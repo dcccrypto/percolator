@@ -56,18 +56,87 @@ pub fn process_execute_cross_slab(
         return Err(PercolatorError::InvalidInstruction);
     }
 
-    // TODO: Phase 1 - Read QuoteCache from each slab account (direct bytes)
-    // TODO: Phase 2 - Validate seqno hasn't changed
-    // TODO: Phase 3 - CPI to each slab's commit_fill
-    // TODO: Phase 4 - Aggregate receipts
-    // TODO: Phase 5 - Update portfolio with net exposure
-    // TODO: Phase 6 - Calculate IM on net exposure (capital efficiency!)
-    // TODO: Phase 7 - Check if portfolio has sufficient equity
+    // Phase 1: Read QuoteCache from each slab (v0 - skip validation for now)
+    // In production, we'd validate seqno consistency here (TOCTOU safety)
 
-    // Stub for v0
-    msg!("ExecuteCrossSlab instruction executed");
+    // Phase 2: CPI to each slab's commit_fill
+    // For v0, we'll stub out actual CPI and simulate the fills
+    // Real CPI will be added when we wire up slab program ID
+    msg!("Executing fills on slabs");
 
-    let _ = vault; // Suppress unused warning for now
+    // Phase 3: Aggregate fills and update portfolio
+    // For each split, update the portfolio exposure
+    for (i, split) in splits.iter().enumerate() {
+        // In v0, assume fill is successful
+        let filled_qty = split.qty;
 
+        // Update portfolio exposure for this slab/instrument
+        // For v0, we'll use slab index and instrument 0 (simplified)
+        let slab_idx = i as u16;
+        let instrument_idx = 0u16;
+
+        // Get current exposure
+        let current_exposure = portfolio.get_exposure(slab_idx, instrument_idx);
+
+        // Update based on side: Buy = add qty, Sell = subtract qty
+        let new_exposure = if split.side == 0 {
+            // Buy
+            current_exposure + filled_qty
+        } else {
+            // Sell
+            current_exposure - filled_qty
+        };
+
+        portfolio.update_exposure(slab_idx, instrument_idx, new_exposure);
+    }
+
+    // Phase 4: Calculate IM on net exposure (THE CAPITAL EFFICIENCY PROOF!)
+    // For v0, use simplified margin calculation:
+    // - Calculate net exposure across all slabs for same instrument
+    // - IM = abs(net_exposure) * notional_value * imr_factor
+    let net_exposure = calculate_net_exposure(portfolio);
+    let im_required = calculate_initial_margin(net_exposure, splits);
+
+    msg!("Calculated margin on net exposure");
+
+    portfolio.update_margin(im_required, im_required / 2); // MM = IM / 2 for v0
+
+    // Phase 5: Check if portfolio has sufficient margin
+    // For v0, we assume equity is managed separately via vault
+    // In production, this would check vault.equity >= portfolio.im
+    if !portfolio.has_sufficient_margin() {
+        msg!("Error: Insufficient margin");
+        return Err(PercolatorError::PortfolioInsufficientMargin);
+    }
+
+    let _ = vault; // Will be used in production for equity checks
+    let _ = receipt_accounts; // Will be used for real CPI
+
+    msg!("ExecuteCrossSlab completed successfully");
     Ok(())
+}
+
+/// Calculate net exposure across all slabs for the same instrument (v0 simplified)
+fn calculate_net_exposure(portfolio: &Portfolio) -> i64 {
+    // For v0, sum all exposures (assuming same instrument across slabs)
+    let mut net = 0i64;
+    for i in 0..portfolio.exposure_count as usize {
+        net += portfolio.exposures[i].2;
+    }
+    net
+}
+
+/// Calculate initial margin requirement (v0 simplified)
+fn calculate_initial_margin(net_exposure: i64, splits: &[SlabSplit]) -> u128 {
+    // For v0, simplified: IM = abs(net_exposure) * avg_price * 0.1 (10% IMR)
+    if splits.is_empty() {
+        return 0;
+    }
+
+    let abs_exposure = net_exposure.abs() as u128;
+    let avg_price = splits[0].limit_px as u128; // Use first split price
+
+    // IM = abs(net_exposure) * price * 0.1 / 1e6 (scale factor)
+    // For v0 proof: if net_exposure = 0, IM = 0!
+    (abs_exposure * avg_price * 10) / (100 * 1_000_000)
 }
