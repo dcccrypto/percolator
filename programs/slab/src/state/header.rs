@@ -1,130 +1,90 @@
-//! Slab header with metadata and anti-toxicity params
+//! Slab header - v0 minimal metadata
 
 use pinocchio::pubkey::Pubkey;
 
-/// Slab header (at start of 10 MB account)
+/// Slab header - v0 simplified for single-account slab
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SlabHeader {
-    /// Magic bytes for validation
+    /// Magic bytes for validation (b"PERP10\0\0")
     pub magic: [u8; 8],
-    /// Version
-    pub version: u16,
-    /// Padding
-    pub _padding: [u8; 6],
+    /// Version (=1 for v0)
+    pub version: u32,
+    /// Sequence number (incremented on any book/state change)
+    pub seqno: u32,
+
     /// Slab program ID
     pub program_id: Pubkey,
     /// LP owner pubkey
     pub lp_owner: Pubkey,
-    /// Router program ID
+    /// Router program ID (only router can call commit_fill)
     pub router_id: Pubkey,
 
-    // Risk parameters
-    /// Initial margin ratio (basis points)
-    pub imr: u64,
-    /// Maintenance margin ratio (basis points)
-    pub mmr: u64,
-    /// Maker fee (basis points, can be negative for rebate)
-    pub maker_fee: i64,
-    /// Taker fee (basis points)
-    pub taker_fee: u64,
+    /// Shared instrument ID (agreed with router)
+    pub instrument: Pubkey,
+    /// Contract size (1e6 fixed)
+    pub contract_size: i64,
+    /// Tick size (1e6 fixed)
+    pub tick: i64,
+    /// Lot size (1e6 fixed)
+    pub lot: i64,
+    /// Mark price from shared oracle (1e6 scale)
+    pub mark_px: i64,
 
-    // Anti-toxicity parameters
-    /// Batch window duration (milliseconds)
-    pub batch_ms: u64,
-    /// Number of top levels to freeze against contra queue
-    pub freeze_levels: u16,
-    /// Kill band (basis points) - reject if price moved too much
-    pub kill_band_bps: u64,
-    /// Anti-sandwich fee factor (basis points)
-    pub as_fee_k: u64,
-    /// JIT penalty enabled
-    pub jit_penalty_on: bool,
-    /// Minimum time for maker rebate (milliseconds)
-    pub maker_rebate_min_ms: u64,
+    /// Taker fee (basis points, 1e6 scale)
+    pub taker_fee_bps: i64,
 
-    // DLP configuration
-    /// Maximum number of DLP accounts
-    pub dlp_max: u16,
-    /// Current number of DLPs
-    pub dlp_count: u16,
-
-    // Pool sizes (for offset calculations)
-    pub max_accounts: u32,
-    pub max_instruments: u16,
-    pub max_orders: u32,
-    pub max_positions: u32,
-    pub max_reservations: u32,
-    pub max_slices: u32,
-    pub max_trades: u32,
-    pub max_aggressor_entries: u32,
-
-    // State tracking
-    /// Next order ID (monotonic)
-    pub next_order_id: u64,
-    /// Next hold ID (monotonic)
-    pub next_hold_id: u64,
-    /// Book sequence number (for staleness detection)
-    pub book_seqno: u64,
-    /// Current timestamp (updated at batch_open)
-    pub current_ts: u64,
+    /// Byte offset to BookArea (from start of account)
+    pub off_book: u32,
+    /// Byte offset to QuoteCache (from start of account)
+    pub off_quote_cache: u32,
+    /// Byte offset to receipt area (from start of account)
+    pub off_receipt_area: u32,
 
     /// Bump seed
     pub bump: u8,
     /// Padding
-    pub _padding2: [u8; 7],
+    pub _padding: [u8; 3],
 }
 
 impl SlabHeader {
-    pub const MAGIC: &'static [u8; 8] = b"PERCSLB1";
-    pub const VERSION: u16 = 1;
+    pub const MAGIC: &'static [u8; 8] = b"PERP10\0\0";
+    pub const VERSION: u32 = 1;
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Initialize new slab header
+    /// Initialize new slab header (v0 minimal)
     pub fn new(
         program_id: Pubkey,
         lp_owner: Pubkey,
         router_id: Pubkey,
-        imr: u64,
-        mmr: u64,
-        maker_fee: i64,
-        taker_fee: u64,
-        batch_ms: u64,
+        instrument: Pubkey,
+        mark_px: i64,
+        taker_fee_bps: i64,
         bump: u8,
     ) -> Self {
+        // Calculate byte offsets
+        let off_quote_cache = Self::LEN as u32;
+        let off_book = off_quote_cache + super::quote_cache::QuoteCache::LEN as u32;
+        let off_receipt_area = off_book + 3072; // 3KB for book
+
         Self {
             magic: *Self::MAGIC,
             version: Self::VERSION,
-            _padding: [0; 6],
+            seqno: 0,
             program_id,
             lp_owner,
             router_id,
-            imr,
-            mmr,
-            maker_fee,
-            taker_fee,
-            batch_ms,
-            freeze_levels: 3,
-            kill_band_bps: 100, // 1%
-            as_fee_k: 50,       // 0.5%
-            jit_penalty_on: true,
-            maker_rebate_min_ms: 100,
-            dlp_max: 100,
-            dlp_count: 0,
-            max_accounts: percolator_common::MAX_ACCOUNTS as u32,
-            max_instruments: percolator_common::MAX_INSTRUMENTS as u16,
-            max_orders: percolator_common::MAX_ORDERS as u32,
-            max_positions: percolator_common::MAX_POSITIONS as u32,
-            max_reservations: percolator_common::MAX_RESERVATIONS as u32,
-            max_slices: percolator_common::MAX_SLICES as u32,
-            max_trades: percolator_common::MAX_TRADES as u32,
-            max_aggressor_entries: percolator_common::MAX_AGGRESSOR_ENTRIES as u32,
-            next_order_id: 1,
-            next_hold_id: 1,
-            book_seqno: 0,
-            current_ts: 0,
+            instrument,
+            contract_size: 1_000_000, // 1.0 (1e6 scale)
+            tick: 1_000_000,           // $1 tick
+            lot: 1_000_000,            // 1.0 lot
+            mark_px,
+            taker_fee_bps,
+            off_book,
+            off_quote_cache,
+            off_receipt_area,
             bump,
-            _padding2: [0; 7],
+            _padding: [0; 3],
         }
     }
 
@@ -133,34 +93,10 @@ impl SlabHeader {
         &self.magic == Self::MAGIC && self.version == Self::VERSION
     }
 
-    /// Increment and get next order ID
-    pub fn next_order_id(&mut self) -> u64 {
-        let id = self.next_order_id;
-        self.next_order_id = self.next_order_id.wrapping_add(1);
-        id
-    }
-
-    /// Increment and get next hold ID
-    pub fn next_hold_id(&mut self) -> u64 {
-        let id = self.next_hold_id;
-        self.next_hold_id = self.next_hold_id.wrapping_add(1);
-        id
-    }
-
-    /// Increment book sequence number
-    pub fn increment_book_seqno(&mut self) -> u64 {
-        self.book_seqno = self.book_seqno.wrapping_add(1);
-        self.book_seqno
-    }
-
-    /// Update current timestamp
-    pub fn update_timestamp(&mut self, ts: u64) {
-        self.current_ts = ts;
-    }
-
-    /// Check if JIT penalty applies
-    pub fn is_jit_order(&self, order_created_ms: u64, batch_open_ms: u64) -> bool {
-        self.jit_penalty_on && order_created_ms >= batch_open_ms
+    /// Increment sequence number (on any book change)
+    pub fn increment_seqno(&mut self) -> u32 {
+        self.seqno = self.seqno.wrapping_add(1);
+        self.seqno
     }
 }
 
@@ -174,38 +110,51 @@ mod tests {
             Pubkey::default(),
             Pubkey::default(),
             Pubkey::default(),
-            500,
-            250,
-            -5,
-            20,
-            100,
-            0,
+            Pubkey::default(),
+            50_000_000_000, // $50,000 mark price
+            20,             // 0.2% taker fee
+            255,
         );
 
         assert!(header.validate());
-        assert_eq!(header.next_order_id, 1);
-        assert_eq!(header.next_hold_id, 1);
+        assert_eq!(header.seqno, 0);
+        assert_eq!(header.version, 1);
+        assert_eq!(header.magic, *SlabHeader::MAGIC);
     }
 
     #[test]
-    fn test_header_monotonic_ids() {
+    fn test_seqno_increment() {
         let mut header = SlabHeader::new(
             Pubkey::default(),
             Pubkey::default(),
             Pubkey::default(),
-            500,
-            250,
-            0,
+            Pubkey::default(),
+            50_000_000_000,
             20,
-            100,
-            0,
+            255,
         );
 
-        assert_eq!(header.next_order_id(), 1);
-        assert_eq!(header.next_order_id(), 2);
-        assert_eq!(header.next_order_id(), 3);
+        assert_eq!(header.seqno, 0);
+        assert_eq!(header.increment_seqno(), 1);
+        assert_eq!(header.increment_seqno(), 2);
+        assert_eq!(header.seqno, 2);
+    }
 
-        assert_eq!(header.next_hold_id(), 1);
-        assert_eq!(header.next_hold_id(), 2);
+    #[test]
+    fn test_offsets() {
+        let header = SlabHeader::new(
+            Pubkey::default(),
+            Pubkey::default(),
+            Pubkey::default(),
+            Pubkey::default(),
+            50_000_000_000,
+            20,
+            255,
+        );
+
+        // Verify offsets are non-zero and ordered correctly
+        assert!(header.off_quote_cache > 0);
+        assert!(header.off_book > header.off_quote_cache);
+        assert!(header.off_receipt_area > header.off_book);
     }
 }
