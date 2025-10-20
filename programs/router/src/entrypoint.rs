@@ -8,8 +8,8 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_initialize_escrow};
-use crate::state::Vault;
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab};
+use crate::state::{Vault, Portfolio};
 use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
@@ -25,28 +25,29 @@ pub fn process_instruction(
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    // Parse instruction discriminator
+    // Parse instruction discriminator (v0 minimal)
     let discriminator = instruction_data[0];
     let instruction = match discriminator {
         0 => RouterInstruction::Initialize,
-        1 => RouterInstruction::Deposit,
-        2 => RouterInstruction::Withdraw,
-        3 => RouterInstruction::MultiReserve,
-        4 => RouterInstruction::MultiCommit,
-        5 => RouterInstruction::Liquidate,
-        6 => RouterInstruction::InitializePortfolio,
-        7 => RouterInstruction::InitializeEscrow,
+        1 => RouterInstruction::InitializePortfolio,
+        2 => RouterInstruction::Deposit,
+        3 => RouterInstruction::Withdraw,
+        4 => RouterInstruction::ExecuteCrossSlab,
         _ => {
-            msg!("Error: Unknown instruction: {}", discriminator);
+            msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
         }
     };
 
-    // Dispatch to instruction handler
+    // Dispatch to instruction handler (v0 minimal)
     match instruction {
         RouterInstruction::Initialize => {
             msg!("Instruction: Initialize");
             process_initialize_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::InitializePortfolio => {
+            msg!("Instruction: InitializePortfolio");
+            process_initialize_portfolio_inner(program_id, accounts, &instruction_data[1..])
         }
         RouterInstruction::Deposit => {
             msg!("Instruction: Deposit");
@@ -56,25 +57,9 @@ pub fn process_instruction(
             msg!("Instruction: Withdraw");
             process_withdraw_inner(program_id, accounts, &instruction_data[1..])
         }
-        RouterInstruction::MultiReserve => {
-            msg!("Instruction: MultiReserve");
-            process_multi_reserve_inner(program_id, accounts, &instruction_data[1..])
-        }
-        RouterInstruction::MultiCommit => {
-            msg!("Instruction: MultiCommit");
-            process_multi_commit_inner(program_id, accounts, &instruction_data[1..])
-        }
-        RouterInstruction::Liquidate => {
-            msg!("Instruction: Liquidate");
-            process_liquidate_inner(program_id, accounts, &instruction_data[1..])
-        }
-        RouterInstruction::InitializePortfolio => {
-            msg!("Instruction: InitializePortfolio");
-            process_initialize_portfolio_inner(program_id, accounts, &instruction_data[1..])
-        }
-        RouterInstruction::InitializeEscrow => {
-            msg!("Instruction: InitializeEscrow");
-            process_initialize_escrow_inner(program_id, accounts, &instruction_data[1..])
+        RouterInstruction::ExecuteCrossSlab => {
+            msg!("Instruction: ExecuteCrossSlab");
+            process_execute_cross_slab_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -186,85 +171,6 @@ fn process_withdraw_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &
     Ok(())
 }
 
-/// Process multi-reserve instruction
-///
-/// Expected accounts:
-/// 0. `[writable]` Portfolio account
-/// 1. `[signer]` User authority
-/// 2..N. `[writable]` Slab accounts
-///
-/// Expected data layout: TBD (Phase 4 work)
-fn process_multi_reserve_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: MultiReserve instruction requires at least 2 accounts");
-        return Err(PercolatorError::InvalidInstruction.into());
-    }
-
-    let portfolio_account = &accounts[0];
-    validate_owner(portfolio_account, program_id)?;
-    validate_writable(portfolio_account)?;
-
-    // TODO: Parse reserve parameters and coordinate multi-slab reserves
-    // This is Phase 4 work - multi-slab coordination
-    let _ = data;
-
-    msg!("MultiReserve instruction validated - implementation pending");
-    Ok(())
-}
-
-/// Process multi-commit instruction
-///
-/// Expected accounts:
-/// 0. `[writable]` Portfolio account
-/// 1. `[signer]` User authority
-/// 2..N. `[writable]` Slab accounts
-///
-/// Expected data layout: TBD (Phase 4 work)
-fn process_multi_commit_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: MultiCommit instruction requires at least 2 accounts");
-        return Err(PercolatorError::InvalidInstruction.into());
-    }
-
-    let portfolio_account = &accounts[0];
-    validate_owner(portfolio_account, program_id)?;
-    validate_writable(portfolio_account)?;
-
-    // TODO: Parse commit parameters and coordinate multi-slab commits
-    // This is Phase 4 work - atomic multi-slab execution
-    let _ = data;
-
-    msg!("MultiCommit instruction validated - implementation pending");
-    Ok(())
-}
-
-/// Process liquidate instruction
-///
-/// Expected accounts:
-/// 0. `[writable]` Portfolio account
-/// 1. `[signer]` Liquidator
-/// 2. `[writable]` Liquidatee account
-/// 3..N. `[writable]` Slab accounts
-///
-/// Expected data layout: TBD (Phase 4 work)
-fn process_liquidate_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 3 {
-        msg!("Error: Liquidate instruction requires at least 3 accounts");
-        return Err(PercolatorError::InvalidInstruction.into());
-    }
-
-    let portfolio_account = &accounts[0];
-    validate_owner(portfolio_account, program_id)?;
-    validate_writable(portfolio_account)?;
-
-    // TODO: Parse liquidation parameters and coordinate liquidation
-    // This is Phase 4 work - cross-slab liquidation
-    let _ = data;
-
-    msg!("Liquidate instruction validated - implementation pending");
-    Ok(())
-}
-
 /// Process initialize portfolio instruction
 ///
 /// Expected accounts:
@@ -304,48 +210,55 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
     Ok(())
 }
 
-/// Process initialize escrow instruction
+/// Process execute cross-slab instruction (v0 main instruction)
 ///
 /// Expected accounts:
-/// 0. `[writable]` Escrow account (PDA)
-/// 1. `[signer]` User
+/// 0. `[writable]` Portfolio account
+/// 1. `[signer]` User authority
+/// 2. `[writable]` Vault account
+/// 3..N. `[writable]` Slab accounts
+/// N+1..M. `[writable]` Receipt PDAs
 ///
-/// Expected data layout (96 bytes):
-/// - user: Pubkey (32 bytes)
-/// - slab: Pubkey (32 bytes)
-/// - mint: Pubkey (32 bytes)
-fn process_initialize_escrow_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 2 {
-        msg!("Error: InitializeEscrow instruction requires at least 2 accounts");
+/// Expected data layout: TBD
+/// - num_splits: u8
+/// - splits: [SlabSplit; num_splits]
+fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 3 {
+        msg!("Error: ExecuteCrossSlab requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    let escrow_account = &accounts[0];
+    let portfolio_account = &accounts[0];
     let user_account = &accounts[1];
+    let vault_account = &accounts[2];
 
     // Validate accounts
-    validate_owner(escrow_account, program_id)?;
-    validate_writable(escrow_account)?;
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_owner(vault_account, program_id)?;
+    validate_writable(vault_account)?;
 
-    // Parse instruction data
-    let mut reader = InstructionReader::new(data);
-    let user_bytes = reader.read_bytes::<32>()?;
-    let slab_bytes = reader.read_bytes::<32>()?;
-    let mint_bytes = reader.read_bytes::<32>()?;
+    // Borrow account data mutably
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
 
-    let user = Pubkey::from(user_bytes);
-    let slab = Pubkey::from(slab_bytes);
-    let mint = Pubkey::from(mint_bytes);
+    // TODO: Parse instruction data to extract splits
+    // For now, stub with empty slabs and receipts
+    let _ = data;
+    let slab_accounts = &[];
+    let receipt_accounts = &[];
+    let splits = &[];
 
-    // Verify user signer matches instruction data
-    if user_account.key() != &user {
-        msg!("Error: User account does not match instruction data");
-        return Err(PercolatorError::InvalidAccount.into());
-    }
+    // Call the instruction handler
+    process_execute_cross_slab(
+        portfolio,
+        user_account.key(),
+        vault,
+        slab_accounts,
+        receipt_accounts,
+        splits,
+    )?;
 
-    // Call the initialization logic
-    process_initialize_escrow(program_id, escrow_account, &user, &slab, &mint)?;
-
-    msg!("Escrow initialized successfully");
+    msg!("ExecuteCrossSlab processed successfully");
     Ok(())
 }
