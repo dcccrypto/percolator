@@ -144,8 +144,9 @@ But **none of that is needed to prove the thesis**.
 
 ## Status
 
-### ✅ Completed (Commits: bf073d7, e98fb0d, 5db64f5, 99b071e)
+### ✅ Completed
 
+**Phase 1: Architecture simplification** (Commits: bf073d7, e98fb0d, 5db64f5, 99b071e)
 - [x] Complex design implemented (research phase - preserved in git history)
 - [x] v0 design documented
 - [x] Slab simplification complete
@@ -153,26 +154,32 @@ But **none of that is needed to prove the thesis**.
   - [x] Created minimal SlabState (~4KB: Header + QuoteCache + BookArea)
   - [x] Added QuoteCache (best 4 bid/ask levels)
   - [x] Added FillReceipt structure
-  - [x] Created commit_fill instruction stub
 - [x] Router simplification complete
   - [x] Removed escrow.rs, cap.rs state files
   - [x] Removed multi_reserve, multi_commit, liquidate instructions
-  - [x] Created execute_cross_slab instruction stub
   - [x] Kept: Portfolio, Vault, Registry, Initialize, Deposit/Withdraw
+
+**Phase 2: Core implementation** (Commits: 7796b90, b862881, 94a67ba)
+- [x] Router entrypoint simplified to v0 instruction set
+  - [x] 5 instructions: Initialize, InitializePortfolio, Deposit, Withdraw, ExecuteCrossSlab
+  - [x] Removed 4 complex instructions (MultiReserve, MultiCommit, Liquidate, InitializeEscrow)
+- [x] commit_fill implementation (slab)
+  - [x] Order validation (qty > 0, limit_px > 0)
+  - [x] v0 instant fill simulation at limit price
+  - [x] Notional and fee calculation
+  - [x] QuoteCache updates after fills
+  - [x] FillReceipt writing
+- [x] execute_cross_slab implementation (router)
+  - [x] Portfolio exposure tracking across slabs
+  - [x] Net exposure calculation (key to capital efficiency!)
+  - [x] IM calculation based on net exposure (IM = 0 when net = 0!)
+  - [x] Margin requirement checking
 
 ### 🚧 In Progress
 
-- [ ] Implement commit_fill logic (matching engine stub)
-- [ ] Implement execute_cross_slab logic (CPI coordination)
-  - [ ] Read QuoteCache bytes directly from slabs
-  - [ ] Validate seqno consistency
-  - [ ] CPI to commit_fill on each slab
-  - [ ] Aggregate FillReceipts
-  - [ ] Update Portfolio with net exposures
-  - [ ] Calculate IM on net exposure
-  - [ ] Check margin requirements
-- [ ] Update tests for v0 structure
 - [ ] Add 7 critical v0 tests
+- [ ] Wire up real CPI to slab program (currently stubbed)
+- [ ] Add slab program ID configuration
 
 ### 📊 Code Reduction
 
@@ -182,10 +189,16 @@ But **none of that is needed to prove the thesis**.
 
 ### 🎯 Next Session
 
-1. Implement simple price-time matching in commit_fill
-2. Implement QuoteCache updates on book changes
-3. Implement router CPI coordination in execute_cross_slab
-4. Add capital efficiency test (long A + short B = ~0 IM)
+1. Add the 7 critical v0 tests:
+   - **Capital efficiency test** (long A + short B = ~0 IM) - THE KEY PROOF
+   - Atomic split test (execute on multiple slabs)
+   - Portfolio netting test
+   - Margin requirement test
+   - Order validation test
+   - Price/quantity limits test
+   - Receipt aggregation test
+2. Wire up real CPI from router to slab (currently stubbed)
+3. End-to-end integration test
 
 ---
 
