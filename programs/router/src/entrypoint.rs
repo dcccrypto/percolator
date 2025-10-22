@@ -8,9 +8,9 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab};
-use crate::state::{Vault, Portfolio};
-use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut, InstructionReader};
+use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user};
+use crate::state::{Vault, Portfolio, SlabRegistry};
+use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
 
@@ -33,6 +33,7 @@ pub fn process_instruction(
         2 => RouterInstruction::Deposit,
         3 => RouterInstruction::Withdraw,
         4 => RouterInstruction::ExecuteCrossSlab,
+        5 => RouterInstruction::LiquidateUser,
         _ => {
             msg!("Error: Unknown instruction");
             return Err(PercolatorError::InvalidInstruction.into());
@@ -60,6 +61,10 @@ pub fn process_instruction(
         RouterInstruction::ExecuteCrossSlab => {
             msg!("Instruction: ExecuteCrossSlab");
             process_execute_cross_slab_inner(program_id, accounts, &instruction_data[1..])
+        }
+        RouterInstruction::LiquidateUser => {
+            msg!("Instruction: LiquidateUser");
+            process_liquidate_user_inner(program_id, accounts, &instruction_data[1..])
         }
     }
 }
@@ -217,12 +222,18 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
 /// 1. `[signer]` User authority
 /// 2. `[writable]` Vault account
 /// 3. `[]` Router authority PDA
-/// 4..N. `[writable]` Slab accounts
-/// N+1..M. `[writable]` Receipt PDAs
+/// 4..4+N. `[writable]` Slab accounts (N = num_splits)
+/// 4+N..4+2N. `[writable]` Receipt PDAs (N = num_splits)
 ///
-/// Expected data layout: TBD
-/// - num_splits: u8
-/// - splits: [SlabSplit; num_splits]
+/// Instruction data layout:
+/// - num_splits: u8 (1 byte)
+/// - For each split (17 bytes):
+///   - side: u8 (0 = buy, 1 = sell)
+///   - qty: i64 (quantity in 1e6 scale)
+///   - limit_px: i64 (limit price in 1e6 scale)
+///
+/// Total size: 1 + (17 * num_splits) bytes
+/// Maximum splits: 8 (to avoid stack overflow)
 fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 4 {
         msg!("Error: ExecuteCrossSlab requires at least 4 accounts");
@@ -244,12 +255,71 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
     let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
     let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
 
-    // TODO: Parse instruction data to extract splits
-    // For now, stub with empty slabs and receipts
-    let _ = data;
-    let slab_accounts = &[];
-    let receipt_accounts = &[];
-    let splits = &[];
+    // Parse instruction data: num_splits (u8) + splits (17 bytes each)
+    // Layout per split: side (u8) + qty (i64) + limit_px (i64)
+    if data.is_empty() {
+        msg!("Error: Instruction data is empty");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let num_splits = reader.read_u8()? as usize;
+
+    if num_splits == 0 {
+        msg!("Error: num_splits must be > 0");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    // Verify we have enough accounts: 4 base + num_splits slabs + num_splits receipts
+    let required_accounts = 4 + (num_splits * 2);
+    if accounts.len() < required_accounts {
+        msg!("Error: Insufficient accounts for ExecuteCrossSlab");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    // Split accounts into slabs and receipts
+    let slab_accounts = &accounts[4..4 + num_splits];
+    let receipt_accounts = &accounts[4 + num_splits..4 + num_splits * 2];
+
+    // Parse splits from instruction data (on stack, small)
+    // Use a fixed-size buffer to avoid heap allocation
+    const MAX_SPLITS: usize = 8;
+    if num_splits > MAX_SPLITS {
+        msg!("Error: num_splits exceeds maximum");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    use crate::instructions::SlabSplit;
+    let mut splits_buffer = [SlabSplit {
+        slab_id: Pubkey::default(),
+        qty: 0,
+        side: 0,
+        limit_px: 0,
+    }; MAX_SPLITS];
+
+    for i in 0..num_splits {
+        let side = reader.read_u8()?;
+        let qty = reader.read_i64()?;
+        let limit_px = reader.read_i64()?;
+
+        // Validate side
+        if side > 1 {
+            msg!("Error: Invalid side");
+            return Err(PercolatorError::InvalidSide.into());
+        }
+
+        // Get slab_id from the corresponding account
+        let slab_id = *slab_accounts[i].key();
+
+        splits_buffer[i] = SlabSplit {
+            slab_id,
+            qty,
+            side,
+            limit_px,
+        };
+    }
+
+    let splits = &splits_buffer[..num_splits];
 
     // Call the instruction handler
     process_execute_cross_slab(
@@ -263,5 +333,87 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
     )?;
 
     msg!("ExecuteCrossSlab processed successfully");
+    Ok(())
+}
+
+/// Process liquidate user instruction
+///
+/// Expected accounts:
+/// 0. `[writable]` Portfolio account (to be liquidated)
+/// 1. `[]` Registry account
+/// 2. `[writable]` Vault account
+/// 3. `[]` Router authority PDA
+/// 4..4+N. `[]` Oracle accounts (N = num_oracles)
+/// 4+N..4+N+M. `[writable]` Slab accounts (M = num_slabs)
+/// 4+N+M..4+N+2M. `[writable]` Receipt PDAs (M = num_slabs)
+///
+/// Instruction data layout:
+/// - num_oracles: u8 (1 byte)
+/// - num_slabs: u8 (1 byte)
+/// - is_preliq: u8 (1 byte, 0 = auto, 1 = force pre-liq)
+/// - current_ts: u64 (8 bytes, Unix timestamp)
+///
+/// Total size: 11 bytes
+fn process_liquidate_user_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    if accounts.len() < 4 {
+        msg!("Error: LiquidateUser requires at least 4 accounts");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let portfolio_account = &accounts[0];
+    let registry_account = &accounts[1];
+    let vault_account = &accounts[2];
+    let router_authority = &accounts[3];
+
+    // Validate accounts
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_owner(registry_account, program_id)?;
+    validate_owner(vault_account, program_id)?;
+    validate_writable(vault_account)?;
+
+    // Borrow account data mutably
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let registry = unsafe { borrow_account_data::<SlabRegistry>(registry_account)? };
+    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
+
+    // Parse instruction data
+    if data.len() < 11 {
+        msg!("Error: Instruction data too short");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    let mut reader = InstructionReader::new(data);
+    let num_oracles = reader.read_u8()? as usize;
+    let num_slabs = reader.read_u8()? as usize;
+    let is_preliq = reader.read_u8()? != 0;
+    let current_ts = reader.read_u64()?;
+
+    // Verify we have enough accounts
+    let required_accounts = 4 + num_oracles + num_slabs * 2;
+    if accounts.len() < required_accounts {
+        msg!("Error: Insufficient accounts for LiquidateUser");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
+
+    // Split accounts
+    let oracle_accounts = &accounts[4..4 + num_oracles];
+    let slab_accounts = &accounts[4 + num_oracles..4 + num_oracles + num_slabs];
+    let receipt_accounts = &accounts[4 + num_oracles + num_slabs..4 + num_oracles + num_slabs * 2];
+
+    // Call the instruction handler
+    process_liquidate_user(
+        portfolio,
+        registry,
+        vault,
+        router_authority,
+        oracle_accounts,
+        slab_accounts,
+        receipt_accounts,
+        is_preliq,
+        current_ts,
+    )?;
+
+    msg!("LiquidateUser processed successfully");
     Ok(())
 }

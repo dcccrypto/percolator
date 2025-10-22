@@ -25,6 +25,8 @@ pub enum PercolatorError {
     PortfolioInsufficientMargin = 107,
     InvalidPortfolio = 108,
     CpiFailed = 109,
+    PortfolioHealthy = 110,
+    LiquidationCooldown = 111,
 
     // Slab errors (200-299)
     InvalidInstrument = 200,
@@ -40,6 +42,7 @@ pub enum PercolatorError {
     InvalidPrice = 210,
     InvalidQuantity = 211,
     PoolFull = 212,
+    SeqnoMismatch = 213,
 
     // Matching errors (300-399)
     InvalidSide = 300,

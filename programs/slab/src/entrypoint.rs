@@ -113,7 +113,8 @@ fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data:
 /// 1. `[writable]` Fill receipt account
 /// 2. `[signer]` Router signer
 ///
-/// Expected data layout (17 bytes):
+/// Expected data layout (21 bytes):
+/// - expected_seqno: u32 (4 bytes) - expected slab seqno (TOCTOU protection)
 /// - side: u8 (1 byte) - 0 = Buy, 1 = Sell
 /// - qty: i64 (8 bytes) - quantity to fill (1e6 scale)
 /// - limit_px: i64 (8 bytes) - limit price (1e6 scale)
@@ -137,6 +138,7 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
 
     // Parse instruction data
     let mut reader = InstructionReader::new(data);
+    let expected_seqno = reader.read_u32()?;
     let side_byte = reader.read_u8()?;
     let qty = reader.read_i64()?;
     let limit_px = reader.read_i64()?;
@@ -156,6 +158,7 @@ fn process_commit_fill_inner(program_id: &Pubkey, accounts: &[AccountInfo], data
         slab,
         receipt_account,
         router_signer.key(),
+        expected_seqno,
         side,
         qty,
         limit_px,

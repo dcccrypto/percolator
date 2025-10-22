@@ -5,12 +5,14 @@ pub mod initialize_portfolio;
 pub mod deposit;
 pub mod withdraw;
 pub mod execute_cross_slab;
+pub mod liquidate_user;
 
 pub use initialize::*;
 pub use initialize_portfolio::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use execute_cross_slab::*;
+pub use liquidate_user::*;
 
 /// Instruction discriminator (v0 minimal)
 #[repr(u8)]
@@ -26,6 +28,8 @@ pub enum RouterInstruction {
     Withdraw = 3,
     /// Execute cross-slab order (v0 main instruction)
     ExecuteCrossSlab = 4,
+    /// Liquidate user positions (reduce-only)
+    LiquidateUser = 5,
 }
 
 // Note: Instruction dispatching is handled in entrypoint.rs

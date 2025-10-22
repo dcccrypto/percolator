@@ -3,6 +3,7 @@
 pub mod state;
 pub mod instructions;
 pub mod pda;
+pub mod liquidation;
 
 // Always expose entrypoint for testing, but only register as entrypoint when feature enabled
 pub mod entrypoint;

@@ -6,6 +6,7 @@ members = [
     "programs/oracle",
     "programs/common",
     "tests/integration",
+    "keeper",
 ]
 
 [workspace.package]

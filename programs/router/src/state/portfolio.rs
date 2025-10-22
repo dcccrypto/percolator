@@ -30,6 +30,17 @@ pub struct Portfolio {
     pub bump: u8,
     /// Padding
     pub _padding: [u8; 5],
+
+    // Liquidation tracking
+    /// Health (equity - MM)
+    pub health: i128,
+    /// Last liquidation timestamp (for rate limiting)
+    pub last_liquidation_ts: u64,
+    /// Cooldown period between deleveraging attempts (seconds)
+    pub cooldown_seconds: u64,
+    /// Padding for alignment
+    pub _padding2: [u8; 8],
+
     /// Exposures: (slab_idx, instrument_idx) -> position qty
     /// Using fixed-size array for simplicity (can optimize with HashMap-like structure)
     pub exposures: [(u16, u16, i64); MAX_SLABS * MAX_INSTRUMENTS],
@@ -53,6 +64,12 @@ impl Portfolio {
         self.exposure_count = 0;
         self.bump = bump;
         self._padding = [0; 5];
+
+        // Initialize liquidation tracking
+        self.health = 0;  // equity - MM = 0 - 0 = 0
+        self.last_liquidation_ts = 0;
+        self.cooldown_seconds = 60;  // 1 minute default cooldown
+        self._padding2 = [0; 8];
 
         // Zero out the exposures array using ptr::write_bytes (efficient and stack-safe)
         unsafe {
@@ -78,6 +95,10 @@ impl Portfolio {
             exposure_count: 0,
             bump,
             _padding: [0; 5],
+            health: 0,
+            last_liquidation_ts: 0,
+            cooldown_seconds: 60,
+            _padding2: [0; 8],
             exposures: [(0, 0, 0); MAX_SLABS * MAX_INSTRUMENTS],
         }
     }

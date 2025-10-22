@@ -60,7 +60,7 @@ pub fn process_execute_cross_slab(
 
     // Verify router_authority is the correct PDA
     use crate::pda::derive_authority_pda;
-    let (expected_authority, _authority_bump) = derive_authority_pda(&portfolio.router_id);
+    let (expected_authority, authority_bump) = derive_authority_pda(&portfolio.router_id);
     if router_authority.key() != &expected_authority {
         msg!("Error: Invalid router authority PDA");
         return Err(PercolatorError::InvalidAccount);
@@ -79,13 +79,30 @@ pub fn process_execute_cross_slab(
         // Get slab program ID from account owner
         let slab_program_id = slab_account.owner();
 
-        // Build commit_fill instruction data (18 bytes total)
-        // Layout: discriminator (1) + side (1) + qty (8) + limit_px (8)
-        let mut instruction_data = [0u8; 18];
+        // Read current seqno from slab for TOCTOU protection
+        let slab_data = slab_account
+            .try_borrow_data()
+            .map_err(|_| PercolatorError::InvalidAccount)?;
+        if slab_data.len() < 4 {
+            msg!("Error: Invalid slab account data");
+            return Err(PercolatorError::InvalidAccount);
+        }
+        // Seqno is at offset 0 in SlabHeader (first field)
+        let expected_seqno = u32::from_le_bytes([
+            slab_data[0],
+            slab_data[1],
+            slab_data[2],
+            slab_data[3],
+        ]);
+
+        // Build commit_fill instruction data (22 bytes total)
+        // Layout: discriminator (1) + expected_seqno (4) + side (1) + qty (8) + limit_px (8)
+        let mut instruction_data = [0u8; 22];
         instruction_data[0] = 1; // CommitFill discriminator
-        instruction_data[1] = split.side;
-        instruction_data[2..10].copy_from_slice(&split.qty.to_le_bytes());
-        instruction_data[10..18].copy_from_slice(&split.limit_px.to_le_bytes());
+        instruction_data[1..5].copy_from_slice(&expected_seqno.to_le_bytes());
+        instruction_data[5] = split.side;
+        instruction_data[6..14].copy_from_slice(&split.qty.to_le_bytes());
+        instruction_data[14..22].copy_from_slice(&split.limit_px.to_le_bytes());
 
         // Build account metas for CPI
         // 0. slab_account (writable)
@@ -93,7 +110,7 @@ pub fn process_execute_cross_slab(
         // 2. router_authority (signer PDA)
         use pinocchio::{
             instruction::{AccountMeta, Instruction},
-            program::invoke,
+            program::invoke_signed,
         };
 
         let account_metas = [
@@ -108,10 +125,23 @@ pub fn process_execute_cross_slab(
             data: &instruction_data,
         };
 
-        // For v0, use regular invoke (CPI signing will be added in production)
-        // TODO: implement proper invoke_signed with authority PDA
-        invoke(&instruction, &[slab_account, receipt_account, router_authority])
-            .map_err(|_| PercolatorError::CpiFailed)?;
+        // Sign the CPI with router authority PDA
+        use crate::pda::AUTHORITY_SEED;
+        use pinocchio::instruction::{Seed, Signer};
+
+        let bump_array = [authority_bump];
+        let seeds = &[
+            Seed::from(AUTHORITY_SEED),
+            Seed::from(&bump_array[..]),
+        ];
+        let signer = Signer::from(seeds);
+
+        invoke_signed(
+            &instruction,
+            &[slab_account, receipt_account, router_authority],
+            &[signer],
+        )
+        .map_err(|_| PercolatorError::CpiFailed)?;
     }
 
     // Phase 3: Aggregate fills and update portfolio

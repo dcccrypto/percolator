@@ -55,6 +55,7 @@ pub fn process_commit_fill(
     slab: &mut SlabState,
     receipt_account: &AccountInfo,
     router_signer: &Pubkey,
+    expected_seqno: u32,
     side: Side,
     qty: i64,
     limit_px: i64,
@@ -63,6 +64,12 @@ pub fn process_commit_fill(
     if &slab.header.router_id != router_signer {
         msg!("Error: Invalid router signer");
         return Err(PercolatorError::Unauthorized);
+    }
+
+    // TOCTOU Protection: Validate seqno hasn't changed
+    if slab.header.seqno != expected_seqno {
+        msg!("Error: Seqno mismatch - book changed since read");
+        return Err(PercolatorError::SeqnoMismatch);
     }
 
     // Validate order parameters
