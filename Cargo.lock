@@ -2969,6 +2969,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "percolator-e2e-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "solana-client",
+ "solana-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "percolator-integration-tests"
 version = "0.1.0"
 dependencies = [

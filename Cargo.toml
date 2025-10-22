@@ -6,6 +6,7 @@ members = [
     "programs/oracle",
     "programs/common",
     "tests/integration",
+    "tests/e2e",
     "keeper",
 ]
 
