@@ -6,6 +6,7 @@ use crate::{harness::TestContext, utils::*};
 use anyhow::Result;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
+    pubkey::Pubkey,
     signature::Signer,
     transaction::Transaction,
 };
@@ -24,12 +25,39 @@ pub async fn test_t01_layout_validity(ctx: &TestContext) -> Result<()> {
     let slab_account = ctx.create_account(SLAB_STATE_SIZE, &ctx.slab_program_id)?;
     println!("Created slab account: {}", slab_account.pubkey());
 
-    // Build initialize instruction
+    // Build initialize instruction with correct format
+    // Expected data layout (121 bytes total after discriminator):
+    // - lp_owner: Pubkey (32 bytes)
+    // - router_id: Pubkey (32 bytes)
+    // - instrument: Pubkey (32 bytes)
+    // - mark_px: i64 (8 bytes)
+    // - taker_fee_bps: i64 (8 bytes)
+    // - contract_size: i64 (8 bytes)
+    // - bump: u8 (1 byte)
+
     let mut init_data = vec![0u8]; // Discriminator = 0 (Initialize)
-    init_data.extend_from_slice(&i64_to_le_bytes(SCALE)); // contract_size
-    init_data.extend_from_slice(&i64_to_le_bytes(SCALE)); // tick
-    init_data.extend_from_slice(&i64_to_le_bytes(SCALE)); // lot
-    init_data.extend_from_slice(&u64_to_le_bytes(5));     // taker_bps
+
+    // lp_owner - use payer as LP owner
+    init_data.extend_from_slice(ctx.payer.pubkey().as_ref());
+
+    // router_id - use router program ID
+    init_data.extend_from_slice(ctx.router_program_id.as_ref());
+
+    // instrument - use a dummy pubkey for test
+    let instrument = Pubkey::new_unique();
+    init_data.extend_from_slice(instrument.as_ref());
+
+    // mark_px - initial mark price (60,000 * SCALE)
+    init_data.extend_from_slice(&i64_to_le_bytes(60_000 * SCALE));
+
+    // taker_fee_bps - 5 basis points
+    init_data.extend_from_slice(&i64_to_le_bytes(5));
+
+    // contract_size - 1 contract = SCALE
+    init_data.extend_from_slice(&i64_to_le_bytes(SCALE));
+
+    // bump - PDA bump seed (use 255 for non-PDA account)
+    init_data.push(255u8);
 
     let initialize_ix = Instruction::new_with_bytes(
         ctx.slab_program_id,
