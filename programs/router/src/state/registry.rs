@@ -74,6 +74,12 @@ pub struct SlabRegistry {
     /// Insurance state (runtime tracking)
     pub insurance_state: crate::state::insurance::InsuranceState,
 
+    // PnL vesting parameters and global haircut state
+    /// PnL vesting parameters (configurable by governance)
+    pub pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams,
+    /// Global haircut state (runtime tracking)
+    pub global_haircut: crate::state::pnl_vesting::GlobalHaircut,
+
     /// Registered slabs
     pub slabs: [SlabEntry; MAX_SLABS],
 }
@@ -107,6 +113,10 @@ impl SlabRegistry {
         self.insurance_params = crate::state::insurance::InsuranceParams::default();
         self.insurance_state = crate::state::insurance::InsuranceState::default();
 
+        // Initialize PnL vesting with defaults
+        self.pnl_vesting_params = crate::state::pnl_vesting::PnlVestingParams::default();
+        self.global_haircut = crate::state::pnl_vesting::GlobalHaircut::default();
+
         // Zero out the slabs array using ptr::write_bytes (efficient and stack-safe)
         unsafe {
             core::ptr::write_bytes(
@@ -138,6 +148,8 @@ impl SlabRegistry {
             _padding2: [0; 8],
             insurance_params: crate::state::insurance::InsuranceParams::default(),
             insurance_state: crate::state::insurance::InsuranceState::default(),
+            pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),
+            global_haircut: crate::state::pnl_vesting::GlobalHaircut::default(),
             slabs: [SlabEntry {
                 slab_id: Pubkey::default(),
                 version_hash: [0; 32],

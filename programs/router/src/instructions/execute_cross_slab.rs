@@ -55,6 +55,24 @@ pub fn process_execute_cross_slab(
         return Err(PercolatorError::InvalidPortfolio);
     }
 
+    // Apply PnL vesting and haircut catchup on user touch
+    use crate::state::on_user_touch;
+    use pinocchio::sysvars::{clock::Clock, Sysvar};
+    let current_slot = Clock::get()
+        .map(|clock| clock.slot)
+        .unwrap_or(portfolio.last_slot);
+
+    on_user_touch(
+        portfolio.principal,
+        &mut portfolio.pnl,
+        &mut portfolio.vested_pnl,
+        &mut portfolio.last_slot,
+        &mut portfolio.pnl_index_checkpoint,
+        &registry.global_haircut,
+        &registry.pnl_vesting_params,
+        current_slot,
+    );
+
     // Verify we have matching number of slabs and receipts
     if slab_accounts.len() != receipt_accounts.len() || slab_accounts.len() != splits.len() {
         msg!("Error: Mismatched slab/receipt/split counts");

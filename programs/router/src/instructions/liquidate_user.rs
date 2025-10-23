@@ -252,6 +252,22 @@ pub fn process_liquidate_user(
 
         if uncovered > 0 {
             msg!("Warning: Uncovered bad debt remains after insurance payout");
+
+            // Trigger global haircut to socialize the uncovered loss across all users
+            // Apply haircut: new_index = old_index * (tvl - loss) / tvl
+            let tvl = vault.balance as i128;  // Simplified: use vault balance as TVL proxy
+
+            if tvl > 0 {
+                let loss = uncovered as i128;
+                let tvl_after_loss = tvl.saturating_sub(loss).max(1);  // Ensure non-zero denominator
+
+                // Apply haircut ratio to global PnL index
+                // new_index = old_index * tvl_after_loss / tvl
+                let old_index = registry.global_haircut.pnl_index;
+                registry.global_haircut.pnl_index = (old_index * tvl_after_loss) / tvl;
+
+                msg!("Global haircut triggered to socialize uncovered bad debt");
+            }
         }
     }
 
@@ -329,6 +345,8 @@ mod tests {
             _padding2: [0; 8],
             insurance_params: crate::state::insurance::InsuranceParams::default(),
             insurance_state: crate::state::insurance::InsuranceState::default(),
+            pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),
+            global_haircut: crate::state::pnl_vesting::GlobalHaircut::default(),
             slabs: [SlabEntry {
                 slab_id: Pubkey::default(),
                 version_hash: [0; 32],

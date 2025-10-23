@@ -9,6 +9,8 @@ members = [
     "tests/integration",
     "tests/e2e",
     "keeper",
+    "crates/model_safety",
+    "crates/proofs/kani",
 ]
 
 [workspace.package]

@@ -42,6 +42,20 @@ pub struct Portfolio {
     /// Padding for alignment
     pub _padding2: [u8; 8],
 
+    // PnL vesting state
+    /// Principal = deposits - withdrawals (never haircutted)
+    pub principal: i128,
+    /// Current PnL (before vesting, can be haircutted)
+    pub pnl: i128,
+    /// Vested PnL (the portion that has vested, can be haircutted)
+    pub vested_pnl: i128,
+    /// Last slot when vesting was applied
+    pub last_slot: u64,
+    /// User's checkpoint of global PnL index (1e9 fixed-point)
+    pub pnl_index_checkpoint: i128,
+    /// Padding for alignment
+    pub _padding4: [u8; 8],
+
     /// Principal exposures: (slab_idx, instrument_idx) -> position qty
     /// These are TRADER positions, separate from LP exposure
     /// Using fixed-size array for simplicity (can optimize with HashMap-like structure)
@@ -81,6 +95,14 @@ impl Portfolio {
         self.last_liquidation_ts = 0;
         self.cooldown_seconds = 60;  // 1 minute default cooldown
         self._padding2 = [0; 8];
+
+        // Initialize PnL vesting state
+        self.principal = 0;  // No deposits yet
+        self.pnl = 0;  // No PnL yet
+        self.vested_pnl = 0;  // No vested PnL yet
+        self.last_slot = 0;  // No vesting applied yet
+        self.pnl_index_checkpoint = crate::state::pnl_vesting::FP_ONE;  // Start at 1.0 (no haircut)
+        self._padding4 = [0; 8];
 
         // Zero out the exposures array using ptr::write_bytes (efficient and stack-safe)
         unsafe {
@@ -125,6 +147,12 @@ impl Portfolio {
             last_liquidation_ts: 0,
             cooldown_seconds: 60,
             _padding2: [0; 8],
+            principal: 0,
+            pnl: 0,
+            vested_pnl: 0,
+            last_slot: 0,
+            pnl_index_checkpoint: crate::state::pnl_vesting::FP_ONE,
+            _padding4: [0; 8],
             exposures: [(0, 0, 0); MAX_SLABS * MAX_INSTRUMENTS],
             lp_buckets: [zero_bucket; MAX_LP_BUCKETS],
             lp_bucket_count: 0,
