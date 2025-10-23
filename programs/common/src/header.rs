@@ -65,7 +65,7 @@ impl SlabHeader {
     ) -> Self {
         // Calculate byte offsets
         let off_quote_cache = Self::LEN as u32;
-        let off_book = off_quote_cache + super::quote_cache::QuoteCache::LEN as u32;
+        let off_book = off_quote_cache + crate::quote_cache::QuoteCache::LEN as u32;
         let off_receipt_area = off_book + 3072; // 3KB for book
 
         Self {

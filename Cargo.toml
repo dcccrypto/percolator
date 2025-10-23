@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "programs/router",
     "programs/slab",
+    "programs/amm",
     "programs/oracle",
     "programs/common",
     "tests/integration",

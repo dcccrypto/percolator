@@ -1,9 +1,8 @@
-pub mod header;
 pub mod slab;
-pub mod quote_cache;
 pub mod fill_receipt;
 
-pub use header::*;
 pub use slab::*;
-pub use quote_cache::*;
 pub use fill_receipt::*;
+
+// Re-export from common
+pub use percolator_common::{SlabHeader, QuoteCache, QuoteLevel};
