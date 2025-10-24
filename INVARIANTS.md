@@ -403,16 +403,22 @@ vault = 2300            // ✅ UNCHANGED (I6 protected)
 ## How to Run Proofs
 
 ```bash
-# All minimal proofs
+# All minimal proofs (7 proofs, <10s)
 ./run_fast_proofs.sh
 
-# All medium proofs
+# All medium proofs (11 proofs, ~40s)
 ./run_medium_proofs.sh
+
+# All edge case proofs (16 proofs, ~60s)
+./run_edge_proofs.sh
 
 # Specific proof
 cargo kani -p proofs-kani --harness i4_socialization_2users_symbolic_deficit
 
-# All proofs (slow, includes intractable ones)
+# All tractable proofs (34 total, ~110s)
+./run_fast_proofs.sh && ./run_medium_proofs.sh && ./run_edge_proofs.sh
+
+# All proofs including intractable ones (NOT RECOMMENDED)
 cargo kani -p proofs-kani --lib
 ```
 
