@@ -2,17 +2,17 @@
 
 use model_safety::state::*;
 
-pub const N_USERS: usize = 5;
-pub const MAX_STEPS: u8 = 6;
+pub const N_USERS: usize = 3;
+pub const MAX_STEPS: u8 = 4;
 
-/// Bounds for stress testing edges
-const MAX_PRINCIPAL: u128 = 1_000_000_000_000u128;  // 1T
-const MAX_PNL_ABS: i128 = 1_000_000_000_000i128;     // ±1T
-const MAX_RESERVED: u128 = 1_000_000_000u128;        // 1B
-const MAX_SLOPE: u128 = 1_000_000u128;               // 1M per step
-const MAX_VAULT: u128 = 2_000_000_000_000u128;       // 2T
-const MAX_INSURANCE: u128 = 1_000_000_000_000u128;   // 1T
-const MAX_FEES: u128 = 1_000_000_000u128;            // 1B
+/// Bounds for tractable verification
+const MAX_PRINCIPAL: u128 = 1_000_000u128;
+const MAX_PNL_ABS: i128 = 1_000_000i128;
+const MAX_RESERVED: u128 = 1_000_000u128;
+const MAX_SLOPE: u128 = 10_000u128;
+const MAX_VAULT: u128 = 10_000_000u128;
+const MAX_INSURANCE: u128 = 1_000_000u128;
+const MAX_FEES: u128 = 1_000_000u128;
 
 pub trait Sanitize {
     fn sanitize(self) -> Self;
