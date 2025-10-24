@@ -155,8 +155,40 @@ pub fn withdraw_pnl(mut s: State, uid: usize, amount: u128, current_step: u32) -
     let steps_elapsed = current_step.saturating_sub(user.warmup_state.started_at_slot as u32);
     let max_withdrawable = withdrawable_pnl(user, steps_elapsed, user.warmup_state.slope_per_step);
 
-    // Actual withdrawal is min of requested and allowed
-    let actual_withdraw = min_u128(amount, max_withdrawable);
+    // L13: Also limit by margin health - don't allow withdrawals that would trigger liquidation
+    let margin_limited_withdraw = if user.position_size > 0 {
+        // Calculate current collateral
+        let current_collateral = add_u128(user.principal, clamp_pos_i128(user.pnl_ledger));
+
+        // We need to ensure: (current_collateral - withdraw) * 1_000_000 >= position * margin_bps
+        // Solving for withdraw: withdraw <= current_collateral - (position * margin_bps / 1_000_000)
+        // But we need to be careful with rounding! Use scaled arithmetic like is_liquidatable.
+
+        // Required: collateral_after * 1_000_000 >= position * margin_bps
+        // Where: collateral_after = current_collateral - withdraw
+
+        // Safe maximum withdraw that keeps: (collateral - w) * 1M >= pos * bps
+        // Rearrange: collateral * 1M - w * 1M >= pos * bps
+        // Therefore: w * 1M <= collateral * 1M - pos * bps
+        // So: w <= (collateral * 1M - pos * bps) / 1M
+
+        let collateral_scaled = mul_u128(current_collateral, 1_000_000);
+        let required_margin_scaled = mul_u128(user.position_size, s.params.maintenance_margin_bps as u128);
+
+        if collateral_scaled > required_margin_scaled {
+            // Safe withdraw amount = (collateral_scaled - required_margin_scaled) / 1_000_000
+            div_u128(sub_u128(collateral_scaled, required_margin_scaled), 1_000_000)
+        } else {
+            // Already at or below margin requirement, no withdrawal allowed
+            0
+        }
+    } else {
+        // No position, no margin requirement
+        max_withdrawable
+    };
+
+    // Actual withdrawal is min of requested, warmup-allowed, and margin-safe
+    let actual_withdraw = min_u128(min_u128(amount, max_withdrawable), margin_limited_withdraw);
 
     if actual_withdraw == 0 {
         return s;

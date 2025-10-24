@@ -1,14 +1,14 @@
 # Kani Formal Verification Status
 
 **Date**: 2025-10-24
-**Status**: 19 of 20 proofs passing (95%)
+**Status**: 20 of 20 proofs passing (100% ✅)
 **Total Verification Time**: <30 seconds
 
 ---
 
 ## Executive Summary
 
-After optimizing generator bounds, **19 proofs** now complete in **0.17s - 3.5s each**, down from hours/never. This makes Kani verification practical for regular use.
+After optimizing generator bounds and fixing a margin check bug, **all 20 proofs** now complete in **0.17s - 3.6s each**, down from hours/never. This makes Kani verification practical for regular use.
 
 ### Key Achievement
 
@@ -33,40 +33,63 @@ After optimizing generator bounds, **19 proofs** now complete in **0.17s - 3.5s 
 | i1_bounded_deficit | Principal under deficit | 0.59s | ✅ PASS |
 | deposit_bounded_amount | Deposit bounded | 0.17s | ✅ PASS |
 
-### Liquidation Proofs (12/13) - Step-Case Properties
+### Liquidation Proofs (13/13) - Step-Case Properties
 
 | Proof | Property | Time | Status |
 |-------|----------|------|--------|
-| **L1** | Progress if any liquidatable | 1.76s | ✅ PASS |
-| **L2** | No-op at fixpoint | 1.68s | ✅ PASS |
+| **L1** | Progress if any liquidatable | 1.74s | ✅ PASS |
+| **L2** | No-op at fixpoint | 1.65s | ✅ PASS |
 | **L3** | Count never increases | 1.19s | ✅ PASS |
-| **L4** | Only liquidatable touched | 1.52s | ✅ PASS |
-| **L5** | Non-interference (principals) | 1.28s | ✅ PASS |
-| **L6** | Authorization required | 1.23s | ✅ PASS |
-| **L7** | Conservation preserved | 1.19s | ✅ PASS |
-| **L8** | Principal inviolability | 1.29s | ✅ PASS |
-| **L9** | No new liquidatables | 1.37s | ✅ PASS |
-| **L10** | Admissible selection | 0.77s | ✅ PASS |
+| **L4** | Only liquidatable touched | 1.51s | ✅ PASS |
+| **L5** | Non-interference (principals) | 1.29s | ✅ PASS |
+| **L6** | Authorization required | 1.24s | ✅ PASS |
+| **L7** | Conservation preserved | 1.22s | ✅ PASS |
+| **L8** | Principal inviolability | 1.32s | ✅ PASS |
+| **L9** | No new liquidatables | 1.35s | ✅ PASS |
+| **L10** | Admissible selection | 0.78s | ✅ PASS |
 | **L11** | Atomic progress/no-op | 2.11s | ✅ PASS |
-| **L12** | Socialize→liquidate safe | 3.52s | ✅ PASS |
-| **L13** | Withdraw doesn't create liq | 0.81s | ❌ FAIL |
+| **L12** | Socialize→liquidate safe | 3.56s | ✅ PASS |
+| **L13** | Withdraw doesn't create liq | 1.86s | ✅ PASS |
 
 ---
 
-## Known Issues
+## Bug Found and Fixed ✅
 
-### L13: withdraw_pnl Liquidation Interaction ❌
+### L13: withdraw_pnl Self-Liquidation Bug
 
-**Status**: FAILED (counterexample found)
-**Assertion**: "Withdrawing PnL from a non-liquidatable account shouldn't make it liquidatable"
-**Finding**: Kani found a case where `withdraw_pnl` causes liquidation
+**Status**: FIXED
+**Discovery**: Kani L13 proof found a counterexample where users could withdraw themselves into liquidation
+**Root Cause**: `withdraw_pnl` didn't check if withdrawal would violate maintenance margin requirements
 
-**Possible Causes**:
-1. Bug in `withdraw_pnl` transition function
-2. Assertion too strong (edge cases exist)
-3. Missing warmup guard constraints in model
+**The Bug**:
+```rust
+// Before (transitions.rs:167):
+user.pnl_ledger = sub_i128(user.pnl_ledger, withdraw_i128);  // No margin check!
+```
 
-**Action Required**: Investigate transition function logic
+**Example Counterexample**:
+```
+Initial: principal=5, pnl=6, position=100, margin_req=10%
+collateral = 5 + 6 = 11 >= 10 ✓ NOT liquidatable
+
+Withdraw 2 from PnL:
+collateral = 5 + 4 = 9 < 10 ✗ LIQUIDATABLE!
+```
+
+**The Fix**:
+Added margin health check using scaled arithmetic (consistent with `is_liquidatable`):
+```rust
+// Calculate safe withdraw limit: (collateral * 1M - position * margin_bps) / 1M
+let collateral_scaled = mul_u128(current_collateral, 1_000_000);
+let required_margin_scaled = mul_u128(position_size, maintenance_margin_bps as u128);
+let margin_limited_withdraw = div_u128(sub_u128(collateral_scaled, required_margin_scaled), 1_000_000);
+
+// Take minimum of warmup cap and margin safety limit
+let actual_withdraw = min_u128(min_u128(amount, max_withdrawable), margin_limited_withdraw);
+```
+
+**Impact**: Critical security fix - prevents users from self-liquidating via PnL withdrawal
+**Verification**: L13 now passes in 1.86s ✅
 
 ---
 
@@ -133,9 +156,9 @@ const MAX_PNL: i128 = 100;        // Down from 1000
 | **I2: Conservation** | 1 proof | ✅ Passing |
 | **I3: Authorization** | 2 proofs | ✅ All passing |
 | **I4: Bounded Socialization** | 1 proof | ✅ Passing |
-| **I5: Warmup/Throttle** | 1 proof | ❌ L13 failing |
+| **I5: Warmup/Throttle** | 1 proof | ✅ Passing (L13 fixed) |
 | **I6: Matcher Isolation** | 1 proof | ✅ Passing |
-| **Liquidation Mechanics** | 12 proofs | ✅ All passing |
+| **Liquidation Mechanics** | 13 proofs | ✅ All passing |
 
 ---
 
@@ -166,11 +189,11 @@ cargo kani -p proofs-kani
 
 ## Next Steps
 
-1. **Investigate L13 failure** - Determine if bug or over-assertion
-2. **Optional: Add more proofs** - Medium/edge cases if needed
-3. **CI Integration** - Run proof suite on each commit
+1. ~~**Investigate L13 failure**~~ - ✅ COMPLETE: Bug found and fixed
+2. **CI Integration** - Run proof suite on each commit (~30 seconds)
+3. **Optional: Add more proofs** - Medium/edge cases if needed
 4. **Documentation** - Link proofs to production code
 
 ---
 
-**Recommendation**: Current proof suite provides strong confidence. The 19 passing proofs cover all 6 core invariants and liquidation mechanics. L13 issue should be investigated but doesn't block production use.
+**Recommendation**: **All 20 proofs passing (100%)** - Production ready! The proof suite provides strong confidence in core protocol safety. Kani formal verification found and helped fix a critical self-liquidation bug. Ready for CI/CD integration.
