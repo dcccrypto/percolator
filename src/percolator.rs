@@ -3649,9 +3649,10 @@ impl RiskEngine {
             loss_to_socialize
         );
 
-        // Haircuts reduce user PnL claims to cover the loss. The reduced claims
-        // represent value that stays in the vault (not extracted by winners).
-        // No insurance credit needed - this is a zero-sum reallocation of claims.
+        // ADL haircuts reduce user PnL claims to cover the loss.
+        // This is a "burn model": reduced claims match vault reality; no insurance credit.
+        // The value that was "owed" to users via pnl claims simply stays in vault as slack,
+        // or offsets other claims (like GC'd negative pnl) that were written off.
 
         // Handle remaining loss with insurance fund (respecting floor)
         // remaining_loss = total_loss - loss_to_socialize (what couldn't be haircutted)
@@ -3798,9 +3799,10 @@ impl RiskEngine {
             loss_to_socialize
         );
 
-        // Haircuts reduce user PnL claims to cover the loss. The reduced claims
-        // represent value that stays in the vault (not extracted by winners).
-        // No insurance credit needed - this is a zero-sum reallocation of claims.
+        // ADL haircuts reduce user PnL claims to cover the loss.
+        // This is a "burn model": reduced claims match vault reality; no insurance credit.
+        // The value that was "owed" to users via pnl claims simply stays in vault as slack,
+        // or offsets other claims (like GC'd negative pnl) that were written off.
 
         // Handle remaining loss with insurance fund (respecting floor)
         // remaining_loss = total_loss - loss_to_socialize (what couldn't be haircutted)
