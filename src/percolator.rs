@@ -2825,6 +2825,36 @@ impl RiskEngine {
                     self.risk_reduction_only = true;
                 }
             }
+
+            // BUG FIX: Force-close accounts with negative equity OR dust positions.
+            // This handles cases where:
+            // 1. Liquidation didn't fully close the position
+            // 2. Funding/fees drained capital to negative between cranks
+            // 3. Position is positive but below min_liquidation_abs (dust)
+            // Without this, accounts can accumulate bad debt or leave uneconomical dust.
+            if !self.accounts[idx].position_size.is_zero() {
+                let equity = self.account_equity_mtm_at_oracle(&self.accounts[idx], oracle_price);
+                let abs_pos = self.accounts[idx].position_size.unsigned_abs();
+                let is_dust = abs_pos < self.params.min_liquidation_abs.get();
+
+                if equity == 0 || is_dust {
+                    // Equity is zero/negative OR position is dust - force close immediately
+                    match self.force_close_position_deferred(idx, oracle_price) {
+                        Ok((_mark_pnl, deferred)) => {
+                            self.lifetime_force_realize_closes =
+                                self.lifetime_force_realize_closes.saturating_add(1);
+                            // Accumulate unpaid loss for socialization
+                            self.pending_unpaid_loss = self
+                                .pending_unpaid_loss
+                                .saturating_add(deferred.unpaid_loss);
+                        }
+                        Err(_) => {
+                            errors += 1;
+                            self.risk_reduction_only = true;
+                        }
+                    }
+                }
+            }
         }
 
         (checked, liquidated, errors)
