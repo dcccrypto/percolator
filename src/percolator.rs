@@ -949,38 +949,13 @@ pub struct Account {
 
 impl Account {
     /// Check if this account is an LP
-    ///
-    /// WORKAROUND: Due to a known SBF struct layout bug where the `kind` field
-    /// is not correctly written on-chain, we detect LPs by checking if
-    /// matcher_program is non-zero. This is valid because:
-    /// - LPs always have a non-zero matcher_program (set during init_lp)
-    /// - Users always have a zero matcher_program (never set)
-    ///
-    /// For Kani: Use kind field directly (no SBF layout bug in symbolic execution)
-    #[cfg(kani)]
     pub fn is_lp(&self) -> bool {
         matches!(self.kind, AccountKind::LP)
     }
 
-    #[cfg(not(kani))]
-    pub fn is_lp(&self) -> bool {
-        self.matcher_program != [0u8; 32]
-    }
-
     /// Check if this account is a regular user
-    ///
-    /// WORKAROUND: Due to a known SBF struct layout bug, we detect users
-    /// by checking if matcher_program is zero (the inverse of is_lp).
-    ///
-    /// For Kani: Use kind field directly (no SBF layout bug in symbolic execution)
-    #[cfg(kani)]
     pub fn is_user(&self) -> bool {
         matches!(self.kind, AccountKind::User)
-    }
-
-    #[cfg(not(kani))]
-    pub fn is_user(&self) -> bool {
-        self.matcher_program == [0u8; 32]
     }
 }
 
