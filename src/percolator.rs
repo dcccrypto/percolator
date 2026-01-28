@@ -5915,3 +5915,407 @@ impl RiskEngine {
         self.current_slot = self.current_slot.saturating_add(slots);
     }
 }
+
+// ===========================
+// Tests (requires --features test)
+// ===========================
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    use super::*;
+
+    const E6: u64 = 1_000_000;
+    const ORACLE_100K: u64 = 100_000 * E6;
+    const ONE_BASE: i128 = 1_000_000; // 1.0 base unit if base is 1e6-scaled
+
+    fn params_for_tests() -> RiskParams {
+        RiskParams {
+            warmup_period_slots: 1000,
+            maintenance_margin_bps: 0,
+            initial_margin_bps: 0,
+            trading_fee_bps: 0,
+            max_accounts: MAX_ACCOUNTS as u64,
+            new_account_fee: U128::new(0),
+            risk_reduction_threshold: U128::new(0),
+
+            maintenance_fee_per_slot: U128::new(0),
+            max_crank_staleness_slots: u64::MAX,
+
+            liquidation_fee_bps: 0,
+            liquidation_fee_cap: U128::new(0),
+
+            liquidation_buffer_bps: 0,
+            min_liquidation_abs: U128::new(0),
+        }
+    }
+
+    struct PriceBelowOracleMatcher;
+    impl MatchingEngine for PriceBelowOracleMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            // Execute $1k below oracle
+            let exec_price = oracle_price - (1_000 * E6);
+            Ok(TradeExecution { price: exec_price, size })
+        }
+    }
+
+    struct OppositeSignMatcher;
+    impl MatchingEngine for OppositeSignMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            Ok(TradeExecution {
+                price: oracle_price,
+                size: -size,
+            })
+        }
+    }
+
+    struct OversizeFillMatcher;
+    impl MatchingEngine for OversizeFillMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            Ok(TradeExecution {
+                price: oracle_price,
+                size: size.checked_mul(2).unwrap(),
+            })
+        }
+    }
+
+    #[test]
+    fn test_execute_trade_sets_current_slot_and_resets_warmup_start() {
+        let mut engine = RiskEngine::new(params_for_tests());
+
+        let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let user_idx = engine.add_user(0).unwrap();
+
+        // Fund both so margin checks pass (maint=0 still requires equity > 0)
+        engine.deposit(lp_idx, 1_000_000_000_000, 1).unwrap();
+        engine.deposit(user_idx, 1_000_000_000_000, 1).unwrap();
+
+        let matcher = PriceBelowOracleMatcher;
+
+        // Trade at now_slot = 100
+        engine
+            .execute_trade(
+                &matcher,
+                lp_idx,
+                user_idx,
+                100,
+                ORACLE_100K,
+                ONE_BASE,
+            )
+            .unwrap();
+
+        assert_eq!(engine.current_slot, 100);
+        assert_eq!(
+            engine.accounts[user_idx as usize].warmup_started_at_slot,
+            100
+        );
+        assert_eq!(engine.accounts[lp_idx as usize].warmup_started_at_slot, 100);
+    }
+
+    #[test]
+    fn test_execute_trade_rejects_matcher_opposite_sign() {
+        let mut engine = RiskEngine::new(params_for_tests());
+
+        let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let user_idx = engine.add_user(0).unwrap();
+
+        engine.deposit(lp_idx, 1_000_000_000_000, 1).unwrap();
+        engine.deposit(user_idx, 1_000_000_000_000, 1).unwrap();
+
+        let matcher = OppositeSignMatcher;
+
+        let res = engine.execute_trade(
+            &matcher,
+            lp_idx,
+            user_idx,
+            10,
+            ORACLE_100K,
+            ONE_BASE,
+        );
+
+        assert_eq!(res, Err(RiskError::InvalidMatchingEngine));
+    }
+
+    #[test]
+    fn test_execute_trade_rejects_matcher_oversize_fill() {
+        let mut engine = RiskEngine::new(params_for_tests());
+
+        let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let user_idx = engine.add_user(0).unwrap();
+
+        engine.deposit(lp_idx, 1_000_000_000_000, 1).unwrap();
+        engine.deposit(user_idx, 1_000_000_000_000, 1).unwrap();
+
+        let matcher = OversizeFillMatcher;
+
+        let res = engine.execute_trade(
+            &matcher,
+            lp_idx,
+            user_idx,
+            10,
+            ORACLE_100K,
+            ONE_BASE,
+        );
+
+        assert_eq!(res, Err(RiskError::InvalidMatchingEngine));
+    }
+
+    #[test]
+    fn test_check_conservation_fails_on_mark_overflow() {
+        let mut engine = RiskEngine::new(params_for_tests());
+        let user_idx = engine.add_user(0).unwrap();
+
+        // Corrupt the account to force mark_pnl overflow inside check_conservation
+        engine.accounts[user_idx as usize].position_size = I128::new(i128::MAX);
+        engine.accounts[user_idx as usize].entry_price = MAX_ORACLE_PRICE;
+        engine.accounts[user_idx as usize].pnl = I128::ZERO;
+        engine.accounts[user_idx as usize].capital = U128::ZERO;
+
+        engine.vault = U128::ZERO;
+        engine.insurance_fund.balance = U128::ZERO;
+        engine.loss_accum = U128::ZERO;
+
+        assert!(!engine.check_conservation(1));
+    }
+
+    #[test]
+    fn test_cross_lp_close_no_pnl_teleport_simple() {
+        let mut engine = RiskEngine::new(params_for_tests());
+
+        let lp1 = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let lp2 = engine.add_lp([3u8; 32], [4u8; 32], 0).unwrap();
+        let user = engine.add_user(0).unwrap();
+
+        // LP1 must be able to absorb -10k*E6 loss and still have equity > 0
+        engine.deposit(lp1, 50_000 * (E6 as u128), 1).unwrap();
+        engine.deposit(lp2, 50_000 * (E6 as u128), 1).unwrap();
+        engine.deposit(user, 50_000 * (E6 as u128), 1).unwrap();
+
+        // Trade 1: user opens +1 at 90k while oracle=100k => user +10k, LP1 -10k
+        struct P90kMatcher;
+        impl MatchingEngine for P90kMatcher {
+            fn execute_match(
+                &self,
+                _lp_program: &[u8; 32],
+                _lp_context: &[u8; 32],
+                _lp_account_id: u64,
+                oracle_price: u64,
+                size: i128,
+            ) -> Result<TradeExecution> {
+                Ok(TradeExecution {
+                    price: oracle_price - (10_000 * E6),
+                    size,
+                })
+            }
+        }
+
+        // Trade 2: user closes with LP2 at oracle price => trade_pnl = 0 (no teleport)
+        struct AtOracleMatcher;
+        impl MatchingEngine for AtOracleMatcher {
+            fn execute_match(
+                &self,
+                _lp_program: &[u8; 32],
+                _lp_context: &[u8; 32],
+                _lp_account_id: u64,
+                oracle_price: u64,
+                size: i128,
+            ) -> Result<TradeExecution> {
+                Ok(TradeExecution {
+                    price: oracle_price,
+                    size,
+                })
+            }
+        }
+
+        engine
+            .execute_trade(&P90kMatcher, lp1, user, 100, ORACLE_100K, ONE_BASE)
+            .unwrap();
+        engine
+            .execute_trade(&AtOracleMatcher, lp2, user, 101, ORACLE_100K, -ONE_BASE)
+            .unwrap();
+
+        // User is flat
+        assert_eq!(engine.accounts[user as usize].position_size.get(), 0);
+
+        // PnL stays with LP1 (the LP that gave the user a better-than-oracle fill).
+        // settle_warmup_to_capital immediately settles negative PnL against capital,
+        // so LP1's pnl field is 0 and capital is reduced by 10k*E6.
+        let ten_k_e6: u128 = (10_000 * E6) as u128;
+        assert_eq!(engine.accounts[user as usize].pnl.get(), ten_k_e6 as i128);
+        assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
+        assert_eq!(engine.accounts[lp1 as usize].capital.get(), 50_000 * (E6 as u128) - ten_k_e6);
+        assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
+        assert_eq!(engine.accounts[lp2 as usize].capital.get(), 50_000 * (E6 as u128));
+
+        // Conservation must still hold
+        assert!(engine.check_conservation(ORACLE_100K));
+    }
+}
+
+// ===========================
+// Kani Proofs
+// ===========================
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    const E6: u64 = 1_000_000;
+    const ORACLE_100K: u64 = 100_000 * E6;
+    const ONE_BASE: i128 = 1_000_000;
+
+    fn params_for_kani() -> RiskParams {
+        RiskParams {
+            warmup_period_slots: 1000,
+            maintenance_margin_bps: 0,
+            initial_margin_bps: 0,
+            trading_fee_bps: 0,
+            max_accounts: MAX_ACCOUNTS as u64,
+            new_account_fee: U128::new(0),
+            risk_reduction_threshold: U128::new(0),
+
+            maintenance_fee_per_slot: U128::new(0),
+            max_crank_staleness_slots: u64::MAX,
+
+            liquidation_fee_bps: 0,
+            liquidation_fee_cap: U128::new(0),
+
+            liquidation_buffer_bps: 0,
+            min_liquidation_abs: U128::new(0),
+        }
+    }
+
+    struct P90kMatcher;
+    impl MatchingEngine for P90kMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            Ok(TradeExecution {
+                price: oracle_price - (10_000 * E6),
+                size,
+            })
+        }
+    }
+
+    struct AtOracleMatcher;
+    impl MatchingEngine for AtOracleMatcher {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            Ok(TradeExecution {
+                price: oracle_price,
+                size,
+            })
+        }
+    }
+
+    struct BadMatcherOpposite;
+    impl MatchingEngine for BadMatcherOpposite {
+        fn execute_match(
+            &self,
+            _lp_program: &[u8; 32],
+            _lp_context: &[u8; 32],
+            _lp_account_id: u64,
+            oracle_price: u64,
+            size: i128,
+        ) -> Result<TradeExecution> {
+            Ok(TradeExecution {
+                price: oracle_price,
+                size: -size,
+            })
+        }
+    }
+
+    #[kani::proof]
+    fn kani_cross_lp_close_no_pnl_teleport() {
+        let mut engine = RiskEngine::new(params_for_kani());
+
+        let lp1 = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let lp2 = engine.add_lp([3u8; 32], [4u8; 32], 0).unwrap();
+        let user = engine.add_user(0).unwrap();
+
+        // Fund everyone (keep values small but safe)
+        engine.deposit(lp1, 50_000_000_000u128, 100).unwrap();
+        engine.deposit(lp2, 50_000_000_000u128, 100).unwrap();
+        engine.deposit(user, 50_000_000_000u128, 100).unwrap();
+
+        // Trade 1 at slot 100
+        engine
+            .execute_trade(&P90kMatcher, lp1, user, 100, ORACLE_100K, ONE_BASE)
+            .unwrap();
+
+        // Trade 2 at slot 101 (close with LP2 at oracle)
+        engine
+            .execute_trade(&AtOracleMatcher, lp2, user, 101, ORACLE_100K, -ONE_BASE)
+            .unwrap();
+
+        // Slot and warmup assertions (verifies slot propagation)
+        assert_eq!(engine.current_slot, 101);
+        assert_eq!(engine.accounts[user as usize].warmup_started_at_slot, 101);
+        assert_eq!(engine.accounts[lp2 as usize].warmup_started_at_slot, 101);
+
+        // Teleport check: LP2 should not absorb LP1's earlier loss when closing at oracle.
+        // settle_warmup_to_capital immediately settles negative PnL against capital,
+        // so LP1's pnl field is 0 and capital is reduced by 10k*E6.
+        let ten_k_e6: u128 = (10_000 * E6) as u128;
+        assert_eq!(engine.accounts[user as usize].position_size.get(), 0);
+        assert_eq!(engine.accounts[user as usize].pnl.get(), ten_k_e6 as i128);
+        assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
+        assert_eq!(engine.accounts[lp1 as usize].capital.get(), 50_000_000_000u128 - ten_k_e6);
+        assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
+        assert_eq!(engine.accounts[lp2 as usize].capital.get(), 50_000_000_000u128);
+
+        // Conservation must hold
+        assert!(engine.check_conservation(ORACLE_100K));
+    }
+
+    #[kani::proof]
+    fn kani_rejects_invalid_matcher_output() {
+        let mut engine = RiskEngine::new(params_for_kani());
+
+        let lp = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let user = engine.add_user(0).unwrap();
+
+        engine.deposit(lp, 50_000_000_000u128, 10).unwrap();
+        engine.deposit(user, 50_000_000_000u128, 10).unwrap();
+
+        let res = engine.execute_trade(
+            &BadMatcherOpposite,
+            lp,
+            user,
+            10,
+            ORACLE_100K,
+            ONE_BASE,
+        );
+
+        assert!(matches!(res, Err(RiskError::InvalidMatchingEngine)));
+    }
+}
