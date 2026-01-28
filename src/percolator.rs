@@ -97,13 +97,19 @@ impl I128 {
     pub const MAX: Self = Self(i128::MAX);
 
     #[inline(always)]
-    pub const fn new(val: i128) -> Self { Self(val) }
+    pub const fn new(val: i128) -> Self {
+        Self(val)
+    }
 
     #[inline(always)]
-    pub const fn get(self) -> i128 { self.0 }
+    pub const fn get(self) -> i128 {
+        self.0
+    }
 
     #[inline(always)]
-    pub fn set(&mut self, val: i128) { self.0 = val; }
+    pub fn set(&mut self, val: i128) {
+        self.0 = val;
+    }
 
     #[inline(always)]
     pub fn checked_add(self, rhs: i128) -> Option<Self> {
@@ -151,19 +157,29 @@ impl I128 {
     }
 
     #[inline(always)]
-    pub fn abs(self) -> Self { Self(self.0.abs()) }
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
 
     #[inline(always)]
-    pub fn unsigned_abs(self) -> u128 { self.0.unsigned_abs() }
+    pub fn unsigned_abs(self) -> u128 {
+        self.0.unsigned_abs()
+    }
 
     #[inline(always)]
-    pub fn is_zero(self) -> bool { self.0 == 0 }
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
 
     #[inline(always)]
-    pub fn is_negative(self) -> bool { self.0 < 0 }
+    pub fn is_negative(self) -> bool {
+        self.0 < 0
+    }
 
     #[inline(always)]
-    pub fn is_positive(self) -> bool { self.0 > 0 }
+    pub fn is_positive(self) -> bool {
+        self.0 > 0
+    }
 }
 
 // ============================================================================
@@ -174,7 +190,9 @@ impl I128 {
 // Kani I128 trait implementations
 #[cfg(kani)]
 impl Default for I128 {
-    fn default() -> Self { Self::ZERO }
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(kani)]
@@ -193,17 +211,23 @@ impl core::fmt::Display for I128 {
 
 #[cfg(kani)]
 impl From<i128> for I128 {
-    fn from(val: i128) -> Self { Self(val) }
+    fn from(val: i128) -> Self {
+        Self(val)
+    }
 }
 
 #[cfg(kani)]
 impl From<i64> for I128 {
-    fn from(val: i64) -> Self { Self(val as i128) }
+    fn from(val: i64) -> Self {
+        Self(val as i128)
+    }
 }
 
 #[cfg(kani)]
 impl From<I128> for i128 {
-    fn from(val: I128) -> Self { val.0 }
+    fn from(val: I128) -> Self {
+        val.0
+    }
 }
 
 #[cfg(kani)]
@@ -223,41 +247,55 @@ impl Ord for I128 {
 #[cfg(kani)]
 impl core::ops::Add<i128> for I128 {
     type Output = Self;
-    fn add(self, rhs: i128) -> Self { Self(self.0.saturating_add(rhs)) }
+    fn add(self, rhs: i128) -> Self {
+        Self(self.0.saturating_add(rhs))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Add<I128> for I128 {
     type Output = Self;
-    fn add(self, rhs: I128) -> Self { Self(self.0.saturating_add(rhs.0)) }
+    fn add(self, rhs: I128) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Sub<i128> for I128 {
     type Output = Self;
-    fn sub(self, rhs: i128) -> Self { Self(self.0.saturating_sub(rhs)) }
+    fn sub(self, rhs: i128) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Sub<I128> for I128 {
     type Output = Self;
-    fn sub(self, rhs: I128) -> Self { Self(self.0.saturating_sub(rhs.0)) }
+    fn sub(self, rhs: I128) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Neg for I128 {
     type Output = Self;
-    fn neg(self) -> Self { Self(self.0.saturating_neg()) }
+    fn neg(self) -> Self {
+        Self(self.0.saturating_neg())
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::AddAssign<i128> for I128 {
-    fn add_assign(&mut self, rhs: i128) { *self = *self + rhs; }
+    fn add_assign(&mut self, rhs: i128) {
+        *self = *self + rhs;
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::SubAssign<i128> for I128 {
-    fn sub_assign(&mut self, rhs: i128) { *self = *self - rhs; }
+    fn sub_assign(&mut self, rhs: i128) {
+        *self = *self - rhs;
+    }
 }
 
 // ============================================================================
@@ -364,7 +402,9 @@ impl I128 {
 
 #[cfg(not(kani))]
 impl Default for I128 {
-    fn default() -> Self { Self::ZERO }
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(not(kani))]
@@ -383,17 +423,23 @@ impl core::fmt::Display for I128 {
 
 #[cfg(not(kani))]
 impl From<i128> for I128 {
-    fn from(val: i128) -> Self { Self::new(val) }
+    fn from(val: i128) -> Self {
+        Self::new(val)
+    }
 }
 
 #[cfg(not(kani))]
 impl From<i64> for I128 {
-    fn from(val: i64) -> Self { Self::new(val as i128) }
+    fn from(val: i64) -> Self {
+        Self::new(val as i128)
+    }
 }
 
 #[cfg(not(kani))]
 impl From<I128> for i128 {
-    fn from(val: I128) -> Self { val.get() }
+    fn from(val: I128) -> Self {
+        val.get()
+    }
 }
 
 #[cfg(not(kani))]
@@ -424,13 +470,19 @@ impl U128 {
     pub const MAX: Self = Self(u128::MAX);
 
     #[inline(always)]
-    pub const fn new(val: u128) -> Self { Self(val) }
+    pub const fn new(val: u128) -> Self {
+        Self(val)
+    }
 
     #[inline(always)]
-    pub const fn get(self) -> u128 { self.0 }
+    pub const fn get(self) -> u128 {
+        self.0
+    }
 
     #[inline(always)]
-    pub fn set(&mut self, val: u128) { self.0 = val; }
+    pub fn set(&mut self, val: u128) {
+        self.0 = val;
+    }
 
     #[inline(always)]
     pub fn checked_add(self, rhs: u128) -> Option<Self> {
@@ -484,21 +536,33 @@ impl U128 {
 
     #[inline(always)]
     pub fn max(self, rhs: Self) -> Self {
-        if self.0 >= rhs.0 { self } else { rhs }
+        if self.0 >= rhs.0 {
+            self
+        } else {
+            rhs
+        }
     }
 
     #[inline(always)]
     pub fn min(self, rhs: Self) -> Self {
-        if self.0 <= rhs.0 { self } else { rhs }
+        if self.0 <= rhs.0 {
+            self
+        } else {
+            rhs
+        }
     }
 
     #[inline(always)]
-    pub fn is_zero(self) -> bool { self.0 == 0 }
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
 }
 
 #[cfg(kani)]
 impl Default for U128 {
-    fn default() -> Self { Self::ZERO }
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(kani)]
@@ -517,17 +581,23 @@ impl core::fmt::Display for U128 {
 
 #[cfg(kani)]
 impl From<u128> for U128 {
-    fn from(val: u128) -> Self { Self(val) }
+    fn from(val: u128) -> Self {
+        Self(val)
+    }
 }
 
 #[cfg(kani)]
 impl From<u64> for U128 {
-    fn from(val: u64) -> Self { Self(val as u128) }
+    fn from(val: u64) -> Self {
+        Self(val as u128)
+    }
 }
 
 #[cfg(kani)]
 impl From<U128> for u128 {
-    fn from(val: U128) -> Self { val.0 }
+    fn from(val: U128) -> Self {
+        val.0
+    }
 }
 
 #[cfg(kani)]
@@ -547,59 +617,79 @@ impl Ord for U128 {
 #[cfg(kani)]
 impl core::ops::Add<u128> for U128 {
     type Output = Self;
-    fn add(self, rhs: u128) -> Self { Self(self.0.saturating_add(rhs)) }
+    fn add(self, rhs: u128) -> Self {
+        Self(self.0.saturating_add(rhs))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Add<U128> for U128 {
     type Output = Self;
-    fn add(self, rhs: U128) -> Self { Self(self.0.saturating_add(rhs.0)) }
+    fn add(self, rhs: U128) -> Self {
+        Self(self.0.saturating_add(rhs.0))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Sub<u128> for U128 {
     type Output = Self;
-    fn sub(self, rhs: u128) -> Self { Self(self.0.saturating_sub(rhs)) }
+    fn sub(self, rhs: u128) -> Self {
+        Self(self.0.saturating_sub(rhs))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Sub<U128> for U128 {
     type Output = Self;
-    fn sub(self, rhs: U128) -> Self { Self(self.0.saturating_sub(rhs.0)) }
+    fn sub(self, rhs: U128) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Mul<u128> for U128 {
     type Output = Self;
-    fn mul(self, rhs: u128) -> Self { Self(self.0.saturating_mul(rhs)) }
+    fn mul(self, rhs: u128) -> Self {
+        Self(self.0.saturating_mul(rhs))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Mul<U128> for U128 {
     type Output = Self;
-    fn mul(self, rhs: U128) -> Self { Self(self.0.saturating_mul(rhs.0)) }
+    fn mul(self, rhs: U128) -> Self {
+        Self(self.0.saturating_mul(rhs.0))
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Div<u128> for U128 {
     type Output = Self;
-    fn div(self, rhs: u128) -> Self { Self(self.0 / rhs) }
+    fn div(self, rhs: u128) -> Self {
+        Self(self.0 / rhs)
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::Div<U128> for U128 {
     type Output = Self;
-    fn div(self, rhs: U128) -> Self { Self(self.0 / rhs.0) }
+    fn div(self, rhs: U128) -> Self {
+        Self(self.0 / rhs.0)
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::AddAssign<u128> for U128 {
-    fn add_assign(&mut self, rhs: u128) { *self = *self + rhs; }
+    fn add_assign(&mut self, rhs: u128) {
+        *self = *self + rhs;
+    }
 }
 
 #[cfg(kani)]
 impl core::ops::SubAssign<u128> for U128 {
-    fn sub_assign(&mut self, rhs: u128) { *self = *self - rhs; }
+    fn sub_assign(&mut self, rhs: u128) {
+        *self = *self - rhs;
+    }
 }
 
 // ============================================================================
@@ -685,12 +775,20 @@ impl U128 {
 
     #[inline]
     pub fn max(self, rhs: Self) -> Self {
-        if self.get() >= rhs.get() { self } else { rhs }
+        if self.get() >= rhs.get() {
+            self
+        } else {
+            rhs
+        }
     }
 
     #[inline]
     pub fn min(self, rhs: Self) -> Self {
-        if self.get() <= rhs.get() { self } else { rhs }
+        if self.get() <= rhs.get() {
+            self
+        } else {
+            rhs
+        }
     }
 
     #[inline]
@@ -701,7 +799,9 @@ impl U128 {
 
 #[cfg(not(kani))]
 impl Default for U128 {
-    fn default() -> Self { Self::ZERO }
+    fn default() -> Self {
+        Self::ZERO
+    }
 }
 
 #[cfg(not(kani))]
@@ -720,17 +820,23 @@ impl core::fmt::Display for U128 {
 
 #[cfg(not(kani))]
 impl From<u128> for U128 {
-    fn from(val: u128) -> Self { Self::new(val) }
+    fn from(val: u128) -> Self {
+        Self::new(val)
+    }
 }
 
 #[cfg(not(kani))]
 impl From<u64> for U128 {
-    fn from(val: u64) -> Self { Self::new(val as u128) }
+    fn from(val: u64) -> Self {
+        Self::new(val as u128)
+    }
 }
 
 #[cfg(not(kani))]
 impl From<U128> for u128 {
-    fn from(val: U128) -> Self { val.get() }
+    fn from(val: U128) -> Self {
+        val.get()
+    }
 }
 
 #[cfg(not(kani))]
@@ -751,106 +857,142 @@ impl Ord for U128 {
 #[cfg(not(kani))]
 impl core::ops::Add<u128> for U128 {
     type Output = Self;
-    fn add(self, rhs: u128) -> Self { Self::new(self.get().saturating_add(rhs)) }
+    fn add(self, rhs: u128) -> Self {
+        Self::new(self.get().saturating_add(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Add<U128> for U128 {
     type Output = Self;
-    fn add(self, rhs: U128) -> Self { Self::new(self.get().saturating_add(rhs.get())) }
+    fn add(self, rhs: U128) -> Self {
+        Self::new(self.get().saturating_add(rhs.get()))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Sub<u128> for U128 {
     type Output = Self;
-    fn sub(self, rhs: u128) -> Self { Self::new(self.get().saturating_sub(rhs)) }
+    fn sub(self, rhs: u128) -> Self {
+        Self::new(self.get().saturating_sub(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Sub<U128> for U128 {
     type Output = Self;
-    fn sub(self, rhs: U128) -> Self { Self::new(self.get().saturating_sub(rhs.get())) }
+    fn sub(self, rhs: U128) -> Self {
+        Self::new(self.get().saturating_sub(rhs.get()))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Mul<u128> for U128 {
     type Output = Self;
-    fn mul(self, rhs: u128) -> Self { Self::new(self.get().saturating_mul(rhs)) }
+    fn mul(self, rhs: u128) -> Self {
+        Self::new(self.get().saturating_mul(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Mul<U128> for U128 {
     type Output = Self;
-    fn mul(self, rhs: U128) -> Self { Self::new(self.get().saturating_mul(rhs.get())) }
+    fn mul(self, rhs: U128) -> Self {
+        Self::new(self.get().saturating_mul(rhs.get()))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Div<u128> for U128 {
     type Output = Self;
-    fn div(self, rhs: u128) -> Self { Self::new(self.get() / rhs) }
+    fn div(self, rhs: u128) -> Self {
+        Self::new(self.get() / rhs)
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Div<U128> for U128 {
     type Output = Self;
-    fn div(self, rhs: U128) -> Self { Self::new(self.get() / rhs.get()) }
+    fn div(self, rhs: U128) -> Self {
+        Self::new(self.get() / rhs.get())
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::AddAssign<u128> for U128 {
-    fn add_assign(&mut self, rhs: u128) { *self = *self + rhs; }
+    fn add_assign(&mut self, rhs: u128) {
+        *self = *self + rhs;
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::SubAssign<u128> for U128 {
-    fn sub_assign(&mut self, rhs: u128) { *self = *self - rhs; }
+    fn sub_assign(&mut self, rhs: u128) {
+        *self = *self - rhs;
+    }
 }
 
 // Arithmetic operators for I128 (BPF version)
 #[cfg(not(kani))]
 impl core::ops::Add<i128> for I128 {
     type Output = Self;
-    fn add(self, rhs: i128) -> Self { Self::new(self.get().saturating_add(rhs)) }
+    fn add(self, rhs: i128) -> Self {
+        Self::new(self.get().saturating_add(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Add<I128> for I128 {
     type Output = Self;
-    fn add(self, rhs: I128) -> Self { Self::new(self.get().saturating_add(rhs.get())) }
+    fn add(self, rhs: I128) -> Self {
+        Self::new(self.get().saturating_add(rhs.get()))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Sub<i128> for I128 {
     type Output = Self;
-    fn sub(self, rhs: i128) -> Self { Self::new(self.get().saturating_sub(rhs)) }
+    fn sub(self, rhs: i128) -> Self {
+        Self::new(self.get().saturating_sub(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Sub<I128> for I128 {
     type Output = Self;
-    fn sub(self, rhs: I128) -> Self { Self::new(self.get().saturating_sub(rhs.get())) }
+    fn sub(self, rhs: I128) -> Self {
+        Self::new(self.get().saturating_sub(rhs.get()))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Mul<i128> for I128 {
     type Output = Self;
-    fn mul(self, rhs: i128) -> Self { Self::new(self.get().saturating_mul(rhs)) }
+    fn mul(self, rhs: i128) -> Self {
+        Self::new(self.get().saturating_mul(rhs))
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::Neg for I128 {
     type Output = Self;
-    fn neg(self) -> Self { Self::new(-self.get()) }
+    fn neg(self) -> Self {
+        Self::new(-self.get())
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::AddAssign<i128> for I128 {
-    fn add_assign(&mut self, rhs: i128) { *self = *self + rhs; }
+    fn add_assign(&mut self, rhs: i128) {
+        *self = *self + rhs;
+    }
 }
 
 #[cfg(not(kani))]
 impl core::ops::SubAssign<i128> for I128 {
-    fn sub_assign(&mut self, rhs: i128) { *self = *self - rhs; }
+    fn sub_assign(&mut self, rhs: i128) {
+        *self = *self - rhs;
+    }
 }
 
 // ============================================================================
@@ -913,7 +1055,8 @@ pub struct Account {
     /// Current position size (+ long, - short)
     pub position_size: I128,
 
-    /// Average entry price for position
+    /// Last oracle mark price at which this account's position was settled (variation margin).
+    /// NOT an average trade entry price.
     pub entry_price: u64,
 
     // ========================================
@@ -1578,7 +1721,10 @@ impl RiskEngine {
             params,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
             vault: U128::ZERO,
-            insurance_fund: InsuranceFund { balance: U128::ZERO, fee_revenue: U128::ZERO },
+            insurance_fund: InsuranceFund {
+                balance: U128::ZERO,
+                fee_revenue: U128::ZERO,
+            },
             loss_accum: U128::ZERO,
             current_slot: 0,
             last_crank_slot: 0,
@@ -1906,7 +2052,11 @@ impl RiskEngine {
         }
 
         // Calculate fee due (engine is purely slot-native)
-        let due = self.params.maintenance_fee_per_slot.get().saturating_mul(dt as u128);
+        let due = self
+            .params
+            .maintenance_fee_per_slot
+            .get()
+            .saturating_mul(dt as u128);
 
         // Update last_fee_slot
         account.last_fee_slot = now_slot;
@@ -1960,7 +2110,11 @@ impl RiskEngine {
             return Ok(0);
         }
 
-        let due = self.params.maintenance_fee_per_slot.get().saturating_mul(dt as u128);
+        let due = self
+            .params
+            .maintenance_fee_per_slot
+            .get()
+            .saturating_mul(dt as u128);
 
         // Advance slot marker regardless
         account.last_fee_slot = now_slot;
@@ -1985,7 +2139,12 @@ impl RiskEngine {
 
     /// Touch account for force-realize paths: settles funding, mark, and fees but
     /// uses best-effort fee settle that can't stall on margin checks.
-    fn touch_account_for_force_realize(&mut self, idx: u16, now_slot: u64, oracle_price: u64) -> Result<()> {
+    fn touch_account_for_force_realize(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<()> {
         // Funding settle is required for correct pnl
         self.touch_account(idx)?;
         // Mark-to-market settlement (variation margin)
@@ -1997,7 +2156,12 @@ impl RiskEngine {
 
     /// Touch account for liquidation paths: settles funding, mark, and fees but
     /// uses best-effort fee settle since we're about to liquidate anyway.
-    fn touch_account_for_liquidation(&mut self, idx: u16, now_slot: u64, oracle_price: u64) -> Result<()> {
+    fn touch_account_for_liquidation(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+    ) -> Result<()> {
         // Funding settle is required for correct pnl
         self.touch_account(idx)?;
         // Mark-to-market settlement (variation margin)
@@ -2021,8 +2185,9 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
         }
-        self.accounts[idx as usize].fee_credits =
-            self.accounts[idx as usize].fee_credits.saturating_add(amount as i128);
+        self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
+            .fee_credits
+            .saturating_add(amount as i128);
         Ok(())
     }
 
@@ -2050,12 +2215,10 @@ impl RiskEngine {
     /// Returns Err(PnlNotWarmedUp) if pnl > 0 (user must wait for warmup).
     /// Returns Err(Undercollateralized) if pnl < 0 (shouldn't happen after settlement).
     /// Returns the capital amount on success.
-    pub fn close_account(
-        &mut self,
-        idx: u16,
-        now_slot: u64,
-        oracle_price: u64,
-    ) -> Result<u128> {
+    pub fn close_account(&mut self, idx: u16, now_slot: u64, oracle_price: u64) -> Result<u128> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -2222,8 +2385,7 @@ impl RiskEngine {
     /// The priority-liquidation phase runs every crank, so once a sweep starts,
     /// the worst accounts are immediately addressed.
     pub fn require_recent_full_sweep(&self, now_slot: u64) -> Result<()> {
-        if now_slot.saturating_sub(self.last_full_sweep_start_slot)
-            > self.max_crank_staleness_slots
+        if now_slot.saturating_sub(self.last_full_sweep_start_slot) > self.max_crank_staleness_slots
         {
             return Err(RiskError::Unauthorized); // SweepStale
         }
@@ -2314,10 +2476,10 @@ impl RiskEngine {
             let forgive = dt / 2;
 
             if forgive > 0 && dt > 0 {
-                self.accounts[caller_idx as usize].last_fee_slot =
-                    last_fee.saturating_add(forgive);
+                self.accounts[caller_idx as usize].last_fee_slot = last_fee.saturating_add(forgive);
             }
-            let settle_result = self.settle_maintenance_fee_best_effort_for_crank(caller_idx, now_slot);
+            let settle_result =
+                self.settle_maintenance_fee_best_effort_for_crank(caller_idx, now_slot);
             (forgive, settle_result.is_ok())
         } else {
             (0, true)
@@ -2358,11 +2520,16 @@ impl RiskEngine {
                 // === Liquidation (if not in force-realize mode) ===
                 if !force_realize_active && liq_budget > 0 {
                     if !self.accounts[idx].position_size.is_zero() {
-                        match self.liquidate_at_oracle_deferred_adl(idx as u16, now_slot, oracle_price) {
+                        match self.liquidate_at_oracle_deferred_adl(
+                            idx as u16,
+                            now_slot,
+                            oracle_price,
+                        ) {
                             Ok((true, deferred)) => {
                                 num_liquidations += 1;
                                 liq_budget = liq_budget.saturating_sub(1);
-                                self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
+                                self.lifetime_liquidations =
+                                    self.lifetime_liquidations.saturating_add(1);
                                 self.pending_profit_to_fund = self
                                     .pending_profit_to_fund
                                     .saturating_add(deferred.profit_to_fund);
@@ -2383,7 +2550,8 @@ impl RiskEngine {
 
                     // Force-close negative equity or dust positions
                     if !self.accounts[idx].position_size.is_zero() {
-                        let equity = self.account_equity_mtm_at_oracle(&self.accounts[idx], oracle_price);
+                        let equity =
+                            self.account_equity_mtm_at_oracle(&self.accounts[idx], oracle_price);
                         let abs_pos = self.accounts[idx].position_size.unsigned_abs();
                         let is_dust = abs_pos < self.params.min_liquidation_abs.get();
 
@@ -2410,7 +2578,10 @@ impl RiskEngine {
                     self.enter_risk_reduction_only_mode();
 
                     if !self.accounts[idx].position_size.is_zero() {
-                        if self.touch_account_for_force_realize(idx as u16, now_slot, oracle_price).is_err() {
+                        if self
+                            .touch_account_for_force_realize(idx as u16, now_slot, oracle_price)
+                            .is_err()
+                        {
                             force_realize_errors += 1;
                             self.risk_reduction_only = true;
                         } else {
@@ -2440,12 +2611,15 @@ impl RiskEngine {
 
                 // === Socialization (haircut profits to cover losses) ===
                 if !self.pending_profit_to_fund.is_zero() || !self.pending_unpaid_loss.is_zero() {
-                    let unwrapped = self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
+                    let unwrapped =
+                        self.compute_unwrapped_pnl_at(&self.accounts[idx], effective_slot);
                     if unwrapped > 0 {
                         let mut remaining = unwrapped;
 
                         // Pass 1: Profit funding (if not excluded)
-                        if !self.pending_profit_to_fund.is_zero() && self.pending_exclude_epoch[idx] != epoch {
+                        if !self.pending_profit_to_fund.is_zero()
+                            && self.pending_exclude_epoch[idx] != epoch
+                        {
                             let take = core::cmp::min(remaining, self.pending_profit_to_fund.get());
                             if take > 0 {
                                 self.accounts[idx].pnl =
@@ -2588,7 +2762,9 @@ impl RiskEngine {
         let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
 
         // Target margin = maintenance + buffer (in basis points)
-        let target_bps = self.params.maintenance_margin_bps
+        let target_bps = self
+            .params
+            .maintenance_margin_bps
             .saturating_add(self.params.liquidation_buffer_bps);
 
         // Maximum safe remaining position (floor-safe calculation)
@@ -2746,11 +2922,7 @@ impl RiskEngine {
     /// No other path creates or destroys value.
     ///
     /// ASSUMES: Caller has already called touch_account_full() on this account.
-    fn oracle_close_position_core(
-        &mut self,
-        idx: u16,
-        oracle_price: u64,
-    ) -> Result<ClosedOutcome> {
+    fn oracle_close_position_core(&mut self, idx: u16, oracle_price: u64) -> Result<ClosedOutcome> {
         // NOTE: Caller must have already called touch_account_full()
         // to settle funding, maintenance, and warmup.
 
@@ -2891,7 +3063,8 @@ impl RiskEngine {
 
             // Pay from capital
             self.accounts[idx as usize].capital = self.accounts[idx as usize].capital - pay;
-            self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(pay as i128);
+            self.accounts[idx as usize].pnl =
+                self.accounts[idx as usize].pnl.saturating_add(pay as i128);
 
             // Track paid losses in warmed_neg_total
             self.warmed_neg_total = self.warmed_neg_total + pay;
@@ -3018,7 +3191,8 @@ impl RiskEngine {
 
             // Pay from capital
             self.accounts[idx as usize].capital = self.accounts[idx as usize].capital - pay;
-            self.accounts[idx as usize].pnl = self.accounts[idx as usize].pnl.saturating_add(pay as i128);
+            self.accounts[idx as usize].pnl =
+                self.accounts[idx as usize].pnl.saturating_add(pay as i128);
 
             // Track paid losses in warmed_neg_total
             self.warmed_neg_total = self.warmed_neg_total + pay;
@@ -3161,6 +3335,9 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<bool> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Validate index
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Ok(false);
@@ -3186,7 +3363,8 @@ impl RiskEngine {
         }
 
         // Compute how much to close (closed-form, single-pass, using MTM equity)
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+        let (close_abs, is_full_close) =
+            self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
             return Ok(false);
@@ -3216,18 +3394,23 @@ impl RiskEngine {
         // during partial close reduces equity enough to miss the target.
         let remaining_pos = self.accounts[idx as usize].position_size;
         if !remaining_pos.is_zero() {
-            let target_bps = self.params.maintenance_margin_bps
+            let target_bps = self
+                .params
+                .maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)
+            {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
                 if fallback_outcome.position_was_closed {
                     outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
                     // Accumulate deferred ADL amounts
-                    deferred.profit_to_fund = deferred.profit_to_fund
+                    deferred.profit_to_fund = deferred
+                        .profit_to_fund
                         .saturating_add(fallback_deferred.profit_to_fund);
-                    deferred.unpaid_loss = deferred.unpaid_loss
+                    deferred.unpaid_loss = deferred
+                        .unpaid_loss
                         .saturating_add(fallback_deferred.unpaid_loss);
                     deferred.excluded = deferred.excluded || fallback_deferred.excluded;
                 }
@@ -3251,7 +3434,10 @@ impl RiskEngine {
         // - If fee should have priority, move this before pending accumulation
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
-        let fee = U128::new(core::cmp::min(fee_raw, self.params.liquidation_fee_cap.get()));
+        let fee = U128::new(core::cmp::min(
+            fee_raw,
+            self.params.liquidation_fee_cap.get(),
+        ));
 
         // Pay fee from account capital (capped by available capital - never underflows)
         let account_capital = self.accounts[idx as usize].capital;
@@ -3276,6 +3462,9 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<(bool, DeferredAdl)> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Validate index
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Ok((false, DeferredAdl::ZERO));
@@ -3296,7 +3485,8 @@ impl RiskEngine {
         }
 
         // Compute how much to close (using MTM equity)
-        let (close_abs, is_full_close) = self.compute_liquidation_close_amount(account, oracle_price);
+        let (close_abs, is_full_close) =
+            self.compute_liquidation_close_amount(account, oracle_price);
 
         if close_abs == 0 {
             return Ok((false, DeferredAdl::ZERO));
@@ -3324,18 +3514,23 @@ impl RiskEngine {
         // fall back to full close
         let remaining_pos = self.accounts[idx as usize].position_size;
         if !remaining_pos.is_zero() {
-            let target_bps = self.params.maintenance_margin_bps
+            let target_bps = self
+                .params
+                .maintenance_margin_bps
                 .saturating_add(self.params.liquidation_buffer_bps);
-            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps) {
+            if !self.is_above_margin_bps_mtm(&self.accounts[idx as usize], oracle_price, target_bps)
+            {
                 // Fallback: close remaining position entirely
                 let (fallback_outcome, fallback_deferred) =
                     self.oracle_close_position_core_deferred_adl(idx, oracle_price)?;
                 if fallback_outcome.position_was_closed {
                     outcome.abs_pos = outcome.abs_pos.saturating_add(fallback_outcome.abs_pos);
                     // Accumulate deferred ADL amounts
-                    deferred.profit_to_fund = deferred.profit_to_fund
+                    deferred.profit_to_fund = deferred
+                        .profit_to_fund
                         .saturating_add(fallback_deferred.profit_to_fund);
-                    deferred.unpaid_loss = deferred.unpaid_loss
+                    deferred.unpaid_loss = deferred
+                        .unpaid_loss
                         .saturating_add(fallback_deferred.unpaid_loss);
                     deferred.excluded = deferred.excluded || fallback_deferred.excluded;
                 }
@@ -3345,7 +3540,10 @@ impl RiskEngine {
         // Compute and apply liquidation fee (IMMEDIATE, not deferred)
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = mul_u128(notional, self.params.liquidation_fee_bps as u128) / 10_000;
-        let fee = U128::new(core::cmp::min(fee_raw, self.params.liquidation_fee_cap.get()));
+        let fee = U128::new(core::cmp::min(
+            fee_raw,
+            self.params.liquidation_fee_cap.get(),
+        ));
 
         // Pay fee from account capital
         let account_capital = self.accounts[idx as usize].capital;
@@ -3504,6 +3702,9 @@ impl RiskEngine {
         start: usize,
         len: usize,
     ) -> (u16, u16) {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Gate: only active when insurance at/below threshold
         if !self.force_realize_active() {
             return (0, 0);
@@ -3563,9 +3764,8 @@ impl RiskEngine {
                     // that must be funded by others. In force-realize, we treat this
                     // as additional loss to socialize (matches full force_realize_losses behavior).
                     if mark_pnl > 0 {
-                        self.pending_unpaid_loss = self
-                            .pending_unpaid_loss
-                            .saturating_add(mark_pnl as u128);
+                        self.pending_unpaid_loss =
+                            self.pending_unpaid_loss.saturating_add(mark_pnl as u128);
                     }
 
                     // Note: We ignore deferred.profit_to_fund. Force-realize is batch-close;
@@ -3627,10 +3827,8 @@ impl RiskEngine {
             if !self.pending_profit_to_fund.is_zero() && self.pending_exclude_epoch[idx] != epoch {
                 let take = core::cmp::min(remaining, self.pending_profit_to_fund.get());
                 if take > 0 {
-                    self.accounts[idx].pnl =
-                        self.accounts[idx].pnl.saturating_sub(take as i128);
-                    self.pending_profit_to_fund =
-                        self.pending_profit_to_fund.saturating_sub(take);
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_profit_to_fund = self.pending_profit_to_fund.saturating_sub(take);
                     remaining = remaining.saturating_sub(take);
                 }
             }
@@ -3639,10 +3837,8 @@ impl RiskEngine {
             if !self.pending_unpaid_loss.is_zero() && remaining > 0 {
                 let take = core::cmp::min(remaining, self.pending_unpaid_loss.get());
                 if take > 0 {
-                    self.accounts[idx].pnl =
-                        self.accounts[idx].pnl.saturating_sub(take as i128);
-                    self.pending_unpaid_loss =
-                        self.pending_unpaid_loss.saturating_sub(take);
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(take as i128);
+                    self.pending_unpaid_loss = self.pending_unpaid_loss.saturating_sub(take);
                 }
             }
         }
@@ -3671,13 +3867,10 @@ impl RiskEngine {
             // First: cover profit funding (profit needs to come from somewhere)
             if !self.pending_profit_to_fund.is_zero() {
                 let spend_profit = core::cmp::min(spendable, self.pending_profit_to_fund.get());
-                self.insurance_fund.balance = self
-                    .insurance_fund
-                    .balance
-                    .saturating_sub(spend_profit);
-                self.pending_profit_to_fund = self
-                    .pending_profit_to_fund
-                    .saturating_sub(spend_profit);
+                self.insurance_fund.balance =
+                    self.insurance_fund.balance.saturating_sub(spend_profit);
+                self.pending_profit_to_fund =
+                    self.pending_profit_to_fund.saturating_sub(spend_profit);
                 // Recompute reserved immediately so spendable_after is accurate
                 self.recompute_warmup_insurance_reserved();
             }
@@ -3688,13 +3881,9 @@ impl RiskEngine {
             // Second: cover unpaid losses
             if !self.pending_unpaid_loss.is_zero() && spendable_after > 0 {
                 let spend_loss = core::cmp::min(spendable_after, self.pending_unpaid_loss.get());
-                self.insurance_fund.balance = self
-                    .insurance_fund
-                    .balance
-                    .saturating_sub(spend_loss);
-                self.pending_unpaid_loss = self
-                    .pending_unpaid_loss
-                    .saturating_sub(spend_loss);
+                self.insurance_fund.balance =
+                    self.insurance_fund.balance.saturating_sub(spend_loss);
+                self.pending_unpaid_loss = self.pending_unpaid_loss.saturating_sub(spend_loss);
             }
 
             // Recompute warmup reserved after insurance changes
@@ -3703,7 +3892,9 @@ impl RiskEngine {
 
         // Handle remaining pending_unpaid_loss: can go to loss_accum (that's what it's for)
         if !self.pending_unpaid_loss.is_zero() {
-            self.loss_accum = self.loss_accum.saturating_add_u128(self.pending_unpaid_loss);
+            self.loss_accum = self
+                .loss_accum
+                .saturating_add_u128(self.pending_unpaid_loss);
             self.pending_unpaid_loss = U128::ZERO;
             // Enter risk-reduction mode (uncovered losses exist)
             self.enter_risk_reduction_only_mode();
@@ -3852,7 +4043,8 @@ impl RiskEngine {
 
     /// Settle funding for an account (lazy update)
     fn settle_account_funding(account: &mut Account, global_funding_index: I128) -> Result<()> {
-        let delta_f = global_funding_index.get()
+        let delta_f = global_funding_index
+            .get()
             .checked_sub(account.funding_index.get())
             .ok_or(RiskError::Overflow)?;
 
@@ -3861,7 +4053,8 @@ impl RiskEngine {
             // Round UP for positive payments (account pays), truncate for negative (account receives)
             // This ensures vault always has at least what's owed (one-sided conservation slack).
             let raw = account
-                .position_size.get()
+                .position_size
+                .get()
                 .checked_mul(delta_f)
                 .ok_or(RiskError::Overflow)?;
 
@@ -3877,10 +4070,13 @@ impl RiskEngine {
             };
 
             // Longs pay when funding positive: pnl -= payment
-            account.pnl = I128::new(account
-                .pnl.get()
-                .checked_sub(payment)
-                .ok_or(RiskError::Overflow)?);
+            account.pnl = I128::new(
+                account
+                    .pnl
+                    .get()
+                    .checked_sub(payment)
+                    .ok_or(RiskError::Overflow)?,
+            );
         }
 
         account.funding_index = global_funding_index;
@@ -3928,8 +4124,14 @@ impl RiskEngine {
             oracle_price,
         )?;
 
-        // Realize the mark PnL
-        account.pnl = account.pnl.saturating_add(mark);
+        // Realize the mark PnL (checked math - overflow returns Err)
+        account.pnl = I128::new(
+            account
+                .pnl
+                .get()
+                .checked_add(mark)
+                .ok_or(RiskError::Overflow)?,
+        );
 
         // Reset entry to oracle (mark PnL is now 0 at this price)
         account.entry_price = oracle_price;
@@ -3940,12 +4142,7 @@ impl RiskEngine {
     /// Full account touch: funding + mark settlement + maintenance fees + warmup.
     /// This is the standard "lazy settlement" path called on every user operation.
     /// Triggers liquidation check if fees push account below maintenance margin.
-    pub fn touch_account_full(
-        &mut self,
-        idx: u16,
-        now_slot: u64,
-        oracle_price: u64,
-    ) -> Result<()> {
+    pub fn touch_account_full(&mut self, idx: u16, now_slot: u64, oracle_price: u64) -> Result<()> {
         // 1. Settle funding
         self.touch_account(idx)?;
 
@@ -4033,6 +4230,9 @@ impl RiskEngine {
     /// with the remainder added to capital. This ensures fee conservation
     /// (fees are never forgiven) and prevents stuck accounts.
     pub fn deposit(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Deposits reduce risk (allowed in risk mode)
         self.enforce_op(OpClass::RiskReduce)?;
 
@@ -4046,7 +4246,11 @@ impl RiskEngine {
         // Calculate and settle accrued fees
         let dt = now_slot.saturating_sub(account.last_fee_slot);
         if dt > 0 {
-            let due = self.params.maintenance_fee_per_slot.get().saturating_mul(dt as u128);
+            let due = self
+                .params
+                .maintenance_fee_per_slot
+                .get()
+                .saturating_mul(dt as u128);
             account.last_fee_slot = now_slot;
             account.fee_credits = account.fee_credits.saturating_sub(due as i128);
         }
@@ -4088,6 +4292,9 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
     ) -> Result<()> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4117,7 +4324,12 @@ impl RiskEngine {
         // Read account state (scope the borrow)
         let (old_capital, pnl, position_size, entry_price) = {
             let account = &self.accounts[idx as usize];
-            (account.capital, account.pnl, account.position_size, account.entry_price)
+            (
+                account.capital,
+                account.pnl,
+                account.position_size,
+                account.entry_price,
+            )
         };
 
         // Check we have enough capital
@@ -4129,14 +4341,19 @@ impl RiskEngine {
         // equity_mtm = max(0, new_capital + pnl + mark_pnl)
         // Fail-safe: if mark_pnl overflows (corrupted entry_price/position_size), treat as 0 equity
         let new_capital = sub_u128(old_capital.get(), amount);
-        let new_equity_mtm = match Self::mark_pnl_for_position(position_size.get(), entry_price, oracle_price) {
-            Ok(mark_pnl) => {
-                let cap_i = u128_to_i128_clamped(new_capital);
-                let new_eq_i = cap_i.saturating_add(pnl.get()).saturating_add(mark_pnl);
-                if new_eq_i > 0 { new_eq_i as u128 } else { 0 }
-            }
-            Err(_) => 0, // Overflow => worst-case equity => will fail margin check below
-        };
+        let new_equity_mtm =
+            match Self::mark_pnl_for_position(position_size.get(), entry_price, oracle_price) {
+                Ok(mark_pnl) => {
+                    let cap_i = u128_to_i128_clamped(new_capital);
+                    let new_eq_i = cap_i.saturating_add(pnl.get()).saturating_add(mark_pnl);
+                    if new_eq_i > 0 {
+                        new_eq_i as u128
+                    } else {
+                        0
+                    }
+                }
+                Err(_) => 0, // Overflow => worst-case equity => will fail margin check below
+            };
 
         // If account has position, must maintain initial margin at ORACLE price (MTM check)
         // This prevents withdrawing to a state that's immediately liquidatable
@@ -4172,7 +4389,8 @@ impl RiskEngine {
         // Regression assert: after settle + withdraw, negative PnL should have been settled
         #[cfg(any(test, kani))]
         debug_assert!(
-            !self.accounts[idx as usize].pnl.is_negative() || self.accounts[idx as usize].capital.is_zero(),
+            !self.accounts[idx as usize].pnl.is_negative()
+                || self.accounts[idx as usize].capital.is_zero(),
             "Withdraw: negative PnL must settle immediately"
         );
 
@@ -4198,7 +4416,11 @@ impl RiskEngine {
     pub fn account_equity(&self, account: &Account) -> u128 {
         let cap_i = u128_to_i128_clamped(account.capital.get());
         let eq_i = cap_i.saturating_add(account.pnl.get());
-        if eq_i > 0 { eq_i as u128 } else { 0 }
+        if eq_i > 0 {
+            eq_i as u128
+        } else {
+            0
+        }
     }
 
     /// Mark-to-market equity at oracle price (the ONLY correct equity for margin checks).
@@ -4217,19 +4439,18 @@ impl RiskEngine {
         };
         let cap_i = u128_to_i128_clamped(account.capital.get());
         let eq_i = cap_i.saturating_add(account.pnl.get()).saturating_add(mark);
-        if eq_i > 0 { eq_i as u128 } else { 0 }
+        if eq_i > 0 {
+            eq_i as u128
+        } else {
+            0
+        }
     }
 
     /// MTM margin check: is equity_mtm > required margin?
     /// This is the ONLY correct margin predicate for all risk checks.
     ///
     /// FAIL-SAFE: Returns false on any error (treat as below margin / liquidatable).
-    pub fn is_above_margin_bps_mtm(
-        &self,
-        account: &Account,
-        oracle_price: u64,
-        bps: u64,
-    ) -> bool {
+    pub fn is_above_margin_bps_mtm(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
         let equity = self.account_equity_mtm_at_oracle(account, oracle_price);
 
         // Position value at oracle price
@@ -4317,6 +4538,9 @@ impl RiskEngine {
         oracle_price: u64,
         size: i128,
     ) -> Result<()> {
+        // Update current_slot so warmup/bookkeeping progresses consistently
+        self.current_slot = now_slot;
+
         // Require fresh crank (time-based) before state-changing operations
         self.require_fresh_crank(now_slot)?;
 
@@ -4327,6 +4551,14 @@ impl RiskEngine {
 
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        // Validate requested size bounds
+        if size == 0 || size == i128::MIN {
+            return Err(RiskError::Overflow);
+        }
+        if saturating_abs_i128(size) as u128 > MAX_POSITION_ABS {
             return Err(RiskError::Overflow);
         }
 
@@ -4365,6 +4597,37 @@ impl RiskEngine {
             size,
         )?;
 
+        let exec_price = execution.price;
+        let exec_size = execution.size;
+
+        // Validate matcher output (trust boundary enforcement)
+        // Price bounds
+        if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::InvalidMatchingEngine);
+        }
+
+        // Size bounds
+        if exec_size == 0 {
+            // No fill: treat as no-op trade (no side effects, deterministic)
+            return Ok(());
+        }
+        if exec_size == i128::MIN {
+            return Err(RiskError::InvalidMatchingEngine);
+        }
+        if saturating_abs_i128(exec_size) as u128 > MAX_POSITION_ABS {
+            return Err(RiskError::InvalidMatchingEngine);
+        }
+
+        // Must be same direction as requested
+        if (exec_size > 0) != (size > 0) {
+            return Err(RiskError::InvalidMatchingEngine);
+        }
+
+        // Must be partial fill at most (abs(exec) <= abs(request))
+        if saturating_abs_i128(exec_size) > saturating_abs_i128(size) {
+            return Err(RiskError::InvalidMatchingEngine);
+        }
+
         // Settle funding, mark-to-market, and maintenance fees for both accounts
         // Mark settlement MUST happen before position changes (variation margin)
         // Note: warmup is settled at the END after trade PnL is generated
@@ -4374,18 +4637,6 @@ impl RiskEngine {
         self.settle_mark_to_oracle(lp_idx, oracle_price)?;
         self.settle_maintenance_fee(user_idx, now_slot, oracle_price)?;
         self.settle_maintenance_fee(lp_idx, now_slot, oracle_price)?;
-
-        let exec_price = execution.price;
-        let exec_size = execution.size;
-
-        // Validate execution bounds (prevents overflow in mark_pnl calculations)
-        // These are the ACTUAL values that will be used, not the requested values
-        if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-        if saturating_abs_i128(exec_size) as u128 > MAX_POSITION_ABS {
-            return Err(RiskError::Overflow);
-        }
 
         // Calculate fee
         let notional =
@@ -4401,9 +4652,17 @@ impl RiskEngine {
             (&mut right[0], &mut left[lp_idx as usize])
         };
 
-        // Calculate new positions
-        let new_user_position = user.position_size.get().saturating_add(exec_size);
-        let new_lp_position = lp.position_size.get().saturating_sub(exec_size);
+        // Calculate new positions (checked math - overflow returns Err)
+        let new_user_position = user
+            .position_size
+            .get()
+            .checked_add(exec_size)
+            .ok_or(RiskError::Overflow)?;
+        let new_lp_position = lp
+            .position_size
+            .get()
+            .checked_sub(exec_size)
+            .ok_or(RiskError::Overflow)?;
 
         // Validate final position bounds (prevents overflow in mark_pnl calculations)
         if saturating_abs_i128(new_user_position) as u128 > MAX_POSITION_ABS
@@ -4416,16 +4675,29 @@ impl RiskEngine {
         // User gains if buying below oracle (exec_size > 0, oracle > exec_price)
         // LP gets opposite sign
         // Note: entry_price is already oracle_price after settle_mark_to_oracle
-        let price_diff = (oracle_price as i128).saturating_sub(exec_price as i128);
-        let trade_pnl = price_diff
-            .saturating_mul(exec_size)
-            .saturating_div(1_000_000);
+        let price_diff = (oracle_price as i128)
+            .checked_sub(exec_price as i128)
+            .ok_or(RiskError::Overflow)?;
 
-        // Compute final PNL values
-        let new_user_pnl = user.pnl.get()
-            .saturating_add(trade_pnl)
-            .saturating_sub(fee as i128);
-        let new_lp_pnl = lp.pnl.get().saturating_sub(trade_pnl);
+        let trade_pnl = price_diff
+            .checked_mul(exec_size)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(RiskError::Overflow)?;
+
+        // Compute final PNL values (checked math - overflow returns Err)
+        let new_user_pnl = user
+            .pnl
+            .get()
+            .checked_add(trade_pnl)
+            .ok_or(RiskError::Overflow)?
+            .checked_sub(fee as i128)
+            .ok_or(RiskError::Overflow)?;
+        let new_lp_pnl = lp
+            .pnl
+            .get()
+            .checked_sub(trade_pnl)
+            .ok_or(RiskError::Overflow)?;
 
         // Check user maintenance margin
         // After settle_mark_to_oracle, entry_price = oracle_price, so mark_pnl = 0
@@ -4464,7 +4736,8 @@ impl RiskEngine {
         }
 
         // Commit all state changes
-        self.insurance_fund.fee_revenue = U128::new(add_u128(self.insurance_fund.fee_revenue.get(), fee));
+        self.insurance_fund.fee_revenue =
+            U128::new(add_u128(self.insurance_fund.fee_revenue.get(), fee));
         self.insurance_fund.balance = U128::new(add_u128(self.insurance_fund.balance.get(), fee));
 
         // Credit fee to user's fee_credits (active traders earn credits that offset maintenance)
@@ -4480,8 +4753,8 @@ impl RiskEngine {
 
         // Update total open interest tracking (O(1))
         // OI = sum of abs(position_size) across all accounts
-        let old_oi = saturating_abs_i128(old_user_pos) as u128
-            + saturating_abs_i128(old_lp_pos) as u128;
+        let old_oi =
+            saturating_abs_i128(old_user_pos) as u128 + saturating_abs_i128(old_lp_pos) as u128;
         let new_oi = saturating_abs_i128(new_user_position) as u128
             + saturating_abs_i128(new_lp_position) as u128;
         if new_oi > old_oi {
@@ -4494,7 +4767,8 @@ impl RiskEngine {
         let old_lp_abs = saturating_abs_i128(old_lp_pos) as u128;
         let new_lp_abs = saturating_abs_i128(new_lp_position) as u128;
         // net_lp_pos: delta = new - old
-        self.net_lp_pos = self.net_lp_pos
+        self.net_lp_pos = self
+            .net_lp_pos
             .saturating_sub(old_lp_pos)
             .saturating_add(new_lp_position);
         // lp_sum_abs: delta of abs values
@@ -4671,7 +4945,9 @@ impl RiskEngine {
     /// This is O(1) using maintained aggregates.
     #[inline]
     pub fn compute_lp_risk_units(&self) -> u128 {
-        self.lp_max_abs.get().saturating_add(self.lp_sum_abs.get() / 8)
+        self.lp_max_abs
+            .get()
+            .saturating_add(self.lp_sum_abs.get() / 8)
     }
 
     /// Returns insurance spendable for ADL and warmup budget (raw - reserved)
@@ -4686,7 +4962,8 @@ impl RiskEngine {
     #[inline]
     pub fn warmup_budget_remaining(&self) -> u128 {
         let rhs = self
-            .warmed_neg_total.get()
+            .warmed_neg_total
+            .get()
             .saturating_add(self.insurance_spendable_unreserved());
         rhs.saturating_sub(self.warmed_pos_total.get())
     }
@@ -4697,7 +4974,10 @@ impl RiskEngine {
     #[inline]
     pub fn recompute_warmup_insurance_reserved(&mut self) {
         let raw = self.insurance_spendable_raw();
-        let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+        let needed = self
+            .warmed_pos_total
+            .get()
+            .saturating_sub(self.warmed_neg_total.get());
         self.warmup_insurance_reserved = U128::new(core::cmp::min(needed, raw));
     }
 
@@ -4745,13 +5025,17 @@ impl RiskEngine {
             // After immediate settlement: pnl < 0 only if capital was exhausted
             #[cfg(any(test, kani))]
             debug_assert!(
-                !self.accounts[idx as usize].pnl.is_negative() || self.accounts[idx as usize].capital.is_zero(),
+                !self.accounts[idx as usize].pnl.is_negative()
+                    || self.accounts[idx as usize].capital.is_zero(),
                 "Negative PnL must settle immediately: pnl < 0 implies capital == 0"
             );
         }
 
         // 3.3 Budget from losses (currently unused but documents the design)
-        let _losses_budget = self.warmed_neg_total.get().saturating_sub(self.warmed_pos_total.get());
+        let _losses_budget = self
+            .warmed_neg_total
+            .get()
+            .saturating_sub(self.warmed_pos_total.get());
 
         // 3.4 Settle gains with budget clamp (positive PnL → increase capital)
         // SAFETY: Block positive conversion while socialization debt is pending
@@ -4792,7 +5076,10 @@ impl RiskEngine {
         {
             let raw = self.insurance_spendable_raw();
             let floor = self.params.risk_reduction_threshold.get();
-            let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+            let needed = self
+                .warmed_pos_total
+                .get()
+                .saturating_sub(self.warmed_neg_total.get());
             let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmed_pos_total.get() <= self.warmed_neg_total.get().saturating_add(raw),
@@ -4805,7 +5092,8 @@ impl RiskEngine {
                 expect_reserved
             );
             debug_assert!(
-                self.insurance_fund.balance.get() >= floor.saturating_add(self.warmup_insurance_reserved.get()),
+                self.insurance_fund.balance.get()
+                    >= floor.saturating_add(self.warmup_insurance_reserved.get()),
                 "Insurance fell below floor+reserved"
             );
         }
@@ -4925,8 +5213,7 @@ impl RiskEngine {
                     let haircut = numer / total_unwrapped;
                     let rem = numer % total_unwrapped;
 
-                    self.accounts[idx].pnl =
-                        self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(haircut as i128);
                     applied_from_pnl += haircut;
 
                     // Store remainder and add to idx list only if non-zero
@@ -4975,7 +5262,8 @@ impl RiskEngine {
             let spend = core::cmp::min(remaining_loss, spendable);
 
             // Deduct from insurance fund
-            self.insurance_fund.balance = U128::new(sub_u128(self.insurance_fund.balance.get(), spend));
+            self.insurance_fund.balance =
+                U128::new(sub_u128(self.insurance_fund.balance.get(), spend));
 
             // Any remaining loss goes to loss_accum
             let uncovered = remaining_loss.saturating_sub(spend);
@@ -4984,7 +5272,8 @@ impl RiskEngine {
             }
 
             // Enter risk-reduction-only mode if we've hit the floor or have uncovered losses
-            if uncovered > 0 || self.insurance_fund.balance.get() <= self.params.risk_reduction_threshold.get()
+            if uncovered > 0
+                || self.insurance_fund.balance.get() <= self.params.risk_reduction_threshold.get()
             {
                 self.enter_risk_reduction_only_mode();
             }
@@ -4997,7 +5286,10 @@ impl RiskEngine {
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
-            let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+            let needed = self
+                .warmed_pos_total
+                .get()
+                .saturating_sub(self.warmed_neg_total.get());
             let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5088,8 +5380,7 @@ impl RiskEngine {
                     let haircut = numer / total_unwrapped;
                     let rem = numer % total_unwrapped;
 
-                    self.accounts[idx].pnl =
-                        self.accounts[idx].pnl.saturating_sub(haircut as i128);
+                    self.accounts[idx].pnl = self.accounts[idx].pnl.saturating_sub(haircut as i128);
                     applied_from_pnl += haircut;
 
                     // Store remainder and add to idx list only if non-zero
@@ -5137,7 +5428,8 @@ impl RiskEngine {
             let spend = core::cmp::min(remaining_loss, spendable);
 
             // Deduct from insurance fund
-            self.insurance_fund.balance = U128::new(sub_u128(self.insurance_fund.balance.get(), spend));
+            self.insurance_fund.balance =
+                U128::new(sub_u128(self.insurance_fund.balance.get(), spend));
 
             // Any remaining loss goes to loss_accum
             let uncovered = remaining_loss.saturating_sub(spend);
@@ -5146,7 +5438,8 @@ impl RiskEngine {
             }
 
             // Enter risk-reduction-only mode if we've hit the floor or have uncovered losses
-            if uncovered > 0 || self.insurance_fund.balance.get() <= self.params.risk_reduction_threshold.get()
+            if uncovered > 0
+                || self.insurance_fund.balance.get() <= self.params.risk_reduction_threshold.get()
             {
                 self.enter_risk_reduction_only_mode();
             }
@@ -5159,7 +5452,10 @@ impl RiskEngine {
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
-            let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+            let needed = self
+                .warmed_pos_total
+                .get()
+                .saturating_sub(self.warmed_neg_total.get());
             let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5238,10 +5534,11 @@ impl RiskEngine {
                 // This ensures panic settle can always complete without wedging
                 let pos = account.position_size.get();
                 let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl = match Self::mark_pnl_for_position(pos, account.entry_price, oracle_price) {
-                    Ok(pnl) => pnl,
-                    Err(_) => -u128_to_i128_clamped(account.capital.get()), // Worst-case: lose all capital
-                };
+                let mark_pnl =
+                    match Self::mark_pnl_for_position(pos, account.entry_price, oracle_price) {
+                        Ok(pnl) => pnl,
+                        Err(_) => -u128_to_i128_clamped(account.capital.get()), // Worst-case: lose all capital
+                    };
 
                 // Track total mark PNL for rounding compensation
                 total_mark_pnl = total_mark_pnl.saturating_add(mark_pnl);
@@ -5301,7 +5598,10 @@ impl RiskEngine {
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
-            let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+            let needed = self
+                .warmed_pos_total
+                .get()
+                .saturating_sub(self.warmed_neg_total.get());
             let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5413,7 +5713,10 @@ impl RiskEngine {
         #[cfg(any(test, kani))]
         {
             let raw = self.insurance_spendable_raw();
-            let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+            let needed = self
+                .warmed_pos_total
+                .get()
+                .saturating_sub(self.warmed_neg_total.get());
             let expect_reserved = core::cmp::min(needed, raw);
             debug_assert!(
                 self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5439,7 +5742,8 @@ impl RiskEngine {
             let remaining = sub_u128(amount, loss_coverage);
 
             // Add remaining to insurance fund balance
-            self.insurance_fund.balance = U128::new(add_u128(self.insurance_fund.balance.get(), remaining));
+            self.insurance_fund.balance =
+                U128::new(add_u128(self.insurance_fund.balance.get(), remaining));
 
             // Recompute reserved after insurance increase
             self.recompute_warmup_insurance_reserved();
@@ -5448,7 +5752,10 @@ impl RiskEngine {
             #[cfg(any(test, kani))]
             {
                 let raw = self.insurance_spendable_raw();
-                let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+                let needed = self
+                    .warmed_pos_total
+                    .get()
+                    .saturating_sub(self.warmed_neg_total.get());
                 let expect_reserved = core::cmp::min(needed, raw);
                 debug_assert!(
                     self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5466,7 +5773,8 @@ impl RiskEngine {
             }
         } else {
             // No loss - just add to insurance fund
-            self.insurance_fund.balance = U128::new(add_u128(self.insurance_fund.balance.get(), amount));
+            self.insurance_fund.balance =
+                U128::new(add_u128(self.insurance_fund.balance.get(), amount));
 
             // Recompute reserved after insurance increase
             self.recompute_warmup_insurance_reserved();
@@ -5475,7 +5783,10 @@ impl RiskEngine {
             #[cfg(any(test, kani))]
             {
                 let raw = self.insurance_spendable_raw();
-                let needed = self.warmed_pos_total.get().saturating_sub(self.warmed_neg_total.get());
+                let needed = self
+                    .warmed_pos_total
+                    .get()
+                    .saturating_sub(self.warmed_neg_total.get());
                 let expect_reserved = core::cmp::min(needed, raw);
                 debug_assert!(
                     self.warmup_insurance_reserved.get() == expect_reserved,
@@ -5521,6 +5832,7 @@ impl RiskEngine {
         let mut total_capital = 0u128;
         let mut net_pnl: i128 = 0;
         let mut net_mark: i128 = 0;
+        let mut mark_ok = true;
         let global_index = self.funding_index_qpb_e6;
 
         self.for_each_used(|_idx, account| {
@@ -5530,7 +5842,9 @@ impl RiskEngine {
             // This accounts for lazy funding settlement with same rounding as settle_account_funding
             let mut settled_pnl = account.pnl.get();
             if !account.position_size.is_zero() {
-                let delta_f = global_index.get().saturating_sub(account.funding_index.get());
+                let delta_f = global_index
+                    .get()
+                    .saturating_sub(account.funding_index.get());
                 if delta_f != 0 {
                     // payment = position × ΔF / 1e6
                     // Round UP for positive (account pays), truncate for negative (account receives)
@@ -5544,17 +5858,26 @@ impl RiskEngine {
                 }
 
                 // Compute unsettled mark PnL (variation margin not yet settled)
-                if let Ok(mark) = Self::mark_pnl_for_position(
+                match Self::mark_pnl_for_position(
                     account.position_size.get(),
                     account.entry_price,
                     oracle_price,
                 ) {
-                    net_mark = net_mark.saturating_add(mark);
+                    Ok(mark) => {
+                        net_mark = net_mark.saturating_add(mark);
+                    }
+                    Err(_) => {
+                        mark_ok = false;
+                    }
                 }
-                // If mark calculation overflows, skip it (conservative: assume zero)
             }
             net_pnl = net_pnl.saturating_add(settled_pnl);
         });
+
+        // Fail if any mark calculation overflowed
+        if !mark_ok {
+            return false;
+        }
 
         // Conservation formula:
         // vault + loss_accum >= sum(capital) + sum(settled_pnl) + sum(mark_pnl) + insurance

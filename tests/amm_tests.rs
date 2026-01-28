@@ -14,9 +14,9 @@ fn default_params() -> RiskParams {
         risk_reduction_threshold: U128::new(0), // Default: only trigger on full depletion
         maintenance_fee_per_slot: U128::new(0), // No maintenance fee by default
         max_crank_staleness_slots: u64::MAX,
-        liquidation_fee_bps: 50,     // 0.5% liquidation fee
+        liquidation_fee_bps: 50,                 // 0.5% liquidation fee
         liquidation_fee_cap: U128::new(100_000), // Cap at 100k units
-        liquidation_buffer_bps: 100, // 1% buffer above maintenance
+        liquidation_buffer_bps: 100,             // 1% buffer above maintenance
         min_liquidation_abs: U128::new(100_000), // Minimum 0.1 units
     }
 }
@@ -104,8 +104,9 @@ fn test_e2e_complete_user_journey() {
     let new_price = 1_200_000;
 
     // Alice closes half her position, realizing profit
+    let slot = engine.current_slot;
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, new_price, -2_500)
+        .execute_trade(&MATCHER, lp, alice, slot, new_price, -2_500)
         .unwrap();
 
     // Alice should have positive PNL from the closed portion
@@ -149,12 +150,13 @@ fn test_e2e_complete_user_journey() {
     // === Phase 5: Withdrawal ===
 
     // Alice closes her remaining position first
+    let slot = engine.current_slot;
     engine
         .execute_trade(
             &MATCHER,
             lp,
             alice,
-            0,
+            slot,
             new_price,
             -engine.accounts[alice as usize].position_size.get(),
         )
@@ -168,7 +170,10 @@ fn test_e2e_complete_user_journey() {
     let alice_withdrawal = engine.accounts[alice as usize].capital.get() + alice_final_withdrawable;
 
     if alice_withdrawal > 0 {
-        engine.withdraw(alice, alice_withdrawal, 0, 1_000_000).unwrap();
+        let slot = engine.current_slot;
+        engine
+            .withdraw(alice, alice_withdrawal, slot, 1_000_000)
+            .unwrap();
 
         // Alice should have minimal remaining balance
         assert!(
@@ -188,15 +193,18 @@ fn test_e2e_complete_user_journey() {
 
     // All positions should be closed
     assert_eq!(
-        engine.accounts[alice as usize].position_size.get(), 0,
+        engine.accounts[alice as usize].position_size.get(),
+        0,
         "Alice position should be closed"
     );
     assert_eq!(
-        engine.accounts[bob as usize].position_size.get(), 0,
+        engine.accounts[bob as usize].position_size.get(),
+        0,
         "Bob position should be closed"
     );
     assert_eq!(
-        engine.accounts[lp as usize].position_size.get(), 0,
+        engine.accounts[lp as usize].position_size.get(),
+        0,
         "LP position should be closed"
     );
 
@@ -292,7 +300,10 @@ fn test_e2e_multi_user_with_adl() {
     }
 
     // Total PNL should be reduced by ADL
-    let total_pnl_after: i128 = users.iter().map(|&u| engine.accounts[u as usize].pnl.get()).sum();
+    let total_pnl_after: i128 = users
+        .iter()
+        .map(|&u| engine.accounts[u as usize].pnl.get())
+        .sum();
 
     // Some PNL should remain (not all haircutted)
     println!("Total PNL after ADL: {}", total_pnl_after);
