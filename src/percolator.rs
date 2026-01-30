@@ -2061,8 +2061,18 @@ impl RiskEngine {
         // Update last_fee_slot
         account.last_fee_slot = now_slot;
 
+        // Book revenue from positive fee_credits that will be consumed
+        let credits_before = core::cmp::max(account.fee_credits.get(), 0) as u128;
+        let pay_from_credits = core::cmp::min(credits_before, due);
+
         // Deduct from fee_credits
         account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+        // Prepaid credits being spent → book as insurance revenue now
+        if pay_from_credits > 0 {
+            self.insurance_fund.balance = self.insurance_fund.balance + pay_from_credits;
+            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay_from_credits;
+        }
 
         // If fee_credits is negative, pay from capital
         if account.fee_credits.is_negative() {
@@ -2119,8 +2129,18 @@ impl RiskEngine {
         // Advance slot marker regardless
         account.last_fee_slot = now_slot;
 
+        // Book revenue from positive fee_credits that will be consumed
+        let credits_before = core::cmp::max(account.fee_credits.get(), 0) as u128;
+        let pay_from_credits = core::cmp::min(credits_before, due);
+
         // Deduct from fee_credits first
         account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+        // Prepaid credits being spent → book as insurance revenue now
+        if pay_from_credits > 0 {
+            self.insurance_fund.balance = self.insurance_fund.balance + pay_from_credits;
+            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay_from_credits;
+        }
 
         // If negative, pay what we can from capital (no margin check)
         if account.fee_credits.is_negative() {
@@ -2180,7 +2200,35 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Add fee credits to an account (e.g., user deposits fee credits)
+    /// Deposit prepaid fee credits for an account.
+    ///
+    /// The wrapper must have already transferred `amount` tokens into the vault.
+    /// This records the prepaid fees: vault increases, insurance receives the
+    /// prepaid amount, and the account's fee_credits balance increases.
+    pub fn deposit_fee_credits(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::Unauthorized);
+        }
+        self.current_slot = now_slot;
+
+        // Wrapper transferred tokens into vault
+        self.vault = self.vault + amount;
+
+        // Prepaid fees belong to insurance immediately
+        self.insurance_fund.balance = self.insurance_fund.balance + amount;
+        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + amount;
+
+        // Credit the account
+        self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
+            .fee_credits
+            .saturating_add(amount as i128);
+
+        Ok(())
+    }
+
+    /// Add fee credits without vault/insurance accounting.
+    /// Only for tests and Kani proofs — production code must use deposit_fee_credits.
+    #[cfg(any(test, feature = "test", kani))]
     pub fn add_fee_credits(&mut self, idx: u16, amount: u128) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
@@ -4292,7 +4340,18 @@ impl RiskEngine {
                 .get()
                 .saturating_mul(dt as u128);
             account.last_fee_slot = now_slot;
+
+            // Book revenue from positive fee_credits that will be consumed
+            let credits_before = core::cmp::max(account.fee_credits.get(), 0) as u128;
+            let pay_from_credits = core::cmp::min(credits_before, due);
+
             account.fee_credits = account.fee_credits.saturating_sub(due as i128);
+
+            // Prepaid credits being spent → book as insurance revenue now
+            if pay_from_credits > 0 {
+                self.insurance_fund.balance = self.insurance_fund.balance + pay_from_credits;
+                self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay_from_credits;
+            }
         }
 
         // Pay any owed fees from deposit first
@@ -4820,13 +4879,14 @@ impl RiskEngine {
         // lp_max_abs: monotone increase only (conservative upper bound)
         self.lp_max_abs = U128::new(self.lp_max_abs.get().max(new_lp_abs));
 
-        // Update warmup slopes after PNL changes
-        self.update_warmup_slope(user_idx)?;
-        self.update_warmup_slope(lp_idx)?;
-
-        // Settle warmup for both accounts (at the very end of trade)
+        // Settle matured warmup using the OLD slope/window before resetting.
+        // This ensures matured value is not lost when the slope gets recomputed.
         self.settle_warmup_to_capital(user_idx)?;
         self.settle_warmup_to_capital(lp_idx)?;
+
+        // Now recompute warmup slopes after PnL changes (resets started_at_slot)
+        self.update_warmup_slope(user_idx)?;
+        self.update_warmup_slope(lp_idx)?;
 
         Ok(())
     }
@@ -6199,12 +6259,20 @@ mod tests {
         // PnL stays with LP1 (the LP that gave the user a better-than-oracle fill).
         // settle_warmup_to_capital immediately settles negative PnL against capital,
         // so LP1's pnl field is 0 and capital is reduced by 10k*E6.
+        // Some of the user's PnL may have partially settled to capital via warmup
+        // during trade 2 (correct behavior: settle matured warmup before slope reset).
         let ten_k_e6: u128 = (10_000 * E6) as u128;
-        assert_eq!(engine.accounts[user as usize].pnl.get(), ten_k_e6 as i128);
+        let user_pnl = engine.accounts[user as usize].pnl.get() as u128;
+        let user_cap = engine.accounts[user as usize].capital.get();
+        let initial_cap = 50_000 * (E6 as u128);
+        // Total user value (pnl + capital) must equal initial_capital + 10k profit
+        assert_eq!(user_pnl + user_cap, initial_cap + ten_k_e6,
+            "user total value must be initial_capital + trade profit");
         assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
-        assert_eq!(engine.accounts[lp1 as usize].capital.get(), 50_000 * (E6 as u128) - ten_k_e6);
+        assert_eq!(engine.accounts[lp1 as usize].capital.get(), initial_cap - ten_k_e6);
+        // LP2 must be unaffected (no teleportation)
         assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
-        assert_eq!(engine.accounts[lp2 as usize].capital.get(), 50_000 * (E6 as u128));
+        assert_eq!(engine.accounts[lp2 as usize].capital.get(), initial_cap);
 
         // Conservation must still hold
         assert!(engine.check_conservation(ORACLE_100K));
@@ -6315,6 +6383,193 @@ mod tests {
         }
 
         assert!(engine.is_used(lp_idx as usize), "LP account must still exist");
+    }
+
+    #[test]
+    fn test_maintenance_fee_paid_from_fee_credits_counts_as_revenue() {
+        let mut params = params_for_tests();
+        params.maintenance_fee_per_slot = U128::new(10);
+        let mut engine = RiskEngine::new(params);
+
+        let user_idx = engine.add_user(0).unwrap();
+        engine.deposit(user_idx, 1_000_000, 1).unwrap();
+
+        // Add 100 fee credits (test-only helper — no vault/insurance)
+        engine.add_fee_credits(user_idx, 100).unwrap();
+        assert_eq!(engine.accounts[user_idx as usize].fee_credits.get(), 100);
+
+        let rev_before = engine.insurance_fund.fee_revenue.get();
+        let bal_before = engine.insurance_fund.balance.get();
+
+        // Settle maintenance: dt=5, fee_per_slot=10, due=50
+        // All 50 should come from fee_credits
+        engine
+            .settle_maintenance_fee(user_idx, 6, ORACLE_100K)
+            .unwrap();
+
+        assert_eq!(
+            engine.accounts[user_idx as usize].fee_credits.get(),
+            50,
+            "fee_credits should decrease by 50"
+        );
+        assert_eq!(
+            engine.insurance_fund.fee_revenue.get() - rev_before,
+            50,
+            "insurance fee_revenue must increase by 50"
+        );
+        assert_eq!(
+            engine.insurance_fund.balance.get() - bal_before,
+            50,
+            "insurance balance must increase by 50"
+        );
+    }
+
+    #[test]
+    fn test_maintenance_fee_splits_between_credits_and_capital_counts_full_revenue() {
+        let mut params = params_for_tests();
+        params.maintenance_fee_per_slot = U128::new(10);
+        let mut engine = RiskEngine::new(params);
+
+        let user_idx = engine.add_user(0).unwrap();
+        // deposit at slot 1: dt=1 from slot 0, fee=10. Paid from deposit.
+        // capital = 50 - 10 = 40.
+        engine.deposit(user_idx, 50, 1).unwrap();
+        assert_eq!(engine.accounts[user_idx as usize].capital.get(), 40);
+
+        // Add 30 fee credits (test-only)
+        engine.add_fee_credits(user_idx, 30).unwrap();
+
+        let rev_before = engine.insurance_fund.fee_revenue.get();
+
+        // Settle maintenance: dt=10, fee_per_slot=10, due=100
+        // credits pays 30, capital pays 40 (all it has), leftover 30 unpaid
+        engine
+            .settle_maintenance_fee(user_idx, 11, ORACLE_100K)
+            .unwrap();
+
+        let rev_increase = engine.insurance_fund.fee_revenue.get() - rev_before;
+        let cap_after = engine.accounts[user_idx as usize].capital.get();
+
+        assert_eq!(rev_increase, 70, "insurance revenue should be 30 (credits) + 40 (capital)");
+        assert_eq!(cap_after, 0, "capital should be fully drained");
+        // fee_credits should be -30 (100 due - 30 credits - 40 capital = 30 unpaid debt)
+        assert_eq!(
+            engine.accounts[user_idx as usize].fee_credits.get(),
+            -30,
+            "fee_credits should reflect unpaid debt"
+        );
+    }
+
+    #[test]
+    fn test_deposit_fee_credits_updates_vault_and_insurance() {
+        let mut engine = RiskEngine::new(params_for_tests());
+        let user_idx = engine.add_user(0).unwrap();
+
+        let vault_before = engine.vault.get();
+        let ins_before = engine.insurance_fund.balance.get();
+        let rev_before = engine.insurance_fund.fee_revenue.get();
+
+        engine.deposit_fee_credits(user_idx, 500, 10).unwrap();
+
+        assert_eq!(engine.vault.get() - vault_before, 500, "vault must increase");
+        assert_eq!(engine.insurance_fund.balance.get() - ins_before, 500, "insurance balance must increase");
+        assert_eq!(engine.insurance_fund.fee_revenue.get() - rev_before, 500, "insurance fee_revenue must increase");
+        assert_eq!(engine.accounts[user_idx as usize].fee_credits.get(), 500, "fee_credits must increase");
+    }
+
+    #[test]
+    fn test_warmup_matured_not_lost_on_trade() {
+        let mut params = params_for_tests();
+        params.warmup_period_slots = 100;
+        params.max_crank_staleness_slots = u64::MAX;
+        let mut engine = RiskEngine::new(params);
+
+        let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+        let user_idx = engine.add_user(0).unwrap();
+
+        // Fund both generously
+        engine.deposit(lp_idx, 1_000_000_000, 1).unwrap();
+        engine.deposit(user_idx, 1_000_000_000, 1).unwrap();
+
+        // Provide warmup budget: the warmup budget system requires losses or
+        // spendable insurance to fund positive PnL settlement. Seed insurance
+        // so the warmup budget allows settlement.
+        engine.insurance_fund.balance = engine.insurance_fund.balance + 1_000_000;
+
+        // Give user positive PnL and set warmup started far in the past
+        engine.accounts[user_idx as usize].pnl = I128::new(10_000);
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 1;
+        // slope = max(1, 10000/100) = 100
+        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(100);
+
+        let cap_before = engine.accounts[user_idx as usize].capital.get();
+
+        // Execute a tiny trade at slot 200 (elapsed from slot 1 = 199 slots, cap = 100*199 = 19900 > 10000)
+        struct AtOracleMatcher;
+        impl MatchingEngine for AtOracleMatcher {
+            fn execute_match(
+                &self,
+                _lp_program: &[u8; 32],
+                _lp_context: &[u8; 32],
+                _lp_account_id: u64,
+                oracle_price: u64,
+                size: i128,
+            ) -> Result<TradeExecution> {
+                Ok(TradeExecution { price: oracle_price, size })
+            }
+        }
+
+        engine
+            .execute_trade(&AtOracleMatcher, lp_idx, user_idx, 200, ORACLE_100K, ONE_BASE)
+            .unwrap();
+
+        let cap_after = engine.accounts[user_idx as usize].capital.get();
+
+        // Capital must have increased by the matured warmup amount (10_000 PnL settled to capital)
+        assert!(
+            cap_after > cap_before,
+            "capital must increase from matured warmup: before={}, after={}",
+            cap_before,
+            cap_after
+        );
+        assert!(
+            cap_after >= cap_before + 10_000,
+            "capital should have increased by at least 10000 (matured warmup): before={}, after={}",
+            cap_before,
+            cap_after
+        );
+    }
+
+    #[test]
+    fn test_abandoned_with_stale_last_fee_slot_eventually_closed() {
+        let mut params = params_for_tests();
+        params.maintenance_fee_per_slot = U128::new(1);
+        let mut engine = RiskEngine::new(params);
+
+        let user_idx = engine.add_user(0).unwrap();
+        // Small deposit
+        engine.deposit(user_idx, 5, 1).unwrap();
+
+        assert!(engine.is_used(user_idx as usize));
+
+        // Don't call any user ops. Run crank at a slot far ahead.
+        // First crank: drains the account via fee settlement
+        let _ = engine
+            .keeper_crank(user_idx, 10_000, ORACLE_100K, 0, false)
+            .unwrap();
+
+        // Second crank: GC scan should pick up the dust
+        let outcome = engine
+            .keeper_crank(user_idx, 10_001, ORACLE_100K, 0, false)
+            .unwrap();
+
+        // The account must be closed by now (across both cranks)
+        assert!(
+            !engine.is_used(user_idx as usize),
+            "abandoned account with stale last_fee_slot must eventually be GC'd"
+        );
+        // At least one of the two cranks should have GC'd it
+        // (first crank drains capital to 0, GC might close it there already)
     }
 }
 

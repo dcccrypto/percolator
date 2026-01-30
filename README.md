@@ -53,6 +53,10 @@ must verify balance deltas before calling into it.
 2. Verify: `vault_balance_after − engine.vault == amount`
 3. Call `RiskEngine::deposit(account_id, amount)`
 
+### Fee Credits
+
+Fee credits (`fee_credits`) are prepaid maintenance balances held by insurance. Use `RiskEngine::deposit_fee_credits(idx, amount, now_slot)` after transferring tokens into the vault. Spending credits during fee settlement books insurance revenue identically to paying from capital.
+
 ### Withdrawals
 
 1. Call `RiskEngine::withdraw(account_id, amount, now_slot, oracle_price)`
