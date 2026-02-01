@@ -4008,9 +4008,10 @@ fn fast_frame_enter_risk_mode_only_mutates_flags() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(0).unwrap();
 
-    // Setup
+    // Setup: loss_accum > 0 so warmup will be paused
     engine.accounts[user_idx as usize].capital = U128::new(10_000);
     engine.vault = U128::new(10_000);
+    engine.loss_accum = U128::new(1);
 
     // Snapshot before
     let user_snapshot = snapshot_account(&engine.accounts[user_idx as usize]);
@@ -4043,7 +4044,8 @@ fn fast_frame_enter_risk_mode_only_mutates_flags() {
 
     // Assert: flags set correctly
     assert!(engine.risk_reduction_only, "Frame: risk_reduction_only set");
-    assert!(engine.warmup_paused, "Frame: warmup_paused set");
+    // warmup_paused only when loss_accum > 0 (which it is here)
+    assert!(engine.warmup_paused, "Frame: warmup_paused set when loss_accum > 0");
 }
 
 /// Frame proof: apply_adl never changes any account's capital (I1)
