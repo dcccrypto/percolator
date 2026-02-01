@@ -4784,17 +4784,25 @@ impl RiskEngine {
     ///
     ///   no trades → no fees → no insurance growth → no warmup budget → LP stuck
     ///
-    /// This function breaks the deadlock by haircutting positive PnL to cover:
-    /// 1. `loss_accum` — phantom PnL backed by accounting holes, not real tokens
-    /// 2. Insurance deficit — to bring insurance back to threshold, enabling mode exit
+    /// This function moves ALL stranded vault funds into the insurance fund.
+    /// Stranded funds originate from user capital that was consumed by losses
+    /// the insurance fund should have covered. They belong in insurance.
     ///
-    /// The haircut is fair because:
-    /// - `loss_accum` represents unrecoverable losses; the PnL it "backs" is phantom
-    /// - The insurance top-up enables the LP to actually withdraw remaining real PnL
-    /// - Conservation invariant is preserved (both sides decrease by the same amount)
+    /// The haircut amount = `stranded_funds() + loss_accum`, which equals the
+    /// net positive PnL across all accounts (from conservation). This zeroes
+    /// out all positive PnL and routes the value:
+    /// 1. First to `loss_accum` — clears the phantom accounting hole
+    /// 2. Remainder to `insurance_fund` — covers future losses
     ///
-    /// After recovery, warmup slopes are reset for affected accounts and the
-    /// function attempts to exit risk-reduction-only mode.
+    /// Conservation proof:
+    ///   Before: vault + L = C + P + I + slack
+    ///   After:  vault + 0 = C + 0 + (I + stranded) + slack
+    ///   Since stranded = P - L: I + stranded = I + P - L
+    ///   So RHS = C + P + I - L + slack... wait, let's just verify:
+    ///   haircut H = P (all positive PnL), loss_red R = L, topup T = H - R = P - L
+    ///   New RHS = C + (P-H) + (I+T) = C + 0 + (I + P - L)
+    ///   New LHS = vault + 0 = vault
+    ///   Original: vault = C + P + I - L → vault = C + I + P - L ✓
     ///
     /// Prerequisites:
     /// - `risk_reduction_only == true`
@@ -4847,16 +4855,12 @@ impl RiskEngine {
             return Ok(0); // Nothing to haircut
         }
 
-        // Compute needed haircut:
-        //   1. Cover loss_accum (phantom PnL → accounting correction)
-        //   2. Top up insurance to threshold (enables risk-reduction exit)
-        let loss_coverage_needed = self.loss_accum.get();
-        let insurance_deficit = self
-            .params
-            .risk_reduction_threshold
-            .get()
-            .saturating_sub(self.insurance_fund.balance.get());
-        let total_needed = loss_coverage_needed.saturating_add(insurance_deficit);
+        // Move ALL stranded funds to insurance.
+        // stranded = vault - capital - insurance = net_pnl - loss_accum (from conservation)
+        // total_needed = stranded + loss_accum = net_pnl
+        // This zeroes all positive PnL; the value flows to insurance via loss_accum.
+        let stranded = self.stranded_funds();
+        let total_needed = stranded.saturating_add(self.loss_accum.get());
 
         let haircut = core::cmp::min(total_needed, total_positive_pnl);
 
