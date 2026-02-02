@@ -2497,12 +2497,6 @@ impl RiskEngine {
     // Trading
     // ========================================
 
-    /// Calculate account's collateral (capital + positive PNL)
-    /// NOTE: This is the OLD collateral definition. For margin checks, use account_equity instead.
-    pub fn account_collateral(&self, account: &Account) -> u128 {
-        add_u128(account.capital.get(), clamp_pos_i128(account.pnl.get()))
-    }
-
     /// Realized-only equity: max(0, capital + realized_pnl).
     ///
     /// DEPRECATED for margin checks: Use account_equity_mtm_at_oracle instead.
@@ -2573,12 +2567,6 @@ impl RiskEngine {
         self.is_above_margin_bps_mtm(account, oracle_price, self.params.maintenance_margin_bps)
     }
 
-    /// Check if account is above maintenance margin (DEPRECATED: uses realized-only equity)
-    /// Use is_above_maintenance_margin_mtm for all margin checks.
-    pub fn is_above_maintenance_margin(&self, account: &Account, oracle_price: u64) -> bool {
-        self.is_above_margin_bps(account, oracle_price, self.params.maintenance_margin_bps)
-    }
-
     /// Cheap priority score for ranking liquidation candidates.
     /// Score = max(maint_required - equity, 0).
     /// Higher score = more urgent to liquidate.
@@ -2607,25 +2595,6 @@ impl RiskEngine {
         } else {
             maint - equity
         }
-    }
-
-    /// Check if account is above a given margin threshold (DEPRECATED: uses realized-only equity).
-    ///
-    /// Use is_above_margin_bps_mtm for all margin checks. This helper is retained for
-    /// tests that specifically need realized-only margin comparison.
-    pub fn is_above_margin_bps(&self, account: &Account, oracle_price: u64, bps: u64) -> bool {
-        let equity = self.account_equity(account);
-
-        // Calculate position value at current price
-        let position_value = mul_u128(
-            saturating_abs_i128(account.position_size.get()) as u128,
-            oracle_price as u128,
-        ) / 1_000_000;
-
-        // Margin requirement at given bps
-        let margin_required = mul_u128(position_value, bps as u128) / 10_000;
-
-        equity > margin_required
     }
 
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
@@ -3078,197 +3047,6 @@ impl RiskEngine {
     // Panic Settlement (Atomic Global Settle)
     // ========================================
 
-    /// Atomic global settlement at oracle price
-    ///
-    /// Emergency instruction that:
-    /// 1. Settles all open positions at the given oracle price
-    /// 2. Settles losses from capital, writes off unpayable losses via set_pnl(i, 0)
-    /// 3. Settles warmup for all accounts
-    ///
-    /// Under the haircut ratio design, written-off losses reduce Residual,
-    /// which reduces h, automatically haircutting all positive PnL claims.
-    /// No ADL scan is needed.
-    pub fn panic_settle_all(&mut self, oracle_price: u64) -> Result<()> {
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        // Reset LP aggregates - all positions will be closed
-        self.net_lp_pos = I128::ZERO;
-        self.lp_sum_abs = U128::ZERO;
-        self.lp_max_abs = U128::ZERO;
-
-        // Phase 1: settle funding, apply mark PnL, close positions, settle losses
-        let global_funding_index = self.funding_index_qpb_e6;
-        for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
-
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
-
-                // Settle funding (maintain pnl_pos_tot)
-                let old_pnl = self.accounts[idx].pnl.get();
-                Self::settle_account_funding(&mut self.accounts[idx], global_funding_index)?;
-                let new_pnl = self.accounts[idx].pnl.get();
-                let old_pos = if old_pnl > 0 { old_pnl as u128 } else { 0 };
-                let new_pos = if new_pnl > 0 { new_pnl as u128 } else { 0 };
-                self.pnl_pos_tot = U128::new(
-                    self.pnl_pos_tot.get().saturating_add(new_pos).saturating_sub(old_pos),
-                );
-
-                // Skip accounts with no position
-                if self.accounts[idx].position_size.is_zero() {
-                    continue;
-                }
-
-                // Compute mark PnL at oracle price
-                let pos = self.accounts[idx].position_size.get();
-                let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl =
-                    match Self::mark_pnl_for_position(pos, self.accounts[idx].entry_price, oracle_price) {
-                        Ok(pnl) => pnl,
-                        Err(_) => -u128_to_i128_clamped(self.accounts[idx].capital.get()),
-                    };
-
-                // Apply mark PnL via set_pnl
-                let new_pnl = self.accounts[idx].pnl.get().saturating_add(mark_pnl);
-                self.set_pnl(idx, new_pnl);
-
-                // Close position
-                self.accounts[idx].position_size = I128::ZERO;
-                self.accounts[idx].entry_price = oracle_price;
-                self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
-
-                // Settle loss: pay from capital, write off remainder
-                let pnl = self.accounts[idx].pnl.get();
-                if pnl < 0 {
-                    let need = neg_i128_to_u128(pnl);
-                    let capital = self.accounts[idx].capital.get();
-                    let pay = core::cmp::min(need, capital);
-                    if pay > 0 {
-                        self.set_capital(idx, capital - pay);
-                        self.set_pnl(idx, self.accounts[idx].pnl.get().saturating_add(pay as i128));
-                    }
-                    // Write off any remaining negative PnL
-                    if self.accounts[idx].pnl.is_negative() {
-                        self.set_pnl(idx, 0);
-                    }
-                }
-            }
-        }
-
-        // Phase 2: Settle warmup for all accounts
-        for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
-
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
-
-                self.settle_warmup_to_capital(idx as u16)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Force realize losses to unstick the exchange at insurance floor
-    ///
-    /// When insurance is at/below the threshold, this closes all positions at oracle price,
-    /// settles losses from capital, and writes off any unpaid losses via set_pnl(i, 0).
-    /// Under the haircut ratio design, write-offs reduce Residual which reduces h,
-    /// automatically haircutting all positive PnL claims.
-    pub fn force_realize_losses(&mut self, oracle_price: u64) -> Result<()> {
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        // Gate: only allowed when insurance is at or below floor
-        if self.insurance_fund.balance > self.params.risk_reduction_threshold {
-            return Err(RiskError::Unauthorized);
-        }
-
-        // Reset LP aggregates - all positions will be closed
-        self.net_lp_pos = I128::ZERO;
-        self.lp_sum_abs = U128::ZERO;
-        self.lp_max_abs = U128::ZERO;
-
-        // Phase 1: settle funding, close positions, settle losses
-        let global_funding_index = self.funding_index_qpb_e6;
-        for block in 0..BITMAP_WORDS {
-            let mut w = self.used[block];
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                let idx = block * 64 + bit;
-                w &= w - 1;
-
-                if idx >= MAX_ACCOUNTS {
-                    continue;
-                }
-
-                // Settle funding
-                let old_pnl = self.accounts[idx].pnl.get();
-                Self::settle_account_funding(&mut self.accounts[idx], global_funding_index)?;
-                let new_pnl = self.accounts[idx].pnl.get();
-                let old_pos = if old_pnl > 0 { old_pnl as u128 } else { 0 };
-                let new_pos = if new_pnl > 0 { new_pnl as u128 } else { 0 };
-                self.pnl_pos_tot = U128::new(
-                    self.pnl_pos_tot.get().saturating_add(new_pos).saturating_sub(old_pos),
-                );
-
-                // Skip accounts with no position
-                if self.accounts[idx].position_size.is_zero() {
-                    continue;
-                }
-
-                // Close position at oracle: compute mark PnL
-                let pos = self.accounts[idx].position_size.get();
-                let abs_pos = saturating_abs_i128(pos) as u128;
-                let mark_pnl =
-                    match Self::mark_pnl_for_position(pos, self.accounts[idx].entry_price, oracle_price) {
-                        Ok(pnl) => pnl,
-                        Err(_) => -u128_to_i128_clamped(self.accounts[idx].capital.get()),
-                    };
-
-                // Apply mark PnL via set_pnl
-                let new_pnl = self.accounts[idx].pnl.get().saturating_add(mark_pnl);
-                self.set_pnl(idx, new_pnl);
-
-                // Close position
-                self.accounts[idx].position_size = I128::ZERO;
-                self.accounts[idx].entry_price = oracle_price;
-                self.total_open_interest = self.total_open_interest.saturating_sub(abs_pos);
-
-                // Settle loss: pay from capital, write off remainder
-                let pnl = self.accounts[idx].pnl.get();
-                if pnl < 0 {
-                    let need = neg_i128_to_u128(pnl);
-                    let capital = self.accounts[idx].capital.get();
-                    let pay = core::cmp::min(need, capital);
-                    if pay > 0 {
-                        self.set_capital(idx, capital - pay);
-                        self.set_pnl(idx, self.accounts[idx].pnl.get().saturating_add(pay as i128));
-                    }
-                    // Write off any remaining negative PnL
-                    if self.accounts[idx].pnl.is_negative() {
-                        self.set_pnl(idx, 0);
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Top up insurance fund
     ///
     /// Adds tokens to both vault and insurance fund.
@@ -3285,13 +3063,6 @@ impl RiskEngine {
         let above_threshold =
             self.insurance_fund.balance > self.params.risk_reduction_threshold;
         Ok(above_threshold)
-    }
-
-
-    /// Placeholder: stranded recovery is no longer needed.
-    /// The haircut ratio automatically handles undercollateralization.
-    pub fn recover_stranded_to_insurance(&mut self) -> Result<u128> {
-        Ok(0)
     }
 
 

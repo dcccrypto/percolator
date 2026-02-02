@@ -355,13 +355,6 @@ enum Action {
         oracle_price: u64,
         size: i128,
     },
-    // Note: ApplyAdl removed - it's internal and tested via PanicSettleAll/ForceRealizeLosses
-    PanicSettleAll {
-        oracle_price: u64,
-    },
-    ForceRealizeLosses {
-        oracle_price: u64,
-    },
     TopUpInsurance {
         amount: u128,
     },
@@ -401,10 +394,6 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         8 => (100_000u64..10_000_000, -5_000i128..5_000).prop_map(|(oracle_price, size)| {
             Action::ExecuteTrade { lp: IdxSel::Lp, user: IdxSel::ExistingNonLp, oracle_price, size }
         }),
-        // Panic settle
-        1 => (100_000u64..10_000_000).prop_map(|price| Action::PanicSettleAll { oracle_price: price }),
-        // Force realize
-        1 => (100_000u64..10_000_000).prop_map(|price| Action::ForceRealizeLosses { oracle_price: price }),
         // Top up insurance
         2 => (0u128..10_000).prop_map(|amount| Action::TopUpInsurance { amount }),
     ]
@@ -731,83 +720,6 @@ impl FuzzState {
                 match result {
                     Ok(_) => {
                         // Trade succeeded - positions modified, that's fine
-                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
-                    }
-                    Err(_) => {
-                        // Simulate Solana rollback
-                        *self.engine = before;
-                    }
-                }
-            }
-
-            Action::PanicSettleAll { oracle_price } => {
-                let before = (*self.engine).clone();
-
-                let result = self.engine.panic_settle_all(*oracle_price);
-
-                match result {
-                    Ok(()) => {
-                        // risk_reduction_only should be true
-                        assert!(
-                            self.engine.risk_reduction_only,
-                            "{}: risk_reduction_only not set after panic_settle",
-                            context
-                        );
-                        // warmup_paused should be true
-                        assert!(
-                            self.engine.warmup_paused,
-                            "{}: warmup_paused not set after panic_settle",
-                            context
-                        );
-                        // All positions should be 0 - scan ALL used accounts, not just live_accounts
-                        let n = account_count(&self.engine);
-                        for idx in 0..n {
-                            if is_account_used(&self.engine, idx as u16) {
-                                assert_eq!(
-                                    self.engine.accounts[idx].position_size, 0,
-                                    "{}: position not closed for account {}",
-                                    context, idx
-                                );
-                            }
-                        }
-                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
-                    }
-                    Err(_) => {
-                        // Simulate Solana rollback
-                        *self.engine = before;
-                    }
-                }
-            }
-
-            Action::ForceRealizeLosses { oracle_price } => {
-                let before = (*self.engine).clone();
-
-                let result = self.engine.force_realize_losses(*oracle_price);
-
-                match result {
-                    Ok(()) => {
-                        // risk_reduction_only and warmup_paused should be true
-                        assert!(
-                            self.engine.risk_reduction_only,
-                            "{}: risk_reduction_only not set after force_realize",
-                            context
-                        );
-                        assert!(
-                            self.engine.warmup_paused,
-                            "{}: warmup_paused not set after force_realize",
-                            context
-                        );
-                        // All positions should be 0 - scan ALL used accounts
-                        let n = account_count(&self.engine);
-                        for idx in 0..n {
-                            if is_account_used(&self.engine, idx as u16) {
-                                assert_eq!(
-                                    self.engine.accounts[idx].position_size, 0,
-                                    "{}: position not closed for account {}",
-                                    context, idx
-                                );
-                            }
-                        }
                         assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
@@ -1234,32 +1146,6 @@ proptest! {
                         "Funding index changed with dt=0");
     }
 
-    // 9. Collateral calculation is consistent
-    #[test]
-    fn fuzz_prop_collateral_calculation(
-        capital in 0u128..100_000,
-        pnl in -50_000i128..50_000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].capital = capital;
-        engine.accounts[user_idx as usize].pnl = pnl;
-
-        let collateral = engine.account_collateral(&engine.accounts[user_idx as usize]);
-
-        // Collateral = capital + max(0, pnl)
-        let expected = if pnl >= 0 {
-            capital.saturating_add(pnl as u128)
-        } else {
-            capital
-        };
-
-        prop_assert_eq!(collateral, expected,
-                        "Collateral calculation incorrect: got {}, expected {}",
-                        collateral, expected);
-    }
-
     // 10. add_user/add_lp fails when at max capacity
     #[test]
     fn fuzz_prop_add_fails_at_capacity(num_to_add in 1usize..10) {
@@ -1412,8 +1298,7 @@ fn random_selector(rng: &mut Rng) -> IdxSel {
 
 /// Generate a random action using the RNG (selector-based)
 fn random_action(rng: &mut Rng) -> (Action, String) {
-    // Note: ApplyAdl removed - it's internal and tested via settlement ops
-    let action_type = rng.usize(0, 10);
+    let action_type = rng.usize(0, 8);
 
     let action = match action_type {
         0 => Action::AddUser {
@@ -1444,12 +1329,6 @@ fn random_action(rng: &mut Rng) -> (Action, String) {
             user: IdxSel::ExistingNonLp,
             oracle_price: rng.u64(100_000, 10_000_000),
             size: rng.i128(-5_000, 5_000),
-        },
-        8 => Action::PanicSettleAll {
-            oracle_price: rng.u64(100_000, 10_000_000),
-        },
-        9 => Action::ForceRealizeLosses {
-            oracle_price: rng.u64(100_000, 10_000_000),
         },
         _ => Action::TopUpInsurance {
             amount: rng.u128(0, 10_000),
@@ -1780,87 +1659,12 @@ proptest! {
         }
     }
 
-    // Conservation after panic settle
-    #[test]
-    fn fuzz_conservation_after_panic_settle(
-        user_capital in 1000u128..100_000,
-        lp_capital in 1000u128..100_000,
-        position in 1i128..10_000,
-        entry_price in 100_000u64..10_000_000,
-        oracle_price in 100_000u64..10_000_000,
-        insurance in 0u128..10_000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-
-        engine.deposit(user_idx, user_capital, 0).unwrap();
-        engine.deposit(lp_idx, lp_capital, 0).unwrap();
-
-        engine.accounts[user_idx as usize].position_size = position;
-        engine.accounts[user_idx as usize].entry_price = entry_price;
-        engine.accounts[lp_idx as usize].position_size = -position;
-        engine.accounts[lp_idx as usize].entry_price = entry_price;
-
-        let total_capital = user_capital + lp_capital;
-        engine.insurance_fund.balance = insurance;
-        engine.vault = total_capital + insurance;
-
-        prop_assert!(engine.check_conservation(DEFAULT_ORACLE), "Before panic_settle");
-
-        let _ = engine.panic_settle_all(oracle_price);
-
-        prop_assert!(engine.check_conservation(DEFAULT_ORACLE), "After panic_settle");
-
-        prop_assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
-        prop_assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
-    }
 }
 
 // ============================================================================
 // SECTION 9: CONSERVATION REGRESSION TESTS
 // These verify that conservation invariant holds under various conditions
 // ============================================================================
-
-/// Verify panic_settle_all preserves conservation with lazy funding
-/// Conservation uses settled_pnl which accounts for unsettled funding payments
-#[test]
-fn panic_settle_preserves_conservation_with_lazy_funding() {
-    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-
-    // Create LP and user with positions
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-    let user_idx = engine.add_user(1).unwrap();
-    engine.deposit(lp_idx, 100_000, 0).unwrap();
-    engine.deposit(user_idx, 100_000, 0).unwrap();
-
-    // Execute a trade to create positions
-    engine
-        .execute_trade(&MATCHER, lp_idx, user_idx, 1_000_000, 1000)
-        .unwrap();
-
-    // Accrue significant funding WITHOUT touching accounts
-    engine.accrue_funding(1000, 1_000_000, 1000).unwrap();
-
-    // Verify conservation holds before panic settle (uses settled_pnl)
-    assert!(
-        engine.check_conservation(DEFAULT_ORACLE),
-        "Conservation should hold before panic_settle"
-    );
-
-    // Panic settle
-    engine.panic_settle_all(1_000_000).unwrap();
-
-    // Verify conservation still holds
-    assert!(
-        engine.check_conservation(DEFAULT_ORACLE),
-        "Conservation must hold after panic_settle"
-    );
-
-    // All positions should be closed
-    assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
-    assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
-}
 
 /// Verify check_conservation uses settled_pnl (accounts for lazy funding)
 /// This prevents "docs drift" - ensures engine matches documented formula

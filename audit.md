@@ -3,10 +3,34 @@ Generated: 2026-02-02
 
 ## Summary
 
-- **Total Proofs**: 118
-- **Passed**: 118 (100%)
+- **Total Proofs**: 107
+- **Passed**: 107 (100%)
 - **Failed**: 0
 - **Total verification time**: ~30 min (sequential, one-by-one)
+
+---
+
+## Dead Code Removal (2026-02-02)
+
+Removed 6 functions unreachable from production code and their 11 associated Kani proofs.
+Modified 1 proof (`proof_lq1_liquidation_reduces_oi_and_enforces_safety`) to use `is_above_margin_bps_mtm`.
+
+**Functions removed from `src/percolator.rs`:**
+- `panic_settle_all` — not called from prod; `keeper_crank` does inline force-realize instead
+- `force_realize_losses` — not called from prod; same inline mechanism in `keeper_crank`
+- `recover_stranded_to_insurance` — no-op placeholder (`Ok(0)`), never called
+- `account_collateral` — deprecated OLD collateral definition, zero callers
+- `is_above_maintenance_margin` — deprecated non-MTM version; prod uses `is_above_maintenance_margin_mtm`
+- `is_above_margin_bps` — deprecated non-MTM version; only caller was `is_above_maintenance_margin`
+
+**11 Kani proofs removed:** `panic_settle_closes_all_positions`, `panic_settle_clamps_negative_pnl`,
+`panic_settle_preserves_conservation`, `proof_ps5_panic_settle_no_insurance_minting`,
+`proof_c1_conservation_bounded_slack_panic_settle`, `fast_valid_preserved_by_panic_settle_all`,
+`proof_c1_conservation_bounded_slack_force_realize`, `audit_force_realize_preserves_warmup_start`,
+`fast_valid_preserved_by_force_realize_losses`, `proof_force_realize_preserves_inv`,
+`maintenance_margin_uses_equity_negative_pnl`
+
+Proof count: 118 → 107.
 
 ---
 

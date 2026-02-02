@@ -183,46 +183,7 @@ fn test_e2e_complete_user_journey() {
         );
     }
 
-    // === Phase 6: Panic Settle All ===
-
-    // Price moves to $2.00, causing significant losses
-    let settle_price = 2_000_000;
-
-    // Trigger panic settlement at the oracle price
-    engine.panic_settle_all(settle_price).unwrap();
-
-    // All positions should be closed
-    assert_eq!(
-        engine.accounts[alice as usize].position_size.get(),
-        0,
-        "Alice position should be closed"
-    );
-    assert_eq!(
-        engine.accounts[bob as usize].position_size.get(),
-        0,
-        "Bob position should be closed"
-    );
-    assert_eq!(
-        engine.accounts[lp as usize].position_size.get(),
-        0,
-        "LP position should be closed"
-    );
-
-    // All PNLs should be >= 0 (negative PNL clamped and written off)
-    assert!(
-        engine.accounts[alice as usize].pnl.get() >= 0,
-        "Alice PNL should be >= 0"
-    );
-    assert!(
-        engine.accounts[bob as usize].pnl.get() >= 0,
-        "Bob PNL should be >= 0"
-    );
-    assert!(
-        engine.accounts[lp as usize].pnl.get() >= 0,
-        "LP PNL should be >= 0"
-    );
-
-    println!("✅ E2E test passed: Complete user journey works correctly");
+    println!("E2E test passed: Complete user journey works correctly");
 }
 
 // ============================================================================
