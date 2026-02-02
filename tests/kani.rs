@@ -240,6 +240,11 @@ fn valid_state(engine: &RiskEngine) -> bool {
 
 /// Structural invariant: freelist and bitmap integrity
 fn inv_structural(engine: &RiskEngine) -> bool {
+    // S0: params.max_accounts matches compile-time MAX_ACCOUNTS
+    if engine.params.max_accounts != MAX_ACCOUNTS as u64 {
+        return false;
+    }
+
     // S1: num_used_accounts == popcount(used bitmap)
     let mut popcount: u16 = 0;
     for block in 0..BITMAP_WORDS {
@@ -1342,7 +1347,7 @@ fn panic_settle_clamps_negative_pnl() {
     );
 }
 
-// Proof PS3: panic_settle_all always enters risk-reduction-only mode
+// TODO: PS3 — prove panic_settle_all always enters risk-reduction-only mode (not yet implemented)
 
 // Proof PS4: panic_settle_all preserves conservation (with rounding compensation)
 // Uses inline "expected vs actual" computation instead of check_conservation() for speed.
@@ -1560,16 +1565,16 @@ fn proof_c1_conservation_bounded_slack_force_realize() {
     );
 }
 
-/// Proof: force_realize_losses updates warmup_started_at_slot
+/// Proof: force_realize_losses preserves warmup_started_at_slot
 ///
-/// FAST: Proves that after force_realize_losses(), all accounts with positions
-/// have their warmup_started_at_slot updated to the effective_slot,
-/// preventing later settle calls from "re-paying" based on old elapsed time.
+/// FAST: Proves that force_realize_losses() does NOT corrupt warmup_started_at_slot,
+/// that positive PnL survives (oracle == entry → zero mark PnL), and that a second
+/// call is idempotent (all positions already closed).
 /// Uses small deterministic bounds for fast verification.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn audit_force_realize_updates_warmup_start() {
+fn audit_force_realize_preserves_warmup_start() {
     let mut engine = RiskEngine::new(test_params_with_floor());
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
@@ -1714,6 +1719,7 @@ fn fast_frame_touch_account_only_mutates_one_account() {
 
     engine.accounts[user_idx as usize].position_size = I128::new(position);
     engine.funding_index_qpb_e6 = I128::new(funding_delta);
+    sync_engine_aggregates(&mut engine);
 
     // Snapshot before
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
@@ -2479,6 +2485,7 @@ fn fast_maintenance_margin_uses_equity_including_negative_pnl() {
     engine.accounts[idx as usize].pnl = I128::new(pnl);
     engine.accounts[idx as usize].position_size = I128::new(position);
     engine.accounts[idx as usize].entry_price = 1_000_000;
+    sync_engine_aggregates(&mut engine);
 
     let oracle_price = 1_000_000u64;
 
@@ -2486,21 +2493,21 @@ fn fast_maintenance_margin_uses_equity_including_negative_pnl() {
     let cap_i = u128_to_i128_clamped(capital);
     let neg_pnl = core::cmp::min(pnl, 0i128);
     let eff_pos = engine.effective_pos_pnl(pnl);
-    let eq_i = cap_i
+    let eff_eq_i = cap_i
         .saturating_add(neg_pnl)
         .saturating_add(u128_to_i128_clamped(eff_pos));
-    let equity = if eq_i > 0 { eq_i as u128 } else { 0 };
+    let eff_equity = if eff_eq_i > 0 { eff_eq_i as u128 } else { 0 };
 
     let position_value = abs_i128_to_u128(position) * (oracle_price as u128) / 1_000_000;
     let mm_required = position_value * (engine.params.maintenance_margin_bps as u128) / 10_000;
 
     let is_above = engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price);
 
-    // is_above_maintenance_margin_mtm should return equity > mm_required
-    if equity > mm_required {
-        assert!(is_above, "Should be above MM when haircutted equity > required");
+    // is_above_maintenance_margin_mtm uses haircutted (effective) equity
+    if eff_equity > mm_required {
+        assert!(is_above, "Should be above MM when effective equity > required");
     } else {
-        assert!(!is_above, "Should be below MM when haircutted equity <= required");
+        assert!(!is_above, "Should be below MM when effective equity <= required");
     }
 }
 
@@ -4273,6 +4280,7 @@ fn withdrawal_rejects_if_below_initial_margin_at_oracle() {
     // Manually set position at oracle price (entry == oracle → mark PnL = 0)
     engine.accounts[idx as usize].position_size = I128::new(100_000);
     engine.accounts[idx as usize].entry_price = 1_000_000; // entry = 1.0
+    sync_engine_aggregates(&mut engine);
 
     // Withdraw 6_000: remaining capital 9_000 < IM 10_000 → must be rejected
     let oracle_price: u64 = 1_000_000; // same as entry → mark PnL = 0
@@ -4321,8 +4329,8 @@ fn proof_inv_holds_for_new_engine() {
 fn proof_inv_preserved_by_add_user() {
     let mut engine = RiskEngine::new(test_params());
 
-    // Precondition: INV holds
-    kani::assume(canonical_inv(&engine));
+    // Precondition: INV holds (assert, not assume — fresh engine must satisfy INV)
+    kani::assert(canonical_inv(&engine), "fresh engine must satisfy INV");
 
     let fee: u128 = kani::any();
     kani::assume(fee < 1_000_000); // Reasonable bound
@@ -4351,8 +4359,8 @@ fn proof_inv_preserved_by_add_user() {
 fn proof_inv_preserved_by_add_lp() {
     let mut engine = RiskEngine::new(test_params());
 
-    // Precondition: INV holds
-    kani::assume(canonical_inv(&engine));
+    // Precondition: INV holds (assert, not assume — fresh engine must satisfy INV)
+    kani::assert(canonical_inv(&engine), "fresh engine must satisfy INV");
 
     let fee: u128 = kani::any();
     kani::assume(fee < 1_000_000);
@@ -4652,7 +4660,7 @@ fn proof_add_user_structural_integrity() {
     let free_head_before = engine.free_head;
 
     kani::assume(free_head_before != u16::MAX); // Ensure slot available
-    kani::assume(inv_structural(&engine)); // Precondition: structure valid
+    kani::assert(inv_structural(&engine), "fresh engine must have valid structure");
 
     let result = engine.add_user(0);
 
@@ -4779,7 +4787,7 @@ fn proof_liquidate_preserves_inv() {
 }
 
 // ============================================================================
-// APPLY_ADL PROOF FAMILY - Exception Safety + INV Preservation
+// TODO: APPLY_ADL PROOF FAMILY - Exception Safety + INV Preservation (not yet implemented)
 // ============================================================================
 
 // ============================================================================
@@ -5049,7 +5057,7 @@ fn proof_close_account_preserves_inv() {
 }
 
 // ============================================================================
-// TOP_UP_INSURANCE_FUND PROOF FAMILY - Exception Safety + INV Preservation
+// TODO: TOP_UP_INSURANCE_FUND PROOF FAMILY - Exception Safety + INV Preservation (not yet implemented)
 // ============================================================================
 
 // ============================================================================
@@ -5107,7 +5115,8 @@ fn proof_sequence_deposit_crank_withdraw() {
 
     let user = engine.add_user(0).unwrap();
 
-    kani::assume(canonical_inv(&engine));
+    // Assert, not assume — state built via public APIs must satisfy INV
+    kani::assert(canonical_inv(&engine), "API-built state must satisfy INV");
 
     // Step 1: Deposit (force success)
     let deposit: u128 = kani::any();
@@ -5161,7 +5170,8 @@ fn proof_trade_creates_funding_settled_positions() {
     engine.deposit(user, 10_000, 0).unwrap();
     engine.deposit(lp, 50_000, 0).unwrap();
 
-    kani::assume(canonical_inv(&engine));
+    // Assert, not assume — state built via public APIs must satisfy INV
+    kani::assert(canonical_inv(&engine), "API-built state must satisfy INV");
 
     // Execute trade to create positions
     let delta: i128 = kani::any();
@@ -5219,7 +5229,8 @@ fn proof_crank_with_funding_preserves_inv() {
     // Execute trade to create positions (creates OI for funding to act on)
     engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, 50).unwrap();
 
-    kani::assume(canonical_inv(&engine));
+    // Assert, not assume — state built via public APIs must satisfy INV
+    kani::assert(canonical_inv(&engine), "API-built state must satisfy INV");
 
     // Crank with symbolic funding rate
     let funding_rate: i64 = kani::any();
@@ -5823,21 +5834,21 @@ fn proof_effective_equity_with_haircut() {
     }
 
     // P2: effective_equity matches spec: max(0, C + min(PNL, 0) + PNL_eff_pos)
-    let expected_eq = {
+    let expected_eff_equity = {
         let cap_i = u128_to_i128_clamped(capital);
         let neg_pnl = core::cmp::min(pnl, 0);
-        let eq_i = cap_i
+        let eff_eq_i = cap_i
             .saturating_add(neg_pnl)
             .saturating_add(u128_to_i128_clamped(eff));
-        if eq_i > 0 { eq_i as u128 } else { 0 }
+        if eff_eq_i > 0 { eff_eq_i as u128 } else { 0 }
     };
-    let actual_eq = engine.effective_equity(&engine.accounts[idx as usize]);
-    assert!(actual_eq == expected_eq, "C2: effective_equity must match spec formula");
+    let actual_eff_equity = engine.effective_equity(&engine.accounts[idx as usize]);
+    assert!(actual_eff_equity == expected_eff_equity, "C2: effective_equity must match spec formula");
 
     // P3: Haircutted equity <= unhaircutted equity
     let unhaircutted = engine.account_equity(&engine.accounts[idx as usize]);
     assert!(
-        actual_eq <= unhaircutted,
+        actual_eff_equity <= unhaircutted,
         "C2: haircutted equity must be <= unhaircutted equity"
     );
 
