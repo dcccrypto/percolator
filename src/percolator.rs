@@ -941,6 +941,11 @@ impl RiskEngine {
             _padding: [0; 8],
         };
 
+        // Maintain c_tot aggregate (account was created with capital = excess)
+        if excess > 0 {
+            self.c_tot = U128::new(self.c_tot.get().saturating_add(excess));
+        }
+
         Ok(idx)
     }
 
@@ -996,6 +1001,11 @@ impl RiskEngine {
             last_fee_slot: self.current_slot,
             _padding: [0; 8],
         };
+
+        // Maintain c_tot aggregate (account was created with capital = excess)
+        if excess > 0 {
+            self.c_tot = U128::new(self.c_tot.get().saturating_add(excess));
+        }
 
         Ok(idx)
     }
@@ -1055,6 +1065,8 @@ impl RiskEngine {
             account.capital = account.capital.saturating_sub(pay);
             self.insurance_fund.balance = self.insurance_fund.balance + pay;
             self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+            // Maintain c_tot aggregate
+            self.c_tot = U128::new(self.c_tot.get().saturating_sub(pay));
 
             // Credit back what was paid
             account.fee_credits = account.fee_credits.saturating_add(pay as i128);
@@ -1116,6 +1128,8 @@ impl RiskEngine {
             account.capital = account.capital.saturating_sub(pay);
             self.insurance_fund.balance = self.insurance_fund.balance + pay;
             self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+            // Maintain c_tot aggregate
+            self.c_tot = U128::new(self.c_tot.get().saturating_sub(pay));
 
             account.fee_credits = account.fee_credits.saturating_add(pay as i128);
             paid_from_capital = pay;
@@ -1136,6 +1150,8 @@ impl RiskEngine {
                 a.capital = a.capital.saturating_sub(pay);
                 self.insurance_fund.balance = self.insurance_fund.balance + pay;
                 self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+                // Maintain c_tot aggregate
+                self.c_tot = U128::new(self.c_tot.get().saturating_sub(pay));
                 a.fee_credits = a.fee_credits.saturating_add(pay as i128);
             }
         }
@@ -1293,6 +1309,9 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
         self.vault = self.vault - capital;
+
+        // Decrement c_tot before freeing slot (free_slot zeroes account but doesn't update c_tot)
+        self.set_capital(idx as usize, 0);
 
         // Free the slot
         self.free_slot(idx);
@@ -2022,29 +2041,30 @@ impl RiskEngine {
 
         let account = &mut self.accounts[idx as usize];
 
-        // Calculate positive PNL that needs to warm up
+        // Calculate available gross PnL: AvailGross_i = max(PNL_i, 0) - R_i (spec §5)
         let positive_pnl = clamp_pos_i128(account.pnl.get());
+        let avail_gross = sub_u128(positive_pnl, account.reserved_pnl as u128);
 
-        // Calculate slope: pnl / warmup_period
-        // Ensure slope >= 1 when positive_pnl > 0 to prevent "zero forever" bug
+        // Calculate slope: avail_gross / warmup_period
+        // Ensure slope >= 1 when avail_gross > 0 to prevent "zero forever" bug
         let slope = if self.params.warmup_period_slots > 0 {
-            let base = positive_pnl / (self.params.warmup_period_slots as u128);
-            if positive_pnl > 0 {
+            let base = avail_gross / (self.params.warmup_period_slots as u128);
+            if avail_gross > 0 {
                 core::cmp::max(1, base)
             } else {
                 0
             }
         } else {
-            positive_pnl // Instant warmup if period is 0
+            avail_gross // Instant warmup if period is 0
         };
 
-        // Verify slope >= 1 when positive PnL exists
+        // Verify slope >= 1 when available PnL exists
         #[cfg(any(test, kani))]
         debug_assert!(
-            slope >= 1 || positive_pnl == 0,
-            "Warmup slope bug: slope {} with positive_pnl {}",
+            slope >= 1 || avail_gross == 0,
+            "Warmup slope bug: slope {} with avail_gross {}",
             slope,
-            positive_pnl
+            avail_gross
         );
 
         // Update slope
@@ -2406,15 +2426,20 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Calculate MTM equity after withdrawal
-        // equity_mtm = max(0, new_capital + pnl + mark_pnl)
+        // Calculate MTM equity after withdrawal with haircut (spec §3.3)
+        // equity_mtm = max(0, new_capital + min(pnl, 0) + effective_pos_pnl(pnl) + mark_pnl)
         // Fail-safe: if mark_pnl overflows (corrupted entry_price/position_size), treat as 0 equity
         let new_capital = sub_u128(old_capital.get(), amount);
         let new_equity_mtm =
             match Self::mark_pnl_for_position(position_size.get(), entry_price, oracle_price) {
                 Ok(mark_pnl) => {
                     let cap_i = u128_to_i128_clamped(new_capital);
-                    let new_eq_i = cap_i.saturating_add(pnl.get()).saturating_add(mark_pnl);
+                    let neg_pnl = core::cmp::min(pnl.get(), 0);
+                    let eff_pos = self.effective_pos_pnl(pnl.get());
+                    let new_eq_i = cap_i
+                        .saturating_add(neg_pnl)
+                        .saturating_add(u128_to_i128_clamped(eff_pos))
+                        .saturating_add(mark_pnl);
                     if new_eq_i > 0 {
                         new_eq_i as u128
                     } else {
@@ -2492,8 +2517,9 @@ impl RiskEngine {
         }
     }
 
-    /// Mark-to-market equity at oracle price (the ONLY correct equity for margin checks).
-    /// equity_mtm = max(0, capital + realized_pnl + mark_pnl(position, entry, oracle))
+    /// Mark-to-market equity at oracle price with haircut (the ONLY correct equity for margin checks).
+    /// equity_mtm = max(0, C_i + min(PNL_i, 0) + PNL_eff_pos_i + mark_pnl)
+    /// where PNL_eff_pos_i = floor(max(PNL_i, 0) * h_num / h_den) per spec §3.3.
     ///
     /// FAIL-SAFE: On overflow, returns 0 (worst-case equity) to ensure liquidation
     /// can still trigger. This prevents overflow from blocking liquidation.
@@ -2507,7 +2533,12 @@ impl RiskEngine {
             Err(_) => return 0, // Overflow => worst-case equity
         };
         let cap_i = u128_to_i128_clamped(account.capital.get());
-        let eq_i = cap_i.saturating_add(account.pnl.get()).saturating_add(mark);
+        let neg_pnl = core::cmp::min(account.pnl.get(), 0);
+        let eff_pos = self.effective_pos_pnl(account.pnl.get());
+        let eq_i = cap_i
+            .saturating_add(neg_pnl)
+            .saturating_add(u128_to_i128_clamped(eff_pos))
+            .saturating_add(mark);
         if eq_i > 0 {
             eq_i as u128
         } else {
@@ -2709,6 +2740,9 @@ impl RiskEngine {
             mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
         let fee = mul_u128(notional, self.params.trading_fee_bps as u128) / 10_000;
 
+        // Pre-compute haircut ratio before split_at_mut borrows accounts
+        let (h_num, h_den) = self.haircut_ratio();
+
         // Access both accounts
         let (user, lp) = if user_idx < lp_idx {
             let (left, right) = self.accounts.split_at_mut(lp_idx as usize);
@@ -2756,8 +2790,6 @@ impl RiskEngine {
             .pnl
             .get()
             .checked_add(trade_pnl)
-            .ok_or(RiskError::Overflow)?
-            .checked_sub(fee as i128)
             .ok_or(RiskError::Overflow)?;
         let new_lp_pnl = lp
             .pnl
@@ -2765,12 +2797,35 @@ impl RiskEngine {
             .checked_sub(trade_pnl)
             .ok_or(RiskError::Overflow)?;
 
-        // Check user maintenance margin
+        // Deduct trading fee from user capital, not PnL (spec §8.1)
+        let new_user_capital = user
+            .capital
+            .get()
+            .checked_sub(fee)
+            .ok_or(RiskError::InsufficientBalance)?;
+
+        // Inline helper: compute effective positive PnL with pre-computed haircut
+        let eff_pos_pnl_inline = |pnl: i128| -> u128 {
+            if pnl <= 0 {
+                return 0;
+            }
+            let pos_pnl = pnl as u128;
+            if h_den == 0 {
+                return pos_pnl;
+            }
+            mul_u128(pos_pnl, h_num) / h_den
+        };
+
+        // Check user maintenance margin with haircut (spec §3.3)
         // After settle_mark_to_oracle, entry_price = oracle_price, so mark_pnl = 0
-        // Equity = capital + realized_pnl (trade_pnl is already in new_user_pnl)
+        // Equity = max(0, new_capital + min(pnl, 0) + eff_pos_pnl)
         if new_user_position != 0 {
-            let user_cap_i = u128_to_i128_clamped(user.capital.get());
-            let user_eq_i = user_cap_i.saturating_add(new_user_pnl);
+            let user_cap_i = u128_to_i128_clamped(new_user_capital);
+            let neg_pnl = core::cmp::min(new_user_pnl, 0);
+            let eff_pos = eff_pos_pnl_inline(new_user_pnl);
+            let user_eq_i = user_cap_i
+                .saturating_add(neg_pnl)
+                .saturating_add(u128_to_i128_clamped(eff_pos));
             let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
@@ -2783,12 +2838,15 @@ impl RiskEngine {
             }
         }
 
-        // Check LP maintenance margin
+        // Check LP maintenance margin with haircut (spec §3.3)
         // After settle_mark_to_oracle, entry_price = oracle_price, so mark_pnl = 0
-        // Equity = capital + realized_pnl (trade_pnl is already in new_lp_pnl)
         if new_lp_position != 0 {
             let lp_cap_i = u128_to_i128_clamped(lp.capital.get());
-            let lp_eq_i = lp_cap_i.saturating_add(new_lp_pnl);
+            let neg_pnl = core::cmp::min(new_lp_pnl, 0);
+            let eff_pos = eff_pos_pnl_inline(new_lp_pnl);
+            let lp_eq_i = lp_cap_i
+                .saturating_add(neg_pnl)
+                .saturating_add(u128_to_i128_clamped(eff_pos));
             let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
@@ -2818,10 +2876,15 @@ impl RiskEngine {
         user.pnl = I128::new(new_user_pnl);
         user.position_size = I128::new(new_user_position);
         user.entry_price = oracle_price;
+        // Commit fee deduction from user capital (spec §8.1)
+        user.capital = U128::new(new_user_capital);
 
         lp.pnl = I128::new(new_lp_pnl);
         lp.position_size = I128::new(new_lp_position);
         lp.entry_price = oracle_price;
+
+        // Maintain c_tot: user capital decreased by fee
+        self.c_tot = U128::new(self.c_tot.get().saturating_sub(fee));
 
         // Maintain pnl_pos_tot aggregate
         self.pnl_pos_tot = U128::new(

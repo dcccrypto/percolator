@@ -1965,20 +1965,20 @@ fn test_unwrapped_definition() {
     let available = positive_pnl - reserved; // 800
     let withdrawable_now = core::cmp::min(available, warmed_cap);
 
-    // With slope=10 (1000/100) and 50 slots, warmed_cap = 500
-    // withdrawable = min(800, 500) = 500
-    // unwrapped = 1000 - 200 - 500 = 300
+    // With slope=8 (avail_gross=800/100) and 50 slots, warmed_cap = 400
+    // withdrawable = min(800, 400) = 400
+    // unwrapped = 1000 - 200 - 400 = 400
     let expected_unwrapped_now = positive_pnl
         .saturating_sub(reserved)
         .saturating_sub(withdrawable_now);
 
     assert_eq!(
-        withdrawable_now, 500,
-        "After 50 slots, withdrawable should be 500"
+        withdrawable_now, 400,
+        "After 50 slots, withdrawable should be 400"
     );
     assert_eq!(
-        expected_unwrapped_now, 300,
-        "After 50 slots, unwrapped should be 300"
+        expected_unwrapped_now, 400,
+        "After 50 slots, unwrapped should be 400"
     );
 
     assert_conserved(&engine);

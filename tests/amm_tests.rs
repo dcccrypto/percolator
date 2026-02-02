@@ -384,13 +384,14 @@ fn test_e2e_funding_complete_cycle() {
     // === Positions Flip ===
 
     // Alice closes long and opens short
+    let slot = engine.current_slot;
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, 1_000_000, -20_000)
+        .execute_trade(&MATCHER, lp, alice, slot, 1_000_000, -20_000)
         .unwrap();
 
     // Bob closes short and opens long
     engine
-        .execute_trade(&MATCHER, lp, bob, 0, 1_000_000, 20_000)
+        .execute_trade(&MATCHER, lp, bob, slot, 1_000_000, 20_000)
         .unwrap();
 
     // Now Alice is short and Bob is long
