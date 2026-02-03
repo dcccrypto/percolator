@@ -1126,6 +1126,14 @@ impl RiskEngine {
         Ok(paid_from_capital) // Return actual amount paid into insurance
     }
 
+    /// Best-effort warmup settlement for crank: settles any warmed positive PnL to capital.
+    /// Silently ignores errors (e.g., account not found) since crank must not stall on
+    /// individual account issues. Used to drain abandoned accounts' positive PnL over time.
+    fn settle_warmup_to_capital_for_crank(&mut self, idx: u16) {
+        // Ignore errors: crank is best-effort and must continue processing other accounts
+        let _ = self.settle_warmup_to_capital(idx);
+    }
+
     /// Pay down existing fee debt (negative fee_credits) using available capital.
     /// Does not advance last_fee_slot or charge new fees — just sweeps capital
     /// that became available (e.g. after warmup settlement) into insurance.
@@ -1550,6 +1558,9 @@ impl RiskEngine {
                 // Always settle maintenance fees for every visited account.
                 // This drains idle accounts over time so they eventually become dust.
                 let _ = self.settle_maintenance_fee_best_effort_for_crank(idx as u16, now_slot);
+                // Touch account and settle warmup to drain abandoned positive PnL
+                let _ = self.touch_account(idx as u16);
+                self.settle_warmup_to_capital_for_crank(idx as u16);
 
                 // === Liquidation (if not in force-realize mode) ===
                 if !force_realize_active && liq_budget > 0 {
@@ -2401,13 +2412,14 @@ impl RiskEngine {
         self.touch_account_full(idx, now_slot, oracle_price)?;
 
         // Read account state (scope the borrow)
-        let (old_capital, pnl, position_size, entry_price) = {
+        let (old_capital, pnl, position_size, entry_price, fee_credits) = {
             let account = &self.accounts[idx as usize];
             (
                 account.capital,
                 account.pnl,
                 account.position_size,
                 account.entry_price,
+                account.fee_credits,
             )
         };
 
@@ -2420,8 +2432,9 @@ impl RiskEngine {
         // equity_mtm = max(0, new_capital + min(pnl, 0) + effective_pos_pnl(pnl) + mark_pnl)
         // Fail-safe: if mark_pnl overflows (corrupted entry_price/position_size), treat as 0 equity
         let new_capital = sub_u128(old_capital.get(), amount);
-        let new_equity_mtm =
-            match Self::mark_pnl_for_position(position_size.get(), entry_price, oracle_price) {
+        let new_equity_mtm = {
+            let eq = match Self::mark_pnl_for_position(position_size.get(), entry_price, oracle_price)
+            {
                 Ok(mark_pnl) => {
                     let cap_i = u128_to_i128_clamped(new_capital);
                     let neg_pnl = core::cmp::min(pnl.get(), 0);
@@ -2438,6 +2451,14 @@ impl RiskEngine {
                 }
                 Err(_) => 0, // Overflow => worst-case equity => will fail margin check below
             };
+            // Subtract fee debt (negative fee_credits = unpaid maintenance fees)
+            let fee_debt = if fee_credits.is_negative() {
+                neg_i128_to_u128(fee_credits.get())
+            } else {
+                0
+            };
+            eq.saturating_sub(fee_debt)
+        };
 
         // If account has position, must maintain initial margin at ORACLE price (MTM check)
         // This prevents withdrawing to a state that's immediately liquidatable
@@ -2523,11 +2544,14 @@ impl RiskEngine {
             .saturating_add(neg_pnl)
             .saturating_add(u128_to_i128_clamped(eff_pos))
             .saturating_add(mark);
-        if eq_i > 0 {
-            eq_i as u128
+        let eq = if eq_i > 0 { eq_i as u128 } else { 0 };
+        // Subtract fee debt (negative fee_credits = unpaid maintenance fees)
+        let fee_debt = if account.fee_credits.is_negative() {
+            neg_i128_to_u128(account.fee_credits.get())
         } else {
             0
-        }
+        };
+        eq.saturating_sub(fee_debt)
     }
 
     /// MTM margin check: is equity_mtm > required margin?
@@ -2809,6 +2833,13 @@ impl RiskEngine {
                 .saturating_add(neg_pnl)
                 .saturating_add(u128_to_i128_clamped(eff_pos));
             let user_equity = if user_eq_i > 0 { user_eq_i as u128 } else { 0 };
+            // Subtract fee debt (negative fee_credits = unpaid maintenance fees)
+            let user_fee_debt = if user.fee_credits.is_negative() {
+                neg_i128_to_u128(user.fee_credits.get())
+            } else {
+                0
+            };
+            let user_equity = user_equity.saturating_sub(user_fee_debt);
             let position_value = mul_u128(
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
@@ -2830,6 +2861,13 @@ impl RiskEngine {
                 .saturating_add(neg_pnl)
                 .saturating_add(u128_to_i128_clamped(eff_pos));
             let lp_equity = if lp_eq_i > 0 { lp_eq_i as u128 } else { 0 };
+            // Subtract fee debt (negative fee_credits = unpaid maintenance fees)
+            let lp_fee_debt = if lp.fee_credits.is_negative() {
+                neg_i128_to_u128(lp.fee_credits.get())
+            } else {
+                0
+            };
+            let lp_equity = lp_equity.saturating_sub(lp_fee_debt);
             let position_value = mul_u128(
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
