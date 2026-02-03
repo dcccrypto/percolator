@@ -2822,9 +2822,10 @@ impl RiskEngine {
             mul_u128(pos_pnl, h_num) / h_den
         };
 
-        // Check user maintenance margin with haircut (spec §3.3)
+        // Check user margin with haircut (spec §3.3, §10.4 step 7)
         // After settle_mark_to_oracle, entry_price = oracle_price, so mark_pnl = 0
         // Equity = max(0, new_capital + min(pnl, 0) + eff_pos_pnl)
+        // Use initial margin if risk-increasing, maintenance margin otherwise
         if new_user_position != 0 {
             let user_cap_i = u128_to_i128_clamped(new_user_capital);
             let neg_pnl = core::cmp::min(new_user_pnl, 0);
@@ -2844,15 +2845,24 @@ impl RiskEngine {
                 saturating_abs_i128(new_user_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
-            let margin_required =
-                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+            // Risk-increasing if |new_pos| > |old_pos|
+            let old_user_pos_abs = saturating_abs_i128(user.position_size.get());
+            let new_user_pos_abs = saturating_abs_i128(new_user_position);
+            let user_risk_increasing = new_user_pos_abs > old_user_pos_abs;
+            let margin_bps = if user_risk_increasing {
+                self.params.initial_margin_bps
+            } else {
+                self.params.maintenance_margin_bps
+            };
+            let margin_required = mul_u128(position_value, margin_bps as u128) / 10_000;
             if user_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
         }
 
-        // Check LP maintenance margin with haircut (spec §3.3)
+        // Check LP margin with haircut (spec §3.3, §10.4 step 7)
         // After settle_mark_to_oracle, entry_price = oracle_price, so mark_pnl = 0
+        // Use initial margin if risk-increasing, maintenance margin otherwise
         if new_lp_position != 0 {
             let lp_cap_i = u128_to_i128_clamped(lp.capital.get());
             let neg_pnl = core::cmp::min(new_lp_pnl, 0);
@@ -2872,8 +2882,16 @@ impl RiskEngine {
                 saturating_abs_i128(new_lp_position) as u128,
                 oracle_price as u128,
             ) / 1_000_000;
-            let margin_required =
-                mul_u128(position_value, self.params.maintenance_margin_bps as u128) / 10_000;
+            // Risk-increasing if |new_pos| > |old_pos|
+            let old_lp_pos_abs = saturating_abs_i128(lp.position_size.get());
+            let new_lp_pos_abs = saturating_abs_i128(new_lp_position);
+            let lp_risk_increasing = new_lp_pos_abs > old_lp_pos_abs;
+            let margin_bps = if lp_risk_increasing {
+                self.params.initial_margin_bps
+            } else {
+                self.params.maintenance_margin_bps
+            };
+            let margin_required = mul_u128(position_value, margin_bps as u128) / 10_000;
             if lp_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }

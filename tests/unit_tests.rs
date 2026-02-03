@@ -803,7 +803,8 @@ fn test_funding_partial_close() {
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
 
-    engine.deposit(user_idx, 15_000_000, 0).unwrap();
+    // Need enough for initial margin (10% of 200M notional = 20M) plus trading fees
+    engine.deposit(user_idx, 25_000_000, 0).unwrap();
     // WHITEBOX: Set LP capital directly. Add to vault (not override) to preserve account fees.
     engine.accounts[lp_idx as usize].capital = U128::new(50_000_000);
     engine.vault += 50_000_000;
@@ -854,7 +855,8 @@ fn test_funding_position_flip() {
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
 
-    engine.deposit(user_idx, 10_000_000, 0).unwrap();
+    // Need enough for initial margin (10% of 100M notional = 10M) plus trading fees
+    engine.deposit(user_idx, 15_000_000, 0).unwrap();
     // WHITEBOX: Set LP capital directly. Add to vault (not override) to preserve account fees.
     engine.accounts[lp_idx as usize].capital = U128::new(20_000_000);
     engine.vault += 20_000_000;
