@@ -1,12 +1,12 @@
 # Kani Proof Timing Report
-Generated: 2026-02-05
+Generated: 2026-02-12
 
 ## Summary
 
-- **Total Proofs**: 125
-- **Passed**: 125 (100%)
+- **Total Proofs**: 133
+- **Passed**: 133 (100%)
 - **Failed**: 0
-- **Total verification time**: ~53 min (sequential, one-by-one)
+- **Total verification time**: ~50 min (sequential, one-by-one)
 
 ---
 
@@ -462,33 +462,53 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 
 ---
 
-## Full Timing Results (2026-02-05)
+## Aggregate Maintenance Proofs (2026-02-12)
 
-125/125 proofs pass. No timeouts, no failures.
+Added 8 new Kani proofs for O(1) aggregate helpers (`set_pnl`, `set_capital`) and related invariants.
+No production code changes — all modifications in `tests/kani.rs`.
+
+| Proof | Time | What it verifies |
+|-------|------|-----------------|
+| proof_set_pnl_maintains_pnl_pos_tot | 1s | set_pnl correctly maintains pnl_pos_tot aggregate |
+| proof_set_capital_maintains_c_tot | 1s | set_capital correctly maintains c_tot aggregate |
+| proof_force_close_with_set_pnl_preserves_invariant | 2s | Force-close via set_pnl preserves canonical_inv |
+| proof_multiple_force_close_preserves_invariant | 6s | Multiple force-close operations preserve invariants |
+| proof_haircut_ratio_bounded | 1s | haircut_ratio uses accurate pnl_pos_tot, bounded [0,1] |
+| proof_effective_pnl_bounded_by_actual | 5s | Effective PnL never exceeds actual positive PnL |
+| proof_recompute_aggregates_correct | 1s | recompute_aggregates helper produces correct values |
+| proof_NEGATIVE_bypass_set_pnl_breaks_invariant | 1s | Bypassing set_pnl (direct write) breaks invariant (should_panic) |
+
+Proof count: 125 → 133.
+
+---
+
+## Full Timing Results (2026-02-12)
+
+133/133 proofs pass. No timeouts, no failures.
 
 | Proof Name | Time | Status |
 |------------|------|--------|
 | crank_bounds_respected | 1s | PASS |
 | fast_account_equity_computes_correctly | 1s | PASS |
 | fast_frame_deposit_only_mutates_one_account_vault_and_warmup | 1s | PASS |
-| fast_frame_execute_trade_only_mutates_two_accounts | 5s | PASS |
+| fast_frame_execute_trade_only_mutates_two_accounts | 7s | PASS |
 | fast_frame_settle_warmup_only_mutates_one_account_and_warmup_globals | 4s | PASS |
-| fast_frame_touch_account_only_mutates_one_account | 2s | PASS |
+| fast_frame_touch_account_only_mutates_one_account | 1s | PASS |
 | fast_frame_update_warmup_slope_only_mutates_one_account | 1s | PASS |
 | fast_frame_withdraw_only_mutates_one_account_vault_and_warmup | 1s | PASS |
 | fast_i2_deposit_preserves_conservation | 1s | PASS |
 | fast_i2_withdraw_preserves_conservation | 1s | PASS |
-| fast_maintenance_margin_uses_equity_including_negative_pnl | 27s | PASS |
+| fast_maintenance_margin_uses_equity_including_negative_pnl | 14s | PASS |
 | fast_neg_pnl_after_settle_implies_zero_capital | 1s | PASS |
 | fast_neg_pnl_settles_into_capital_independent_of_warm_cap | 2s | PASS |
 | fast_valid_preserved_by_deposit | 1s | PASS |
 | fast_valid_preserved_by_execute_trade | 6s | PASS |
 | fast_valid_preserved_by_garbage_collect_dust | 1s | PASS |
-| fast_valid_preserved_by_settle_warmup_to_capital | 3s | PASS |
+| fast_valid_preserved_by_settle_warmup_to_capital | 2s | PASS |
 | fast_valid_preserved_by_top_up_insurance_fund | 1s | PASS |
 | fast_valid_preserved_by_withdraw | 1s | PASS |
 | fast_withdraw_cannot_bypass_losses_when_position_zero | 2s | PASS |
-| funding_p1_settlement_idempotent | 9s | PASS |
+| funding_p1_settlement_idempotent | 10s | PASS |
 | funding_p2_never_touches_principal | 1s | PASS |
 | funding_p3_bounded_drift_between_opposite_positions | 8s | PASS |
 | funding_p4_settle_before_position_change | 6s | PASS |
@@ -496,7 +516,7 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | funding_zero_position_no_change | 1s | PASS |
 | gc_frees_only_true_dust | 1s | PASS |
 | gc_never_frees_account_with_positive_value | 4s | PASS |
-| gc_respects_full_dust_predicate | 4s | PASS |
+| gc_respects_full_dust_predicate | 3s | PASS |
 | i5_warmup_bounded_by_pnl | 1s | PASS |
 | i5_warmup_determinism | 2s | PASS |
 | i5_warmup_monotonicity | 1s | PASS |
@@ -511,6 +531,7 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | neg_pnl_settlement_does_not_depend_on_elapsed_or_slope | 3s | PASS |
 | negative_pnl_withdrawable_is_zero | 1s | PASS |
 | pnl_withdrawal_requires_warmup | 2s | PASS |
+| proof_NEGATIVE_bypass_set_pnl_breaks_invariant | 1s | PASS |
 | proof_add_user_structural_integrity | 1s | PASS |
 | proof_close_account_includes_warmed_pnl | 1s | PASS |
 | proof_close_account_negative_pnl_written_off | 1s | PASS |
@@ -520,31 +541,34 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | proof_close_account_structural_integrity | 1s | PASS |
 | proof_crank_with_funding_preserves_inv | 6s | PASS |
 | proof_deposit_preserves_inv | 1s | PASS |
-| proof_effective_equity_with_haircut | 40s | PASS |
-| proof_execute_trade_conservation | 41s | PASS |
-| proof_execute_trade_margin_enforcement | 67s | PASS |
-| proof_execute_trade_preserves_inv | 21s | PASS |
+| proof_effective_equity_with_haircut | 41s | PASS |
+| proof_effective_pnl_bounded_by_actual | 5s | PASS |
+| proof_execute_trade_conservation | 40s | PASS |
+| proof_execute_trade_margin_enforcement | 45s | PASS |
+| proof_execute_trade_preserves_inv | 24s | PASS |
 | proof_fee_credits_never_inflate_from_settle | 1s | PASS |
-| proof_gap1_crank_with_fees_preserves_inv | 39s | PASS |
+| proof_force_close_with_set_pnl_preserves_invariant | 2s | PASS |
+| proof_gap1_crank_with_fees_preserves_inv | 36s | PASS |
 | proof_gap1_settle_mark_err_no_mutation | 1s | PASS |
 | proof_gap1_touch_account_err_no_mutation | 1s | PASS |
 | proof_gap2_execute_trade_err_preserves_inv | 5s | PASS |
 | proof_gap2_rejects_max_price_exceeded_matcher | 1s | PASS |
 | proof_gap2_rejects_overfill_matcher | 1s | PASS |
 | proof_gap2_rejects_zero_price_matcher | 1s | PASS |
-| proof_gap3_conservation_crank_funding_positions | 477s | PASS |
-| proof_gap3_conservation_trade_entry_neq_oracle | 92s | PASS |
-| proof_gap3_multi_step_lifecycle_conservation | 1462s | PASS |
+| proof_gap3_conservation_crank_funding_positions | 317s | PASS |
+| proof_gap3_conservation_trade_entry_neq_oracle | 97s | PASS |
+| proof_gap3_multi_step_lifecycle_conservation | 1348s | PASS |
 | proof_gap4_margin_extreme_values_no_panic | 1s | PASS |
 | proof_gap4_trade_extreme_price_no_panic | 6s | PASS |
 | proof_gap4_trade_extreme_size_no_panic | 4s | PASS |
-| proof_gap4_trade_partial_fill_diff_price_no_panic | 25s | PASS |
+| proof_gap4_trade_partial_fill_diff_price_no_panic | 26s | PASS |
 | proof_gap5_deposit_fee_credits_conservation | 1s | PASS |
 | proof_gap5_fee_credits_saturating_near_max | 3s | PASS |
 | proof_gap5_fee_credits_trade_then_settle_bounded | 3s | PASS |
-| proof_gap5_fee_settle_margin_or_err | 12s | PASS |
+| proof_gap5_fee_settle_margin_or_err | 15s | PASS |
 | proof_gc_dust_preserves_inv | 1s | PASS |
 | proof_gc_dust_structural_integrity | 1s | PASS |
+| proof_haircut_ratio_bounded | 1s | PASS |
 | proof_haircut_ratio_formula_correctness | 1s | PASS |
 | proof_inv_holds_for_new_engine | 1s | PASS |
 | proof_inv_preserved_by_add_lp | 1s | PASS |
@@ -552,7 +576,7 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | proof_keeper_crank_advances_slot_monotonically | 1s | PASS |
 | proof_keeper_crank_best_effort_liquidation | 2s | PASS |
 | proof_keeper_crank_best_effort_settle | 9s | PASS |
-| proof_keeper_crank_forgives_half_slots | 7s | PASS |
+| proof_keeper_crank_forgives_half_slots | 8s | PASS |
 | proof_keeper_crank_preserves_inv | 2s | PASS |
 | proof_liq_partial_1_safety_after_liquidation | 2s | PASS |
 | proof_liq_partial_2_dust_elimination | 2s | PASS |
@@ -566,13 +590,17 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | proof_lq3a_profit_routes_through_adl | 3s | PASS |
 | proof_lq4_liquidation_fee_paid_to_insurance | 2s | PASS |
 | proof_lq6_n1_boundary_after_liquidation | 2s | PASS |
-| proof_net_extraction_bounded_with_fee_credits | 67s | PASS |
+| proof_multiple_force_close_preserves_invariant | 6s | PASS |
+| proof_net_extraction_bounded_with_fee_credits | 70s | PASS |
 | proof_principal_protection_across_accounts | 1s | PASS |
 | proof_profit_conversion_payout_formula | 18s | PASS |
+| proof_recompute_aggregates_correct | 1s | PASS |
 | proof_require_fresh_crank_gates_stale | 1s | PASS |
 | proof_rounding_slack_bound | 168s | PASS |
 | proof_sequence_deposit_crank_withdraw | 14s | PASS |
 | proof_sequence_deposit_trade_liquidate | 3s | PASS |
+| proof_set_capital_maintains_c_tot | 1s | PASS |
+| proof_set_pnl_maintains_pnl_pos_tot | 1s | PASS |
 | proof_set_risk_reduction_threshold_updates | 1s | PASS |
 | proof_settle_maintenance_deducts_correctly | 1s | PASS |
 | proof_settle_warmup_negative_pnl_immediate | 1s | PASS |
@@ -581,15 +609,15 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 | proof_stale_crank_blocks_withdraw | 1s | PASS |
 | proof_total_open_interest_initial | 1s | PASS |
 | proof_trade_creates_funding_settled_positions | 6s | PASS |
-| proof_trade_pnl_zero_sum | 43s | PASS |
+| proof_trade_pnl_zero_sum | 70s | PASS |
 | proof_trading_credits_fee_to_user | 1s | PASS |
-| proof_variation_margin_no_pnl_teleport | 271s | PASS |
+| proof_variation_margin_no_pnl_teleport | 283s | PASS |
 | proof_warmup_slope_nonzero_when_positive_pnl | 1s | PASS |
 | proof_withdraw_preserves_inv | 1s | PASS |
 | saturating_arithmetic_prevents_overflow | 1s | PASS |
-| withdraw_calls_settle_enforces_pnl_or_zero_capital_post | 3s | PASS |
+| withdraw_calls_settle_enforces_pnl_or_zero_capital_post | 2s | PASS |
 | withdraw_im_check_blocks_when_equity_after_withdraw_below_im | 1s | PASS |
-| withdrawal_maintains_margin_above_maintenance | 104s | PASS |
+| withdrawal_maintains_margin_above_maintenance | 114s | PASS |
 | withdrawal_rejects_if_below_initial_margin_at_oracle | 1s | PASS |
 | withdrawal_requires_sufficient_balance | 1s | PASS |
 | zero_pnl_withdrawable_is_zero | 1s | PASS |
