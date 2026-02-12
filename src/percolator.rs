@@ -818,22 +818,29 @@ impl RiskEngine {
         if pnl_pos_tot == 0 {
             return (1, 1);
         }
-        let residual = Self::signed_residual(
+        let (solvent, residual) = Self::signed_residual(
             self.vault.get(),
             self.c_tot.get(),
             self.insurance_fund.balance.get(),
         );
-        // Kani will prove residual >= 0; clamp as defense-in-depth.
-        let residual_u = if residual >= 0 { residual as u128 } else { 0 };
+        // Kani proves solvent == true always; clamp as defense-in-depth.
+        let residual_u = if solvent { residual } else { 0 };
         let h_num = core::cmp::min(residual_u, pnl_pos_tot);
         (h_num, pnl_pos_tot)
     }
 
-    /// Compute vault residual using signed arithmetic.
-    /// Returns vault - c_tot - insurance as i128, exposing true deficit if any.
+    /// Compute vault residual: vault - c_tot - insurance.
+    /// Returns (is_positive, abs_value) to avoid i128 overflow on large u128 inputs.
+    /// is_positive == true  ⟹ residual = +abs_value (solvent)
+    /// is_positive == false ⟹ residual = -abs_value (deficit / bad debt)
     #[inline]
-    pub fn signed_residual(vault: u128, c_tot: u128, insurance: u128) -> i128 {
-        (vault as i128) - (c_tot as i128) - (insurance as i128)
+    pub fn signed_residual(vault: u128, c_tot: u128, insurance: u128) -> (bool, u128) {
+        let obligations = c_tot.saturating_add(insurance);
+        if vault >= obligations {
+            (true, vault - obligations)
+        } else {
+            (false, obligations - vault)
+        }
     }
 
     /// Compute effective positive PnL after haircut for a given account PnL (spec §3.3).
@@ -2908,12 +2915,12 @@ impl RiskEngine {
         let (h_num, h_den) = if projected_pnl_pos_tot == 0 {
             (1u128, 1u128)
         } else {
-            let residual = Self::signed_residual(
+            let (solvent, residual) = Self::signed_residual(
                 self.vault.get(),
                 self.c_tot.get(),
                 self.insurance_fund.balance.get(),
             );
-            let residual_u = if residual >= 0 { residual as u128 } else { 0 };
+            let residual_u = if solvent { residual } else { 0 };
             (core::cmp::min(residual_u, projected_pnl_pos_tot), projected_pnl_pos_tot)
         };
 
