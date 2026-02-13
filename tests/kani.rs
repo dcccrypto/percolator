@@ -4362,7 +4362,7 @@ fn proof_settle_warmup_negative_pnl_immediate() {
     engine.accounts[user_idx as usize].pnl = I128::new(-2_000); // Negative PnL
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let cap_before = engine.accounts[user_idx as usize].capital;
 
@@ -4408,7 +4408,7 @@ fn proof_keeper_crank_preserves_inv() {
     engine.accounts[caller as usize].capital = U128::new(10_000);
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let now_slot: u64 = kani::any();
     kani::assume(now_slot > engine.last_crank_slot && now_slot <= 200);
@@ -4448,7 +4448,7 @@ fn proof_gc_dust_preserves_inv() {
     engine.accounts[user_idx as usize].reserved_pnl = 0;
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let num_used_before = engine.num_used_accounts;
 
@@ -4515,7 +4515,7 @@ fn proof_close_account_preserves_inv() {
     engine.accounts[user_idx as usize].position_size = I128::new(0);
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let num_used_before = engine.num_used_accounts;
 
@@ -4556,7 +4556,7 @@ fn proof_top_up_insurance_preserves_inv() {
     engine.accounts[user_idx as usize].capital = U128::new(10_000);
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let amount: u128 = kani::any();
     kani::assume(amount > 0 && amount < 1_000_000);
@@ -6058,7 +6058,7 @@ fn proof_gap2_execute_trade_err_preserves_inv() {
     engine.accounts[lp as usize].capital = U128::new(lp_cap);
     engine.recompute_aggregates();
 
-    // Assert canonical_inv before
+    // Precondition: start from an INV-valid symbolic setup.
     kani::assume(canonical_inv(&engine));
 
     let size: i128 = kani::any();
@@ -7056,7 +7056,7 @@ fn proof_settle_mark_to_oracle_preserves_inv() {
     engine.accounts[user_idx as usize].funding_index = engine.funding_index_qpb_e6;
 
     sync_engine_aggregates(&mut engine);
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let oracle: u64 = kani::any();
     kani::assume(oracle >= 500_000 && oracle <= 2_000_000); // $0.50 - $2.00
@@ -7114,7 +7114,7 @@ fn proof_touch_account_preserves_inv() {
     // Account's index is 0 (default), so delta = funding_delta
 
     sync_engine_aggregates(&mut engine);
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let vault_before = engine.vault.get();
     let c_tot_before = engine.c_tot.get();
@@ -7172,7 +7172,7 @@ fn proof_touch_account_full_preserves_inv() {
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(50);
 
     sync_engine_aggregates(&mut engine);
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let now_slot: u64 = kani::any();
     kani::assume(now_slot >= 101 && now_slot <= 300);
@@ -7224,7 +7224,7 @@ fn proof_settle_loss_only_preserves_inv() {
     engine.accounts[user_idx as usize].pnl = I128::new(pnl);
 
     engine.recompute_aggregates();
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let vault_before = engine.vault.get();
     let ins_before = engine.insurance_fund.balance.get();
@@ -7281,7 +7281,7 @@ fn proof_accrue_funding_preserves_inv() {
     kani::assume(rate >= -100 && rate <= 100);
     engine.funding_rate_bps_per_slot_last = rate;
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let now_slot: u64 = kani::any();
     kani::assume(now_slot >= 101 && now_slot <= 200);
