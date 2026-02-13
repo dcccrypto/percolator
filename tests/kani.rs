@@ -4265,7 +4265,7 @@ fn proof_liquidate_preserves_inv() {
     engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let liquidated = assert_ok!(
         engine.liquidate_at_oracle(user_idx, 100, oracle_price),
