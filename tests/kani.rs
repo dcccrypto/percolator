@@ -6573,21 +6573,29 @@ fn proof_gap5_fee_credits_trade_then_settle_bounded() {
     let dt: u64 = kani::any();
     kani::assume(dt >= 1 && dt <= 500);
 
-    let result = engine.settle_maintenance_fee(user, 100 + dt, 1_000_000);
-    let _ = assert_ok!(
-        result,
+    let paid_from_capital = assert_ok!(
+        engine.settle_maintenance_fee(user, 100 + dt, 1_000_000),
         "maintenance settle must succeed with high capital and bounded dt"
     );
 
-    // fee_credits should decrease by maintenance_fee_per_slot * dt = 1 * dt = dt
+    // Deterministic coupon math in this setup:
+    // due = dt (fee_per_slot=1)
+    // fee_credits' = fee_credits_before - due + paid_from_capital
+    // with sufficient capital, paid_from_capital = max(due - fee_credits_before, 0)
     let credits_after_settle = engine.accounts[user as usize].fee_credits.get();
-    // Credits after settle = credits_after_trade - dt (capped by coupon semantics)
-    let _expected_credits = credits_after_trade - (dt as i128);
-    // The actual credits may be lower if capital was also deducted, but
-    // fee_credits tracks the coupon balance
+    let due_i = dt as i128;
+    let expected_paid = core::cmp::max(due_i.saturating_sub(credits_after_trade), 0) as u128;
+    let expected_credits = credits_after_trade
+        .saturating_sub(due_i)
+        .saturating_add(expected_paid as i128);
+
     kani::assert(
-        credits_after_settle <= credits_after_trade,
-        "fee_credits must not increase from settle"
+        paid_from_capital == expected_paid,
+        "paid_from_capital must match deterministic coupon shortfall"
+    );
+    kani::assert(
+        credits_after_settle == expected_credits,
+        "fee_credits must follow deterministic settle formula"
     );
 
     kani::assert(canonical_inv(&engine), "canonical_inv must hold after trade + settle");
