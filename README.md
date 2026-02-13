@@ -1,128 +1,96 @@
-# Percolator: Risk Engine for Perpetual DEXs
+# Percolator
 
-⚠️ **EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY** ⚠️  
-Do **NOT** use with real funds. Not audited. Experimental design.
+A predictable alternative to ADL.
 
-Percolator is a **formally verified accounting + risk engine** for perpetual futures DEXs on Solana.
+If you want the `xy = k` of perpetual futures risk engines -- something you can reason about, audit, and run without human intervention -- the cleanest move is simple: stop treating profit like money. Treat it like what it really is in a stressed exchange: a junior claim on a shared balance sheet.
 
-**Primary goal:**
+> No user can ever withdraw more value than actually exists on the exchange balance sheet.
 
-> **No user can ever withdraw more value than actually exists on the exchange balance sheet.**
+## The Core Idea
 
-Percolator **does not move tokens**. A wrapper program performs SPL transfers and calls into the engine.
+- **Principal** (capital) is senior.
+- **Profits** are junior IOUs.
+- A single global ratio `h` determines how much of all profits are actually backed.
+- Profits convert into withdrawable capital only through a bounded warmup process.
 
----
+## Why This Is Different From ADL
 
-## What kind of perp design is this?
+Most perp venues use a waterfall: liquidate, insurance absorbs loss, and if insufficient, ADL. ADL preserves solvency by forcibly reducing profitable positions. The withdrawal-window model instead applies a global pro-rata haircut on profit extraction.
 
-Percolator is a **hybrid**:
-- **Synthetics-style risk**: users take positions against **LP accounts** (inventory holders), and the engine enforces margin, liquidations, ADL/socialization, and withdrawal safety against a shared balance sheet.
-- **Orderbook-style execution extensibility**: LPs provide a **pluggable matcher program/context** (`MatchingEngine`) that can implement AMM/RFQ/CLOB logic and can **reject** trades.
+## One Vault. Two Claim Classes.
 
-### Design clarifications
+### Senior Claim: Capital
 
-- **Users choose which LP to trade with.**  
-  The wrapper routes the trade to a specific LP account. The LP is not forced to take every trade: its **matcher** may reject, and the engine rejects if post-trade solvency fails.
+Capital is withdrawable. Withdrawals only return capital, never raw profit.
 
-- **Liquidity fragmentation is possible at the execution layer.**  
-  If users must target a specific LP account, then the maximum fill against that LP is bounded by that LP’s inventory/margin. Aggregation/routing across LPs is a **wrapper-level** feature.
+### Junior Claim: Profit
 
-- **Positions opened with LP1 can be closed against LP2 — by design.**  
-  The engine uses **variation margin** semantics: `entry_price` is **the last oracle mark at which the position was settled** (not per-counterparty trade entry).  
-  Before mutating positions, the engine settles mark-to-oracle (`settle_mark_to_oracle`), making positions **fungible** across LPs for closing.
+Profit is an IOU backed by system residual value. It is not immediately withdrawable. It must first mature into capital through time-gated warmup (spec section 5-6).
 
-- **Liquidations are oracle-price closes of the liquidated account only — by design.**  
-  Liquidation does **not** require finding the original counterparty LP. It closes the liquidated account at the oracle price and routes PnL via the engine’s waterfall.
+## The Global Coverage Ratio `h`
 
----
+```
+Residual  = max(0, V - C_tot - I)
 
-## Balance-Sheet-Backed Net Extraction (Security Claim)
+              min(Residual, PNL_pos_tot)
+    h     =  --------------------------
+                    PNL_pos_tot
+```
 
-No sequence of trades, oracle updates, funding accruals, warmups, ADL/socialization, panic settles, force-realize scans, or withdrawals can allow net extraction beyond what is funded by others’ realized losses and spendable insurance.
+If the system is fully backed, `h = 1`. If stressed, `h < 1`. Every profitable account is backed by the same fraction `h`.
 
----
+`V` is the vault balance. `C_tot` is the sum of all capital. `I` is the insurance fund. `PNL_pos_tot` is the sum of all positive PnL across all accounts.
 
-## Wrapper usage (token movement)
+## Profit as Equity
 
-### Deposits
-1. Transfer tokens into the vault SPL account.
-2. Call `RiskEngine::deposit(idx, amount, now_slot)`.
+```
+effective_pnl_i = floor(max(PNL_i, 0) * h)
+```
 
-### Withdrawals
-1. Call `RiskEngine::withdraw(idx, amount, now_slot, oracle_price)`.
-2. If Ok, transfer tokens out of the vault SPL account.
+All winners share the same haircut. No rankings. No queue. Just proportional equity math.
 
-Withdraw only returns **capital**. Positive PnL becomes capital only via warmup/budget rules.
+## The Withdrawal Window
 
-Withdrawal safety checks enforced by the engine:
-- **Fresh crank required** (time-based staleness gate)
-- **Recent sweep started** for risk-increasing operations
-- **No pending socialization** (blocks value extraction while `pending_profit_to_fund` or `pending_unpaid_loss` are non-zero)
-- **Post-withdrawal margin checks** if a position remains open
+Only capital can leave the system. Profits must mature into capital through warmup, and the amount converted is bounded by `h`:
 
----
+```
+payout = floor(warmable_amount * h_num / h_den)
+```
 
-## Trading
+If the system is stressed, `h` falls and less profit converts. If losses are realized or buffers improve, `h` rises. The mechanism self-heals mathematically.
 
-Wrapper validates signatures and oracle input, then calls:
+## Concrete Example
 
-`RiskEngine::execute_trade(matcher, lp_idx, user_idx, now_slot, oracle_price, size)`
+**Fully solvent:** `Residual = 150`, `PNL_pos_tot = 120` => `h = 1` (fully backed)
 
-Execution semantics (implementation-aligned):
-- Funding is settled lazily on touched accounts.
-- Positions are made fungible by settling mark-to-oracle before mutation:
-  - `settle_mark_to_oracle()` realizes mark PnL into `account.pnl` and sets `entry_price = oracle_price`.
-- Trade PnL is only execution-vs-oracle:
-  - `trade_pnl = (oracle_price - exec_price) * exec_size / 1e6` (zero-sum between user and LP)
-- Warmup slope is updated after PnL changes; profits warm over time and may become capital **even while a position remains open**, but withdrawals are still constrained by margin + system budget + socialization gates.
+**Stressed:** `Residual = 50`, `PNL_pos_tot = 200` => `h = 0.25` (each dollar of profit is backed by 25 cents)
 
----
+## Side-by-Side
 
-## Keeper crank, liveness, and cleanup
+| | ADL | Withdrawal-Window |
+|---|---|---|
+| **Mechanism** | Forcibly closes profitable positions | Haircuts profit extraction |
+| **When triggered** | Insurance depleted | Continuously via `h` |
+| **User experience** | Position deleted without consent | Withdrawable amount reduced |
+| **Recovery** | Manual re-entry | Automatic as `h` recovers |
 
-`RiskEngine::keeper_crank(...)` is permissionless.
+## The Invariant
 
-The crank is **cursor-based**, not a fixed 16-step schedule:
-- It scans up to `ACCOUNTS_PER_CRANK` occupied slots per call.
-- It detects “sweep complete” when the scanning cursor wraps back to the sweep start.
-- Liquidations and force-realize work are bounded by per-call budgets.
+```
+Withdrawable value <= Backed capital
+```
 
-Budget constants (from code):
-- `LIQ_BUDGET_PER_CRANK = 120`
-- `FORCE_REALIZE_BUDGET_PER_CRANK = 32`
-- `GC_CLOSE_BUDGET = 32`
+Formally verified with 145 Kani proofs covering conservation, principal protection, isolation, and no-teleport properties.
 
-### Liquidation semantics
-- Liquidations close the **liquidated account** at the **oracle price** (no LP/AMM required).
-- Profit/loss routing:
-  - If `mark_pnl > 0`: profit must be funded; the engine funds it via ADL/socialization (excluding the winner from funding itself).
-  - If `mark_pnl <= 0`: losses are realized from the account’s own capital immediately; any unpaid remainder becomes socialized loss.
-- Liquidation fee is charged from remaining capital to insurance (if configured).
+## Open Source
 
-### Abandoned accounts / dust GC
-User accounts with:
-- `position_size == 0`
-- `capital == 0`
-- `reserved_pnl == 0`
-- `pnl <= 0`
-
-are eligible to be freed by crank GC. LP accounts are never GC’d.
-
-(If maintenance fees are enabled, the intended behavior is that crank processing advances fee settlement so abandoned accounts eventually reach dust and are freed.)
-
----
-
-## Formal verification
-
-Kani harnesses verify key invariants including conservation, isolation, and no-teleport behavior for cross-LP closes.
+Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
 
 ```bash
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani
 ```
-
----
 
 ## References
 
