@@ -2731,8 +2731,15 @@ fn proof_keeper_crank_forgives_half_slots() {
     }
 }
 
-/// Proof: Net extraction is bounded even with fee credits and keeper_crank
-/// Attacker cannot extract more than deposited + others' losses + spendable insurance
+/// Proof: In this no-price-move scenario, attacker withdrawal is principal-bounded.
+///
+/// Model scope:
+/// - Trades execute at oracle (NoOpMatcher), so trade PnL transfer is zero-sum and
+///   attacker cannot realize directional price profit.
+/// - No explicit insurance top-ups or oracle drift are modeled.
+///
+/// Security claim for this harness:
+/// attacker cannot successfully withdraw more than their own deposited principal.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
@@ -2779,6 +2786,12 @@ fn proof_net_extraction_bounded_with_fee_credits() {
     // PROOF: Cannot withdraw more than equity allows
     // If withdrawal succeeded, amount must be <= available equity
     if result.is_ok() {
+        // In this modeled scenario (no price edge), attacker capital before withdraw
+        // cannot exceed their original deposit.
+        assert!(
+            attacker_capital.get() <= attacker_deposit,
+            "attacker capital should be principal-bounded before withdraw in this model"
+        );
         // Withdrawal succeeded, so amount was within limits
         // The engine enforces capital-only withdrawals (no direct pnl/credit withdrawal)
         assert!(
