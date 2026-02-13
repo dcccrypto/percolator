@@ -4309,24 +4309,23 @@ fn proof_settle_warmup_preserves_inv() {
     let pnl_before = engine.accounts[user_idx as usize].pnl;
     let total_before = cap_before.get() as i128 + pnl_before.get();
 
-    let result = engine.settle_warmup_to_capital(user_idx);
+    let _ = assert_ok!(
+        engine.settle_warmup_to_capital(user_idx),
+        "settle_warmup_to_capital must succeed for valid positive-pnl account"
+    );
+    kani::assert(
+        canonical_inv(&engine),
+        "INV must hold after settle_warmup_to_capital",
+    );
 
-    // INV only matters on Ok path (Solana tx aborts on Err, state discarded)
-    if result.is_ok() {
-        kani::assert(
-            canonical_inv(&engine),
-            "INV must hold after settle_warmup_to_capital",
-        );
-
-        // KEY INVARIANT: For positive pnl settlement, capital + pnl must be unchanged
-        let cap_after = engine.accounts[user_idx as usize].capital;
-        let pnl_after = engine.accounts[user_idx as usize].pnl;
-        let total_after = cap_after.get() as i128 + pnl_after.get();
-        kani::assert(
-            total_after == total_before,
-            "capital + pnl must be unchanged after positive pnl settlement",
-        );
-    }
+    // KEY INVARIANT: For positive pnl settlement, capital + pnl must be unchanged
+    let cap_after = engine.accounts[user_idx as usize].capital;
+    let pnl_after = engine.accounts[user_idx as usize].pnl;
+    let total_after = cap_after.get() as i128 + pnl_after.get();
+    kani::assert(
+        total_after == total_before,
+        "capital + pnl must be unchanged after positive pnl settlement",
+    );
 }
 
 /// settle_warmup_to_capital: Negative PnL settles immediately
