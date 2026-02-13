@@ -4112,7 +4112,7 @@ fn proof_withdraw_preserves_inv() {
     engine.accounts[user_idx as usize].capital = U128::new(10_000);
     engine.recompute_aggregates();
 
-    kani::assume(canonical_inv(&engine));
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     let amount: u128 = kani::any();
     kani::assume(amount > 0 && amount < 5_000); // Less than capital, should succeed
