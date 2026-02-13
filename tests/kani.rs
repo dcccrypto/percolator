@@ -3897,8 +3897,8 @@ fn proof_execute_trade_preserves_inv() {
     engine.accounts[lp_idx as usize].capital = U128::new(50_000);
     engine.recompute_aggregates();
 
-    // Precondition: INV holds before trade
-    kani::assume(canonical_inv(&engine));
+    // Precondition: setup built via concrete initialization must satisfy INV
+    kani::assert(canonical_inv(&engine), "setup state must satisfy INV");
 
     // Snapshot position BEFORE trade
     let user_pos_before = engine.accounts[user_idx as usize].position_size;
