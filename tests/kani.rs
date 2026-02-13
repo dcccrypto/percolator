@@ -4195,33 +4195,34 @@ fn proof_close_account_structural_integrity() {
 
     kani::assume(inv_structural(&engine));
 
-    let result = engine.close_account(user_idx, 100, 1_000_000);
+    let _withdrawn = assert_ok!(
+        engine.close_account(user_idx, 100, 1_000_000),
+        "close_account must succeed for flat, zero-capital account with fresh crank"
+    );
 
-    if result.is_ok() {
-        // Popcount decreased by 1
-        kani::assert(
-            engine.num_used_accounts == pop_before - 1,
-            "close_account must decrease num_used_accounts by 1",
-        );
+    // Popcount decreased by 1
+    kani::assert(
+        engine.num_used_accounts == pop_before - 1,
+        "close_account must decrease num_used_accounts by 1",
+    );
 
-        // Account no longer marked as used
-        kani::assert(
-            !engine.is_used(user_idx as usize),
-            "close_account must clear used bit",
-        );
+    // Account no longer marked as used
+    kani::assert(
+        !engine.is_used(user_idx as usize),
+        "close_account must clear used bit",
+    );
 
-        // Index returned to freelist (new head)
-        kani::assert(
-            engine.free_head == user_idx,
-            "close_account must return index to freelist head",
-        );
+    // Index returned to freelist (new head)
+    kani::assert(
+        engine.free_head == user_idx,
+        "close_account must return index to freelist head",
+    );
 
-        // Structural invariant preserved
-        kani::assert(
-            inv_structural(&engine),
-            "close_account must preserve structural invariant",
-        );
-    }
+    // Structural invariant preserved
+    kani::assert(
+        inv_structural(&engine),
+        "close_account must preserve structural invariant",
+    );
 }
 
 // ============================================================================
