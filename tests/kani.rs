@@ -1659,36 +1659,38 @@ fn fast_frame_update_warmup_slope_only_mutates_one_account() {
 }
 
 // ============================================================================
-// FAST Validity-Preservation Proofs
-// These prove that valid_state is preserved by operations
+// FAST Canonical-INV Preservation Proofs
+// These prove that canonical_inv is preserved by operations (upgraded from valid_state)
 // ============================================================================
 
-/// Validity preserved by deposit
+/// canonical_inv preserved by deposit
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_deposit() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(10_000);
     let user_idx = engine.add_user(0).unwrap();
 
     let amount: u128 = kani::any();
     kani::assume(amount > 0 && amount < 10_000);
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     let res = engine.deposit(user_idx, amount, 0);
 
     // Non-vacuity: deposit must succeed
     assert!(res.is_ok(), "non-vacuity: deposit must succeed");
-    assert!(valid_state(&engine), "valid_state preserved by deposit");
+    assert!(canonical_inv(&engine), "canonical_inv preserved by deposit");
 }
 
-/// Validity preserved by withdraw
+/// canonical_inv preserved by withdraw
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_withdraw() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(10_000);
     let user_idx = engine.add_user(0).unwrap();
 
     let deposit: u128 = kani::any();
@@ -1699,21 +1701,25 @@ fn fast_valid_preserved_by_withdraw() {
 
     engine.deposit(user_idx, deposit, 0).unwrap();
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     let res = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
 
     // Non-vacuity: withdraw must succeed (no position, withdraw <= deposit)
     assert!(res.is_ok(), "non-vacuity: withdraw must succeed");
-    assert!(valid_state(&engine), "valid_state preserved by withdraw");
+    assert!(canonical_inv(&engine), "canonical_inv preserved by withdraw");
 }
 
-/// Validity preserved by execute_trade
+/// canonical_inv preserved by execute_trade
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_execute_trade() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
 
@@ -1727,20 +1733,20 @@ fn fast_valid_preserved_by_execute_trade() {
     kani::assume(delta != i128::MIN);
     kani::assume(delta.abs() < 100);
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     let matcher = NoOpMatcher;
-    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, delta);
+    let res = engine.execute_trade(&matcher, lp_idx, user_idx, 100, 1_000_000, delta);
 
     // Non-vacuity: trade must succeed with well-capitalized accounts and small delta
     assert!(res.is_ok(), "non-vacuity: execute_trade must succeed");
     assert!(
-        valid_state(&engine),
-        "valid_state preserved by execute_trade"
+        canonical_inv(&engine),
+        "canonical_inv preserved by execute_trade"
     );
 }
 
-/// Validity preserved by settle_warmup_to_capital
+/// canonical_inv preserved by settle_warmup_to_capital
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
@@ -1773,37 +1779,39 @@ fn fast_valid_preserved_by_settle_warmup_to_capital() {
     }
     sync_engine_aggregates(&mut engine);
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     let res = engine.settle_warmup_to_capital(user_idx);
 
     // Non-vacuity: settle_warmup must succeed (account is used, bounded inputs)
     assert!(res.is_ok(), "non-vacuity: settle_warmup must succeed");
     assert!(
-        valid_state(&engine),
-        "valid_state preserved by settle_warmup_to_capital"
+        canonical_inv(&engine),
+        "canonical_inv preserved by settle_warmup_to_capital"
     );
 }
 
-/// Validity preserved by top_up_insurance_fund
+/// canonical_inv preserved by top_up_insurance_fund
+/// NOTE: This is the ONLY canonical_inv proof for top_up_insurance_fund
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_top_up_insurance_fund() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(10_000);
 
     let amount: u128 = kani::any();
     kani::assume(amount > 0 && amount < 10_000);
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     let res = engine.top_up_insurance_fund(amount);
 
     // Non-vacuity: top_up must succeed
     assert!(res.is_ok(), "non-vacuity: top_up_insurance_fund must succeed");
     assert!(
-        valid_state(&engine),
-        "valid_state preserved by top_up_insurance_fund"
+        canonical_inv(&engine),
+        "canonical_inv preserved by top_up_insurance_fund"
     );
 }
 
@@ -3571,6 +3579,7 @@ fn gc_never_frees_account_with_positive_value() {
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_garbage_collect_dust() {
     let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(10_000);
 
     // Set global funding index explicitly
     engine.funding_index_qpb_e6 = I128::new(0);
@@ -3584,8 +3593,9 @@ fn fast_valid_preserved_by_garbage_collect_dust() {
     engine.accounts[dust_idx as usize].position_size = I128::new(0);
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
     engine.accounts[dust_idx as usize].pnl = I128::new(0);
+    sync_engine_aggregates(&mut engine);
 
-    kani::assume(valid_state(&engine));
+    kani::assume(canonical_inv(&engine));
 
     // Run GC
     let closed = engine.garbage_collect_dust();
@@ -3594,8 +3604,8 @@ fn fast_valid_preserved_by_garbage_collect_dust() {
     assert!(closed > 0, "GC should close the dust account");
 
     assert!(
-        valid_state(&engine),
-        "valid_state preserved by garbage_collect_dust"
+        canonical_inv(&engine),
+        "canonical_inv preserved by garbage_collect_dust"
     );
 }
 
@@ -8265,4 +8275,79 @@ fn proof_flaw3_warmup_converts_after_single_slot() {
         );
     }
     kani::assert(canonical_inv(&engine), "INV after warmup settle");
+}
+
+// ============================================================================
+// SLOT REUSE PROOF
+// Added per Kani audit: no proof verified close→add→verify INV on recycled slot
+// ============================================================================
+
+/// Slot reuse: close_account → add_user on recycled slot → verify INV
+///
+/// Proves that freeing a slot and reallocating it preserves canonical_inv.
+/// This catches freelist/bitmap corruption, stale account data, and
+/// aggregate staleness from slot recycling.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_slot_reuse_preserves_inv() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(100_000);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    // Step 1: Add user and give them capital
+    let user1_idx = engine.add_user(0).unwrap();
+    engine.deposit(user1_idx, 5_000, 0).unwrap();
+
+    kani::assume(canonical_inv(&engine));
+
+    // Step 2: Withdraw all capital (required for close)
+    engine.withdraw(user1_idx, 5_000, 100, 1_000_000).unwrap();
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV must hold after full withdrawal",
+    );
+
+    // Step 3: Close the account (frees the slot)
+    engine.close_account(user1_idx, 100, 1_000_000).unwrap();
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV must hold after close_account",
+    );
+
+    let num_used_after_close = engine.num_used_accounts;
+
+    // Step 4: Add a new user — should reuse the freed slot
+    let user2_idx = engine.add_user(0).unwrap();
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV must hold after add_user on recycled slot",
+    );
+
+    // NON-VACUITY: slot was actually reused (LIFO freelist)
+    kani::assert(
+        user2_idx == user1_idx,
+        "New user must reuse the freed slot (LIFO freelist)",
+    );
+
+    // NON-VACUITY: used count went down then back up
+    kani::assert(
+        engine.num_used_accounts == num_used_after_close + 1,
+        "num_used must increase after add_user",
+    );
+
+    // Step 5: Deposit to the recycled slot and verify INV still holds
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount < 10_000);
+    engine.deposit(user2_idx, amount, 100).unwrap();
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV must hold after deposit to recycled slot",
+    );
 }
