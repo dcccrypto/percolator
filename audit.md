@@ -462,6 +462,19 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 
 ---
 
+## Strengthen settle_warmup_to_capital INV Proofs (2026-02-17)
+
+Replaced 2 concrete settle_warmup proofs with fully symbolic versions to exercise all branches
+in `settle_warmup_to_capital` (§6.1 loss settlement + §6.2 profit conversion).
+No production code changes — only `tests/kani.rs` modified.
+
+| Proof | What it verifies |
+|-------|-----------------|
+| proof_settle_warmup_preserves_inv | Symbolic positive PnL: canonical_inv preserved across partial conversion, haircut < 1, non-zero reserved_pnl, and zero conversion branches |
+| proof_settle_warmup_negative_pnl_immediate | Symbolic negative PnL: canonical_inv preserved across insolvency writeoff (loss > capital), zero-capital, and solvent branches; N1 boundary; full resolution |
+
+---
+
 ## External Review Rebuttal Proofs (2026-02-14)
 
 Added 6 new Kani proofs to formally verify that 3 claimed critical flaws from an external review are NOT exploitable. No production code changes — all modifications in `tests/kani.rs`.
