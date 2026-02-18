@@ -674,17 +674,24 @@ fn i5_warmup_monotonicity() {
 
     let pnl: i128 = kani::any();
     let slope: u128 = kani::any();
+    let reserved: u64 = kani::any();
     let slots1: u64 = kani::any();
     let slots2: u64 = kani::any();
 
-    kani::assume(pnl > 0 && pnl < 10_000);
-    kani::assume(slope > 0 && slope < 100);
+    // Both positive and negative pnl: negative always yields 0, trivially monotonic
+    kani::assume(pnl > -5_000 && pnl < 10_000 && pnl != 0);
+    kani::assume(slope < 100);
     kani::assume(slots1 < 200);
     kani::assume(slots2 < 200);
     kani::assume(slots2 > slots1);
 
+    // Symbolic reserved_pnl exercises the available_pnl = positive_pnl - reserved branch
+    let pnl_pos: u64 = if pnl > 0 { pnl as u64 } else { 0 };
+    kani::assume(reserved <= pnl_pos); // PA1: reserved <= max(pnl, 0)
+
     engine.accounts[user_idx as usize].pnl = I128::new(pnl);
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
+    engine.accounts[user_idx as usize].reserved_pnl = reserved;
 
     engine.current_slot = slots1;
     let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
