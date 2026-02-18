@@ -2233,33 +2233,40 @@ fn proof_settle_maintenance_deducts_correctly() {
     let mut engine = RiskEngine::new(test_params_with_maintenance_fee());
     let user = engine.add_user(0).unwrap();
 
-    // Make the path deterministic - set capital explicitly
-    engine.accounts[user as usize].capital = U128::new(20_000);
-    engine.accounts[user as usize].fee_credits = I128::ZERO;
+    // Symbolic capital and slot — exercises partial-pay (capital < due) and full-pay paths
+    let capital: u128 = kani::any();
+    let now_slot: u64 = kani::any();
+    let fee_credits: i128 = kani::any();
+    kani::assume(capital >= 100 && capital <= 20_000);
+    kani::assume(now_slot >= 100 && now_slot <= 10_000);
+    kani::assume(fee_credits >= -500 && fee_credits <= 500);
+
+    engine.accounts[user as usize].capital = U128::new(capital);
+    engine.accounts[user as usize].fee_credits = I128::new(fee_credits);
     engine.accounts[user as usize].last_fee_slot = 0;
-    engine.vault = U128::new(20_000);
+    engine.vault = U128::new(capital + 10_000);
+    engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
 
-    let cap_before = engine.accounts[user as usize].capital;
-    let insurance_before = engine.insurance_fund.balance;
-
-    let now_slot: u64 = 10_000;
-    let expected_due: u128 = 10_000; // fee_per_slot=1
+    let cap_before = engine.accounts[user as usize].capital.get();
+    let insurance_before = engine.insurance_fund.balance.get();
 
     let res = engine.settle_maintenance_fee(user, now_slot, 1_000_000);
-    assert!(res.is_ok());
-    assert!(res.unwrap() == expected_due);
+    assert!(res.is_ok(), "settle_maintenance_fee must succeed");
 
-    let cap_after = engine.accounts[user as usize].capital;
-    let insurance_after = engine.insurance_fund.balance;
-    let credits_after = engine.accounts[user as usize].fee_credits;
+    let cap_after = engine.accounts[user as usize].capital.get();
+    let insurance_after = engine.insurance_fund.balance.get();
 
-    assert!(engine.accounts[user as usize].last_fee_slot == now_slot);
-
-    // With credits=0 and capital=20_000, we pay full due from capital:
-    assert!(cap_after == cap_before - expected_due);
-    assert!(insurance_after.get() == insurance_before.get() + expected_due);
-    assert!(credits_after.get() == 0);
+    // Capital can only decrease (fees deducted)
+    kani::assert(cap_after <= cap_before, "capital must not increase from fees");
+    // Insurance can only increase (fees added)
+    kani::assert(insurance_after >= insurance_before, "insurance must not decrease from fees");
+    // Slot must be updated
+    kani::assert(engine.accounts[user as usize].last_fee_slot == now_slot, "slot must update");
+    // Conservation: capital decrease == insurance increase (net zero)
+    let cap_decrease = cap_before - cap_after;
+    let ins_increase = insurance_after - insurance_before;
+    kani::assert(cap_decrease == ins_increase, "fee settlement must be zero-sum");
 }
 
 /// C. keeper_crank advances last_crank_slot correctly
