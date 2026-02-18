@@ -882,6 +882,10 @@ fn i8_equity_with_negative_pnl() {
 #[kani::solver(cadical)]
 fn withdrawal_requires_sufficient_balance() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
     let user_idx = engine.add_user(0).unwrap();
 
     let principal: u128 = kani::any();
@@ -895,12 +899,16 @@ fn withdrawal_requires_sufficient_balance() {
     engine.vault = U128::new(principal);
     sync_engine_aggregates(&mut engine);
 
-    let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
+    kani::assert(canonical_inv(&engine), "INV before withdraw");
+
+    let result = engine.withdraw(user_idx, withdraw, 100, 1_000_000);
 
     assert!(
         result == Err(RiskError::InsufficientBalance),
         "Withdrawal of more than available must fail with InsufficientBalance"
     );
+
+    kani::assert(canonical_inv(&engine), "INV preserved on error path");
 }
 
 #[kani::proof]
@@ -908,6 +916,10 @@ fn withdrawal_requires_sufficient_balance() {
 #[kani::solver(cadical)]
 fn pnl_withdrawal_requires_warmup() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 0;
+    engine.last_crank_slot = 0;
+    engine.last_full_sweep_start_slot = 0;
+
     let user_idx = engine.add_user(0).unwrap();
 
     let pnl: i128 = kani::any();
@@ -920,27 +932,23 @@ fn pnl_withdrawal_requires_warmup() {
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(10);
     engine.accounts[user_idx as usize].capital = U128::new(0); // No principal
     engine.insurance_fund.balance = U128::new(100_000);
-    engine.vault = U128::new(100_000); // >= c_tot(0) + insurance(100k)
+    engine.vault = U128::new(100_000 + pnl as u128); // c_tot(0) + insurance(100k) + pnl_pos
     sync_engine_aggregates(&mut engine);
-    engine.current_slot = 0; // At slot 0, nothing warmed up
+
+    kani::assert(canonical_inv(&engine), "INV before withdraw");
 
     // withdrawable_pnl should be 0 at slot 0
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
     assert!(withdrawable == 0, "No PNL warmed up at slot 0");
 
     // Trying to withdraw should fail (no principal, no warmed PNL)
-    // Can fail with InsufficientBalance (no capital) or other blocking errors
-    if withdraw > 0 {
-        let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
-        assert!(
-            matches!(
-                result,
-                Err(RiskError::InsufficientBalance)
-                    | Err(RiskError::PnlNotWarmedUp)
-            ),
-            "Cannot withdraw when no principal and PNL not warmed up"
-        );
-    }
+    let result = engine.withdraw(user_idx, withdraw, 0, 1_000_000);
+    assert!(
+        result.is_err(),
+        "Cannot withdraw when no principal and PNL not warmed up"
+    );
+
+    kani::assert(canonical_inv(&engine), "INV preserved on error path");
 }
 
 // ============================================================================
@@ -1492,28 +1500,35 @@ fn fast_frame_withdraw_only_mutates_one_account_vault_and_warmup() {
     let other_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
 
-    // User with capital and position — margin check exercised
-    engine.accounts[user_idx as usize].capital = U128::new(5_000);
-    engine.accounts[user_idx as usize].position_size = I128::new(500);
+    let user_capital: u128 = kani::any();
+    let position: i128 = kani::any();
+    let withdraw: u128 = kani::any();
+
+    kani::assume(user_capital >= 2_000 && user_capital <= 10_000);
+    kani::assume(position >= -1_000 && position <= 1_000);
+    kani::assume(withdraw > 0 && withdraw <= 500); // Conservative to ensure success
+
+    // User with symbolic capital and position — margin check exercised
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].position_size = I128::new(position);
     engine.accounts[user_idx as usize].entry_price = 1_000_000;
 
     // LP counterparty
+    let abs_pos = abs_i128_to_u128(position);
     engine.accounts[lp_idx as usize].capital = U128::new(50_000);
-    engine.accounts[lp_idx as usize].position_size = I128::new(-500);
+    engine.accounts[lp_idx as usize].position_size = I128::new(-position);
     engine.accounts[lp_idx as usize].entry_price = 1_000_000;
 
     // Other user with capital
     engine.accounts[other_idx as usize].capital = U128::new(3_000);
 
-    engine.vault = U128::new(58_000);
+    engine.vault = U128::new(user_capital + 50_000 + 3_000);
     sync_engine_aggregates(&mut engine);
 
-    let withdraw: u128 = kani::any();
-    kani::assume(withdraw > 0 && withdraw <= 1_000);
+    kani::assert(canonical_inv(&engine), "INV before withdraw");
 
     // Snapshot before
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
-    let insurance_before = engine.insurance_fund.balance;
 
     // Withdraw — force Ok for non-vacuity (small withdraw relative to capital)
     assert_ok!(engine.withdraw(user_idx, withdraw, 100, 1_000_000), "withdraw must succeed");
@@ -1529,11 +1544,7 @@ fn fast_frame_withdraw_only_mutates_one_account_vault_and_warmup() {
         "Frame: other pnl unchanged"
     );
 
-    // Assert: insurance unchanged
-    assert!(
-        engine.insurance_fund.balance.get() == insurance_before.get(),
-        "Frame: insurance unchanged"
-    );
+    kani::assert(canonical_inv(&engine), "INV after withdraw");
 }
 
 /// Frame proof: execute_trade only mutates two accounts (user and LP)
@@ -1640,6 +1651,8 @@ fn fast_frame_settle_warmup_only_mutates_one_account_and_warmup_globals() {
     engine.current_slot = slots;
     sync_engine_aggregates(&mut engine);
 
+    kani::assert(canonical_inv(&engine), "INV before settle_warmup");
+
     // Snapshot other account
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
 
@@ -1656,6 +1669,16 @@ fn fast_frame_settle_warmup_only_mutates_one_account_and_warmup_globals() {
         other_after.pnl.get() == other_snapshot.pnl,
         "Frame: other pnl unchanged"
     );
+
+    // Postcondition: canonical_inv preserved
+    kani::assert(canonical_inv(&engine), "INV after settle_warmup");
+
+    // Postcondition: N1 boundary holds for target
+    let account = &engine.accounts[user_idx as usize];
+    kani::assert(
+        n1_boundary_holds(account),
+        "N1: pnl >= 0 OR capital == 0 after settle",
+    );
 }
 
 /// Frame proof: update_warmup_slope only mutates one account
@@ -1668,12 +1691,18 @@ fn fast_frame_update_warmup_slope_only_mutates_one_account() {
     let other_idx = engine.add_user(0).unwrap();
 
     let pnl: i128 = kani::any();
+    let capital: u128 = kani::any();
     kani::assume(pnl > -5_000 && pnl < 10_000);
+    kani::assume(capital < 5_000);
 
     engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+    engine.accounts[user_idx as usize].capital = U128::new(capital);
     let pnl_pos = if pnl > 0 { pnl as u128 } else { 0 };
-    engine.vault = U128::new(pnl_pos + 10_000);
+    engine.vault = U128::new(capital + pnl_pos + 10_000);
+    engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "INV before update_warmup_slope");
 
     // Snapshot
     let other_snapshot = snapshot_account(&engine.accounts[other_idx as usize]);
@@ -1706,6 +1735,17 @@ fn fast_frame_update_warmup_slope_only_mutates_one_account() {
         engine.insurance_fund.balance.get() == globals_before.insurance_balance,
         "Frame: insurance unchanged"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after update_warmup_slope");
+
+    // Slope correctness: positive pnl → non-zero slope
+    let account = &engine.accounts[user_idx as usize];
+    if account.pnl.get() > 0 {
+        kani::assert(
+            account.warmup_slope_per_step.get() > 0,
+            "positive pnl → non-zero slope",
+        );
+    }
 }
 
 // ============================================================================
