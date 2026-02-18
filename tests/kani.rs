@@ -985,12 +985,19 @@ fn zero_pnl_withdrawable_is_zero() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(0).unwrap();
 
+    // Symbolic slot and reserved_pnl: withdrawable must be 0 for pnl=0 at any slot
+    let slot: u64 = kani::any();
+    let reserved: u64 = kani::any();
+    kani::assume(slot < 10_000);
+    kani::assume(reserved < 5_000);
+
     engine.accounts[user_idx as usize].pnl = I128::new(0);
-    engine.current_slot = 1000; // Far in future
+    engine.accounts[user_idx as usize].reserved_pnl = reserved;
+    engine.current_slot = slot;
 
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(withdrawable == 0, "Zero PNL means zero withdrawable");
+    kani::assert(withdrawable == 0, "Zero PNL means zero withdrawable regardless of slot or reserved");
 }
 
 #[kani::proof]
