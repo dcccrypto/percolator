@@ -2391,51 +2391,48 @@ fn proof_settle_maintenance_deducts_correctly() {
 #[kani::solver(cadical)]
 fn proof_keeper_crank_advances_slot_monotonically() {
     let mut engine = RiskEngine::new(test_params());
-    engine.vault = U128::new(100_000);
-    engine.insurance_fund.balance = U128::new(10_000);
     engine.current_slot = 100;
     engine.last_crank_slot = 100;
     engine.last_full_sweep_start_slot = 100;
 
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 1_000 && capital <= 50_000);
+
     let user = engine.add_user(0).unwrap();
-    engine.accounts[user as usize].capital = U128::new(10_000);
+    engine.accounts[user as usize].capital = U128::new(capital);
+    engine.vault = U128::new(capital + 10_000);
+    engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
 
-    // Symbolic slot — exercises various advance amounts
-    let now_slot: u64 = kani::any();
-    kani::assume(now_slot >= 101 && now_slot <= 10_000);
+    kani::assert(canonical_inv(&engine), "INV before crank");
 
+    // Symbolic slot — exercises both advancing and non-advancing paths
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot >= 50 && now_slot <= 10_000);
+
+    let last_before = engine.last_crank_slot;
     let result = engine.keeper_crank(user, now_slot, 1_000_000, 0, false);
 
     // keeper_crank succeeds with valid setup
-    assert!(
-        result.is_ok(),
-        "keeper_crank should succeed with valid setup"
-    );
+    assert!(result.is_ok(), "keeper_crank should succeed with valid setup");
 
     let outcome = result.unwrap();
 
-    // Should advance (now_slot > last_crank_slot)
-    assert!(
-        outcome.advanced,
-        "Should advance when now_slot > last_crank_slot"
-    );
-    assert!(
-        engine.last_crank_slot == now_slot,
-        "last_crank_slot should equal now_slot"
-    );
+    if now_slot > last_before {
+        // Should advance
+        kani::assert(outcome.advanced, "must advance when now_slot > last_crank_slot");
+        kani::assert(engine.last_crank_slot == now_slot, "last_crank_slot == now_slot");
+        kani::assert(engine.current_slot == now_slot, "current_slot updated");
+    } else {
+        // Should not advance
+        kani::assert(!outcome.advanced, "must not advance when now_slot <= last_crank_slot");
+        kani::assert(engine.last_crank_slot == last_before, "last_crank_slot unchanged");
+    }
 
-    // GC budget is always respected
-    assert!(
-        outcome.num_gc_closed <= GC_CLOSE_BUDGET,
-        "GC must respect budget"
-    );
+    // GC budget always respected
+    kani::assert(outcome.num_gc_closed <= GC_CLOSE_BUDGET, "GC must respect budget");
 
-    // current_slot is updated
-    assert!(
-        engine.current_slot == now_slot,
-        "current_slot must be updated by crank"
-    );
+    kani::assert(canonical_inv(&engine), "INV after crank");
 }
 
 /// C2. keeper_crank never fails due to caller maintenance settle
@@ -2450,16 +2447,26 @@ fn proof_keeper_crank_best_effort_settle() {
     let capital: u128 = kani::any();
     kani::assume(capital >= 10 && capital <= 500);
     let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
     engine.accounts[user as usize].capital = U128::new(capital);
-    engine.vault = U128::new(capital);
 
     // Give user a position so undercollateralization can trigger
     engine.accounts[user as usize].position_size = I128::new(1000);
     engine.accounts[user as usize].entry_price = 1_000_000;
 
+    // LP counterparty
+    engine.accounts[lp as usize].capital = U128::new(50_000);
+    engine.accounts[lp as usize].position_size = I128::new(-1000);
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+
     // Set last_fee_slot = 0, so huge fees accrue
     engine.accounts[user as usize].last_fee_slot = 0;
+    engine.vault = U128::new(capital + 50_000);
+    engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "INV before crank");
 
     // Crank at a later slot - fees will exceed capital
     let result = engine.keeper_crank(user, 100_000, 1_000_000, 0, false);
@@ -2467,8 +2474,13 @@ fn proof_keeper_crank_best_effort_settle() {
     // keeper_crank ALWAYS returns Ok (best-effort settle)
     assert!(result.is_ok(), "keeper_crank must always succeed");
 
-    // caller_settle_ok may be false if settle failed
-    // But that's fine - crank still worked
+    kani::assert(canonical_inv(&engine), "INV after best-effort crank");
+
+    // Capital must not have increased (fees only deducted)
+    kani::assert(
+        engine.accounts[user as usize].capital.get() <= capital,
+        "capital must not increase from fee settlement",
+    );
 }
 
 /// D. close_account succeeds iff flat and pnl == 0 (fee debt forgiven on close)
@@ -2578,21 +2590,33 @@ fn proof_require_fresh_crank_gates_stale() {
 #[kani::solver(cadical)]
 fn proof_stale_crank_blocks_withdraw() {
     let mut engine = RiskEngine::new(test_params());
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.current_slot = 100;
+    engine.max_crank_staleness_slots = 50;
+
     let user = engine.add_user(0).unwrap();
     engine.deposit(user, 10_000, 0).unwrap();
 
-    // Advance crank, then let it go stale
-    engine.last_crank_slot = 100;
-    engine.max_crank_staleness_slots = 50;
-    let stale_slot: u64 = kani::any();
-    kani::assume(stale_slot > 150); // strictly stale
-    kani::assume(stale_slot < u64::MAX - 1000);
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot >= 50 && now_slot < u64::MAX - 1000);
 
-    let result = engine.withdraw(user, 1_000, stale_slot, 1_000_000);
-    assert!(
-        result == Err(RiskError::Unauthorized),
-        "withdraw must reject when crank is stale"
-    );
+    kani::assert(canonical_inv(&engine), "INV before withdraw");
+
+    let result = engine.withdraw(user, 1_000, now_slot, 1_000_000);
+
+    if now_slot.saturating_sub(engine.last_crank_slot) > engine.max_crank_staleness_slots {
+        // Stale: must reject
+        assert!(
+            result == Err(RiskError::Unauthorized),
+            "withdraw must reject when crank is stale"
+        );
+    } else {
+        // Fresh: must succeed (user has 10K capital, withdrawing 1K)
+        assert!(result.is_ok(), "withdraw must succeed when crank is fresh");
+    }
+
+    kani::assert(canonical_inv(&engine), "INV preserved regardless of path");
 }
 
 /// Verify execute_trade rejects with Unauthorized when crank is stale
@@ -2601,26 +2625,38 @@ fn proof_stale_crank_blocks_withdraw() {
 #[kani::solver(cadical)]
 fn proof_stale_crank_blocks_execute_trade() {
     let mut engine = RiskEngine::new(test_params());
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.current_slot = 100;
+    engine.max_crank_staleness_slots = 50;
+
     let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
     let user = engine.add_user(0).unwrap();
     engine.deposit(lp, 100_000, 0).unwrap();
     engine.deposit(user, 10_000, 0).unwrap();
 
-    // Advance crank, then let it go stale
-    engine.last_crank_slot = 100;
-    engine.max_crank_staleness_slots = 50;
-    let stale_slot: u64 = kani::any();
-    kani::assume(stale_slot > 150); // strictly stale
-    kani::assume(stale_slot < u64::MAX - 1000);
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot >= 50 && now_slot < u64::MAX - 1000);
+
+    kani::assert(canonical_inv(&engine), "INV before execute_trade");
 
     let result = engine.execute_trade(
         &NoOpMatcher,
-        lp, user, stale_slot, 1_000_000, 1_000,
+        lp, user, now_slot, 1_000_000, 1_000,
     );
-    assert!(
-        result == Err(RiskError::Unauthorized),
-        "execute_trade must reject when crank is stale"
-    );
+
+    if now_slot.saturating_sub(engine.last_crank_slot) > engine.max_crank_staleness_slots {
+        // Stale: must reject
+        assert!(
+            result == Err(RiskError::Unauthorized),
+            "execute_trade must reject when crank is stale"
+        );
+    } else {
+        // Fresh: must succeed (conservative trade, adequate capital)
+        assert!(result.is_ok(), "execute_trade must succeed when crank is fresh");
+    }
+
+    kani::assert(canonical_inv(&engine), "INV preserved regardless of path");
 }
 
 /// Verify close_account rejects when pnl > 0 (must warm up first)
