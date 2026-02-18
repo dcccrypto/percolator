@@ -2442,6 +2442,9 @@ fn proof_keeper_crank_advances_slot_monotonically() {
 #[kani::solver(cadical)]
 fn proof_keeper_crank_best_effort_settle() {
     let mut engine = RiskEngine::new(test_params_with_maintenance_fee());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
     // Create user with symbolic small capital — may or may not cover fees
     let capital: u128 = kani::any();
@@ -2460,15 +2463,15 @@ fn proof_keeper_crank_best_effort_settle() {
     engine.accounts[lp as usize].position_size = I128::new(-1000);
     engine.accounts[lp as usize].entry_price = 1_000_000;
 
-    // Set last_fee_slot = 0, so huge fees accrue
-    engine.accounts[user as usize].last_fee_slot = 0;
-    engine.vault = U128::new(capital + 50_000);
+    // Set last_fee_slot = 100 (same as current), so fees accrue from crank advance
+    engine.accounts[user as usize].last_fee_slot = 100;
+    engine.vault = U128::new(capital + 50_000 + 10_000);
     engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
 
     kani::assert(canonical_inv(&engine), "INV before crank");
 
-    // Crank at a later slot - fees will exceed capital
+    // Crank at a later slot - fees will accrue over many slots
     let result = engine.keeper_crank(user, 100_000, 1_000_000, 0, false);
 
     // keeper_crank ALWAYS returns Ok (best-effort settle)
@@ -3063,28 +3066,40 @@ fn proof_lq4_liquidation_fee_paid_to_insurance() {
 #[kani::solver(cadical)]
 fn proof_keeper_crank_best_effort_liquidation() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
     let capital: u128 = kani::any();
+    let oracle_price: u64 = kani::any();
     kani::assume(capital >= 100 && capital <= 5_000);
+    kani::assume(oracle_price >= 950_000 && oracle_price <= 1_050_000);
 
     let user = engine.add_user(0).unwrap();
-    engine.deposit(user, capital, 0).unwrap();
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
 
+    engine.accounts[user as usize].capital = U128::new(capital);
     // Large position: always under-MM at capital <= 5K (MM = 500K for 10M notional)
     engine.accounts[user as usize].position_size = I128::new(10_000_000);
     engine.accounts[user as usize].entry_price = 1_000_000;
+
+    // LP counterparty
+    engine.accounts[lp as usize].capital = U128::new(500_000);
+    engine.accounts[lp as usize].position_size = I128::new(-10_000_000);
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+
+    engine.vault = U128::new(capital + 500_000 + 10_000);
+    engine.insurance_fund.balance = U128::new(10_000);
     sync_engine_aggregates(&mut engine);
 
-    let oracle_price: u64 = 1_000_000;
-    let now_slot: u64 = 1;
+    kani::assert(canonical_inv(&engine), "INV before crank");
 
     // keeper_crank must always succeed regardless of liquidation outcomes
-    let result = engine.keeper_crank(user, now_slot, oracle_price, 0, false);
+    let result = engine.keeper_crank(user, 101, oracle_price, 0, false);
 
-    assert!(
-        result.is_ok(),
-        "keeper_crank must always succeed (best-effort)"
-    );
+    assert!(result.is_ok(), "keeper_crank must always succeed (best-effort)");
+
+    kani::assert(canonical_inv(&engine), "INV after crank with liquidation");
 }
 
 /// LQ7: Symbolic oracle liquidation — mark PnL settlement + all post-conditions.
@@ -3306,33 +3321,48 @@ fn gc_never_frees_account_with_positive_value() {
     kani::assert(canonical_inv(&engine), "INV preserved by GC");
 }
 
-/// canonical_inv preserved by garbage_collect_dust
+/// canonical_inv preserved by garbage_collect_dust — symbolic state
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn fast_valid_preserved_by_garbage_collect_dust() {
     let mut engine = RiskEngine::new(test_params());
-
-    // Set global funding index explicitly
     engine.funding_index_qpb_e6 = I128::new(0);
 
-    // Create a dust account
+    // Create a dust account + a non-dust account with symbolic capital
     let dust_idx = engine.add_user(0).unwrap();
+    let live_idx = engine.add_user(0).unwrap();
 
-    // Set funding index (required by GC predicate)
+    let live_capital: u128 = kani::any();
+    kani::assume(live_capital > 0 && live_capital <= 5_000);
+
+    // Dust account: zero everything
     engine.accounts[dust_idx as usize].funding_index = I128::new(0);
     engine.accounts[dust_idx as usize].capital = U128::new(0);
     engine.accounts[dust_idx as usize].position_size = I128::new(0);
     engine.accounts[dust_idx as usize].reserved_pnl = 0;
     engine.accounts[dust_idx as usize].pnl = I128::new(0);
 
+    // Live account: symbolic capital
+    engine.accounts[live_idx as usize].funding_index = I128::new(0);
+    engine.accounts[live_idx as usize].capital = U128::new(live_capital);
+    engine.accounts[live_idx as usize].position_size = I128::new(0);
+    engine.accounts[live_idx as usize].reserved_pnl = 0;
+    engine.accounts[live_idx as usize].pnl = I128::new(0);
+
+    engine.vault = U128::new(live_capital);
+    sync_engine_aggregates(&mut engine);
+
     kani::assert(canonical_inv(&engine), "setup must satisfy INV");
 
     // Run GC
     let closed = engine.garbage_collect_dust();
 
-    // Non-vacuous: GC should actually close the dust account
+    // Non-vacuous: GC should close the dust account
     kani::assert(closed > 0, "GC should close the dust account");
+
+    // Live account must survive
+    kani::assert(engine.is_used(live_idx as usize), "live account survives GC");
 
     kani::assert(canonical_inv(&engine), "INV preserved by garbage_collect_dust");
 }
@@ -3649,56 +3679,69 @@ fn proof_inv_holds_for_new_engine() {
     );
 }
 
-/// INV preserved by add_user
+/// INV preserved by add_user — fresh engine + freelist recycling
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_inv_preserved_by_add_user() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
-    // Precondition: INV holds (assert, not assume — fresh engine must satisfy INV)
-    kani::assert(canonical_inv(&engine), "fresh engine must satisfy INV");
+    // First: add a user, deposit, then close to populate the freelist
+    let first = engine.add_user(0).unwrap();
+    engine.deposit(first, 1_000, 0).unwrap();
+    engine.close_account(first, 100, 1_000_000).unwrap();
 
+    kani::assert(canonical_inv(&engine), "INV after close (freelist populated)");
+
+    // Now add_user should recycle the freed slot
     let fee: u128 = kani::any();
-    kani::assume(fee < 1_000_000); // Reasonable bound
+    kani::assume(fee < 1_000_000);
 
     let idx = assert_ok!(
         engine.add_user(fee),
-        "add_user must succeed on fresh engine with bounded fee"
+        "add_user must succeed with freelist recycling"
     );
 
-    // Postcondition: INV must hold after successful add_user
-    kani::assert(canonical_inv(&engine), "INV preserved by add_user on Ok");
-    kani::assert(
-        engine.is_used(idx as usize),
-        "add_user must mark account as used",
-    );
-    kani::assert(
-        engine.num_used_accounts >= 1,
-        "num_used_accounts must increase",
-    );
+    kani::assert(canonical_inv(&engine), "INV preserved by add_user (recycled)");
+    kani::assert(engine.is_used(idx as usize), "add_user must mark account as used");
+
+    // The recycled slot should be the same one we freed
+    kani::assert(idx == first, "freelist should recycle the freed slot");
 }
 
-/// INV preserved by add_lp
+/// INV preserved by add_lp — fresh engine + freelist recycling
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_inv_preserved_by_add_lp() {
     let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
 
-    // Precondition: INV holds (assert, not assume — fresh engine must satisfy INV)
-    kani::assert(canonical_inv(&engine), "fresh engine must satisfy INV");
+    // First: add a user, deposit, then close to populate the freelist
+    let first = engine.add_user(0).unwrap();
+    engine.deposit(first, 1_000, 0).unwrap();
+    engine.close_account(first, 100, 1_000_000).unwrap();
+
+    kani::assert(canonical_inv(&engine), "INV after close (freelist populated)");
 
     let fee: u128 = kani::any();
     kani::assume(fee < 1_000_000);
 
-    let _lp = assert_ok!(
+    let lp = assert_ok!(
         engine.add_lp([1u8; 32], [0u8; 32], fee),
-        "add_lp must succeed on fresh engine with bounded fee"
+        "add_lp must succeed with freelist recycling"
     );
 
-    // Postcondition: INV must hold after successful add_lp
-    kani::assert(canonical_inv(&engine), "INV preserved by add_lp on Ok");
+    kani::assert(canonical_inv(&engine), "INV preserved by add_lp (recycled)");
+    kani::assert(engine.is_used(lp as usize), "add_lp must mark account as used");
+
+    // The recycled slot should be the same one we freed
+    kani::assert(lp == first, "freelist should recycle the freed slot");
 }
 
 // ============================================================================
