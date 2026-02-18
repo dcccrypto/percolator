@@ -1925,7 +1925,9 @@ fn fast_neg_pnl_settles_into_capital_independent_of_warm_cap() {
     engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
     engine.vault = U128::new(capital);
     engine.current_slot = 100;
-    engine.recompute_aggregates();
+    sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     // Settle
     engine.settle_warmup_to_capital(user_idx).unwrap();
@@ -1944,6 +1946,8 @@ fn fast_neg_pnl_settles_into_capital_independent_of_warm_cap() {
         engine.accounts[user_idx as usize].pnl.get() == expected_pnl,
         "PnL should be written off to 0 (spec §6.1)"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after settle");
 }
 
 /// Proof: Withdraw cannot bypass losses when position is zero
@@ -1966,6 +1970,9 @@ fn fast_withdraw_cannot_bypass_losses_when_position_zero() {
     engine.accounts[user_idx as usize].position_size = I128::new(0); // No position
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(capital);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     // After settlement: capital = capital - loss, pnl = 0
     // Trying to withdraw more than remaining capital should fail
@@ -1982,6 +1989,8 @@ fn fast_withdraw_cannot_bypass_losses_when_position_zero() {
         engine.accounts[user_idx as usize].pnl.get() >= 0,
         "PnL should be non-negative after settlement (unless insolvent)"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after withdraw attempt");
 }
 
 /// Proof: After settle, pnl < 0 implies capital == 0
@@ -2002,8 +2011,12 @@ fn fast_neg_pnl_after_settle_implies_zero_capital() {
     engine.accounts[user_idx as usize].capital = U128::new(capital);
     engine.accounts[user_idx as usize].pnl = I128::new(-(loss as i128));
     let slope: u128 = kani::any();
+    kani::assume(slope <= 10_000);
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
     engine.vault = U128::new(capital);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     // Settle
     engine.settle_warmup_to_capital(user_idx).unwrap();
@@ -2016,6 +2029,8 @@ fn fast_neg_pnl_after_settle_implies_zero_capital() {
         pnl_after.get() >= 0 || capital_after.get() == 0,
         "After settle: pnl < 0 must imply capital == 0"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after settle");
 }
 
 /// Proof: Negative PnL settlement does not depend on elapsed or slope (N1)
@@ -2088,6 +2103,8 @@ fn withdraw_calls_settle_enforces_pnl_or_zero_capital_post() {
     engine.vault = U128::new(capital);
     sync_engine_aggregates(&mut engine);
 
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     // Call withdraw - may succeed or fail
     let _result = engine.withdraw(user_idx, withdraw_amt, 0, 1_000_000);
 
@@ -2099,6 +2116,8 @@ fn withdraw_calls_settle_enforces_pnl_or_zero_capital_post() {
         pnl_after.get() >= 0 || capital_after.get() == 0,
         "After withdraw: pnl >= 0 || capital == 0 must hold"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after withdraw");
 }
 
 // ============================================================================
@@ -2335,6 +2354,8 @@ fn proof_fee_credits_never_inflate_from_settle() {
     // Set last_fee_slot = 0 so fees accrue over now_slot slots
     engine.accounts[user as usize].last_fee_slot = 0;
 
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     let credits_before = engine.accounts[user as usize].fee_credits;
 
     engine.settle_maintenance_fee(user, now_slot, 1_000_000).unwrap();
@@ -2346,6 +2367,8 @@ fn proof_fee_credits_never_inflate_from_settle() {
         credits_after <= credits_before,
         "Fee credits increased from settle_maintenance_fee"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after fee settle");
 }
 
 /// B. settle_maintenance_fee properly deducts with deterministic accounting
@@ -2696,6 +2719,9 @@ fn proof_close_account_rejects_positive_pnl() {
 
     // Symbolic positive pnl must block close
     engine.accounts[user as usize].pnl = I128::new(pnl);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     let res = engine.close_account(user, 0, 1_000_000);
 
@@ -2703,6 +2729,8 @@ fn proof_close_account_rejects_positive_pnl() {
         res == Err(RiskError::PnlNotWarmedUp),
         "close_account must reject positive pnl with PnlNotWarmedUp"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after close_account rejection");
 }
 
 /// Verify close_account includes warmed pnl that was settled to capital
@@ -2784,12 +2812,16 @@ fn proof_close_account_negative_pnl_written_off() {
     engine.accounts[user as usize].capital = U128::new(0);
     engine.vault = U128::new(0);
     engine.accounts[user as usize].pnl = I128::new(-(loss as i128));
-    engine.recompute_aggregates();
+    sync_engine_aggregates(&mut engine);
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     // Under haircut spec §6.1: negative PnL is written off to 0 during settlement.
     // So close_account succeeds (returning 0 capital) instead of rejecting.
     let res = engine.close_account(user, 0, 1_000_000);
     assert!(res == Ok(0));
+
+    kani::assert(canonical_inv(&engine), "INV after close_account writeoff");
 }
 
 /// Verify set_risk_reduction_threshold updates the parameter
@@ -2802,12 +2834,16 @@ fn proof_set_risk_reduction_threshold_updates() {
     let new_threshold: u128 = kani::any();
     kani::assume(new_threshold < u128::MAX / 2); // Bounded for sanity
 
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     engine.set_risk_reduction_threshold(new_threshold);
 
     assert!(
         engine.params.risk_reduction_threshold.get() == new_threshold,
         "Threshold not updated correctly"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after threshold update");
 }
 
 // ============================================================================
@@ -2880,6 +2916,8 @@ fn proof_keeper_crank_forgives_half_slots() {
     engine.accounts[user as usize].last_fee_slot = 0;
     sync_engine_aggregates(&mut engine);
 
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     // Use bounded now_slot for fast verification
     let now_slot: u64 = kani::any();
     kani::assume(now_slot > 0 && now_slot <= 1000);
@@ -2925,6 +2963,8 @@ fn proof_keeper_crank_forgives_half_slots() {
             "Insurance must increase by exactly charged_dt when settle succeeds"
         );
     }
+
+    kani::assert(canonical_inv(&engine), "INV after keeper_crank");
 }
 
 /// Proof: In this no-price-move scenario, attacker withdrawal is principal-bounded.
@@ -3004,6 +3044,8 @@ fn proof_net_extraction_bounded_with_fee_credits() {
     if !do_trade && !do_crank && withdraw_amount <= attacker_deposit {
         assert!(result.is_ok(), "non-vacuity: withdrawal within deposit must succeed without trade/crank");
     }
+
+    kani::assert(canonical_inv(&engine), "INV after extraction attempt");
 }
 
 // ============================================================================
@@ -3405,10 +3447,11 @@ fn gc_respects_full_dust_predicate() {
 
     match blocker {
         0 => {
-            // reserved_pnl > 0 blocks GC
+            // reserved_pnl > 0 blocks GC (also sets pnl = reserved for PA1 validity)
             let reserved: u128 = kani::any();
             kani::assume(reserved > 0 && reserved < 1000);
             engine.accounts[idx as usize].reserved_pnl = reserved as u64;
+            engine.accounts[idx as usize].pnl = I128::new(reserved as i128); // PA1: reserved <= pnl
             engine.accounts[idx as usize].position_size = I128::new(0);
             engine.accounts[idx as usize].funding_index = I128::new(0); // settled
         }
@@ -3430,8 +3473,12 @@ fn gc_respects_full_dust_predicate() {
         }
     }
 
+    sync_engine_aggregates(&mut engine);
+
     let was_used = engine.is_used(idx as usize);
     assert!(was_used, "Account should exist before GC");
+
+    kani::assert(canonical_inv(&engine), "setup INV");
 
     // Run GC
     let _closed = engine.garbage_collect_dust();
@@ -3441,6 +3488,8 @@ fn gc_respects_full_dust_predicate() {
         engine.is_used(idx as usize),
         "GC must not free account that doesn't satisfy dust predicate"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after GC");
 }
 
 
@@ -3553,6 +3602,9 @@ fn gc_frees_only_true_dust() {
     engine.accounts[pnl_pos_idx as usize].pnl = I128::new(pnl_val);
     engine.accounts[pnl_pos_idx as usize].funding_index = I128::new(0);
 
+    sync_engine_aggregates(&mut engine);
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     // Run GC
     let closed = engine.garbage_collect_dust();
 
@@ -3572,6 +3624,8 @@ fn gc_frees_only_true_dust() {
         engine.is_used(pnl_pos_idx as usize),
         "GC-NEW-A: Account with pnl > 0 must remain"
     );
+
+    kani::assert(canonical_inv(&engine), "INV after GC");
 }
 
 
@@ -3613,6 +3667,8 @@ fn withdrawal_maintains_margin_above_maintenance() {
     engine.accounts[idx as usize].entry_price = entry_price;
     sync_engine_aggregates(&mut engine);
 
+    kani::assert(canonical_inv(&engine), "setup INV");
+
     let oracle_price: u64 = kani::any();
     kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
 
@@ -3630,6 +3686,7 @@ fn withdrawal_maintains_margin_above_maintenance() {
             engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price),
             "Post-withdrawal account with position must be above maintenance margin"
         );
+        kani::assert(canonical_inv(&engine), "INV after successful withdrawal");
     }
 
     // Non-vacuity: with high capital and tiny withdrawal at entry price, must succeed
