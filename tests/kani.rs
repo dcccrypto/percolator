@@ -4487,45 +4487,65 @@ fn proof_liquidate_preserves_inv() {
 
 /// settle_warmup_to_capital: canonical_inv preserved for positive PnL (fully symbolic)
 ///
+/// Two-account topology: user1 (target) + user2 (bystander with independent PnL).
+/// This ensures pnl_pos_tot includes multi-account contributions so haircut_ratio
+/// depends on the aggregate, not just the target account.
+///
 /// Symbolic inputs exercise all branches in §6.2 profit conversion:
 /// - Partial conversion: slope*elapsed < avail_gross (small slope or elapsed)
-/// - Haircut < 1: vault_margin < pnl (tight vault → h_num < h_den)
+/// - Haircut < 1: vault_margin < total_pnl_pos (tight vault → h_num < h_den)
 /// - Non-zero reserved_pnl: reduces avail_gross below raw positive pnl
 /// - Zero conversion: slope=0 or elapsed=0 → cap=0 → x=0
+/// - Bounds up to 5000 to exercise mul_u128 with realistic magnitudes
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_settle_warmup_preserves_inv() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(0).unwrap();
+    let user2 = engine.add_user(0).unwrap();
 
-    // Symbolic inputs
+    // User 1 (target): symbolic warmup state
     let capital: u128 = kani::any();
     let pnl: u128 = kani::any();
     let slope: u128 = kani::any();
     let warmup_start: u64 = kani::any();
     let current_slot: u64 = kani::any();
     let reserved_pnl: u64 = kani::any();
-    let insurance: u128 = kani::any();
-    let vault_margin: u128 = kani::any();
 
-    kani::assume(capital <= 50);
-    kani::assume(pnl >= 1 && pnl <= 50);
-    kani::assume(slope <= 10);
+    kani::assume(capital <= 1_000);
+    kani::assume(pnl >= 1 && pnl <= 1_000);
+    kani::assume(slope <= 100);
     kani::assume(warmup_start <= 10);
     kani::assume(current_slot >= warmup_start && current_slot <= 10);
-    kani::assume((reserved_pnl as u128) <= pnl); // PA1: reserved <= max(pnl, 0)
-    kani::assume(insurance <= 50);
-    kani::assume(vault_margin <= pnl); // residual ∈ [0, pnl] → h ∈ [0, 1]
+    kani::assume((reserved_pnl as u128) <= pnl);
 
-    // vault = capital + insurance + vault_margin ensures inv_accounting (vault >= c_tot + insurance)
-    let vault = capital + insurance + vault_margin;
+    // User 2 (bystander): symbolic capital and positive PnL
+    // This makes pnl_pos_tot = pnl + pnl2, so haircut depends on aggregate
+    let capital2: u128 = kani::any();
+    let pnl2: u128 = kani::any();
+    kani::assume(capital2 <= 1_000);
+    kani::assume(pnl2 <= 1_000);
+
+    // Vault and insurance
+    let insurance: u128 = kani::any();
+    let vault_margin: u128 = kani::any();
+    kani::assume(insurance <= 1_000);
+    // residual = vault_margin; total_pnl_pos = pnl + pnl2; h can be < 1
+    let total_pnl_pos = pnl + pnl2;
+    kani::assume(vault_margin <= total_pnl_pos);
+
+    let vault = capital + capital2 + insurance + vault_margin;
 
     engine.accounts[user_idx as usize].capital = U128::new(capital);
     engine.accounts[user_idx as usize].pnl = I128::new(pnl as i128);
     engine.accounts[user_idx as usize].warmup_started_at_slot = warmup_start;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
     engine.accounts[user_idx as usize].reserved_pnl = reserved_pnl;
+
+    engine.accounts[user2 as usize].capital = U128::new(capital2);
+    engine.accounts[user2 as usize].pnl = I128::new(pnl2 as i128);
+
     engine.insurance_fund.balance = U128::new(insurance);
     engine.vault = U128::new(vault);
     engine.current_slot = current_slot;
@@ -4541,36 +4561,60 @@ fn proof_settle_warmup_preserves_inv() {
         canonical_inv(&engine),
         "INV must hold after settle_warmup_to_capital",
     );
+
+    // User2 must be untouched
+    kani::assert(
+        engine.accounts[user2 as usize].capital.get() == capital2,
+        "bystander capital unchanged",
+    );
+    kani::assert(
+        engine.accounts[user2 as usize].pnl.get() == pnl2 as i128,
+        "bystander pnl unchanged",
+    );
 }
 
 /// settle_warmup_to_capital: canonical_inv preserved for negative PnL (fully symbolic)
+///
+/// Two-account topology: user1 (target, negative PnL) + user2 (bystander, positive PnL).
+/// user2's positive PnL contributes to pnl_pos_tot, making aggregate maintenance non-trivial
+/// when user1's loss settlement modifies aggregates via set_capital/set_pnl.
 ///
 /// Symbolic inputs exercise all branches in §6.1 loss settlement:
 /// - Insolvency writeoff: loss > capital → capital zeroed, residual written off
 /// - Zero capital: capital=0 → pay=0, entire loss written off immediately
 /// - Solvent case: loss <= capital → pay=loss, pnl→0
+/// Bounds up to 5000 for realistic magnitudes.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_settle_warmup_negative_pnl_immediate() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(0).unwrap();
+    let user2 = engine.add_user(0).unwrap();
 
-    // Symbolic inputs
+    // User 1 (target): negative PnL
     let capital: u128 = kani::any();
     let loss: u128 = kani::any();
-    let insurance: u128 = kani::any();
-
     kani::assume(capital <= 5_000);
     kani::assume(loss >= 1 && loss <= 5_000);
+    let pnl = -(loss as i128);
+
+    // User 2 (bystander): symbolic capital and positive PnL
+    let capital2: u128 = kani::any();
+    let pnl2: u128 = kani::any();
+    kani::assume(capital2 <= 5_000);
+    kani::assume(pnl2 <= 5_000);
+
+    let insurance: u128 = kani::any();
     kani::assume(insurance <= 5_000);
 
-    let pnl = -(loss as i128);
-    // Minimum vault for inv_accounting (no positive PnL → no residual needed)
-    let vault = capital + insurance;
+    // vault must cover c_tot + insurance; residual covers pnl2
+    let vault = capital + capital2 + insurance + pnl2;
 
     engine.accounts[user_idx as usize].capital = U128::new(capital);
     engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+    engine.accounts[user2 as usize].capital = U128::new(capital2);
+    engine.accounts[user2 as usize].pnl = I128::new(pnl2 as i128);
     engine.insurance_fund.balance = U128::new(insurance);
     engine.vault = U128::new(vault);
     sync_engine_aggregates(&mut engine);
@@ -4596,6 +4640,16 @@ fn proof_settle_warmup_negative_pnl_immediate() {
     kani::assert(
         account.pnl.get() >= 0,
         "Negative PnL must be fully resolved after settlement",
+    );
+
+    // User2 untouched
+    kani::assert(
+        engine.accounts[user2 as usize].capital.get() == capital2,
+        "bystander capital unchanged",
+    );
+    kani::assert(
+        engine.accounts[user2 as usize].pnl.get() == pnl2 as i128,
+        "bystander pnl unchanged",
     );
 }
 
