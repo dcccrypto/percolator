@@ -8776,12 +8776,12 @@ fn inductive_settle_loss_preserves_accounting() {
 ///   Since h_num = min(residual, pnl_pos_tot) <= residual: y <= residual  QED
 #[kani::proof]
 fn inductive_settle_warmup_profit_preserves_accounting() {
-    let vault: u128 = kani::any();
-    let c_tot: u128 = kani::any();
-    let insurance: u128 = kani::any();
-    let pnl_pos_tot: u128 = kani::any();
-    let x: u128 = kani::any(); // amount converted from pnl to capital
-    let y: u128 = kani::any(); // haircutted amount credited to capital
+    // Use u8 symbolic domain (lifted to u128) for tractable nonlinear arithmetic.
+    let vault = kani::any::<u8>() as u128;
+    let c_tot = kani::any::<u8>() as u128;
+    let insurance = kani::any::<u8>() as u128;
+    let pnl_pos_tot = kani::any::<u8>() as u128;
+    let x = kani::any::<u8>() as u128; // amount converted from pnl to capital
 
     // Pre: inv_accounting
     kani::assume(c_tot.checked_add(insurance).is_some());
@@ -8792,10 +8792,12 @@ fn inductive_settle_warmup_profit_preserves_accounting() {
     kani::assume(pnl_pos_tot > 0);
     kani::assume(x <= pnl_pos_tot);
 
-    // Haircut bounds: y = floor(x * min(residual, pnl_pos_tot) / pnl_pos_tot)
-    // Guarantees: y <= x (ratio <= 1) and y <= residual (see derivation above)
-    kani::assume(y <= x);
-    kani::assume(y <= residual);
+    // Model production haircut computation:
+    // y = floor(x * min(residual, pnl_pos_tot) / pnl_pos_tot)
+    let h_num = core::cmp::min(residual, pnl_pos_tot);
+    let h_den = pnl_pos_tot;
+    kani::assume(x.checked_mul(h_num).is_some());
+    let y = (x * h_num) / h_den;
 
     // Operation: c_tot += y (capital increases by haircutted amount)
     kani::assume(c_tot.checked_add(y).is_some());
@@ -8815,14 +8817,14 @@ fn inductive_settle_warmup_profit_preserves_accounting() {
 /// Result: Loss increases residual headroom; haircut ensures profit phase stays within it.
 #[kani::proof]
 fn inductive_settle_warmup_full_preserves_accounting() {
-    let vault: u128 = kani::any();
-    let c_tot: u128 = kani::any();
-    let insurance: u128 = kani::any();
-    let capital: u128 = kani::any();
-    let loss_pnl: i128 = kani::any(); // negative pnl for loss phase
-    let pnl_pos_tot: u128 = kani::any();
-    let x: u128 = kani::any(); // profit conversion amount
-    let y: u128 = kani::any(); // haircutted amount
+    // Use u8 symbolic domain (lifted to u128) for tractable nonlinear arithmetic.
+    let vault = kani::any::<u8>() as u128;
+    let c_tot = kani::any::<u8>() as u128;
+    let insurance = kani::any::<u8>() as u128;
+    let capital = kani::any::<u8>() as u128;
+    let loss_pnl = kani::any::<i8>() as i128; // negative pnl for loss phase
+    let pnl_pos_tot = kani::any::<u8>() as u128;
+    let x = kani::any::<u8>() as u128; // profit conversion amount
 
     // Pre: inv_accounting
     kani::assume(c_tot.checked_add(insurance).is_some());
@@ -8845,9 +8847,11 @@ fn inductive_settle_warmup_full_preserves_accounting() {
     // Residual after loss (increased: loss freed headroom)
     let residual_after_loss = vault - c_tot_after_loss - insurance;
 
-    // Haircut bounds on post-loss residual (see proof 8 derivation)
-    kani::assume(y <= x);
-    kani::assume(y <= residual_after_loss);
+    // Model production haircut computation on post-loss state.
+    let h_num = core::cmp::min(residual_after_loss, pnl_pos_tot);
+    let h_den = pnl_pos_tot;
+    kani::assume(x.checked_mul(h_num).is_some());
+    let y = (x * h_num) / h_den;
 
     kani::assume(c_tot_after_loss.checked_add(y).is_some());
     let c_tot_final = c_tot_after_loss + y;
