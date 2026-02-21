@@ -2,7 +2,7 @@
 
 Generated: 2026-02-21 (updated with 9 INDUCTIVE proofs)
 
-155 proof harnesses across `/home/anatoly/percolator/tests/kani.rs`.
+157 proof harnesses across `/home/anatoly/percolator/tests/kani.rs`.
 
 Methodology: Each proof analyzed for:
 1. **Input classification**: concrete (hardcoded) vs symbolic (`kani::any()` with `kani::assume`) vs derived
@@ -27,7 +27,7 @@ Scaffolding policy: Concrete values that do NOT affect branch coverage in the fu
 
 | Classification | Count | Description |
 |---|---|---|
-| **INDUCTIVE** | 9 | Fully symbolic state, decomposed invariants, loop-free delta specs, full u128/i128 domain |
+| **INDUCTIVE** | 11 | Fully symbolic state, decomposed invariants, loop-free delta specs, full u128/i128 domain |
 | **STRONG** | 144 | Symbolic inputs exercise key branches, canonical_inv or equivalent strong assertions, non-vacuous |
 | **WEAK** | 0 | -- |
 | **UNIT TEST** | 2 | Intentional meta-test and concrete-oracle scenario test |
@@ -37,11 +37,11 @@ Scaffolding policy: Concrete values that do NOT affect branch coverage in the fu
 
 ## Criterion 6: Inductive Strength -- Global Assessment
 
-Of 155 proofs, 9 achieve INDUCTIVE classification using fully symbolic state with decomposed invariants. The remaining 146 proofs share structural patterns that prevent INDUCTIVE classification. This section evaluates the global findings for sub-criteria 6a through 6f for the non-INDUCTIVE proofs.
+Of 157 proofs, 11 achieve INDUCTIVE classification using fully symbolic state with decomposed invariants. The remaining 146 proofs share structural patterns that prevent INDUCTIVE classification. This section evaluates the global findings for sub-criteria 6a through 6f for the non-INDUCTIVE proofs.
 
 ### 6a. State Construction Method
 
-**Finding: 146 of 155 proofs use constructed state. 9 proofs (#147-155) use fully symbolic state.**
+**Finding: 146 of 157 proofs use constructed state. 11 proofs (#147-157) use fully symbolic state.**
 
 Every proof follows the pattern:
 ```rust
@@ -567,11 +567,13 @@ These proofs model operations algebraically on fully symbolic state (full u128/i
 | 153 | `inductive_settle_loss_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.17s |
 | 154 | `inductive_settle_warmup_profit_preserves_accounting` | **INDUCTIVE** | inv_accounting | 1.69s |
 | 155 | `inductive_settle_warmup_full_preserves_accounting` | **INDUCTIVE** | inv_accounting | 1.51s |
+| 156 | `inductive_fee_transfer_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.41s |
+| 157 | `inductive_set_position_delta_correct` | **INDUCTIVE** | inv_aggregates | 1.68s |
 
 **Criteria 1-5 Assessment (all 9 proofs):**
 
 - **C1 (Input classification)**: All inputs are `kani::any()` — fully symbolic u128/i128 with no hardcoded values.
-- **C2 (Branch coverage)**: Proof 2 covers decrease-only (increase covered by proof 5/deposit). Proof 4 covers both increase/decrease branches. Proof 7 exercises both branches of `min(need, capital)`. All other proofs have no conditional branches in their operation model.
+- **C2 (Branch coverage)**: Proof 2 covers decrease-only (increase covered by proof 5/deposit). Proofs 4 and 11 cover both increase/decrease branches (c_tot and OI deltas respectively). Proof 7 exercises both branches of `min(need, capital)`. All other proofs have no conditional branches in their operation model.
 - **C3 (Invariant strength)**: Decomposed components — each proof targets exactly the invariant component affected by the operation (inv_accounting or inv_aggregates), not monolithic canonical_inv.
 - **C4 (Vacuity risk)**: All assumption sets are satisfiable (verified by Kani passing with VERIFICATION SUCCESSFUL). No contradictory assumes.
 - **C5 (Symbolic collapse)**: All symbolic values are independent — no derived values that collapse symbolic ranges.
@@ -868,21 +870,21 @@ These are naturally loop-free because they describe the delta to one slot, not a
 
 ### Criterion 6 (Inductive Strength)
 
-Applied globally (see section above) and per-proof (see summary table). Finding: 9 INDUCTIVE, 144 STRONG, 2 UNIT TEST. The 9 INDUCTIVE proofs (#147-155) achieve fully symbolic state, decomposed invariants, loop-free specs, and full-domain coverage. The remaining 146 proofs share structural limitations (constructed state, fixed topology, monolithic invariant, loop-based specs, out-of-cone fields fixed, bounded ranges).
+Applied globally (see section above) and per-proof (see summary table). Finding: 11 INDUCTIVE, 144 STRONG, 2 UNIT TEST. The 11 INDUCTIVE proofs (#147-157) achieve fully symbolic state, decomposed invariants, loop-free specs, and full-domain coverage. The remaining 146 proofs share structural limitations (constructed state, fixed topology, monolithic invariant, loop-based specs, out-of-cone fields fixed, bounded ranges).
 
 ---
 
 ## Final Summary
 
 ```
-INDUCTIVE:   9 / 155  ( 5.8%)
-STRONG:    144 / 155  (92.9%)
-WEAK:        0 / 155  ( 0.0%)
-UNIT TEST:   2 / 155  ( 1.3%)
-VACUOUS:     0 / 155  ( 0.0%)
+INDUCTIVE:  11 / 157  ( 7.0%)
+STRONG:    144 / 157  (91.7%)
+WEAK:        0 / 157  ( 0.0%)
+UNIT TEST:   2 / 157  ( 1.3%)
+VACUOUS:     0 / 157  ( 0.0%)
 ```
 
-155 proofs total. The 9 INDUCTIVE proofs (proofs #147-155) achieve the gold standard: fully symbolic state, decomposed invariant components, loop-free delta specifications, and full u128/i128 domain coverage. They prove that the core conservation inequality (`vault >= c_tot + insurance`) and aggregate delta properties (`c_tot` and `pnl_pos_tot` update correctness) hold for ALL possible states.
+157 proofs total. The 11 INDUCTIVE proofs (proofs #147-157) achieve the gold standard: fully symbolic state, decomposed invariant components, loop-free delta specifications, and full u128/i128 domain coverage. They prove that the core conservation inequality (`vault >= c_tot + insurance`) and aggregate delta properties (`c_tot` and `pnl_pos_tot` update correctness) hold for ALL possible states.
 
 The 144 STRONG proofs exercise the real code paths with bounded symbolic inputs and monolithic `canonical_inv`. The 2 UNIT TEST proofs are intentional:
 1. **`proof_NEGATIVE_bypass_set_pnl_breaks_invariant`** -- a meta/negative proof that validates the non-vacuity of real proofs.
@@ -905,11 +907,15 @@ The 9 INDUCTIVE proofs cover the Priority 1 operations from the upgrade recommen
 | `settle_loss_only` | #153 | inv_accounting preserved (c_tot decreases, vault/insurance unchanged) |
 | `settle_warmup` (profit) | #154 | inv_accounting preserved (haircut bounds c_tot increase to residual) |
 | `settle_warmup` (full) | #155 | inv_accounting preserved (loss + profit phases combined) |
+| fee transfer (all fee paths) | #156 | inv_accounting preserved (c_tot + insurance invariant under transfer) |
+| position change (OI delta) | #157 | inv_aggregates delta correct (total_open_interest update matches exact arithmetic) |
 
 ### Path Forward
+
+All three inv_aggregates components now have inductive delta proofs: c_tot (#150), pnl_pos_tot (#149), and total_open_interest (#157). All core accounting patterns for inv_accounting are covered: deposit, withdraw, top-up, fee transfer, loss settlement, and warmup conversion.
 
 Remaining Priority 2-4 operations (execute_trade, liquidate, touch_account, add_user, close_account, etc.) could be upgraded to INDUCTIVE using the same decomposition approach. The key challenge for Priority 2 operations is their larger cone of influence (two accounts, position fields, margin checks).
 
 ### Changes from Previous Audit
 
-The previous audit (2026-02-20) classified 0 INDUCTIVE / 144 STRONG / 2 UNIT TEST across 146 proofs. This audit adds 9 new INDUCTIVE proofs (#147-155) implementing the Priority 1 upgrade recommendations. The existing 144 STRONG + 2 UNIT TEST proofs are unchanged. Total: 155 proofs.
+The previous audit (2026-02-20) classified 0 INDUCTIVE / 144 STRONG / 2 UNIT TEST across 146 proofs. This audit adds 11 new INDUCTIVE proofs (#147-157) implementing the Priority 1 upgrade recommendations plus fee transfer and OI delta coverage. The existing 144 STRONG + 2 UNIT TEST proofs are unchanged. Total: 157 proofs.

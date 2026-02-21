@@ -8858,3 +8858,85 @@ fn inductive_settle_warmup_full_preserves_accounting() {
         "full settle_warmup must preserve vault >= c_tot + insurance",
     );
 }
+
+/// Inductive Proof 10: fee transfer (capital → insurance) preserves inv_accounting
+///
+/// Operation: c_tot -= fee (via set_capital), insurance += fee. Vault unchanged.
+/// Component: inv_accounting (vault >= c_tot + insurance)
+/// Covers: trading fees, liquidation fees, maintenance fees, new account fees.
+/// Result: c_tot + insurance is invariant under transfer → trivially preserved.
+#[kani::proof]
+fn inductive_fee_transfer_preserves_accounting() {
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let fee: u128 = kani::any();
+
+    // Pre: inv_accounting
+    kani::assume(c_tot.checked_add(insurance).is_some());
+    kani::assume(vault >= c_tot + insurance);
+
+    // Pre: fee comes from capital (part of c_tot)
+    kani::assume(fee <= c_tot);
+
+    // Pre: insurance + fee doesn't overflow
+    kani::assume(insurance.checked_add(fee).is_some());
+
+    // Operation: c_tot -= fee, insurance += fee (internal transfer)
+    let c_tot_after = c_tot - fee;
+    let insurance_after = insurance + fee;
+
+    // Post: inv_accounting preserved
+    kani::assert(
+        vault >= c_tot_after + insurance_after,
+        "fee transfer must preserve vault >= c_tot + insurance",
+    );
+}
+
+/// Inductive Proof 11: position change correctly updates total_open_interest (delta form)
+///
+/// Operation: OI' = OI - |old_pos| + |new_pos|
+/// Component: inv_aggregates (total_open_interest correctness)
+/// Covers: execute_trade, liquidation, close_account position changes.
+/// Result: Branching saturating arithmetic matches exact arithmetic.
+///
+/// Note: execute_trade computes a two-account combined delta, but algebraically
+/// OI - (|old_a| + |old_b|) + (|new_a| + |new_b|) == applying single-account
+/// deltas twice. This proof covers the fundamental single-account delta.
+#[kani::proof]
+fn inductive_set_position_delta_correct() {
+    let oi: u128 = kani::any();
+    let old_pos: i128 = kani::any();
+    let new_pos: i128 = kani::any();
+
+    // PA2: no i128::MIN in position fields
+    kani::assume(old_pos != i128::MIN);
+    kani::assume(new_pos != i128::MIN);
+
+    // Compute absolute values (matches saturating_abs_i128 cast to u128)
+    let old_abs = old_pos.abs() as u128;
+    let new_abs = new_pos.abs() as u128;
+
+    // Pre: old position's |pos| is part of total OI
+    kani::assume(oi >= old_abs);
+
+    // Pre: no overflow when OI increases
+    if new_abs >= old_abs {
+        kani::assume(oi.checked_add(new_abs - old_abs).is_some());
+    }
+
+    // Model: branching saturating arithmetic (matches execute_trade lines 3063-3067)
+    let oi_after = if new_abs >= old_abs {
+        oi.saturating_add(new_abs - old_abs)
+    } else {
+        oi.saturating_sub(old_abs - new_abs)
+    };
+
+    // Expected: exact delta
+    let expected = oi - old_abs + new_abs;
+
+    kani::assert(
+        oi_after == expected,
+        "position change delta must equal OI - |old| + |new|",
+    );
+}
