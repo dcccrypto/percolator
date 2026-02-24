@@ -178,6 +178,22 @@ fn params_regime_a() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000),
         liquidation_buffer_bps: 100,
         min_liquidation_abs: U128::new(100_000),
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 1_000_000,
+        funding_premium_max_bps_per_slot: 5,
+        partial_liquidation_bps: 2000,
+        partial_liquidation_cooldown_slots: 30,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
@@ -197,6 +213,22 @@ fn params_regime_b() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000),
         liquidation_buffer_bps: 100,
         min_liquidation_abs: U128::new(100_000),
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 1_000_000,
+        funding_premium_max_bps_per_slot: 5,
+        partial_liquidation_bps: 2000,
+        partial_liquidation_cooldown_slots: 30,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
@@ -307,8 +339,8 @@ struct FuzzState {
     engine: Box<RiskEngine>,
     live_accounts: Vec<u16>,
     lp_idx: Option<u16>,
-    account_ids: Vec<u64>, // Track allocated account IDs for uniqueness
-    rng_state: u64,        // For deterministic selector resolution
+    account_ids: Vec<u64>,  // Track allocated account IDs for uniqueness
+    rng_state: u64,         // For deterministic selector resolution
     last_oracle_price: u64, // Track last oracle price for conservation checks with mark PnL
 }
 
@@ -552,9 +584,9 @@ impl FuzzState {
                 let last_slot_before = self.engine.last_funding_slot;
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
-                let result = self
-                    .engine
-                    .accrue_funding_with_rate(now_slot, *oracle_price, *rate_bps);
+                let result =
+                    self.engine
+                        .accrue_funding_with_rate(now_slot, *oracle_price, *rate_bps);
 
                 match result {
                     Ok(()) => {
@@ -1202,14 +1234,16 @@ fn run_deterministic_fuzzer(
             eprintln!("Conservation failed after setup for seed {}", seed);
             eprintln!(
                 "  vault={}, insurance={}",
-                state.engine.vault.get(), state.engine.insurance_fund.balance.get()
+                state.engine.vault.get(),
+                state.engine.insurance_fund.balance.get()
             );
             eprintln!("  live_accounts={:?}", state.live_accounts);
             let mut total_cap = 0u128;
             for &idx in &state.live_accounts {
                 eprintln!(
                     "  account[{}]: capital={}",
-                    idx, state.engine.accounts[idx as usize].capital.get()
+                    idx,
+                    state.engine.accounts[idx as usize].capital.get()
                 );
                 total_cap += state.engine.accounts[idx as usize].capital.get();
             }
@@ -1436,7 +1470,9 @@ fn conservation_uses_settled_pnl_regression() {
 
     // Accrue significant funding WITHOUT touching accounts
     // This creates a gap between account.pnl and settled_pnl
-    engine.accrue_funding_with_rate(1000, 1_000_000, 500).unwrap();
+    engine
+        .accrue_funding_with_rate(1000, 1_000_000, 500)
+        .unwrap();
 
     // Manually compute conservation using settled_pnl formula
     let global_index = engine.funding_index_qpb_e6.get();
@@ -1508,7 +1544,9 @@ fn harness_rollback_simulation_test() {
     engine.deposit(user_idx, 1000, 0).unwrap();
 
     // Accrue some funding to create state that could be mutated
-    engine.accrue_funding_with_rate(100, 1_000_000, 100).unwrap();
+    engine
+        .accrue_funding_with_rate(100, 1_000_000, 100)
+        .unwrap();
 
     // Capture complete state before failed operation (deep clone of RiskEngine)
     let before = (*engine).clone();
