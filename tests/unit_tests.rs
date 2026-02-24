@@ -58,7 +58,7 @@ fn default_params() -> RiskParams {
         maintenance_margin_bps: 500, // 5%
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
-        max_accounts: 1000,
+        max_accounts: MAX_ACCOUNTS as u64,
         new_account_fee: U128::new(0),          // Zero fee for tests
         risk_reduction_threshold: U128::new(0), // Default: only trigger on full depletion
         maintenance_fee_per_slot: U128::new(0), // No maintenance fee by default
@@ -67,6 +67,22 @@ fn default_params() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000), // Cap at 100k units
         liquidation_buffer_bps: 100,             // 1% buffer above maintenance
         min_liquidation_abs: U128::new(100_000), // Minimum 0.1 units (scaled by 1e6)
+        funding_premium_weight_bps: 0,           // Disabled by default
+        funding_settlement_interval_slots: 0,    // Disabled by default
+        funding_premium_dampening_e6: 1_000_000, // 1x dampening (safe default)
+        funding_premium_max_bps_per_slot: 5,     // Conservative cap
+        partial_liquidation_bps: 2000,
+        partial_liquidation_cooldown_slots: 30,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
@@ -273,7 +289,7 @@ fn test_pnl_warmup_with_reserved() {
     assert_eq!(engine.accounts[user_idx as usize].pnl.get(), 0);
     assert_eq!(engine.accounts[counterparty as usize].pnl.get(), 0);
     engine.accounts[user_idx as usize].pnl = I128::new(1000);
-    engine.accounts[user_idx as usize].reserved_pnl = 300; // 300 reserved for pending withdrawal
+    // reserved_pnl is now trade_entry_price — no longer reduces available PnL
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(10);
     engine.accounts[counterparty as usize].pnl = I128::new(-1000);
     assert_conserved(&engine);
@@ -282,12 +298,12 @@ fn test_pnl_warmup_with_reserved() {
     engine.advance_slot(100);
 
     // Withdrawable = min(available_pnl, warmed_up)
-    // available_pnl = 1000 - 300 = 700
+    // available_pnl = 1000 (no reservation, full PnL available)
     // warmed_up = 10 * 100 = 1000
-    // So withdrawable = 700
+    // So withdrawable = 1000
     assert_eq!(
         engine.withdrawable_pnl(&engine.accounts[user_idx as usize]),
-        700
+        1000
     );
 }
 
@@ -1464,9 +1480,8 @@ fn test_unwrapped_definition() {
     engine.deposit(loser, 10_000, 0).unwrap();
     engine.accounts[loser as usize].pnl = I128::new(-1000);
 
-    // Set positive PnL and reserved
+    // Set positive PnL (reserved_pnl is now trade_entry_price, not a PnL reservation)
     engine.accounts[user as usize].pnl = I128::new(1000);
-    engine.accounts[user as usize].reserved_pnl = 200;
 
     // Update slope to establish warmup rate
     engine.update_warmup_slope(user).unwrap();
@@ -1475,13 +1490,12 @@ fn test_unwrapped_definition() {
 
     // At t=0, nothing is warmed yet, so:
     // withdrawable = 0
-    // unwrapped = 1000 - 200 - 0 = 800
+    // unwrapped = 1000 - 0 = 1000
     let account = &engine.accounts[user as usize];
     let positive_pnl = account.pnl.get() as u128;
-    let reserved = account.reserved_pnl as u128;
 
     // Compute withdrawable manually (same logic as compute_withdrawable_pnl)
-    let available = positive_pnl - reserved; // 800
+    let available = positive_pnl; // 1000 (no reservation)
     let elapsed = engine
         .current_slot
         .saturating_sub(account.warmup_started_at_slot);
@@ -1489,13 +1503,11 @@ fn test_unwrapped_definition() {
     let withdrawable = core::cmp::min(available, warmed_cap);
 
     // Expected unwrapped
-    let expected_unwrapped = positive_pnl
-        .saturating_sub(reserved)
-        .saturating_sub(withdrawable);
+    let expected_unwrapped = positive_pnl.saturating_sub(withdrawable);
 
-    // Test: at t=0, withdrawable should be 0, unwrapped should be 800
+    // Test: at t=0, withdrawable should be 0, unwrapped should be 1000
     assert_eq!(withdrawable, 0, "No time elapsed, withdrawable should be 0");
-    assert_eq!(expected_unwrapped, 800, "Unwrapped should be 800 at t=0");
+    assert_eq!(expected_unwrapped, 1000, "Unwrapped should be 1000 at t=0");
 
     // Advance time to allow partial warmup (50 slots = 50% of 100)
     engine.current_slot = 50;
@@ -1506,23 +1518,21 @@ fn test_unwrapped_definition() {
         .current_slot
         .saturating_sub(account.warmup_started_at_slot);
     let warmed_cap = account.warmup_slope_per_step.get() * (elapsed as u128);
-    let available = positive_pnl - reserved; // 800
+    let available = positive_pnl; // 1000
     let withdrawable_now = core::cmp::min(available, warmed_cap);
 
-    // With slope=8 (avail_gross=800/100) and 50 slots, warmed_cap = 400
-    // withdrawable = min(800, 400) = 400
-    // unwrapped = 1000 - 200 - 400 = 400
-    let expected_unwrapped_now = positive_pnl
-        .saturating_sub(reserved)
-        .saturating_sub(withdrawable_now);
+    // With slope=10 (avail_gross=1000/100) and 50 slots, warmed_cap = 500
+    // withdrawable = min(1000, 500) = 500
+    // unwrapped = 1000 - 500 = 500
+    let expected_unwrapped_now = positive_pnl.saturating_sub(withdrawable_now);
 
     assert_eq!(
-        withdrawable_now, 400,
-        "After 50 slots, withdrawable should be 400"
+        withdrawable_now, 500,
+        "After 50 slots, withdrawable should be 500"
     );
     assert_eq!(
-        expected_unwrapped_now, 400,
-        "After 50 slots, unwrapped should be 400"
+        expected_unwrapped_now, 500,
+        "After 50 slots, unwrapped should be 500"
     );
 
     assert_conserved(&engine);
@@ -1740,6 +1750,7 @@ fn test_account_equity_computes_correctly() {
         owner: [0; 32],
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
+        last_partial_liquidation_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_pos), 7_000);
 
@@ -1760,6 +1771,7 @@ fn test_account_equity_computes_correctly() {
         owner: [0; 32],
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
+        last_partial_liquidation_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_neg), 0);
 
@@ -1780,6 +1792,7 @@ fn test_account_equity_computes_correctly() {
         owner: [0; 32],
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
+        last_partial_liquidation_slot: 0,
     };
     assert_eq!(engine.account_equity(&account_profit), 15_000);
 }
@@ -1875,10 +1888,11 @@ fn test_withdraw_im_check_blocks_when_equity_below_im() {
     let result = engine.withdraw(user_idx, 60, 0, 1_000_000);
     assert_eq!(result, Err(RiskError::Undercollateralized));
 
-    // withdraw(40): new_capital = 110, equity = 110 > 100 (IM)
-    // Should succeed
+    // withdraw(40): would pass IM check (equity 110 > IM 100) but
+    // withdrawals are blocked entirely when position is open.
+    // Must close position first.
     let result2 = engine.withdraw(user_idx, 40, 0, 1_000_000);
-    assert!(result2.is_ok());
+    assert_eq!(result2, Err(RiskError::Undercollateralized));
 }
 
 // ==============================================================================
@@ -2118,6 +2132,126 @@ fn test_partial_liquidation_fee_charged() {
     // Fee = 500_000 * 1_000_000 / 1_000_000 * 50 / 10_000 = 2_500
     // But capped by available capital (20_000), so full 2_500 should be charged
     assert!(fee_received > 0, "Some fee should be charged");
+}
+
+/// Test: Emergency cooldown bypass for critically underwater accounts (Issue #300)
+///
+/// When an account's margin ratio falls below the emergency threshold during
+/// the partial liquidation cooldown, the cooldown must be bypassed and a full
+/// liquidation must occur immediately to prevent bad debt.
+#[test]
+fn test_emergency_cooldown_bypass_critically_underwater() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;   // 5%
+    params.liquidation_buffer_bps = 100;    // 1% buffer → target 6%
+    params.min_liquidation_abs = U128::new(1);
+    params.partial_liquidation_bps = 2000;  // 20% per partial
+    params.partial_liquidation_cooldown_slots = 30;
+    params.use_mark_price_for_liquidation = true;
+    params.emergency_liquidation_margin_bps = 200; // 2% emergency threshold
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.mark_price_e6 = 1_000_000; // $1 mark price
+
+    // Setup LP (required for risk engine)
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(100_000_000);
+    engine.accounts[lp as usize].position_size = I128::new(-10_000_000);
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 10 units at $1, capital = 300k
+    // At $1: position_value = 10M, equity = 300k
+    // MM = 10M * 5% = 500k
+    // equity (300k) < MM (500k) → underwater
+    engine.accounts[user as usize].capital = U128::new(300_000);
+    engine.accounts[user as usize].position_size = I128::new(10_000_000);
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = I128::new(0);
+    engine.total_open_interest = U128::new(10_000_000);
+    engine.vault = U128::new(100_300_000);
+
+    // First partial liquidation at slot 100
+    let result = engine.liquidate_with_mark_price(user, 100, 1_000_000).unwrap();
+    assert!(result, "First partial liquidation should succeed");
+
+    // Account should still have a position (partial, not full)
+    let pos_after_first = engine.accounts[user as usize].position_size.get();
+    // Position may have been fully closed by safety check; skip rest if so
+    if pos_after_first == 0 {
+        return; // Safety check already handled it
+    }
+
+    // Now simulate price crash: mark price drops substantially
+    // The account becomes critically underwater (below emergency threshold)
+    engine.mark_price_e6 = 500_000; // $0.50 mark price — big drop
+
+    // Set very low capital to simulate critically underwater
+    // At $0.50 mark: position_value = pos * 0.5, equity very low
+    // We need margin ratio < 2% (emergency_liquidation_margin_bps)
+    engine.accounts[user as usize].capital = U128::new(10_000); // Very low capital
+    engine.accounts[user as usize].pnl = I128::new(-290_000); // Large loss
+
+    // Try liquidation at slot 105 — within cooldown (last was 100, cooldown=30)
+    // Normally this would return Ok(false) due to cooldown.
+    // But since account is critically underwater (< 2% margin), it must bypass.
+    let result2 = engine.liquidate_with_mark_price(user, 105, 500_000).unwrap();
+    assert!(result2, "Emergency liquidation must bypass cooldown for critically underwater accounts");
+
+    // Position should be fully closed
+    assert!(
+        engine.accounts[user as usize].position_size.is_zero(),
+        "Critically underwater account should be fully liquidated"
+    );
+}
+
+/// Test: Normal cooldown should still block when account is NOT critically underwater (Issue #300)
+#[test]
+fn test_normal_cooldown_still_blocks_when_not_emergency() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 500;
+    params.liquidation_buffer_bps = 100;
+    params.min_liquidation_abs = U128::new(1);
+    params.partial_liquidation_bps = 2000;
+    params.partial_liquidation_cooldown_slots = 30;
+    params.use_mark_price_for_liquidation = true;
+    params.emergency_liquidation_margin_bps = 200; // 2%
+
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.mark_price_e6 = 1_000_000;
+
+    let lp = engine.add_lp([0u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(100_000_000);
+    engine.accounts[lp as usize].position_size = I128::new(-10_000_000);
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+
+    let user = engine.add_user(0).unwrap();
+
+    // Position: 10 units at $1, capital = 400k
+    // At $1: position_value = 10M, equity = 400k
+    // MM = 10M * 5% = 500k → underwater
+    // Emergency = 10M * 2% = 200k → equity(400k) > 200k → NOT emergency
+    engine.accounts[user as usize].capital = U128::new(400_000);
+    engine.accounts[user as usize].position_size = I128::new(10_000_000);
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = I128::new(0);
+    engine.total_open_interest = U128::new(10_000_000);
+    engine.vault = U128::new(100_400_000);
+
+    // First partial liquidation at slot 100
+    let result = engine.liquidate_with_mark_price(user, 100, 1_000_000).unwrap();
+    assert!(result, "First partial liquidation should succeed");
+
+    // Simulate last_partial_liquidation_slot = 100 (already set by engine)
+    let pos_after_first = engine.accounts[user as usize].position_size.get();
+    if pos_after_first == 0 {
+        return; // Already fully closed
+    }
+
+    // Try again at slot 105 — within cooldown, NOT emergency
+    let result2 = engine.liquidate_with_mark_price(user, 105, 1_000_000).unwrap();
+    assert!(!result2, "Normal cooldown should block liquidation when not in emergency");
 }
 
 /// Test 4: Compute liquidation close amount basic test
@@ -3244,9 +3378,9 @@ fn test_mark_settlement_on_trade_touch() {
     assert_eq!(engine.accounts[user as usize].pnl.get(), 0);
 
     // Second trade at higher oracle: user sells (closes) at oracle 1_100_000
-    // Before position change, mark should be settled:
-    // mark = (1_100_000 - 1_000_000) * 1_000_000 / 1e6 = 100_000
-    // User gains +100k mark PnL, LP gets -100k mark PnL
+    // Before position change, mark should be settled (coin-margined):
+    // mark = (1_100_000 - 1_000_000) * 1_000_000 / 1_100_000 = 90_909
+    // User gains +90909 mark PnL, LP gets -90909 mark PnL
     //
     // After mark settlement, trade_pnl = (oracle - exec) * size = 0 (exec at oracle)
     //
@@ -3270,8 +3404,8 @@ fn test_mark_settlement_on_trade_touch() {
     let user_capital = engine.accounts[user as usize].capital.get();
     let user_equity_gain = user_pnl + (user_capital as i128 - user_capital_before as i128);
     assert_eq!(
-        user_equity_gain, 100_000,
-        "User should have gained 100k total equity"
+        user_equity_gain, 90_909,
+        "User should have gained 90909 total equity (coin-margined)"
     );
 
     // LP should have lost 100k total equity
@@ -3281,8 +3415,8 @@ fn test_mark_settlement_on_trade_touch() {
     assert_eq!(lp_pnl, 0, "LP negative pnl should be settled to capital");
     assert_eq!(
         lp_capital,
-        lp_capital_before - 100_000,
-        "LP capital should decrease by 100k (loss settled)"
+        lp_capital_before - 90_909,
+        "LP capital should decrease by 90909 (coin-margined loss settled)"
     );
 
     // Conservation should hold
@@ -3374,19 +3508,18 @@ fn test_execute_trade_sets_current_slot_and_resets_warmup_start() {
     params.warmup_period_slots = 1000;
     params.trading_fee_bps = 0;
     params.maintenance_fee_per_slot = U128::new(0);
-    params.maintenance_margin_bps = 0;
-    params.initial_margin_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
     params.max_accounts = 64;
 
     let mut engine = Box::new(RiskEngine::new(params));
 
-    // Create LP and user with capital
+    // Create LP and user with capital — deposits large enough to satisfy initial margin
+    // at oracle_price=100k with 10% initial margin (notional=1e11, margin_req=1e10)
     let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
-    engine.deposit(lp_idx, 1_000_000, 0).unwrap();
+    engine.deposit(lp_idx, 20_000_000_000, 0).unwrap();
 
     let user_idx = engine.add_user(0).unwrap();
-    engine.deposit(user_idx, 1_000_000, 0).unwrap();
+    engine.deposit(user_idx, 20_000_000_000, 0).unwrap();
 
     // Execute trade at now_slot = 100
     let now_slot = 100u64;
@@ -3558,8 +3691,8 @@ const ONE_BASE: i128 = 1_000_000; // 1.0 base unit if base is 1e6-scaled
 fn params_for_inline_tests() -> RiskParams {
     RiskParams {
         warmup_period_slots: 1000,
-        maintenance_margin_bps: 0,
-        initial_margin_bps: 0,
+        maintenance_margin_bps: 1,
+        initial_margin_bps: 1,
         trading_fee_bps: 0,
         max_accounts: MAX_ACCOUNTS as u64,
         new_account_fee: U128::new(0),
@@ -3573,6 +3706,22 @@ fn params_for_inline_tests() -> RiskParams {
 
         liquidation_buffer_bps: 0,
         min_liquidation_abs: U128::new(0),
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 1_000_000,
+        funding_premium_max_bps_per_slot: 5,
+        partial_liquidation_bps: 2000,
+        partial_liquidation_cooldown_slots: 30,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
@@ -3636,15 +3785,16 @@ fn test_cross_lp_close_no_pnl_teleport_simple() {
     assert_eq!(engine.accounts[user as usize].position_size.get(), 0);
 
     // PnL stays with LP1 (the LP that gave the user a better-than-oracle fill).
-    let ten_k_e6: u128 = (10_000 * E6) as u128;
+    // Coin-margined profit: (10K*E6) * ONE_BASE / ORACLE_100K = 100_000
+    let profit: u128 = 100_000;
     let user_pnl = engine.accounts[user as usize].pnl.get() as u128;
     let user_cap = engine.accounts[user as usize].capital.get();
     let initial_cap = 50_000 * (E6 as u128);
-    // Total user value (pnl + capital) must equal initial_capital + 10k profit
-    assert_eq!(user_pnl + user_cap, initial_cap + ten_k_e6,
+    // Total user value (pnl + capital) must equal initial_capital + coin-margined profit
+    assert_eq!(user_pnl + user_cap, initial_cap + profit,
         "user total value must be initial_capital + trade profit");
     assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
-    assert_eq!(engine.accounts[lp1 as usize].capital.get(), initial_cap - ten_k_e6);
+    assert_eq!(engine.accounts[lp1 as usize].capital.get(), initial_cap - profit);
     // LP2 must be unaffected (no teleportation)
     assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
     assert_eq!(engine.accounts[lp2 as usize].capital.get(), initial_cap);
@@ -4571,4 +4721,583 @@ fn test_rounding_bound_with_many_positive_pnl_accounts() {
         slack,
         MAX_ROUNDING_SLACK
     );
+}
+
+// ==============================================================================
+// RISKPARAMS VALIDATION TESTS
+// ==============================================================================
+
+#[test]
+fn test_validate_valid_params() {
+    assert!(default_params().validate().is_ok());
+}
+
+#[test]
+fn test_validate_zero_maintenance_margin_rejected() {
+    let mut p = default_params();
+    p.maintenance_margin_bps = 0;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_zero_initial_margin_rejected() {
+    let mut p = default_params();
+    p.initial_margin_bps = 0;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_initial_less_than_maintenance_rejected() {
+    let mut p = default_params();
+    p.maintenance_margin_bps = 1000;
+    p.initial_margin_bps = 500; // initial < maintenance
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_margin_exceeds_10000_rejected() {
+    let mut p = default_params();
+    p.initial_margin_bps = 10_001;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+
+    let mut p2 = default_params();
+    p2.maintenance_margin_bps = 10_001;
+    assert_eq!(p2.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_zero_max_accounts_rejected() {
+    let mut p = default_params();
+    p.max_accounts = 0;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_max_accounts_exceeds_physical_limit_rejected() {
+    let mut p = default_params();
+    p.max_accounts = MAX_ACCOUNTS as u64 + 1;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_zero_crank_staleness_rejected() {
+    let mut p = default_params();
+    p.max_crank_staleness_slots = 0;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_u64_max_crank_staleness_allowed() {
+    let mut p = default_params();
+    p.max_crank_staleness_slots = u64::MAX;
+    assert!(p.validate().is_ok());
+}
+
+#[test]
+fn test_validate_liquidation_fee_exceeds_10000_rejected() {
+    let mut p = default_params();
+    p.liquidation_fee_bps = 10_001;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_liquidation_buffer_exceeds_10000_rejected() {
+    let mut p = default_params();
+    p.liquidation_buffer_bps = 10_001;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_init_in_place_rejects_invalid_params() {
+    let mut engine = RiskEngine::new(default_params());
+    let mut bad_params = default_params();
+    bad_params.maintenance_margin_bps = 0;
+    let result = engine.init_in_place(bad_params);
+    assert_eq!(result, Err(RiskError::Overflow));
+    // Engine params must remain unchanged after rejection
+    assert_eq!(engine.params.maintenance_margin_bps, default_params().maintenance_margin_bps);
+}
+
+#[test]
+fn test_init_in_place_accepts_valid_params() {
+    let mut engine = RiskEngine::new(default_params());
+    let mut new_params = default_params();
+    new_params.initial_margin_bps = 2000;
+    new_params.maintenance_margin_bps = 1000;
+    assert!(engine.init_in_place(new_params).is_ok());
+    assert_eq!(engine.params.initial_margin_bps, 2000);
+}
+
+#[test]
+fn test_set_margin_params_rejects_zero_maintenance() {
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.set_margin_params(1000, 0), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_set_margin_params_rejects_zero_initial() {
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.set_margin_params(0, 500), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_set_margin_params_rejects_maintenance_greater_than_initial() {
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.set_margin_params(500, 1000), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_set_margin_params_rejects_exceeding_10000() {
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.set_margin_params(10_001, 500), Err(RiskError::Overflow));
+    assert_eq!(engine.set_margin_params(1000, 10_001), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_set_margin_params_accepts_valid_values() {
+    let mut engine = RiskEngine::new(default_params());
+    assert!(engine.set_margin_params(2000, 1000).is_ok());
+    assert_eq!(engine.params.initial_margin_bps, 2000);
+    assert_eq!(engine.params.maintenance_margin_bps, 1000);
+}
+
+#[test]
+fn test_set_margin_params_does_not_update_on_error() {
+    let mut engine = RiskEngine::new(default_params());
+    let orig_initial = engine.params.initial_margin_bps;
+    let orig_maint = engine.params.maintenance_margin_bps;
+    let _ = engine.set_margin_params(500, 1000); // maintenance > initial → error
+    assert_eq!(engine.params.initial_margin_bps, orig_initial);
+    assert_eq!(engine.params.maintenance_margin_bps, orig_maint);
+}
+
+// ==============================================================================
+// admin_force_close bounds & existence guards
+// ==============================================================================
+
+#[test]
+fn test_admin_force_close_oob_index_returns_account_not_found() {
+    let mut engine = RiskEngine::new(default_params());
+    let result = engine.admin_force_close(u16::MAX, 100, 1_000_000);
+    assert_eq!(result, Err(RiskError::AccountNotFound));
+}
+
+#[test]
+fn test_admin_force_close_unused_slot_returns_account_not_found() {
+    let mut engine = RiskEngine::new(default_params());
+    let result = engine.admin_force_close(0, 100, 1_000_000);
+    assert_eq!(result, Err(RiskError::AccountNotFound));
+}
+
+#[test]
+fn test_admin_force_close_valid_zero_position_returns_ok() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(0).unwrap();
+    // Force close on zero position should succeed (no-op)
+    assert!(engine.admin_force_close(idx, 100, 1_000_000).is_ok());
+}
+
+// ==============================================================================
+// PERC-121: Premium Funding Rate Tests
+// ==============================================================================
+
+#[test]
+fn test_premium_funding_zero_when_mark_equals_index() {
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(
+        1_000_000, // mark = 1.0
+        1_000_000, // index = 1.0
+        1_000_000, // dampening = 1.0x
+        100,       // max 100 bps/slot
+    );
+    assert_eq!(rate, 0, "No premium when mark == index");
+}
+
+#[test]
+fn test_premium_funding_positive_when_mark_above_index() {
+    // mark = 1.01 (1% above index)
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(
+        1_010_000, // mark = 1.01
+        1_000_000, // index = 1.0
+        1_000_000, // dampening = 1.0x (no dampening)
+        100,       // max 100 bps/slot
+    );
+    // premium = (1.01 - 1.0) / 1.0 = 1% = 100 bps
+    // rate = 100 bps / dampening(1.0) = 100 bps/slot
+    assert!(rate > 0, "Longs should pay when mark > index");
+    assert_eq!(rate, 100, "1% premium with 1.0x dampening = 100 bps");
+}
+
+#[test]
+fn test_premium_funding_negative_when_mark_below_index() {
+    // mark = 0.99 (1% below index)
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(
+        990_000,   // mark = 0.99
+        1_000_000, // index = 1.0
+        1_000_000, // dampening = 1.0x
+        100,       // max
+    );
+    assert!(rate < 0, "Shorts should pay when mark < index");
+    assert_eq!(rate, -100);
+}
+
+#[test]
+fn test_premium_funding_clamped_to_max() {
+    // mark = 1.10 (10% above index) but max is 5 bps
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(
+        1_100_000, // mark = 1.10
+        1_000_000, // index = 1.0
+        1_000_000, // dampening = 1.0x
+        5,         // max 5 bps/slot
+    );
+    assert_eq!(rate, 5, "Should clamp to max");
+}
+
+#[test]
+fn test_premium_funding_with_dampening() {
+    // mark = 1.01 (1% above), dampening = 8_000_000 (8x)
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(
+        1_010_000, // mark = 1.01
+        1_000_000, // index = 1.0
+        8_000_000, // dampening = 8.0x
+        100,       // max
+    );
+    // premium = 100 bps, rate = 100 / 8 = 12 bps/slot
+    assert_eq!(rate, 12);
+}
+
+#[test]
+fn test_premium_funding_zero_inputs() {
+    assert_eq!(RiskEngine::compute_premium_funding_bps_per_slot(0, 1_000_000, 1_000_000, 5), 0);
+    assert_eq!(RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 0, 1_000_000, 5), 0);
+    assert_eq!(RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 1_000_000, 0, 5), 0);
+}
+
+#[test]
+fn test_combined_funding_rate_pure_inventory() {
+    let combined = RiskEngine::compute_combined_funding_rate(
+        10,    // inventory rate
+        50,    // premium rate
+        0,     // weight = 0 (pure inventory)
+    );
+    assert_eq!(combined, 10);
+}
+
+#[test]
+fn test_combined_funding_rate_pure_premium() {
+    let combined = RiskEngine::compute_combined_funding_rate(
+        10,     // inventory rate
+        50,     // premium rate
+        10_000, // weight = 100% (pure premium)
+    );
+    assert_eq!(combined, 50);
+}
+
+#[test]
+fn test_combined_funding_rate_50_50() {
+    let combined = RiskEngine::compute_combined_funding_rate(
+        10,    // inventory rate
+        50,    // premium rate
+        5_000, // weight = 50%
+    );
+    // (10 * 5000 + 50 * 5000) / 10000 = 300000 / 10000 = 30
+    assert_eq!(combined, 30);
+}
+
+#[test]
+fn test_accrue_funding_combined_respects_interval() {
+    let mut params = default_params();
+    params.funding_premium_weight_bps = 5_000; // 50% premium
+    params.funding_settlement_interval_slots = 100;
+    params.funding_premium_dampening_e6 = 1_000_000;
+    params.funding_premium_max_bps_per_slot = 50;
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.mark_price_e6 = 1_010_000; // 1% above index
+
+    // Slot 50: below interval, should not accrue
+    engine.last_funding_slot = 0;
+    engine.funding_rate_bps_per_slot_last = 10;
+    let result = engine.accrue_funding_combined(50, 1_000_000, 5);
+    assert!(result.is_ok());
+    // Funding index should be unchanged (skipped due to interval)
+    assert_eq!(engine.funding_index_qpb_e6.get(), 0);
+    assert_eq!(engine.last_funding_slot, 0); // Not updated
+
+    // Slot 100: at interval, should accrue
+    let result = engine.accrue_funding_combined(100, 1_000_000, 5);
+    assert!(result.is_ok());
+    assert_ne!(engine.last_funding_slot, 0); // Updated
+}
+
+#[test]
+fn test_set_mark_price() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    assert_eq!(engine.mark_price_e6, 0);
+    engine.set_mark_price(1_500_000);
+    assert_eq!(engine.mark_price_e6, 1_500_000);
+}
+
+#[test]
+fn test_premium_funding_params_validation() {
+    let mut params = default_params();
+    // Valid: premium weight = 50%, dampening = 8x
+    params.funding_premium_weight_bps = 5_000;
+    params.funding_premium_dampening_e6 = 8_000_000;
+    assert!(params.validate().is_ok());
+
+    // Invalid: premium weight > 100%
+    params.funding_premium_weight_bps = 10_001;
+    assert!(params.validate().is_err());
+
+    // Invalid: premium weight > 0 but dampening = 0
+    params.funding_premium_weight_bps = 5_000;
+    params.funding_premium_dampening_e6 = 0;
+    assert!(params.validate().is_err());
+}
+
+// ==============================================================================
+// Funding freeze/unfreeze tests (PERC-121 security)
+// ==============================================================================
+
+#[test]
+fn test_freeze_funding_snapshots_rate() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    engine.funding_rate_bps_per_slot_last = 42;
+    assert!(!engine.is_funding_frozen());
+
+    // Freeze
+    assert!(engine.freeze_funding().is_ok());
+    assert!(engine.is_funding_frozen());
+    assert_eq!(engine.funding_frozen_rate_snapshot, 42);
+
+    // Double-freeze should fail
+    assert!(engine.freeze_funding().is_err());
+}
+
+#[test]
+fn test_unfreeze_funding() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    // Can't unfreeze what isn't frozen
+    assert!(engine.unfreeze_funding().is_err());
+
+    engine.funding_rate_bps_per_slot_last = 10;
+    engine.freeze_funding().unwrap();
+
+    // Unfreeze
+    assert!(engine.unfreeze_funding().is_ok());
+    assert!(!engine.is_funding_frozen());
+    assert_eq!(engine.funding_frozen_rate_snapshot, 0);
+}
+
+#[test]
+fn test_frozen_funding_ignores_rate_updates() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    engine.funding_rate_bps_per_slot_last = 10;
+    engine.freeze_funding().unwrap();
+
+    // Try to set a new rate — should be ignored
+    engine.set_funding_rate_for_next_interval(999);
+    assert_eq!(engine.funding_rate_bps_per_slot_last, 10); // Unchanged
+}
+
+#[test]
+fn test_frozen_funding_uses_snapshot_rate_on_accrue() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    engine.funding_rate_bps_per_slot_last = 5;
+    engine.last_funding_slot = 0;
+
+    // Freeze with rate = 5
+    engine.freeze_funding().unwrap();
+
+    // Change the stored rate (simulating external mutation) — should not matter
+    engine.funding_rate_bps_per_slot_last = 999;
+
+    // Accrue 100 slots at oracle price 1_000_000
+    engine.accrue_funding(100, 1_000_000).unwrap();
+
+    // ΔF = price * rate * dt / 10_000 = 1_000_000 * 5 * 100 / 10_000 = 50_000
+    assert_eq!(engine.funding_index_qpb_e6.get(), 50_000);
+}
+
+// ==============================================================================
+// PERC-122: Mark-price liquidation + partial liquidation tests
+// ==============================================================================
+
+#[test]
+fn test_mark_price_liq_delegates_when_disabled() {
+    let mut params = default_params();
+    params.use_mark_price_for_liquidation = false;
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000_000, 1).unwrap();
+    assert_eq!(engine.liquidate_with_mark_price(user, 100, 1_000_000), Ok(false));
+}
+
+#[test]
+fn test_mark_price_liq_skips_healthy_at_mark() {
+    let mut params = default_params();
+    params.use_mark_price_for_liquidation = true;
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 100_000_000, 1).unwrap();
+    engine.accounts[user as usize].position_size = I128::new(1_000_000);
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.total_open_interest = U128::new(1_000_000);
+    engine.mark_price_e6 = 1_000_000; // healthy mark
+    // Oracle crashed but mark is fine → no liquidation
+    assert_eq!(engine.liquidate_with_mark_price(user, 100, 500_000), Ok(false));
+}
+
+#[test]
+fn test_partial_liq_cooldown() {
+    let mut params = default_params();
+    params.use_mark_price_for_liquidation = true;
+    params.partial_liquidation_bps = 2000;
+    params.partial_liquidation_cooldown_slots = 30;
+    let mut engine = Box::new(RiskEngine::new(params));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000_000, 1).unwrap();
+    engine.accounts[user as usize].position_size = I128::new(100_000_000);
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.total_open_interest = U128::new(100_000_000);
+    engine.mark_price_e6 = 900_000;
+    // First call at slot 100
+    let r1 = engine.liquidate_with_mark_price(user, 100, 900_000);
+    assert!(r1.is_ok());
+    if r1.unwrap() {
+        // Within cooldown at slot 110
+        assert_eq!(engine.liquidate_with_mark_price(user, 110, 900_000), Ok(false));
+    }
+}
+
+#[test]
+fn test_partial_liq_params_validation() {
+    let mut params = default_params();
+    params.partial_liquidation_bps = 2000;
+    assert!(params.validate().is_ok());
+    params.partial_liquidation_bps = 10_001;
+    assert!(params.validate().is_err());
+}
+
+#[test]
+fn test_mark_price_liq_oob() {
+    let mut params = default_params();
+    params.use_mark_price_for_liquidation = true;
+    let mut engine = Box::new(RiskEngine::new(params));
+    engine.mark_price_e6 = 1_000_000;
+    assert_eq!(engine.liquidate_with_mark_price(u16::MAX, 100, 1_000_000), Ok(false));
+}
+// PERC-120: Dynamic fee model tests
+// ==============================================================================
+
+#[test]
+fn test_dynamic_fee_flat_when_tiers_disabled() {
+    let mut params = default_params();
+    params.trading_fee_bps = 10; // 0.1%
+    params.fee_tier2_threshold = 0; // disabled
+    let engine = Box::new(RiskEngine::new(params));
+    // Any notional → flat rate
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000), 10);
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000_000_000), 10);
+}
+
+#[test]
+fn test_dynamic_fee_tiered() {
+    let mut params = default_params();
+    params.trading_fee_bps = 5;  // Tier 1: 0.05%
+    params.fee_tier2_bps = 8;    // Tier 2: 0.08%
+    params.fee_tier3_bps = 10;   // Tier 3: 0.10%
+    params.fee_tier2_threshold = 1_000_000; // 1M
+    params.fee_tier3_threshold = 10_000_000; // 10M
+    let engine = Box::new(RiskEngine::new(params));
+
+    assert_eq!(engine.compute_dynamic_fee_bps(500_000), 5);     // Tier 1
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000_000), 8);   // Tier 2
+    assert_eq!(engine.compute_dynamic_fee_bps(5_000_000), 8);   // Tier 2
+    assert_eq!(engine.compute_dynamic_fee_bps(10_000_000), 10); // Tier 3
+    assert_eq!(engine.compute_dynamic_fee_bps(100_000_000), 10); // Tier 3
+}
+
+#[test]
+fn test_dynamic_fee_utilization_surge() {
+    let mut params = default_params();
+    params.trading_fee_bps = 10;
+    params.fee_utilization_surge_bps = 20; // max 20bps surge at 100% utilization
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // No vault → no surge
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000), 10);
+
+    // Set vault and OI
+    engine.vault = U128::new(1_000_000);
+    engine.total_open_interest = U128::new(0);
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000), 10); // 0% utilization
+
+    engine.total_open_interest = U128::new(1_000_000); // 50% util (OI / 2*vault)
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000), 20); // 10 + 20*0.5 = 20
+
+    engine.total_open_interest = U128::new(2_000_000); // 100% util
+    assert_eq!(engine.compute_dynamic_fee_bps(1_000), 30); // 10 + 20 = 30
+}
+
+#[test]
+fn test_fee_split_legacy() {
+    let engine = Box::new(RiskEngine::new(default_params()));
+    let (lp, proto, creator) = engine.compute_fee_split(10_000);
+    assert_eq!(lp, 10_000);     // 100% to LP
+    assert_eq!(proto, 0);
+    assert_eq!(creator, 0);
+}
+
+#[test]
+fn test_fee_split_configured() {
+    let mut params = default_params();
+    params.fee_split_lp_bps = 8000;      // 80%
+    params.fee_split_protocol_bps = 1200; // 12%
+    params.fee_split_creator_bps = 800;   // 8%
+    let engine = Box::new(RiskEngine::new(params));
+
+    let (lp, proto, creator) = engine.compute_fee_split(10_000);
+    assert_eq!(lp, 8000);
+    assert_eq!(proto, 1200);
+    assert_eq!(creator, 800);
+}
+
+#[test]
+fn test_fee_split_rounding_goes_to_creator() {
+    let mut params = default_params();
+    params.fee_split_lp_bps = 8000;
+    params.fee_split_protocol_bps = 1200;
+    params.fee_split_creator_bps = 800;
+    let engine = Box::new(RiskEngine::new(params));
+
+    // 33 is not evenly divisible
+    let (lp, proto, creator) = engine.compute_fee_split(33);
+    assert_eq!(lp + proto + creator, 33); // Conservation: total preserved
+}
+
+#[test]
+fn test_fee_params_validation() {
+    let mut params = default_params();
+
+    // Valid tiered config
+    params.fee_tier2_bps = 8;
+    params.fee_tier3_bps = 10;
+    params.fee_tier2_threshold = 1_000_000;
+    params.fee_tier3_threshold = 10_000_000;
+    assert!(params.validate().is_ok());
+
+    // Invalid: tier3 threshold <= tier2 threshold
+    params.fee_tier3_threshold = 500_000;
+    assert!(params.validate().is_err());
+
+    // Fix thresholds, test fee split
+    params.fee_tier3_threshold = 10_000_000;
+    params.fee_split_lp_bps = 8000;
+    params.fee_split_protocol_bps = 1200;
+    params.fee_split_creator_bps = 800;
+    assert!(params.validate().is_ok());
+
+    // Invalid: fee split doesn't sum to 10_000
+    params.fee_split_creator_bps = 900;
+    assert!(params.validate().is_err());
 }

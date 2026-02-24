@@ -1,12 +1,12 @@
 # Kani Proof Timing Report
-Generated: 2026-02-13
+Generated: 2026-02-05
 
 ## Summary
 
-- **Total Proofs**: 151
-- **Passed**: 151 (100%)
+- **Total Proofs**: 125
+- **Passed**: 125 (100%)
 - **Failed**: 0
-- **Total verification time**: ~80 min (sequential, one-by-one)
+- **Total verification time**: ~53 min (sequential, one-by-one)
 
 ---
 
@@ -462,245 +462,137 @@ Three rounds of proof hardening addressed vacuity risks, naming correctness, and
 
 ---
 
-## Strengthen settle_warmup_to_capital INV Proofs (2026-02-17)
+## Full Timing Results (2026-02-05)
 
-Replaced 2 concrete settle_warmup proofs with fully symbolic versions to exercise all branches
-in `settle_warmup_to_capital` (§6.1 loss settlement + §6.2 profit conversion).
-No production code changes — only `tests/kani.rs` modified.
-
-| Proof | What it verifies |
-|-------|-----------------|
-| proof_settle_warmup_preserves_inv | Symbolic positive PnL: canonical_inv preserved across partial conversion, haircut < 1, non-zero reserved_pnl, and zero conversion branches |
-| proof_settle_warmup_negative_pnl_immediate | Symbolic negative PnL: canonical_inv preserved across insolvency writeoff (loss > capital), zero-capital, and solvent branches; N1 boundary; full resolution |
-
----
-
-## External Review Rebuttal Proofs (2026-02-14)
-
-Added 6 new Kani proofs to formally verify that 3 claimed critical flaws from an external review are NOT exploitable. No production code changes — all modifications in `tests/kani.rs`.
-
-| Flaw | Claim | Verdict | Proofs |
-|------|-------|---------|--------|
-| 1. Debt Wipe | Free option after writeoff | **Not exploitable** — writeoff requires flat position | 2 |
-| 2. Phantom Margin | Stale entry inflates equity | **Not exploitable** — mark settled before all checks | 2 |
-| 3. Forever Warmup | Perpetual timer reset traps profit | **Not exploitable** — slope grows proportionally | 2 |
-
-### Flaw 1: "Free Option" Debt Wipe (2 proofs)
-
-| Proof | Time | What it verifies |
-|-------|------|-----------------|
-| proof_flaw1_debt_writeoff_requires_flat_position | 2s | After liquidation with debt writeoff, position is always zero (no free option) |
-| proof_flaw1_gc_never_writes_off_with_open_position | 1s | GC dust predicate blocks PnL writeoff when position_size != 0 |
-
-### Flaw 2: "Phantom Margin Equity" (2 proofs)
-
-| Proof | Time | What it verifies |
-|-------|------|-----------------|
-| proof_flaw2_no_phantom_equity_after_mark_settlement | 35s | After mark settlement, entry==oracle, mark_pnl==0, equity unchanged (symbolic PnL) |
-| proof_flaw2_withdraw_settles_before_margin_check | 4s | withdraw() settles stale entry (entry!=oracle) to oracle before margin check |
-
-### Flaw 3: "Forever Warmup" Reset (2 proofs)
-
-| Proof | Time | What it verifies |
-|-------|------|-----------------|
-| proof_flaw3_warmup_reset_increases_slope_proportionally | 1s | Increased PnL yields non-decreasing warmup slope (symbolic PnL pair) |
-| proof_flaw3_warmup_converts_after_single_slot | 3s | Warmup converts PnL to capital after 1 slot; liveness proven (symbolic PnL) |
-
-### Completeness Concerns (no new proofs needed)
-
-1. **`I_floor` unused**: Governance parameter, used in `execute_trade()`, tested by existing proof.
-2. **Dust routing to insurance**: By design — writeoff reduces Residual. Proven by `proof_gc_dust_preserves_inv`.
-3. **U256 overflow in mul_u128**: Widening multiplication, verified by `proof_gap4_trade_extreme_*`.
-
-Proof count: 145 → 151.
-
----
-
-## Aggregate Maintenance Proofs (2026-02-12)
-
-Added 8 new Kani proofs for O(1) aggregate helpers (`set_pnl`, `set_capital`) and related invariants.
-No production code changes — all modifications in `tests/kani.rs`.
-
-| Proof | Time | What it verifies |
-|-------|------|-----------------|
-| proof_set_pnl_maintains_pnl_pos_tot | 1s | set_pnl correctly maintains pnl_pos_tot aggregate |
-| proof_set_capital_maintains_c_tot | 1s | set_capital correctly maintains c_tot aggregate |
-| proof_force_close_with_set_pnl_preserves_invariant | 2s | Force-close via set_pnl preserves canonical_inv |
-| proof_multiple_force_close_preserves_invariant | 6s | Multiple force-close operations preserve invariants |
-| proof_haircut_ratio_bounded | 1s | haircut_ratio uses accurate pnl_pos_tot, bounded [0,1] |
-| proof_effective_pnl_bounded_by_actual | 5s | Effective PnL never exceeds actual positive PnL |
-| proof_recompute_aggregates_correct | 1s | recompute_aggregates helper produces correct values |
-| proof_NEGATIVE_bypass_set_pnl_breaks_invariant | 1s | Bypassing set_pnl (direct write) breaks invariant (should_panic) |
-
-Proof count: 125 → 133.
-
----
-
-## Full Timing Results (2026-02-14)
-
-151/151 proofs pass. No timeouts, no failures.
+125/125 proofs pass. No timeouts, no failures.
 
 | Proof Name | Time | Status |
 |------------|------|--------|
-| crank_bounds_respected | 3s | PASS |
+| crank_bounds_respected | 1s | PASS |
 | fast_account_equity_computes_correctly | 1s | PASS |
-| fast_frame_deposit_only_mutates_one_account_vault_and_warmup | 2s | PASS |
-| fast_frame_execute_trade_only_mutates_two_accounts | 9s | PASS |
+| fast_frame_deposit_only_mutates_one_account_vault_and_warmup | 1s | PASS |
+| fast_frame_execute_trade_only_mutates_two_accounts | 5s | PASS |
 | fast_frame_settle_warmup_only_mutates_one_account_and_warmup_globals | 4s | PASS |
-| fast_frame_touch_account_only_mutates_one_account | 3s | PASS |
-| fast_frame_update_warmup_slope_only_mutates_one_account | 2s | PASS |
-| fast_frame_withdraw_only_mutates_one_account_vault_and_warmup | 2s | PASS |
-| fast_i2_deposit_preserves_conservation | 2s | PASS |
-| fast_i2_withdraw_preserves_conservation | 3s | PASS |
-| fast_maintenance_margin_uses_equity_including_negative_pnl | 25s | PASS |
-| fast_neg_pnl_after_settle_implies_zero_capital | 3s | PASS |
-| fast_neg_pnl_settles_into_capital_independent_of_warm_cap | 4s | PASS |
-| fast_valid_preserved_by_deposit | 2s | PASS |
-| fast_valid_preserved_by_execute_trade | 8s | PASS |
-| fast_valid_preserved_by_garbage_collect_dust | 2s | PASS |
-| fast_valid_preserved_by_settle_warmup_to_capital | 5s | PASS |
+| fast_frame_touch_account_only_mutates_one_account | 2s | PASS |
+| fast_frame_update_warmup_slope_only_mutates_one_account | 1s | PASS |
+| fast_frame_withdraw_only_mutates_one_account_vault_and_warmup | 1s | PASS |
+| fast_i2_deposit_preserves_conservation | 1s | PASS |
+| fast_i2_withdraw_preserves_conservation | 1s | PASS |
+| fast_maintenance_margin_uses_equity_including_negative_pnl | 27s | PASS |
+| fast_neg_pnl_after_settle_implies_zero_capital | 1s | PASS |
+| fast_neg_pnl_settles_into_capital_independent_of_warm_cap | 2s | PASS |
+| fast_valid_preserved_by_deposit | 1s | PASS |
+| fast_valid_preserved_by_execute_trade | 6s | PASS |
+| fast_valid_preserved_by_garbage_collect_dust | 1s | PASS |
+| fast_valid_preserved_by_settle_warmup_to_capital | 3s | PASS |
 | fast_valid_preserved_by_top_up_insurance_fund | 1s | PASS |
-| fast_valid_preserved_by_withdraw | 3s | PASS |
-| fast_withdraw_cannot_bypass_losses_when_position_zero | 3s | PASS |
-| funding_p1_settlement_idempotent | 13s | PASS |
-| funding_p2_never_touches_principal | 3s | PASS |
-| funding_p3_bounded_drift_between_opposite_positions | 9s | PASS |
+| fast_valid_preserved_by_withdraw | 1s | PASS |
+| fast_withdraw_cannot_bypass_losses_when_position_zero | 2s | PASS |
+| funding_p1_settlement_idempotent | 9s | PASS |
+| funding_p2_never_touches_principal | 1s | PASS |
+| funding_p3_bounded_drift_between_opposite_positions | 8s | PASS |
 | funding_p4_settle_before_position_change | 6s | PASS |
-| funding_p5_bounded_operations_no_overflow | 5s | PASS |
-| funding_zero_position_no_change | 2s | PASS |
-| gc_frees_only_true_dust | 2s | PASS |
-| gc_never_frees_account_with_positive_value | 6s | PASS |
-| gc_respects_full_dust_predicate | 5s | PASS |
-| i5_warmup_bounded_by_pnl | 2s | PASS |
-| i5_warmup_determinism | 4s | PASS |
-| i5_warmup_monotonicity | 2s | PASS |
-| i7_user_isolation_deposit | 2s | PASS |
-| i7_user_isolation_withdrawal | 3s | PASS |
-| i8_equity_with_negative_pnl | 2s | PASS |
-| i8_equity_with_positive_pnl | 2s | PASS |
-| kani_cross_lp_close_no_pnl_teleport | 10s | PASS |
-| kani_no_teleport_cross_lp_close | 6s | PASS |
-| kani_rejects_invalid_matcher_output | 3s | PASS |
-| neg_pnl_is_realized_immediately_by_settle | 2s | PASS |
-| neg_pnl_settlement_does_not_depend_on_elapsed_or_slope | 5s | PASS |
+| funding_p5_bounded_operations_no_overflow | 1s | PASS |
+| funding_zero_position_no_change | 1s | PASS |
+| gc_frees_only_true_dust | 1s | PASS |
+| gc_never_frees_account_with_positive_value | 4s | PASS |
+| gc_respects_full_dust_predicate | 4s | PASS |
+| i5_warmup_bounded_by_pnl | 1s | PASS |
+| i5_warmup_determinism | 2s | PASS |
+| i5_warmup_monotonicity | 1s | PASS |
+| i7_user_isolation_deposit | 1s | PASS |
+| i7_user_isolation_withdrawal | 1s | PASS |
+| i8_equity_with_negative_pnl | 1s | PASS |
+| i8_equity_with_positive_pnl | 1s | PASS |
+| kani_cross_lp_close_no_pnl_teleport | 7s | PASS |
+| kani_no_teleport_cross_lp_close | 4s | PASS |
+| kani_rejects_invalid_matcher_output | 1s | PASS |
+| neg_pnl_is_realized_immediately_by_settle | 1s | PASS |
+| neg_pnl_settlement_does_not_depend_on_elapsed_or_slope | 3s | PASS |
 | negative_pnl_withdrawable_is_zero | 1s | PASS |
-| pnl_withdrawal_requires_warmup | 4s | PASS |
-| proof_accrue_funding_preserves_inv | 2s | PASS |
+| pnl_withdrawal_requires_warmup | 2s | PASS |
 | proof_add_user_structural_integrity | 1s | PASS |
-| proof_close_account_includes_warmed_pnl | 3s | PASS |
-| proof_close_account_negative_pnl_written_off | 2s | PASS |
-| proof_close_account_preserves_inv | 4s | PASS |
-| proof_close_account_rejects_positive_pnl | 3s | PASS |
-| proof_close_account_requires_flat_and_paid | 8s | PASS |
-| proof_close_account_structural_integrity | 3s | PASS |
-| proof_crank_with_funding_preserves_inv | 9s | PASS |
-| proof_deposit_preserves_inv | 2s | PASS |
-| proof_effective_equity_with_haircut | 64s | PASS |
-| proof_effective_pnl_bounded_by_actual | 5s | PASS |
-| proof_execute_trade_conservation | 30s | PASS |
-| proof_execute_trade_margin_enforcement | 53s | PASS |
-| proof_execute_trade_preserves_inv | 35s | PASS |
-| proof_fee_credits_never_inflate_from_settle | 2s | PASS |
-| proof_force_close_with_set_pnl_preserves_invariant | 4s | PASS |
+| proof_close_account_includes_warmed_pnl | 1s | PASS |
+| proof_close_account_negative_pnl_written_off | 1s | PASS |
+| proof_close_account_preserves_inv | 1s | PASS |
+| proof_close_account_rejects_positive_pnl | 1s | PASS |
+| proof_close_account_requires_flat_and_paid | 7s | PASS |
+| proof_close_account_structural_integrity | 1s | PASS |
+| proof_crank_with_funding_preserves_inv | 6s | PASS |
+| proof_deposit_preserves_inv | 1s | PASS |
+| proof_effective_equity_with_haircut | 40s | PASS |
+| proof_execute_trade_conservation | 41s | PASS |
+| proof_execute_trade_margin_enforcement | 67s | PASS |
+| proof_execute_trade_preserves_inv | 21s | PASS |
+| proof_fee_credits_never_inflate_from_settle | 1s | PASS |
 | proof_gap1_crank_with_fees_preserves_inv | 39s | PASS |
-| proof_gap1_settle_mark_err_no_mutation | 2s | PASS |
-| proof_gap1_touch_account_err_no_mutation | 2s | PASS |
-| proof_gap2_execute_trade_err_preserves_inv | 8s | PASS |
-| proof_gap2_rejects_max_price_exceeded_matcher | 3s | PASS |
-| proof_gap2_rejects_overfill_matcher | 3s | PASS |
-| proof_gap2_rejects_zero_price_matcher | 4s | PASS |
-| proof_gap3_conservation_crank_funding_positions | 1215s | PASS |
-| proof_gap3_conservation_trade_entry_neq_oracle | 148s | PASS |
-| proof_gap3_multi_step_lifecycle_conservation | 848s | PASS |
-| proof_gap4_margin_extreme_values_no_panic | 2s | PASS |
-| proof_gap4_trade_extreme_price_no_panic | 8s | PASS |
-| proof_gap4_trade_extreme_size_no_panic | 6s | PASS |
-| proof_gap4_trade_partial_fill_diff_price_no_panic | 31s | PASS |
-| proof_gap5_deposit_fee_credits_conservation | 2s | PASS |
-| proof_gap5_fee_credits_saturating_near_max | 5s | PASS |
-| proof_gap5_fee_credits_trade_then_settle_bounded | 6s | PASS |
-| proof_gap5_fee_settle_margin_or_err | 15s | PASS |
-| proof_gc_dust_preserves_inv | 2s | PASS |
-| proof_gc_dust_structural_integrity | 2s | PASS |
-| proof_haircut_ratio_bounded | 2s | PASS |
-| proof_haircut_ratio_formula_correctness | 2s | PASS |
-| proof_init_in_place_satisfies_inv | 1s | PASS |
+| proof_gap1_settle_mark_err_no_mutation | 1s | PASS |
+| proof_gap1_touch_account_err_no_mutation | 1s | PASS |
+| proof_gap2_execute_trade_err_preserves_inv | 5s | PASS |
+| proof_gap2_rejects_max_price_exceeded_matcher | 1s | PASS |
+| proof_gap2_rejects_overfill_matcher | 1s | PASS |
+| proof_gap2_rejects_zero_price_matcher | 1s | PASS |
+| proof_gap3_conservation_crank_funding_positions | 477s | PASS |
+| proof_gap3_conservation_trade_entry_neq_oracle | 92s | PASS |
+| proof_gap3_multi_step_lifecycle_conservation | 1462s | PASS |
+| proof_gap4_margin_extreme_values_no_panic | 1s | PASS |
+| proof_gap4_trade_extreme_price_no_panic | 6s | PASS |
+| proof_gap4_trade_extreme_size_no_panic | 4s | PASS |
+| proof_gap4_trade_partial_fill_diff_price_no_panic | 25s | PASS |
+| proof_gap5_deposit_fee_credits_conservation | 1s | PASS |
+| proof_gap5_fee_credits_saturating_near_max | 3s | PASS |
+| proof_gap5_fee_credits_trade_then_settle_bounded | 3s | PASS |
+| proof_gap5_fee_settle_margin_or_err | 12s | PASS |
+| proof_gc_dust_preserves_inv | 1s | PASS |
+| proof_gc_dust_structural_integrity | 1s | PASS |
+| proof_haircut_ratio_formula_correctness | 1s | PASS |
 | proof_inv_holds_for_new_engine | 1s | PASS |
-| proof_inv_preserved_by_add_lp | 2s | PASS |
-| proof_inv_preserved_by_add_user | 2s | PASS |
-| proof_keeper_crank_advances_slot_monotonically | 3s | PASS |
-| proof_keeper_crank_best_effort_liquidation | 4s | PASS |
-| proof_keeper_crank_best_effort_settle | 11s | PASS |
-| proof_keeper_crank_forgives_half_slots | 9s | PASS |
-| proof_keeper_crank_preserves_inv | 4s | PASS |
-| proof_lifecycle_trade_crash_settle_loss_conservation | 269s | PASS |
-| proof_lifecycle_trade_then_touch_full_conservation | 122s | PASS |
-| proof_lifecycle_trade_warmup_withdraw_topup_conservation | 628s | PASS |
-| proof_liq_partial_1_safety_after_liquidation | 3s | PASS |
-| proof_liq_partial_2_dust_elimination | 3s | PASS |
-| proof_liq_partial_3_routing_is_complete_via_conservation_and_n1 | 5s | PASS |
-| proof_liq_partial_4_conservation_preservation | 5s | PASS |
-| proof_liq_partial_deterministic_reaches_target_or_full_close | 3s | PASS |
-| proof_liquidate_preserves_inv | 4s | PASS |
-| proof_liveness_after_loss_writeoff | 3s | PASS |
-| proof_lq1_liquidation_reduces_oi_and_enforces_safety | 4s | PASS |
-| proof_lq2_liquidation_preserves_conservation | 4s | PASS |
-| proof_lq3a_profit_routes_through_adl | 5s | PASS |
-| proof_lq4_liquidation_fee_paid_to_insurance | 3s | PASS |
-| proof_lq6_n1_boundary_after_liquidation | 4s | PASS |
-| proof_multiple_force_close_preserves_invariant | 7s | PASS |
-| proof_net_extraction_bounded_with_fee_credits | 65s | PASS |
-| proof_principal_protection_across_accounts | 2s | PASS |
+| proof_inv_preserved_by_add_lp | 1s | PASS |
+| proof_inv_preserved_by_add_user | 1s | PASS |
+| proof_keeper_crank_advances_slot_monotonically | 1s | PASS |
+| proof_keeper_crank_best_effort_liquidation | 2s | PASS |
+| proof_keeper_crank_best_effort_settle | 9s | PASS |
+| proof_keeper_crank_forgives_half_slots | 7s | PASS |
+| proof_keeper_crank_preserves_inv | 2s | PASS |
+| proof_liq_partial_1_safety_after_liquidation | 2s | PASS |
+| proof_liq_partial_2_dust_elimination | 2s | PASS |
+| proof_liq_partial_3_routing_is_complete_via_conservation_and_n1 | 3s | PASS |
+| proof_liq_partial_4_conservation_preservation | 3s | PASS |
+| proof_liq_partial_deterministic_reaches_target_or_full_close | 2s | PASS |
+| proof_liquidate_preserves_inv | 2s | PASS |
+| proof_liveness_after_loss_writeoff | 1s | PASS |
+| proof_lq1_liquidation_reduces_oi_and_enforces_safety | 2s | PASS |
+| proof_lq2_liquidation_preserves_conservation | 3s | PASS |
+| proof_lq3a_profit_routes_through_adl | 3s | PASS |
+| proof_lq4_liquidation_fee_paid_to_insurance | 2s | PASS |
+| proof_lq6_n1_boundary_after_liquidation | 2s | PASS |
+| proof_net_extraction_bounded_with_fee_credits | 67s | PASS |
+| proof_principal_protection_across_accounts | 1s | PASS |
 | proof_profit_conversion_payout_formula | 18s | PASS |
-| proof_recompute_aggregates_correct | 2s | PASS |
 | proof_require_fresh_crank_gates_stale | 1s | PASS |
-| proof_rounding_slack_bound | 158s | PASS |
-| proof_sequence_deposit_crank_withdraw | 15s | PASS |
-| proof_sequence_deposit_trade_liquidate | 6s | PASS |
-| proof_set_capital_aggregate_correct | 2s | PASS |
-| proof_set_capital_decrease_preserves_conservation | 1s | PASS |
-| proof_set_capital_maintains_c_tot | 2s | PASS |
-| proof_set_pnl_maintains_pnl_pos_tot | 2s | PASS |
-| proof_set_pnl_preserves_conservation | 2s | PASS |
-| proof_set_risk_reduction_threshold_updates | 2s | PASS |
-| proof_settle_loss_only_preserves_inv | 3s | PASS |
-| proof_settle_maintenance_deducts_correctly | 3s | PASS |
-| proof_settle_mark_to_oracle_preserves_inv | 4s | PASS |
-| proof_settle_warmup_negative_pnl_immediate | 3s | PASS |
-| proof_settle_warmup_preserves_inv | 3s | PASS |
-| proof_stale_crank_blocks_execute_trade | 3s | PASS |
-| proof_stale_crank_blocks_withdraw | 3s | PASS |
-| proof_top_up_insurance_preserves_inv | 2s | PASS |
+| proof_rounding_slack_bound | 168s | PASS |
+| proof_sequence_deposit_crank_withdraw | 14s | PASS |
+| proof_sequence_deposit_trade_liquidate | 3s | PASS |
+| proof_set_risk_reduction_threshold_updates | 1s | PASS |
+| proof_settle_maintenance_deducts_correctly | 1s | PASS |
+| proof_settle_warmup_negative_pnl_immediate | 1s | PASS |
+| proof_settle_warmup_preserves_inv | 1s | PASS |
+| proof_stale_crank_blocks_execute_trade | 1s | PASS |
+| proof_stale_crank_blocks_withdraw | 1s | PASS |
 | proof_total_open_interest_initial | 1s | PASS |
-| proof_touch_account_full_preserves_inv | 74s | PASS |
-| proof_touch_account_preserves_inv | 4s | PASS |
-| proof_trade_creates_funding_settled_positions | 8s | PASS |
-| proof_trade_pnl_zero_sum | 40s | PASS |
-| proof_trading_credits_fee_to_user | 3s | PASS |
-| proof_variation_margin_no_pnl_teleport | 255s | PASS |
-| proof_warmup_slope_nonzero_when_positive_pnl | 2s | PASS |
-| proof_withdraw_preserves_inv | 4s | PASS |
+| proof_trade_creates_funding_settled_positions | 6s | PASS |
+| proof_trade_pnl_zero_sum | 43s | PASS |
+| proof_trading_credits_fee_to_user | 1s | PASS |
+| proof_variation_margin_no_pnl_teleport | 271s | PASS |
+| proof_warmup_slope_nonzero_when_positive_pnl | 1s | PASS |
+| proof_withdraw_preserves_inv | 1s | PASS |
 | saturating_arithmetic_prevents_overflow | 1s | PASS |
-| withdraw_calls_settle_enforces_pnl_or_zero_capital_post | 5s | PASS |
-| withdraw_im_check_blocks_when_equity_after_withdraw_below_im | 3s | PASS |
-| withdrawal_maintains_margin_above_maintenance | 126s | PASS |
-| withdrawal_rejects_if_below_initial_margin_at_oracle | 3s | PASS |
-| withdrawal_requires_sufficient_balance | 3s | PASS |
-| zero_pnl_withdrawable_is_zero | 2s | PASS |
-| proof_flaw1_debt_writeoff_requires_flat_position | 2s | PASS |
-| proof_flaw1_gc_never_writes_off_with_open_position | 1s | PASS |
-| proof_flaw2_no_phantom_equity_after_mark_settlement | 35s | PASS |
-| proof_flaw2_withdraw_settles_before_margin_check | 4s | PASS |
-| proof_flaw3_warmup_reset_increases_slope_proportionally | 1s | PASS |
-| proof_flaw3_warmup_converts_after_single_slot | 3s | PASS |
-
-## Historical Results (2026-02-13)
-
-Previous results: 145 proofs, 145 passed, 0 failures.
-
-## Historical Results (2026-02-12)
-
-Previous results: 133 proofs, 133 passed, 0 failures.
+| withdraw_calls_settle_enforces_pnl_or_zero_capital_post | 3s | PASS |
+| withdraw_im_check_blocks_when_equity_after_withdraw_below_im | 1s | PASS |
+| withdrawal_maintains_margin_above_maintenance | 104s | PASS |
+| withdrawal_rejects_if_below_initial_margin_at_oracle | 1s | PASS |
+| withdrawal_requires_sufficient_balance | 1s | PASS |
+| zero_pnl_withdrawable_is_zero | 1s | PASS |
 
 ## Historical Results (2026-01-21)
 

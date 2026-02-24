@@ -9,7 +9,7 @@ fn default_params() -> RiskParams {
         maintenance_margin_bps: 500, // 5%
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
-        max_accounts: 1000,
+        max_accounts: MAX_ACCOUNTS as u64,
         new_account_fee: U128::new(0),          // Zero fee for tests
         risk_reduction_threshold: U128::new(0), // Default: only trigger on full depletion
         maintenance_fee_per_slot: U128::new(0), // No maintenance fee by default
@@ -18,6 +18,22 @@ fn default_params() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000), // Cap at 100k units
         liquidation_buffer_bps: 100,             // 1% buffer above maintenance
         min_liquidation_abs: U128::new(100_000), // Minimum 0.1 units
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 1_000_000,
+        funding_premium_max_bps_per_slot: 5,
+        partial_liquidation_bps: 2000,
+        partial_liquidation_cooldown_slots: 30,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
