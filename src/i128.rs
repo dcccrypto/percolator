@@ -837,6 +837,9 @@ impl core::ops::Mul<U128> for U128 {
 impl core::ops::Div<u128> for U128 {
     type Output = Self;
     fn div(self, rhs: u128) -> Self {
+        if rhs == 0 {
+            return Self::ZERO; // Saturate to zero on division by zero (BPF safety)
+        }
         Self::new(self.get() / rhs)
     }
 }
@@ -845,6 +848,9 @@ impl core::ops::Div<u128> for U128 {
 impl core::ops::Div<U128> for U128 {
     type Output = Self;
     fn div(self, rhs: U128) -> Self {
+        if rhs.get() == 0 {
+            return Self::ZERO; // Saturate to zero on division by zero (BPF safety)
+        }
         Self::new(self.get() / rhs.get())
     }
 }
@@ -908,7 +914,8 @@ impl core::ops::Mul<i128> for I128 {
 impl core::ops::Neg for I128 {
     type Output = Self;
     fn neg(self) -> Self {
-        Self::new(-self.get())
+        // Match Kani's saturating_neg: i128::MIN.neg() → i128::MAX instead of panic/wrap
+        Self::new(self.get().saturating_neg())
     }
 }
 
