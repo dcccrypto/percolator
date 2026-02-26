@@ -5450,3 +5450,55 @@ fn test_fee_params_validation() {
     params.fee_split_creator_bps = 900;
     assert!(params.validate().is_err());
 }
+
+/// PERC-215: Explicit warm-up leverage cap test.
+/// Verifies that initial_margin_bps is enforced during warmup period,
+/// preventing users from exceeding max leverage even while PnL is warming up.
+#[test]
+fn test_warmup_leverage_cap_enforced() {
+    // Setup: warmup_period = 1000 slots, initial_margin = 1000 bps (10x max leverage)
+    let mut params = default_params();
+    params.warmup_period_slots = 1000;
+    params.initial_margin_bps = 1000; // 10% → 10x max leverage
+    params.maintenance_margin_bps = 500; // 5%
+    params.trading_fee_bps = 0;
+    params.max_crank_staleness_slots = u64::MAX;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // Deposit capital
+    engine.deposit(user_idx, 1_000_000_000, 0).unwrap(); // 1 SOL
+    engine.accounts[lp_idx as usize].capital = U128::new(100_000_000_000);
+    engine.vault += 100_000_000_000;
+
+    let oracle_price = 100_000_000u64; // $100
+
+    // 1. Open a position at exactly 10x leverage — should succeed
+    // position_value = size * oracle / 1e6 = size * 100
+    // margin_required (10%) = position_value / 10
+    // 1_000_000_000 >= position_value / 10 → max position_value = 10_000_000_000
+    // size = 10_000_000_000 * 1_000_000 / 100_000_000 = 100_000_000
+    let safe_size: i128 = 90_000_000; // ~9x leverage (below 10x, should pass)
+    let result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, safe_size);
+    assert!(result.is_ok(), "9x leverage should be allowed (within 10x cap): {:?}", result);
+
+    // 2. Advance slot into warmup period
+    engine.current_slot = 500; // mid-warmup
+
+    // 3. Try to increase position beyond 10x leverage — should fail
+    // Current position is ~9x. Trying to add more should fail if it exceeds initial margin.
+    let excess_size: i128 = 30_000_000; // would bring total to ~12x
+    let result2 = engine.execute_trade(&MATCHER, lp_idx, user_idx, 500, oracle_price, excess_size);
+    assert!(
+        result2.is_err(),
+        "Exceeding 10x leverage during warmup period must be rejected"
+    );
+
+    // 4. Reducing position should still be allowed during warmup
+    let reduce_size: i128 = -50_000_000; // closing half the position
+    let result3 = engine.execute_trade(&MATCHER, lp_idx, user_idx, 500, oracle_price, reduce_size);
+    assert!(result3.is_ok(), "Position reduction should be allowed during warmup: {:?}", result3);
+}
