@@ -7804,3 +7804,94 @@ fn proof_gap4_trade_extreme_price_symbolic() {
         "structural inv must hold after trade at any price",
     );
 }
+
+// ============================================================================
+// §5.4 REGRESSION: Liquidation warmup slope reset
+// ============================================================================
+
+/// §5.4 regression: liquidation path MUST reset warmup slope when mark
+/// settlement increases AvailGross.
+///
+/// Setup: long position with positive warming PnL, elapsed warmup (90 of 100
+/// slots), favorable symbolic oracle. Account is undercollateralized (small
+/// capital vs large position) so liquidation triggers.
+///
+/// Per spec §5.4: "After any change that increases AvailGross_i [...] Set
+/// w_start_i = current_slot." Mark settlement in touch_account_for_liquidation
+/// increases AvailGross when oracle > entry, so warmup must reset → elapsed=0
+/// → cap=0 → no PnL-to-capital conversion.
+///
+/// Bug: touch_account_for_liquidation skips update_warmup_slope after mark
+/// settlement, allowing stale cap = slope * elapsed to convert warming PnL
+/// to protected capital prematurely.
+///
+/// TDD: This proof FAILS before the fix, PASSES after.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_liquidation_must_reset_warmup_on_mark_increase() {
+    let mut params = test_params();
+    // Zero liquidation fee to isolate warmup conversion effect
+    params.liquidation_fee_bps = 0;
+    params.liquidation_fee_cap = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    engine.current_slot = 90;
+    engine.last_crank_slot = 90;
+    engine.last_full_sweep_start_slot = 90;
+
+    // Symbolic initial PnL: positive, warming
+    let initial_pnl: u128 = kani::any();
+    kani::assume(initial_pnl >= 1_000 && initial_pnl <= 50_000);
+
+    // Symbolic oracle: above entry → favorable mark → AvailGross increases
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1_000_001 && oracle_price <= 1_010_000);
+
+    // User: long 10 units at $1.00, small capital, positive warming PnL
+    let user = engine.add_user(0).unwrap();
+    engine.accounts[user as usize].capital = U128::new(500);
+    engine.accounts[user as usize].position_size = I128::new(10_000_000);
+    engine.accounts[user as usize].entry_price = 1_000_000;
+    engine.accounts[user as usize].pnl = I128::new(initial_pnl as i128);
+
+    // Warmup slope per spec §5.4: max(1, avail_gross / warmup_period)
+    let slope = core::cmp::max(1, initial_pnl / 100);
+    engine.accounts[user as usize].warmup_slope_per_step = U128::new(slope);
+    engine.accounts[user as usize].warmup_started_at_slot = 0;
+
+    // LP counterparty (well-capitalized, short)
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(1_000_000);
+    engine.accounts[lp as usize].position_size = I128::new(-10_000_000);
+    engine.accounts[lp as usize].entry_price = 1_000_000;
+
+    // Vault: user_capital + lp_capital + insurance + residual (h=1)
+    engine.vault = U128::new(500 + 1_000_000 + 10_000 + 1_000_000);
+    engine.insurance_fund.balance = U128::new(10_000);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let cap_before = engine.accounts[user as usize].capital.get();
+
+    let result = engine.liquidate_at_oracle(user, 90, oracle_price);
+
+    // Non-vacuity: liquidation must succeed and trigger
+    assert!(result.is_ok(), "liquidation must not error");
+    assert!(result.unwrap(), "liquidation must trigger");
+
+    // §5.4: mark settlement increased AvailGross (oracle > entry).
+    // Warmup must reset → elapsed=0 → cap=0 → no conversion.
+    // Capital must not increase from premature warmup conversion.
+    let cap_after = engine.accounts[user as usize].capital.get();
+    kani::assert(
+        cap_after <= cap_before,
+        "§5.4: warmup must reset on AvailGross increase — no premature conversion",
+    );
+
+    // INV must still hold after liquidation
+    kani::assert(
+        canonical_inv(&engine),
+        "canonical_inv must hold after liquidation",
+    );
+}
