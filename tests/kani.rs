@@ -7658,12 +7658,12 @@ fn proof_funding_zero_sum_across_accounts() {
     // Set symbolic funding rate and advance slot
     let funding_rate: i64 = kani::any();
     kani::assume(funding_rate >= -100 && funding_rate <= 100);
-    engine.funding_rate_bps_per_slot = funding_rate;
+    engine.funding_rate_bps_per_slot_last = funding_rate;
 
     let now_slot: u64 = kani::any();
     kani::assume(now_slot > 100 && now_slot <= 200);
 
-    let _ = engine.keeper_crank(now_slot, 1_000_000, false);
+    let _ = engine.keeper_crank(user, now_slot, 1_000_000, funding_rate, false);
 
     // Total capital + pnl should be conserved (funding is zero-sum)
     let total_after = {
@@ -7678,38 +7678,50 @@ fn proof_funding_zero_sum_across_accounts() {
     );
 }
 
-/// Non-Normal mode: operations that should fail in Resolved mode.
+/// Stale sweep blocks risk-increasing trades.
+/// When the last full sweep is older than max_crank_staleness_slots,
+/// risk-increasing trades must be rejected with Unauthorized.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_resolved_mode_blocks_trading() {
+fn proof_stale_sweep_blocks_risk_increasing_trade() {
     let mut engine = RiskEngine::new(test_params());
     engine.current_slot = 100;
     engine.last_crank_slot = 100;
-    engine.last_full_sweep_start_slot = 100;
+    // Set sweep start far in the past so it's stale
+    engine.last_full_sweep_start_slot = 0;
+    // Set staleness threshold so sweep at slot 0 is stale by slot 100
+    engine.max_crank_staleness_slots = 50;
 
     let user = engine.add_user(0).unwrap();
     let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
 
-    engine.deposit(user, 50_000, 100).unwrap();
-    engine.deposit(lp, 100_000, 100).unwrap();
+    engine.accounts[user as usize].capital = U128::new(50_000);
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.vault = U128::new(150_000);
+    sync_engine_aggregates(&mut engine);
 
-    // Switch to Resolved mode
-    engine.set_mode_resolved(1_000_000);
-
+    // Risk-increasing trade: user has no position, any non-zero delta increases risk
     let delta: i128 = kani::any();
     kani::assume(delta != 0 && delta != i128::MIN);
     kani::assume(delta.abs() < 100);
 
     let result = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta);
 
-    // Trading must fail in Resolved mode
-    kani::assert(result.is_err(), "execute_trade must fail in Resolved mode");
+    // Risk-increasing trade must fail when sweep is stale
+    kani::assert(
+        result.is_err(),
+        "execute_trade must fail when sweep is stale",
+    );
+    kani::assert(
+        result == Err(RiskError::Unauthorized),
+        "must return Unauthorized when sweep is stale",
+    );
 
     // INV must still hold (no mutation on Err)
     kani::assert(
         canonical_inv(&engine),
-        "INV must hold after failed trade in Resolved mode",
+        "INV must hold after failed trade with stale sweep",
     );
 }
 
