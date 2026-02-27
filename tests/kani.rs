@@ -7709,7 +7709,10 @@ fn proof_stale_sweep_blocks_risk_increasing_trade() {
     let result = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, delta);
 
     // Risk-increasing trade must fail when sweep is stale
-    kani::assert(result.is_err(), "execute_trade must fail when sweep is stale");
+    kani::assert(
+        result.is_err(),
+        "execute_trade must fail when sweep is stale",
+    );
     kani::assert(
         result == Err(RiskError::Unauthorized),
         "must return Unauthorized when sweep is stale",
