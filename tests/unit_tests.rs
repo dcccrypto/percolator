@@ -5483,7 +5483,11 @@ fn test_warmup_leverage_cap_enforced() {
     // size = 10_000_000_000 * 1_000_000 / 100_000_000 = 100_000_000
     let safe_size: i128 = 90_000_000; // ~9x leverage (below 10x, should pass)
     let result = engine.execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, safe_size);
-    assert!(result.is_ok(), "9x leverage should be allowed (within 10x cap): {:?}", result);
+    assert!(
+        result.is_ok(),
+        "9x leverage should be allowed (within 10x cap): {:?}",
+        result
+    );
 
     // 2. Advance slot into warmup period
     engine.current_slot = 500; // mid-warmup
@@ -5500,5 +5504,9 @@ fn test_warmup_leverage_cap_enforced() {
     // 4. Reducing position should still be allowed during warmup
     let reduce_size: i128 = -50_000_000; // closing half the position
     let result3 = engine.execute_trade(&MATCHER, lp_idx, user_idx, 500, oracle_price, reduce_size);
-    assert!(result3.is_ok(), "Position reduction should be allowed during warmup: {:?}", result3);
+    assert!(
+        result3.is_ok(),
+        "Position reduction should be allowed during warmup: {:?}",
+        result3
+    );
 }
