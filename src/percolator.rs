@@ -1392,8 +1392,34 @@ impl RiskEngine {
     ) -> Result<()> {
         // Funding settle is required for correct pnl
         self.touch_account(idx)?;
+
+        // Per spec §5.4: if mark settlement increases AvailGross, warmup must reset.
+        // Capture old AvailGross before mark settlement.
+        let old_avail_gross = {
+            let pnl = self.accounts[idx as usize].pnl.get();
+            if pnl > 0 {
+                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl as u128)
+            } else {
+                0
+            }
+        };
+
         // Best-effort mark-to-market (saturating — never wedges on extreme PnL)
         self.settle_mark_to_oracle_best_effort(idx, oracle_price)?;
+
+        // If AvailGross increased, update warmup slope (restarts warmup timer)
+        let new_avail_gross = {
+            let pnl = self.accounts[idx as usize].pnl.get();
+            if pnl > 0 {
+                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl as u128)
+            } else {
+                0
+            }
+        };
+        if new_avail_gross > old_avail_gross {
+            self.update_warmup_slope(idx)?;
+        }
+
         // Best-effort fees; margin check would just block the liquidation we need to do
         let _ = self.settle_maintenance_fee_best_effort_for_crank(idx, now_slot)?;
         Ok(())
