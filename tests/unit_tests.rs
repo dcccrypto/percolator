@@ -5524,7 +5524,7 @@ fn test_execute_trade_uses_dynamic_fee_tiers() {
     params.trading_fee_bps = 5; // Tier 1: 0.05%
     params.fee_tier2_bps = 8; // Tier 2: 0.08%
     params.fee_tier3_bps = 12; // Tier 3: 0.12%
-    // Thresholds in capital units (notional = size * oracle / 1e6)
+                               // Thresholds in capital units (notional = size * oracle / 1e6)
     params.fee_tier2_threshold = 500_000; // Tier 2 at 500k notional
     params.fee_tier3_threshold = 5_000_000; // Tier 3 at 5M notional
     params.max_crank_staleness_slots = u64::MAX;
@@ -5573,14 +5573,14 @@ fn test_execute_trade_uses_dynamic_fee_tiers() {
 
     // Verify: Tier 1 fee should be 5 bps of notional
     // fee_1 = ceil(100_000 * 5 / 10_000) = 50
-    assert_eq!(fee_paid_1, 50, "Tier 1 fee should be 5 bps of 100k notional");
+    assert_eq!(
+        fee_paid_1, 50,
+        "Tier 1 fee should be 5 bps of 100k notional"
+    );
 
     // Verify: Tier 2 fee should be 8 bps of notional
     // fee_2 = ceil(1_000_000 * 8 / 10_000) = 800
-    assert_eq!(
-        fee_paid_2, 800,
-        "Tier 2 fee should be 8 bps of 1M notional"
-    );
+    assert_eq!(fee_paid_2, 800, "Tier 2 fee should be 8 bps of 1M notional");
 }
 
 /// Verify execute_trade applies utilization-based fee surge.
@@ -5616,10 +5616,7 @@ fn test_execute_trade_utilization_surge() {
     let fee_no_util = capital_before - capital_after;
 
     // fee = ceil(1_000_000 * 10 / 10_000) = 1_000
-    assert_eq!(
-        fee_no_util, 1000,
-        "With no OI, should be base 10 bps"
-    );
+    assert_eq!(fee_no_util, 1000, "With no OI, should be base 10 bps");
 
     // Now the trade has created OI. Close and re-trade with high OI.
     engine
