@@ -5510,3 +5510,178 @@ fn test_warmup_leverage_cap_enforced() {
         result3
     );
 }
+
+// =============================================================================
+// PERC-283: Dynamic Fee Integration Tests
+// =============================================================================
+
+/// Verify execute_trade uses tiered fees when configured.
+/// Tier 2 fee (8 bps) should be charged instead of base (5 bps) for large trades.
+#[test]
+fn test_execute_trade_uses_dynamic_fee_tiers() {
+    let mut params = default_params();
+    params.warmup_period_slots = 0;
+    params.trading_fee_bps = 5; // Tier 1: 0.05%
+    params.fee_tier2_bps = 8; // Tier 2: 0.08%
+    params.fee_tier3_bps = 12; // Tier 3: 0.12%
+                               // Thresholds in capital units (notional = size * oracle / 1e6)
+    params.fee_tier2_threshold = 500_000; // Tier 2 at 500k notional
+    params.fee_tier3_threshold = 5_000_000; // Tier 3 at 5M notional
+    params.max_crank_staleness_slots = u64::MAX;
+    params.initial_margin_bps = 1000;
+    params.maintenance_margin_bps = 500;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // Large deposits to avoid undercollateralized
+    engine.deposit(user_idx, 100_000_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(100_000_000_000);
+    engine.c_tot = U128::new(engine.c_tot.get() + 100_000_000_000);
+    engine.vault = U128::new(engine.vault.get() + 100_000_000_000);
+
+    let oracle_price = 1_000_000u64; // $1
+
+    // Trade 1: Small trade → Tier 1 (5 bps)
+    // Size 100_000 at price $1 → notional = 100_000 * 1_000_000 / 1_000_000 = 100_000
+    // That's below Tier 2 threshold of 500_000 → base fee = 5 bps
+    // Expected fee = ceil(100_000 * 5 / 10_000) = ceil(50) = 50
+    let capital_before = engine.accounts[user_idx as usize].capital.get();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, 100_000)
+        .unwrap();
+    let capital_after = engine.accounts[user_idx as usize].capital.get();
+    let fee_paid_1 = capital_before - capital_after;
+
+    // Close position before next trade (clean state)
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, -100_000)
+        .unwrap();
+
+    // Trade 2: Large trade → Tier 2 (8 bps)
+    // Size 1_000_000 at price $1 → notional = 1_000_000
+    // That's above Tier 2 threshold (500k) → fee = 8 bps
+    // Expected fee = ceil(1_000_000 * 8 / 10_000) = ceil(800) = 800
+    let capital_before = engine.accounts[user_idx as usize].capital.get();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, 1_000_000)
+        .unwrap();
+    let capital_after = engine.accounts[user_idx as usize].capital.get();
+    let fee_paid_2 = capital_before - capital_after;
+
+    // Verify: Tier 1 fee should be 5 bps of notional
+    // fee_1 = ceil(100_000 * 5 / 10_000) = 50
+    assert_eq!(
+        fee_paid_1, 50,
+        "Tier 1 fee should be 5 bps of 100k notional"
+    );
+
+    // Verify: Tier 2 fee should be 8 bps of notional
+    // fee_2 = ceil(1_000_000 * 8 / 10_000) = 800
+    assert_eq!(fee_paid_2, 800, "Tier 2 fee should be 8 bps of 1M notional");
+}
+
+/// Verify execute_trade applies utilization-based fee surge.
+#[test]
+fn test_execute_trade_utilization_surge() {
+    let mut params = default_params();
+    params.warmup_period_slots = 0;
+    params.trading_fee_bps = 10; // 0.10% base
+    params.fee_utilization_surge_bps = 20; // max 0.20% surge at 100% utilization
+    params.fee_tier2_threshold = 0; // No tiers (flat + surge only)
+    params.max_crank_staleness_slots = u64::MAX;
+    params.initial_margin_bps = 1000;
+    params.maintenance_margin_bps = 500;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    engine.deposit(user_idx, 100_000_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(100_000_000_000);
+    engine.c_tot = U128::new(engine.c_tot.get() + 100_000_000_000);
+    engine.vault = U128::new(engine.vault.get() + 100_000_000_000);
+
+    let oracle_price = 1_000_000u64; // $1
+
+    // No OI yet → base fee only (10 bps)
+    let capital_before = engine.accounts[user_idx as usize].capital.get();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, 1_000_000)
+        .unwrap();
+    let capital_after = engine.accounts[user_idx as usize].capital.get();
+    let fee_no_util = capital_before - capital_after;
+
+    // fee = ceil(1_000_000 * 10 / 10_000) = 1_000
+    assert_eq!(fee_no_util, 1000, "With no OI, should be base 10 bps");
+
+    // Now the trade has created OI. Close and re-trade with high OI.
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, -1_000_000)
+        .unwrap();
+
+    // Inject high OI = vault (50% utilization since util = OI / (2*vault))
+    // vault ~ 200B, inject OI = 200B → util = 200B / (2*200B) = 0.5
+    let vault = engine.vault.get();
+    engine.total_open_interest = U128::new(vault); // 50% util
+
+    let capital_before = engine.accounts[user_idx as usize].capital.get();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, 1_000_000)
+        .unwrap();
+    let capital_after = engine.accounts[user_idx as usize].capital.get();
+    let fee_with_util = capital_before - capital_after;
+
+    // At 50% utilization: surge = 20 * 5000/10000 = 10 bps
+    // Total fee = 10 + 10 = 20 bps
+    // fee = ceil(1_000_000 * 20 / 10_000) = 2_000
+    assert_eq!(
+        fee_with_util, 2000,
+        "At 50% utilization, surge should add 10 bps (total 20 bps)"
+    );
+}
+
+/// Verify execute_trade applies Tier 3 fee for very large trades.
+#[test]
+fn test_execute_trade_tier3_fee() {
+    let mut params = default_params();
+    params.warmup_period_slots = 0;
+    params.trading_fee_bps = 5;
+    params.fee_tier2_bps = 8;
+    params.fee_tier3_bps = 15;
+    params.fee_tier2_threshold = 500_000;
+    params.fee_tier3_threshold = 5_000_000;
+    params.max_crank_staleness_slots = u64::MAX;
+    params.initial_margin_bps = 200; // 50x leverage for large trades
+    params.maintenance_margin_bps = 100;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    engine.deposit(user_idx, 1_000_000_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(1_000_000_000_000);
+    engine.c_tot = U128::new(engine.c_tot.get() + 1_000_000_000_000);
+    engine.vault = U128::new(engine.vault.get() + 1_000_000_000_000);
+
+    let oracle_price = 1_000_000u64; // $1
+
+    // Size 10_000_000 at price $1 → notional = 10_000_000
+    // Tier 3 threshold = 5_000_000 → fee = 15 bps
+    // Expected fee = ceil(10_000_000 * 15 / 10_000) = 15_000
+    let capital_before = engine.accounts[user_idx as usize].capital.get();
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, 10_000_000)
+        .unwrap();
+    let capital_after = engine.accounts[user_idx as usize].capital.get();
+    let fee = capital_before - capital_after;
+
+    assert_eq!(
+        fee, 15_000,
+        "Tier 3 fee (15 bps) should apply for 10M notional"
+    );
+}
