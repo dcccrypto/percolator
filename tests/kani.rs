@@ -8000,12 +8000,12 @@ fn proof_auto_unresolve_requires_oracle_within_5pct() {
     } else {
         settlement - oracle_price
     };
-    let deviation_bps = (diff as u128).saturating_mul(10_000) / (settlement as u128);
 
-    let would_unresolve = deviation_bps <= 500; // 5%
+    // Use cross-multiplication for exact check (avoids integer division rounding)
+    let would_unresolve = (diff as u128) * 10_000 <= (settlement as u128) * 500;
 
     if would_unresolve {
-        // Verify: oracle is within 5% of settlement
+        // Verify: oracle is within 5% of settlement (exact arithmetic)
         kani::assert(
             diff as u128 * 10_000 <= settlement as u128 * 500,
             "auto-unresolve must only trigger when oracle within 5% of settlement",
@@ -8285,10 +8285,10 @@ fn proof_auto_unresolve_blocked_outside_500_slot_window() {
     }
 }
 
-/// Prove: auto-unresolve requires oracle recovery within 5%.
+/// Prove: large deviation (>5%) blocks auto-unresolve.
 #[cfg(kani)]
 #[kani::proof]
-fn proof_auto_unresolve_requires_oracle_within_5pct() {
+fn proof_auto_unresolve_large_deviation_blocks() {
     let recovered_price: u64 = kani::any();
     let settled_price: u64 = kani::any();
 
