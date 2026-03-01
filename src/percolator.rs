@@ -510,6 +510,16 @@ pub struct RiskEngine {
     /// This measures total risk exposure in the system.
     pub total_open_interest: U128,
 
+    /// Long-side open interest: sum of position_size for all accounts with position_size > 0.
+    /// Maintained incrementally for O(1) skew computation.
+    /// PERC-298: Used for skew-adjusted dynamic OI cap.
+    pub long_oi: U128,
+
+    /// Short-side open interest: sum of abs(position_size) for all accounts with position_size < 0.
+    /// Maintained incrementally for O(1) skew computation.
+    /// PERC-298: Used for skew-adjusted dynamic OI cap.
+    pub short_oi: U128,
+
     // ========================================
     // O(1) Aggregates (spec §2.2, §4)
     // ========================================
@@ -840,6 +850,8 @@ impl RiskEngine {
             last_crank_slot: 0,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
             total_open_interest: U128::ZERO,
+            long_oi: U128::ZERO,
+            short_oi: U128::ZERO,
             c_tot: U128::ZERO,
             pnl_pos_tot: U128::ZERO,
             liq_cursor: 0,
@@ -896,6 +908,35 @@ impl RiskEngine {
         }
         self.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
         Ok(())
+    }
+
+    // ========================================
+    // Directional OI Helpers (PERC-298)
+    // ========================================
+
+    /// Update long_oi and short_oi when a position changes from old_pos to new_pos.
+    /// - Positions > 0 contribute to long_oi (their value)
+    /// - Positions < 0 contribute to short_oi (their abs value)
+    /// - This is O(1) and maintains the invariant: long_oi + short_oi == total_oi
+    #[inline]
+    fn update_directional_oi(
+        long_oi: &mut U128,
+        short_oi: &mut U128,
+        old_pos: i128,
+        new_pos: i128,
+    ) {
+        // Remove old contribution
+        if old_pos > 0 {
+            *long_oi = long_oi.saturating_sub(old_pos as u128);
+        } else if old_pos < 0 {
+            *short_oi = short_oi.saturating_sub(saturating_abs_i128(old_pos) as u128);
+        }
+        // Add new contribution
+        if new_pos > 0 {
+            *long_oi = long_oi.saturating_add(new_pos as u128);
+        } else if new_pos < 0 {
+            *short_oi = short_oi.saturating_add(saturating_abs_i128(new_pos) as u128);
+        }
     }
 
     // ========================================
@@ -2122,18 +2163,21 @@ impl RiskEngine {
 
         // Update position
         let new_abs_pos = current_abs_pos.saturating_sub(close_abs);
-        self.accounts[idx as usize].position_size = if pos > 0 {
-            I128::new(new_abs_pos as i128)
+        let new_pos = if pos > 0 {
+            new_abs_pos as i128
         } else {
-            I128::new(-(new_abs_pos as i128))
+            -(new_abs_pos as i128)
         };
+        self.accounts[idx as usize].position_size = I128::new(new_pos);
 
         // Update OI
         self.total_open_interest = self.total_open_interest - close_abs;
 
+        // PERC-298: Update directional OI
+        Self::update_directional_oi(&mut self.long_oi, &mut self.short_oi, pos, new_pos);
+
         // Update LP aggregates if LP
         if self.accounts[idx as usize].is_lp() {
-            let new_pos = self.accounts[idx as usize].position_size.get();
             self.net_lp_pos = self.net_lp_pos - pos + new_pos;
             self.lp_sum_abs = self.lp_sum_abs - close_abs;
         }
@@ -2197,6 +2241,9 @@ impl RiskEngine {
 
         // Update OI
         self.total_open_interest = self.total_open_interest - abs_pos;
+
+        // PERC-298: Update directional OI (position goes from pos to 0)
+        Self::update_directional_oi(&mut self.long_oi, &mut self.short_oi, pos, 0);
 
         // Update LP aggregates if LP
         if self.accounts[idx as usize].is_lp() {
@@ -3845,6 +3892,22 @@ impl RiskEngine {
         } else {
             self.total_open_interest = self.total_open_interest.saturating_sub(old_oi - new_oi);
         }
+
+        // PERC-298: Update directional OI (long_oi / short_oi) for skew-adjusted cap
+        // Helper: compute long/short contribution of a position
+        // For each account (user and LP), subtract old contribution and add new.
+        Self::update_directional_oi(
+            &mut self.long_oi,
+            &mut self.short_oi,
+            old_user_pos,
+            new_user_position,
+        );
+        Self::update_directional_oi(
+            &mut self.long_oi,
+            &mut self.short_oi,
+            old_lp_pos,
+            new_lp_position,
+        );
 
         // Update LP aggregates for funding/threshold (O(1))
         let old_lp_abs = saturating_abs_i128(old_lp_pos) as u128;
