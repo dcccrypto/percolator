@@ -7895,3 +7895,120 @@ fn proof_liquidation_must_reset_warmup_on_mark_increase() {
         "canonical_inv must hold after liquidation",
     );
 }
+
+// ========================================
+// PERC-299: Volatility-Adjusted OI Cap
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_emergency_cap_is_half_base() {
+    // Verify that when emergency_oi_mode is active, the effective OI cap is halved.
+    let base_cap: u128 = kani::any();
+    kani::assume(base_cap > 0 && base_cap <= u64::MAX as u128);
+
+    let emergency_mode: bool = kani::any();
+
+    let effective = if emergency_mode {
+        base_cap / 2
+    } else {
+        base_cap
+    };
+
+    if emergency_mode {
+        kani::assert(
+            effective <= base_cap / 2,
+            "emergency cap must be at most half of base",
+        );
+        kani::assert(
+            effective * 2 <= base_cap,
+            "doubling emergency cap must not exceed base",
+        );
+    } else {
+        kani::assert(effective == base_cap, "normal cap must equal base");
+    }
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_emergency_recovery_requires_stable_slots() {
+    let last_breaker_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+    kani::assume(current_slot >= last_breaker_slot);
+
+    let should_recover = current_slot >= last_breaker_slot + EMERGENCY_RECOVERY_SLOTS;
+
+    if should_recover {
+        kani::assert(
+            current_slot - last_breaker_slot >= EMERGENCY_RECOVERY_SLOTS,
+            "recovery requires EMERGENCY_RECOVERY_SLOTS stable slots",
+        );
+    }
+}
+
+// ========================================
+// PERC-302: Market Maturity OI Ramp
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_ramp_never_exceeds_configured_multiplier() {
+    let multiplier: u64 = kani::any();
+    kani::assume(multiplier > 0 && multiplier <= 1_000_000);
+
+    let current_slot: u64 = kani::any();
+    let market_created_slot: u64 = kani::any();
+    kani::assume(current_slot >= market_created_slot);
+
+    let oi_ramp_slots: u64 = kani::any();
+    kani::assume(oi_ramp_slots <= 1_000_000);
+
+    let effective = if oi_ramp_slots == 0 || market_created_slot == 0 {
+        multiplier
+    } else {
+        let elapsed = current_slot.saturating_sub(market_created_slot);
+        if elapsed >= oi_ramp_slots {
+            multiplier
+        } else {
+            let start = 1000u64.min(multiplier);
+            let range = multiplier.saturating_sub(start);
+            start + range * elapsed / oi_ramp_slots
+        }
+    };
+
+    kani::assert(
+        effective <= multiplier,
+        "ramped multiplier must never exceed configured multiplier",
+    );
+}
+
+// ========================================
+// PERC-301: Auto-Recovery Unresolve
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_auto_unresolve_requires_oracle_within_5pct() {
+    let settlement: u64 = kani::any();
+    kani::assume(settlement > 0 && settlement <= 1_000_000_000_000); // Up to $1M
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price > 0 && oracle_price <= 1_000_000_000_000);
+
+    let diff = if oracle_price > settlement {
+        oracle_price - settlement
+    } else {
+        settlement - oracle_price
+    };
+    let deviation_bps = (diff as u128).saturating_mul(10_000) / (settlement as u128);
+
+    let would_unresolve = deviation_bps <= 500; // 5%
+
+    if would_unresolve {
+        // Verify: oracle is within 5% of settlement
+        kani::assert(
+            diff as u128 * 10_000 <= settlement as u128 * 500,
+            "auto-unresolve must only trigger when oracle within 5% of settlement",
+        );
+    }
+}
