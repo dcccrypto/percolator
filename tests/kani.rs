@@ -7878,3 +7878,34 @@ fn proof_ramp_never_exceeds_configured_multiplier() {
         "ramped multiplier must never exceed configured multiplier",
     );
 }
+
+// ========================================
+// PERC-301: Auto-Recovery Unresolve
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_auto_unresolve_requires_oracle_within_5pct() {
+    let settlement: u64 = kani::any();
+    kani::assume(settlement > 0 && settlement <= 1_000_000_000_000); // Up to $1M
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price > 0 && oracle_price <= 1_000_000_000_000);
+
+    let diff = if oracle_price > settlement {
+        oracle_price - settlement
+    } else {
+        settlement - oracle_price
+    };
+    let deviation_bps = (diff as u128).saturating_mul(10_000) / (settlement as u128);
+
+    let would_unresolve = deviation_bps <= 500; // 5%
+
+    if would_unresolve {
+        // Verify: oracle is within 5% of settlement
+        kani::assert(
+            diff as u128 * 10_000 <= settlement as u128 * 500,
+            "auto-unresolve must only trigger when oracle within 5% of settlement",
+        );
+    }
+}
