@@ -7945,3 +7945,53 @@ fn proof_emergency_recovery_requires_stable_slots() {
         );
     }
 }
+
+// ========================================
+// PERC-300: Adaptive Funding Rate
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_adaptive_funding_converges_at_equilibrium() {
+    // When skew = 0 (long_oi == short_oi), rate must not change
+    let prev_rate: i64 = kani::any();
+    let oi: u128 = kani::any();
+    kani::assume(oi > 0 && oi <= u64::MAX as u128);
+    let scale: u16 = kani::any();
+    let max_bps: u64 = kani::any();
+    kani::assume(max_bps > 0);
+
+    // Balanced OI: long == short
+    let result =
+        RiskEngine::compute_adaptive_funding_rate(prev_rate, oi, oi, oi * 2, scale, max_bps);
+
+    // Skew = 0 → delta = 0 → rate unchanged (unless clamped)
+    let clamped_prev = (prev_rate as i128).clamp(-(max_bps as i128), max_bps as i128) as i64;
+    kani::assert(
+        result == clamped_prev,
+        "at equilibrium (skew=0), rate must equal clamped prev_rate",
+    );
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_adaptive_funding_clamped_within_bounds() {
+    let prev_rate: i64 = kani::any();
+    let long_oi: u128 = kani::any();
+    let short_oi: u128 = kani::any();
+    let total_oi: u128 = kani::any();
+    kani::assume(total_oi > 0 && total_oi <= u64::MAX as u128);
+    kani::assume(long_oi <= total_oi && short_oi <= total_oi);
+    let scale: u16 = kani::any();
+    let max_bps: u64 = kani::any();
+    kani::assume(max_bps > 0 && max_bps <= 1_000_000);
+
+    let result = RiskEngine::compute_adaptive_funding_rate(
+        prev_rate, long_oi, short_oi, total_oi, scale, max_bps,
+    );
+
+    kani::assert(
+        result.unsigned_abs() <= max_bps,
+        "adaptive rate must be within [-max_bps, +max_bps]",
+    );
+}
