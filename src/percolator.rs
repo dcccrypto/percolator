@@ -1593,6 +1593,69 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// PERC-305: Auto-deleverage — surgically close or reduce a profitable position
+    /// to bring `pnl_pos_tot` back within bounds.
+    ///
+    /// # Preconditions (caller must verify):
+    /// - `pnl_pos_tot > pnl_cap` (the cap is exceeded)
+    /// - Target account has positive effective PnL
+    ///
+    /// # Parameters
+    /// - `idx`: account index to deleverage
+    /// - `now_slot`: current slot for funding settlement
+    /// - `oracle_price`: current oracle price (e6)
+    /// - `excess`: `pnl_pos_tot - pnl_cap` (amount of PnL to remove)
+    ///
+    /// # Returns
+    /// `Ok(closed_abs)` — the absolute position size that was closed.
+    pub fn execute_adl(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        excess: u128,
+    ) -> Result<u128> {
+        if (idx as usize) >= MAX_ACCOUNTS {
+            return Err(RiskError::AccountNotFound);
+        }
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+        self.current_slot = now_slot;
+
+        let pos = self.accounts[idx as usize].position_size.get();
+        if pos == 0 {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Settle funding + mark PnL before computing effective PnL
+        self.settle_mark_to_oracle_best_effort(idx, oracle_price)?;
+
+        let target_pnl = self.accounts[idx as usize].pnl.get();
+        if target_pnl <= 0 {
+            return Err(RiskError::Undercollateralized); // Target is not profitable
+        }
+
+        let target_positive_pnl = target_pnl as u128;
+        let abs_pos = saturating_abs_i128(pos) as u128;
+
+        if target_positive_pnl <= excess || abs_pos == 0 {
+            // Close entire position — not enough to cover all excess
+            self.oracle_close_position_core(idx, oracle_price)?;
+            Ok(abs_pos)
+        } else {
+            // Partial close: close proportion = excess / target_positive_pnl
+            let close_abs = abs_pos
+                .checked_mul(excess)
+                .map(|v| v / target_positive_pnl)
+                .unwrap_or(abs_pos);
+            let close_abs = core::cmp::max(close_abs, 1);
+
+            self.oracle_close_position_slice_core(idx, oracle_price, close_abs)?;
+            Ok(close_abs)
+        }
+    }
+
     /// Update initial and maintenance margin BPS. Admin only.
     pub fn set_margin_params(
         &mut self,
