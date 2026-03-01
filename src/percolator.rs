@@ -55,6 +55,9 @@ pub const MAX_ACCOUNTS: usize = 4096; // Full: ~6.9 SOL rent
 // Derived constants - all use size_of, no hardcoded values
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+
+/// PERC-299: Number of consecutive stable slots before emergency OI mode clears.
+pub const EMERGENCY_RECOVERY_SLOTS: u64 = 1000;
 /// Mask for wrapping indices (MAX_ACCOUNTS must be power of 2)
 const ACCOUNT_IDX_MASK: usize = MAX_ACCOUNTS - 1;
 
@@ -586,6 +589,19 @@ pub struct RiskEngine {
     pub lp_max_abs_sweep: U128,
 
     // ========================================
+    // Volatility-Adjusted OI Cap (PERC-299)
+    // ========================================
+    /// When true, OI cap is halved due to circuit breaker trigger.
+    /// Cleared when oracle is stable for EMERGENCY_RECOVERY_SLOTS consecutive slots.
+    pub emergency_oi_mode: u8, // bool stored as u8 for repr(C) alignment
+
+    /// Slot when emergency OI mode was activated (0 = never)
+    pub emergency_start_slot: u64,
+
+    /// Last slot when the circuit breaker fired (used for recovery tracking)
+    pub last_breaker_slot: u64,
+
+    // ========================================
     // Slab Management
     // ========================================
     /// Occupancy bitmap (4096 bits = 64 u64 words)
@@ -874,6 +890,9 @@ impl RiskEngine {
             lp_sum_abs: U128::ZERO,
             lp_max_abs: U128::ZERO,
             lp_max_abs_sweep: U128::ZERO,
+            emergency_oi_mode: 0,
+            emergency_start_slot: 0,
+            last_breaker_slot: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -889,6 +908,40 @@ impl RiskEngine {
         engine.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
 
         engine
+    }
+
+    // ========================================
+    // PERC-299: Volatility-Adjusted OI Cap
+    // ========================================
+
+    /// Returns true if emergency OI mode is active.
+    #[inline]
+    pub fn is_emergency_oi_mode(&self) -> bool {
+        self.emergency_oi_mode != 0
+    }
+
+    /// Activate emergency OI mode (halves effective OI cap).
+    /// Called when circuit breaker fires.
+    #[inline]
+    pub fn enter_emergency_oi_mode(&mut self, current_slot: u64) {
+        if self.emergency_oi_mode == 0 {
+            self.emergency_start_slot = current_slot;
+        }
+        self.emergency_oi_mode = 1;
+        self.last_breaker_slot = current_slot;
+    }
+
+    /// Check if oracle has been stable long enough to exit emergency mode.
+    /// Call this on every crank/oracle update where the breaker did NOT fire.
+    #[inline]
+    pub fn check_emergency_recovery(&mut self, current_slot: u64) {
+        if self.emergency_oi_mode != 0
+            && current_slot >= self.last_breaker_slot + EMERGENCY_RECOVERY_SLOTS
+        {
+            self.emergency_oi_mode = 0;
+            self.emergency_start_slot = 0;
+            self.last_breaker_slot = 0;
+        }
     }
 
     /// Initialize a RiskEngine in place (zero-copy friendly).
