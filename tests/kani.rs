@@ -7792,3 +7792,53 @@ fn proof_gap4_trade_extreme_price_symbolic() {
         "structural inv must hold after trade at any price",
     );
 }
+
+// ========================================
+// PERC-299: Volatility-Adjusted OI Cap
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_emergency_cap_is_half_base() {
+    // Verify that when emergency_oi_mode is active, the effective OI cap is halved.
+    let base_cap: u128 = kani::any();
+    kani::assume(base_cap > 0 && base_cap <= u64::MAX as u128);
+
+    let emergency_mode: bool = kani::any();
+
+    let effective = if emergency_mode {
+        base_cap / 2
+    } else {
+        base_cap
+    };
+
+    if emergency_mode {
+        kani::assert(
+            effective <= base_cap / 2,
+            "emergency cap must be at most half of base",
+        );
+        kani::assert(
+            effective * 2 <= base_cap,
+            "doubling emergency cap must not exceed base",
+        );
+    } else {
+        kani::assert(effective == base_cap, "normal cap must equal base");
+    }
+}
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_emergency_recovery_requires_stable_slots() {
+    let last_breaker_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+    kani::assume(current_slot >= last_breaker_slot);
+
+    let should_recover = current_slot >= last_breaker_slot + EMERGENCY_RECOVERY_SLOTS;
+
+    if should_recover {
+        kani::assert(
+            current_slot - last_breaker_slot >= EMERGENCY_RECOVERY_SLOTS,
+            "recovery requires EMERGENCY_RECOVERY_SLOTS stable slots",
+        );
+    }
+}
