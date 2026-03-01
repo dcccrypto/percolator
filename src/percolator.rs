@@ -510,6 +510,14 @@ pub struct RiskEngine {
     /// This measures total risk exposure in the system.
     pub total_open_interest: U128,
 
+    /// Long open interest = sum of position_size for all long positions (pos > 0)
+    /// Maintained incrementally for O(1) OI skew computation (PERC-298).
+    pub long_oi: U128,
+
+    /// Short open interest = sum of abs(position_size) for all short positions (pos < 0)
+    /// Maintained incrementally for O(1) OI skew computation (PERC-298).
+    pub short_oi: U128,
+
     // ========================================
     // O(1) Aggregates (spec §2.2, §4)
     // ========================================
@@ -840,6 +848,8 @@ impl RiskEngine {
             last_crank_slot: 0,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
             total_open_interest: U128::ZERO,
+            long_oi: U128::ZERO,
+            short_oi: U128::ZERO,
             c_tot: U128::ZERO,
             pnl_pos_tot: U128::ZERO,
             liq_cursor: 0,
@@ -2104,6 +2114,12 @@ impl RiskEngine {
 
         // Update OI
         self.total_open_interest = self.total_open_interest - close_abs;
+        // PERC-298: maintain per-side OI
+        if pos > 0 {
+            self.long_oi = self.long_oi.saturating_sub(close_abs);
+        } else {
+            self.short_oi = self.short_oi.saturating_sub(close_abs);
+        }
 
         // Update LP aggregates if LP
         if self.accounts[idx as usize].is_lp() {
@@ -2171,6 +2187,12 @@ impl RiskEngine {
 
         // Update OI
         self.total_open_interest = self.total_open_interest - abs_pos;
+        // PERC-298: maintain per-side OI
+        if pos > 0 {
+            self.long_oi = self.long_oi.saturating_sub(abs_pos);
+        } else {
+            self.short_oi = self.short_oi.saturating_sub(abs_pos);
+        }
 
         // Update LP aggregates if LP
         if self.accounts[idx as usize].is_lp() {
@@ -3816,6 +3838,34 @@ impl RiskEngine {
             self.total_open_interest = self.total_open_interest.saturating_add(new_oi - old_oi);
         } else {
             self.total_open_interest = self.total_open_interest.saturating_sub(old_oi - new_oi);
+        }
+
+        // PERC-298: maintain per-side OI incrementally
+        {
+            // Helper: compute long/short OI contribution for a position
+            fn long_short_oi(pos: i128) -> (u128, u128) {
+                if pos > 0 { (pos as u128, 0) } else { (0, saturating_abs_i128(pos) as u128) }
+            }
+            let (old_user_long, old_user_short) = long_short_oi(old_user_pos);
+            let (new_user_long, new_user_short) = long_short_oi(new_user_position);
+            let (old_lp_long, old_lp_short) = long_short_oi(old_lp_pos);
+            let (new_lp_long, new_lp_short) = long_short_oi(new_lp_position);
+
+            let old_long = old_user_long + old_lp_long;
+            let new_long = new_user_long + new_lp_long;
+            if new_long > old_long {
+                self.long_oi = self.long_oi.saturating_add(new_long - old_long);
+            } else {
+                self.long_oi = self.long_oi.saturating_sub(old_long - new_long);
+            }
+
+            let old_short = old_user_short + old_lp_short;
+            let new_short = new_user_short + new_lp_short;
+            if new_short > old_short {
+                self.short_oi = self.short_oi.saturating_add(new_short - old_short);
+            } else {
+                self.short_oi = self.short_oi.saturating_sub(old_short - new_short);
+            }
         }
 
         // Update LP aggregates for funding/threshold (O(1))
