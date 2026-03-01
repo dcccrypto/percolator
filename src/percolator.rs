@@ -2793,6 +2793,50 @@ impl RiskEngine {
         blended.clamp(i64::MIN as i128, i64::MAX as i128) as i64
     }
 
+    // ========================================
+    // PERC-300: Adaptive Funding Rate
+    // ========================================
+
+    /// Compute adaptive funding rate based on OI skew.
+    ///
+    /// Formula: new_rate = clamp(prev_rate + skew * scale_bps, -max_bps, +max_bps)
+    /// where skew = (long_oi - short_oi) / total_oi (range -1 to +1)
+    ///
+    /// When skew = 0 (balanced), rate unchanged (convergence at equilibrium).
+    /// When longs dominate (skew > 0), rate increases (longs pay shorts).
+    /// When shorts dominate (skew < 0), rate decreases (shorts pay longs).
+    ///
+    /// Returns the new adaptive funding rate in bps per slot.
+    pub fn compute_adaptive_funding_rate(
+        prev_rate_bps: i64,
+        long_oi: u128,
+        short_oi: u128,
+        total_oi: u128,
+        adaptive_scale_bps: u16,
+        max_funding_bps: u64,
+    ) -> i64 {
+        if total_oi == 0 || adaptive_scale_bps == 0 {
+            return prev_rate_bps; // No adjustment possible
+        }
+
+        // skew = (long_oi - short_oi) / total_oi, range [-1, 1]
+        // delta = skew * adaptive_scale_bps
+        // Using i128 to avoid overflow:
+        // delta_bps = (long_oi - short_oi) * adaptive_scale_bps / total_oi
+        let long = long_oi as i128;
+        let short = short_oi as i128;
+        let total = total_oi as i128;
+        let scale = adaptive_scale_bps as i128;
+
+        let delta_bps = ((long - short) * scale) / total;
+
+        let new_rate = (prev_rate_bps as i128).saturating_add(delta_bps);
+
+        // Clamp to [-max_funding_bps, +max_funding_bps]
+        let max = max_funding_bps as i128;
+        new_rate.clamp(-max, max) as i64
+    }
+
     /// Freeze funding rate (emergency admin action).
     ///
     /// Snapshots the current rate so accrue_funding still applies it (no drift),
