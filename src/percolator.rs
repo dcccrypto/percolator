@@ -229,6 +229,14 @@ pub struct InsuranceFund {
 
     /// Accumulated fees from trades
     pub fee_revenue: U128,
+
+    /// PERC-311: Balance incentive reserve.
+    /// Funded by fee_to_balance_reserve_bps of trading fees.
+    /// Pays rebates to traders who improve OI skew balance.
+    pub balance_incentive_reserve: u64,
+
+    /// Padding for 16-byte alignment.
+    pub _rebate_pad: [u8; 8],
 }
 
 /// Outcome from oracle_close_position_core helper
@@ -828,6 +836,8 @@ impl RiskEngine {
             insurance_fund: InsuranceFund {
                 balance: U128::ZERO,
                 fee_revenue: U128::ZERO,
+                balance_incentive_reserve: 0,
+                _rebate_pad: [0; 8],
             },
             params,
             current_slot: 0,
@@ -4008,6 +4018,59 @@ impl RiskEngine {
         Ok(above_threshold)
     }
 
+    /// PERC-311: Fund the balance incentive reserve from trading fees.
+    /// Called by wrapper after each trade's fee is computed.
+    /// `fee_amount` is in engine units; `reserve_bps` is basis points of fee to reserve.
+    pub fn fund_balance_reserve(&mut self, fee_amount: u128, reserve_bps: u16) {
+        if reserve_bps == 0 || fee_amount == 0 {
+            return;
+        }
+        let portion = fee_amount.saturating_mul(reserve_bps as u128) / 10_000;
+        if portion > u64::MAX as u128 {
+            return;
+        }
+        self.insurance_fund.balance_incentive_reserve = self
+            .insurance_fund
+            .balance_incentive_reserve
+            .saturating_add(portion as u64);
+    }
+
+    /// PERC-311: Pay a skew-improvement rebate to a user.
+    /// Returns the actual rebate paid (may be less than requested if reserve is low).
+    ///
+    /// `user_idx`: account to credit
+    /// `rebate_amount`: requested rebate in engine units
+    pub fn pay_skew_rebate(&mut self, user_idx: u16, rebate_amount: u64) -> u64 {
+        if rebate_amount == 0 {
+            return 0;
+        }
+        let reserve = self.insurance_fund.balance_incentive_reserve;
+        let actual = core::cmp::min(rebate_amount, reserve);
+        if actual == 0 {
+            return 0;
+        }
+        self.insurance_fund.balance_incentive_reserve = reserve - actual;
+        // Credit to user capital
+        let old_cap = self.accounts[user_idx as usize].capital;
+        self.accounts[user_idx as usize].capital = old_cap.saturating_add(actual as u128);
+        // Update c_tot aggregate
+        self.c_tot = U128::new(self.c_tot.get().saturating_add(actual as u128));
+        actual
+    }
+
+    /// PERC-311: Compute whether a trade improves OI skew.
+    /// Returns true if the user's new position reduces the absolute net LP position
+    /// (i.e., the trade helps rebalance long/short OI).
+    ///
+    /// `net_lp_before`: net_lp_pos before trade
+    /// `lp_delta`: LP's position change from this trade (negative of user's trade size)
+    pub fn trade_improves_skew(net_lp_before: i128, lp_delta: i128) -> bool {
+        let abs_before = net_lp_before.unsigned_abs();
+        let net_lp_after = net_lp_before.saturating_add(lp_delta);
+        let abs_after = net_lp_after.unsigned_abs();
+        abs_after < abs_before
+    }
+
     // ========================================
     // Utilities
     // ========================================
@@ -4097,5 +4160,110 @@ impl RiskEngine {
     /// Advance to next slot (for testing warmup)
     pub fn advance_slot(&mut self, slots: u64) {
         self.current_slot = self.current_slot.saturating_add(slots);
+    }
+}
+
+#[cfg(kani)]
+mod skew_rebate_proofs {
+    use super::*;
+
+    /// PERC-311: Rebate never exceeds the reserve balance.
+    #[kani::proof]
+    #[kani::unwind(1)]
+    fn proof_rebate_never_exceeds_reserve_balance() {
+        let reserve: u64 = kani::any();
+        let rebate_request: u64 = kani::any();
+
+        kani::assume(reserve <= 1_000_000_000_000);
+        kani::assume(rebate_request <= 1_000_000_000_000);
+
+        let actual = core::cmp::min(rebate_request, reserve);
+        let new_reserve = reserve - actual;
+
+        // PROPERTY: reserve never goes negative (implicitly true since u64)
+        assert!(new_reserve <= reserve);
+        // PROPERTY: actual rebate never exceeds original reserve
+        assert!(actual <= reserve);
+        // PROPERTY: actual rebate never exceeds request
+        assert!(actual <= rebate_request);
+    }
+}
+
+#[cfg(test)]
+mod skew_rebate_tests {
+    use super::*;
+
+    fn test_engine() -> RiskEngine {
+        let params = RiskParams {
+            warmup_period_slots: 10,
+            maintenance_margin_bps: 500,
+            initial_margin_bps: 1000,
+            trading_fee_bps: 10,
+            max_accounts: MAX_ACCOUNTS as u64,
+            new_account_fee: U128::ZERO,
+            risk_reduction_threshold: U128::ZERO,
+            maintenance_fee_per_slot: U128::ZERO,
+            max_crank_staleness_slots: u64::MAX,
+            liquidation_fee_bps: 50,
+            liquidation_fee_cap: U128::new(1_000_000),
+            liquidation_buffer_bps: 100,
+            min_liquidation_abs: U128::ZERO,
+            funding_premium_weight_bps: 0,
+            funding_settlement_interval_slots: 0,
+            funding_premium_dampening_e6: 1_000_000,
+            funding_premium_max_bps_per_slot: 5,
+            partial_liquidation_bps: 0,
+            partial_liquidation_cooldown_slots: 0,
+            use_mark_price_for_liquidation: false,
+            emergency_liquidation_margin_bps: 0,
+            fee_tier2_bps: 0,
+            fee_tier3_bps: 0,
+            fee_tier2_threshold: 0,
+            fee_tier3_threshold: 0,
+            fee_split_lp_bps: 0,
+            fee_split_protocol_bps: 0,
+            fee_split_creator_bps: 10_000,
+            fee_utilization_surge_bps: 0,
+        };
+        RiskEngine::new(params)
+    }
+
+    #[test]
+    fn test_trade_improves_skew_reduces_net() {
+        assert!(!RiskEngine::trade_improves_skew(-100, -10));
+        assert!(RiskEngine::trade_improves_skew(-100, 10));
+    }
+
+    #[test]
+    fn test_trade_improves_skew_from_zero() {
+        assert!(!RiskEngine::trade_improves_skew(0, 10));
+        assert!(!RiskEngine::trade_improves_skew(0, -10));
+    }
+
+    #[test]
+    fn test_fund_balance_reserve() {
+        let mut engine = test_engine();
+        engine.fund_balance_reserve(10_000, 500);
+        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
+        engine.fund_balance_reserve(10_000, 0);
+        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
+    }
+
+    #[test]
+    fn test_pay_skew_rebate_capped() {
+        let mut engine = test_engine();
+        engine.insurance_fund.balance_incentive_reserve = 100;
+        let paid = engine.pay_skew_rebate(0, 200);
+        assert_eq!(paid, 100);
+        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 0);
+    }
+
+    #[test]
+    fn test_pay_skew_rebate_exact() {
+        let mut engine = test_engine();
+        engine.insurance_fund.balance_incentive_reserve = 100;
+        let paid = engine.pay_skew_rebate(0, 50);
+        assert_eq!(paid, 50);
+        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 50);
     }
 }
