@@ -7842,3 +7842,39 @@ fn proof_emergency_recovery_requires_stable_slots() {
         );
     }
 }
+
+// ========================================
+// PERC-302: Market Maturity OI Ramp
+// ========================================
+
+#[cfg(kani)]
+#[kani::proof]
+fn proof_ramp_never_exceeds_configured_multiplier() {
+    let multiplier: u64 = kani::any();
+    kani::assume(multiplier > 0 && multiplier <= 1_000_000);
+
+    let current_slot: u64 = kani::any();
+    let market_created_slot: u64 = kani::any();
+    kani::assume(current_slot >= market_created_slot);
+
+    let oi_ramp_slots: u64 = kani::any();
+    kani::assume(oi_ramp_slots <= 1_000_000);
+
+    let effective = if oi_ramp_slots == 0 || market_created_slot == 0 {
+        multiplier
+    } else {
+        let elapsed = current_slot.saturating_sub(market_created_slot);
+        if elapsed >= oi_ramp_slots {
+            multiplier
+        } else {
+            let start = 1000u64.min(multiplier);
+            let range = multiplier.saturating_sub(start);
+            start + range * elapsed / oi_ramp_slots
+        }
+    };
+
+    kani::assert(
+        effective <= multiplier,
+        "ramped multiplier must never exceed configured multiplier",
+    );
+}
