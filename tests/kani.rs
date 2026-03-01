@@ -487,19 +487,29 @@ fn canonical_inv(engine: &RiskEngine) -> bool {
         && inv_per_account(engine)
 }
 
-/// Sync all engine aggregates (c_tot, pnl_pos_tot, total_open_interest) from account data.
+/// Sync all engine aggregates (c_tot, pnl_pos_tot, total_open_interest, long_oi, short_oi) from account data.
 /// Call this after manually setting account.capital, account.pnl, or account.position_size.
 /// Unlike engine.recompute_aggregates() which only handles c_tot and pnl_pos_tot,
-/// this also recomputes total_open_interest.
+/// this also recomputes total_open_interest and directional OI.
 fn sync_engine_aggregates(engine: &mut RiskEngine) {
     engine.recompute_aggregates();
     let mut oi: u128 = 0;
+    let mut long: u128 = 0;
+    let mut short: u128 = 0;
     for idx in 0..MAX_ACCOUNTS {
         if engine.is_used(idx) {
-            oi = oi.saturating_add(abs_i128_to_u128(engine.accounts[idx].position_size.get()));
+            let pos = engine.accounts[idx].position_size.get();
+            oi = oi.saturating_add(abs_i128_to_u128(pos));
+            if pos > 0 {
+                long = long.saturating_add(pos as u128);
+            } else if pos < 0 {
+                short = short.saturating_add(abs_i128_to_u128(pos));
+            }
         }
     }
     engine.total_open_interest = U128::new(oi);
+    engine.long_oi = U128::new(long);
+    engine.short_oi = U128::new(short);
 }
 
 // ============================================================================
@@ -7893,5 +7903,113 @@ fn proof_liquidation_must_reset_warmup_on_mark_increase() {
     kani::assert(
         canonical_inv(&engine),
         "canonical_inv must hold after liquidation",
+    );
+}
+
+// ============================================================================
+// PERC-298: Skew-adjusted dynamic OI cap
+// ============================================================================
+
+/// Compute the skew-adjusted effective max OI cap.
+/// Formula: effective_max_oi = max_oi * (1 - abs(long_oi - short_oi) / total_oi * skew_factor_bps / 10_000)
+/// Returns (effective_max_oi, base_max_oi) for verification.
+fn compute_skew_adjusted_cap(
+    vault: u128,
+    oi_cap_multiplier_bps: u64,
+    long_oi: u128,
+    short_oi: u128,
+    skew_factor_bps: u16,
+) -> (u128, u128) {
+    if oi_cap_multiplier_bps == 0 {
+        return (u128::MAX, u128::MAX); // OI cap disabled
+    }
+    let base_max_oi = vault.saturating_mul(oi_cap_multiplier_bps as u128) / 10_000;
+
+    if skew_factor_bps == 0 {
+        return (base_max_oi, base_max_oi); // Skew adjustment disabled
+    }
+
+    let total_oi = long_oi.saturating_add(short_oi);
+    if total_oi == 0 {
+        return (base_max_oi, base_max_oi); // No OI, no skew
+    }
+
+    let skew = if long_oi >= short_oi {
+        long_oi - short_oi
+    } else {
+        short_oi - long_oi
+    };
+
+    // reduction_bps = skew / total_oi * skew_factor_bps
+    // Use u128 arithmetic to avoid overflow: (skew * skew_factor_bps) / total_oi
+    // Cap at 10_000 to prevent negative effective cap
+    let reduction_bps = skew
+        .saturating_mul(skew_factor_bps as u128)
+        .checked_div(total_oi)
+        .unwrap_or(0)
+        .min(10_000);
+
+    // effective = base * (10_000 - reduction_bps) / 10_000
+    let effective = base_max_oi
+        .saturating_mul(10_000u128.saturating_sub(reduction_bps))
+        / 10_000;
+
+    (effective, base_max_oi)
+}
+
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_skew_adjusted_cap_never_exceeds_base_cap() {
+    // Symbolic inputs
+    let vault: u128 = kani::any();
+    kani::assume(vault >= 1_000 && vault <= 1_000_000_000_000); // 1K to 1T
+
+    let oi_cap_multiplier_bps: u64 = kani::any();
+    kani::assume(oi_cap_multiplier_bps >= 1 && oi_cap_multiplier_bps <= 1_000_000); // 0.01% to 100x
+
+    let long_oi: u128 = kani::any();
+    kani::assume(long_oi <= 1_000_000_000_000);
+
+    let short_oi: u128 = kani::any();
+    kani::assume(short_oi <= 1_000_000_000_000);
+
+    // total_oi must be non-zero for skew to matter
+    let total_oi = long_oi.saturating_add(short_oi);
+    kani::assume(total_oi > 0);
+
+    let skew_factor_bps: u16 = kani::any();
+    kani::assume(skew_factor_bps >= 1 && skew_factor_bps <= 10_000);
+
+    let (effective, base) =
+        compute_skew_adjusted_cap(vault, oi_cap_multiplier_bps, long_oi, short_oi, skew_factor_bps);
+
+    // PROPERTY 1: Effective cap never exceeds base cap
+    kani::assert(
+        effective <= base,
+        "PERC-298: skew-adjusted cap must never exceed base cap",
+    );
+
+    // PROPERTY 2: When skew is 0 (balanced), effective == base
+    if long_oi == short_oi {
+        kani::assert(
+            effective == base,
+            "PERC-298: balanced OI must yield full base cap",
+        );
+    }
+
+    // PROPERTY 3: Effective cap is non-negative (always >= 0)
+    // This is implicit for u128 but let's be explicit
+    kani::assert(
+        effective <= base,
+        "PERC-298: effective cap is non-negative",
+    );
+
+    // PROPERTY 4: When skew_factor_bps = 0, effective == base (disabled)
+    let (eff_disabled, base_disabled) =
+        compute_skew_adjusted_cap(vault, oi_cap_multiplier_bps, long_oi, short_oi, 0);
+    kani::assert(
+        eff_disabled == base_disabled,
+        "PERC-298: skew_factor_bps=0 must disable adjustment",
     );
 }

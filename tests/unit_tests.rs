@@ -5685,3 +5685,116 @@ fn test_execute_trade_tier3_fee() {
         "Tier 3 fee (15 bps) should apply for 10M notional"
     );
 }
+
+// ================================================================
+// PERC-298: Directional OI Tracking Tests
+// ================================================================
+
+#[test]
+fn test_directional_oi_after_trade() {
+    // After a trade, long_oi and short_oi should track the directional OI
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.last_full_sweep_completed_slot = 100;
+
+    let user = engine.add_user(0).unwrap();
+    engine.accounts[user as usize].capital = U128::new(100_000);
+    engine.set_capital(user as usize, 100_000);
+
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.set_capital(lp as usize, 100_000);
+
+    engine.vault = U128::new(200_000);
+
+    // Initially, no OI
+    assert_eq!(engine.long_oi.get(), 0);
+    assert_eq!(engine.short_oi.get(), 0);
+    assert_eq!(engine.total_open_interest.get(), 0);
+
+    // Buy 1000 units at $1.00 → user goes long, LP goes short
+    engine
+        .execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, 1000)
+        .unwrap();
+
+    // User is long 1000, LP is short 1000
+    assert!(engine.accounts[user as usize].position_size.get() > 0);
+    assert!(engine.accounts[lp as usize].position_size.get() < 0);
+
+    // long_oi = 1000 (user), short_oi = 1000 (LP)
+    assert_eq!(engine.long_oi.get(), 1000);
+    assert_eq!(engine.short_oi.get(), 1000);
+    assert_eq!(engine.total_open_interest.get(), 2000);
+}
+
+#[test]
+fn test_directional_oi_after_force_close() {
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.last_full_sweep_completed_slot = 100;
+
+    let user = engine.add_user(0).unwrap();
+    engine.accounts[user as usize].capital = U128::new(100_000);
+    engine.set_capital(user as usize, 100_000);
+
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.set_capital(lp as usize, 100_000);
+
+    engine.vault = U128::new(200_000);
+    engine.insurance_fund.balance = U128::new(10_000);
+
+    // Open position
+    engine
+        .execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, 1000)
+        .unwrap();
+
+    assert_eq!(engine.long_oi.get(), 1000);
+    assert_eq!(engine.short_oi.get(), 1000);
+
+    // Admin force-close the user position
+    engine.admin_force_close(user, 100, 1_000_000).unwrap();
+
+    // User position closed → long_oi decreases to 0
+    assert_eq!(engine.long_oi.get(), 0);
+    // LP still has short position (1000)
+    assert_eq!(engine.short_oi.get(), 1000);
+}
+
+#[test]
+fn test_directional_oi_invariant_equals_total() {
+    // After trades, long_oi + short_oi should always equal total_open_interest
+    let params = default_params();
+    let mut engine = RiskEngine::new(params);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+    engine.last_full_sweep_completed_slot = 100;
+
+    let user = engine.add_user(0).unwrap();
+    engine.accounts[user as usize].capital = U128::new(100_000);
+    engine.set_capital(user as usize, 100_000);
+
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.set_capital(lp as usize, 100_000);
+
+    engine.vault = U128::new(200_000);
+
+    // Multiple trades: invariant must hold after each
+    for size in [500i128, 300, -200, 100, -700] {
+        let _ = engine.execute_trade(&NoOpMatcher, lp, user, 100, 1_000_000, size);
+        assert_eq!(
+            engine.long_oi.get() + engine.short_oi.get(),
+            engine.total_open_interest.get(),
+            "Invariant violated: long_oi + short_oi != total_open_interest after trade size={}",
+            size
+        );
+    }
+}
