@@ -53,7 +53,7 @@ pub const MAX_ACCOUNTS: usize = 1024; // Medium: ~2.7 SOL rent
 pub const MAX_ACCOUNTS: usize = 4096; // Full: ~6.9 SOL rent
 
 // Derived constants - all use size_of, no hardcoded values
-pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
+pub const BITMAP_WORDS: usize = MAX_ACCOUNTS.div_ceil(64);
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
 
 /// PERC-299: Number of consecutive stable slots before emergency OI mode clears.
@@ -722,15 +722,6 @@ fn mul_u128(a: u128, b: u128) -> u128 {
 }
 
 #[inline]
-fn div_u128(a: u128, b: u128) -> Result<u128> {
-    if b == 0 {
-        Err(RiskError::Overflow) // Division by zero
-    } else {
-        Ok(a / b)
-    }
-}
-
-#[inline]
 fn clamp_pos_i128(val: i128) -> u128 {
     if val > 0 {
         val as u128
@@ -1010,6 +1001,7 @@ impl RiskEngine {
         self.used[w] &= !(1u64 << b);
     }
 
+    #[allow(dead_code)]
     fn for_each_used_mut<F: FnMut(usize, &mut Account)>(&mut self, mut f: F) {
         for (block, word) in self.used.iter().copied().enumerate() {
             let mut w = word;
@@ -1161,6 +1153,7 @@ impl RiskEngine {
     }
 
     /// Count used accounts
+    #[allow(dead_code)]
     fn count_used(&self) -> u64 {
         let mut count = 0u64;
         self.for_each_used(|_, _| {
@@ -1192,9 +1185,9 @@ impl RiskEngine {
 
         // Pay fee to insurance (fee tokens are deposited into vault)
         // Account for FULL fee_payment in vault, not just required_fee
-        self.vault = self.vault + fee_payment;
-        self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
-        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + required_fee;
+        self.vault += fee_payment;
+        self.insurance_fund.balance += required_fee;
+        self.insurance_fund.fee_revenue += required_fee;
 
         // Allocate slot and assign unique ID
         let idx = self.alloc_slot()?;
@@ -1253,9 +1246,9 @@ impl RiskEngine {
 
         // Pay fee to insurance (fee tokens are deposited into vault)
         // Account for FULL fee_payment in vault, not just required_fee
-        self.vault = self.vault + fee_payment;
-        self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
-        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + required_fee;
+        self.vault += fee_payment;
+        self.insurance_fund.balance += required_fee;
+        self.insurance_fund.fee_revenue += required_fee;
 
         // Allocate slot and assign unique ID
         let idx = self.alloc_slot()?;
@@ -1345,8 +1338,8 @@ impl RiskEngine {
 
             // Use set_capital helper to maintain c_tot aggregate (spec §4.1)
             self.set_capital(idx as usize, current_cap.saturating_sub(pay));
-            self.insurance_fund.balance = self.insurance_fund.balance + pay;
-            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+            self.insurance_fund.balance += pay;
+            self.insurance_fund.fee_revenue += pay;
 
             // Credit back what was paid
             self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
@@ -1409,8 +1402,8 @@ impl RiskEngine {
 
             // Use set_capital helper to maintain c_tot aggregate (spec §4.1)
             self.set_capital(idx as usize, current_cap.saturating_sub(pay));
-            self.insurance_fund.balance = self.insurance_fund.balance + pay;
-            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+            self.insurance_fund.balance += pay;
+            self.insurance_fund.fee_revenue += pay;
 
             self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
                 .fee_credits
@@ -1443,8 +1436,8 @@ impl RiskEngine {
             if pay > 0 {
                 // Use set_capital helper to maintain c_tot aggregate (spec §4.1)
                 self.set_capital(idx as usize, current_cap.saturating_sub(pay));
-                self.insurance_fund.balance = self.insurance_fund.balance + pay;
-                self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+                self.insurance_fund.balance += pay;
+                self.insurance_fund.fee_revenue += pay;
                 self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
                     .fee_credits
                     .saturating_add(u128_to_i128_clamped(pay));
@@ -1535,13 +1528,13 @@ impl RiskEngine {
         self.current_slot = now_slot;
 
         // Wrapper transferred tokens into vault
-        self.vault = self.vault + amount;
+        self.vault += amount;
 
         // Pre-fund: insurance receives the amount now.
         // When credits are later spent during fee settlement, no further
         // insurance booking occurs (coupon semantics).
-        self.insurance_fund.balance = self.insurance_fund.balance + amount;
-        self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + amount;
+        self.insurance_fund.balance += amount;
+        self.insurance_fund.fee_revenue += amount;
 
         // Credit the account
         self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
@@ -1780,8 +1773,8 @@ impl RiskEngine {
         self.gc_cursor = ((start + max_scan) & ACCOUNT_IDX_MASK) as u16;
 
         // Free all collected dust accounts
-        for i in 0..num_to_free {
-            self.free_slot(to_free[i]);
+        for slot in to_free.iter().take(num_to_free) {
+            self.free_slot(*slot);
         }
 
         num_to_free as u32
@@ -1848,7 +1841,7 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
         funding_rate_bps_per_slot: i64,
-        allow_panic: bool,
+        _allow_panic: bool,
     ) -> Result<CrankOutcome> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
@@ -1912,7 +1905,7 @@ impl RiskEngine {
         let mut liq_budget = LIQ_BUDGET_PER_CRANK;
         let mut force_realize_budget = FORCE_REALIZE_BUDGET_PER_CRANK;
 
-        let start_cursor = self.crank_cursor;
+        let _start_cursor = self.crank_cursor;
 
         // Iterate through index space looking for occupied accounts
         let mut idx = self.crank_cursor as usize;
@@ -1973,26 +1966,27 @@ impl RiskEngine {
                 }
 
                 // === Force-realize (when insurance at/below threshold) ===
-                if force_realize_active && force_realize_budget > 0 {
-                    if !self.accounts[idx].position_size.is_zero() {
+                if force_realize_active
+                    && force_realize_budget > 0
+                    && !self.accounts[idx].position_size.is_zero()
+                {
+                    if self
+                        .touch_account_for_force_realize(idx as u16, now_slot, oracle_price)
+                        .is_ok()
+                    {
                         if self
-                            .touch_account_for_force_realize(idx as u16, now_slot, oracle_price)
+                            .oracle_close_position_core(idx as u16, oracle_price)
                             .is_ok()
                         {
-                            if self
-                                .oracle_close_position_core(idx as u16, oracle_price)
-                                .is_ok()
-                            {
-                                force_realize_closed += 1;
-                                force_realize_budget = force_realize_budget.saturating_sub(1);
-                                self.lifetime_force_realize_closes =
-                                    self.lifetime_force_realize_closes.saturating_add(1);
-                            } else {
-                                force_realize_errors += 1;
-                            }
+                            force_realize_closed += 1;
+                            force_realize_budget = force_realize_budget.saturating_sub(1);
+                            self.lifetime_force_realize_closes =
+                                self.lifetime_force_realize_closes.saturating_add(1);
                         } else {
                             force_realize_errors += 1;
                         }
+                    } else {
+                        force_realize_errors += 1;
                     }
                 }
 
@@ -2131,9 +2125,7 @@ impl RiskEngine {
         // Conservative rounding guard: subtract 1 unit to ensure we close slightly more
         // than mathematically required. This guarantees post-liquidation account is
         // strictly on the safe side of the inequality despite integer truncation.
-        if abs_pos_safe_max > 0 {
-            abs_pos_safe_max -= 1;
-        }
+        abs_pos_safe_max = abs_pos_safe_max.saturating_sub(1);
 
         // Required close amount
         let close_abs = abs_pos.saturating_sub(abs_pos_safe_max);
@@ -2216,7 +2208,7 @@ impl RiskEngine {
         };
 
         // Update OI
-        self.total_open_interest = self.total_open_interest - close_abs;
+        self.total_open_interest -= close_abs;
         // PERC-298: maintain per-side OI
         if pos > 0 {
             self.long_oi = self.long_oi.saturating_sub(close_abs);
@@ -2228,7 +2220,7 @@ impl RiskEngine {
         if self.accounts[idx as usize].is_lp() {
             let new_pos = self.accounts[idx as usize].position_size.get();
             self.net_lp_pos = self.net_lp_pos - pos + new_pos;
-            self.lp_sum_abs = self.lp_sum_abs - close_abs;
+            self.lp_sum_abs -= close_abs;
         }
 
         // Settle warmup (loss settlement + profit conversion per spec §6)
@@ -2289,7 +2281,7 @@ impl RiskEngine {
         self.accounts[idx as usize].entry_price = oracle_price;
 
         // Update OI
-        self.total_open_interest = self.total_open_interest - abs_pos;
+        self.total_open_interest -= abs_pos;
         // PERC-298: maintain per-side OI
         if pos > 0 {
             self.long_oi = self.long_oi.saturating_sub(abs_pos);
@@ -2299,8 +2291,8 @@ impl RiskEngine {
 
         // Update LP aggregates if LP
         if self.accounts[idx as usize].is_lp() {
-            self.net_lp_pos = self.net_lp_pos - pos;
-            self.lp_sum_abs = self.lp_sum_abs - abs_pos;
+            self.net_lp_pos -= pos;
+            self.lp_sum_abs -= abs_pos;
         }
 
         // Settle warmup (loss settlement + profit conversion per spec §6)
@@ -2396,7 +2388,7 @@ impl RiskEngine {
         // Use ceiling division for consistency with trade fees
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = if notional > 0 && self.params.liquidation_fee_bps > 0 {
-            (mul_u128(notional, self.params.liquidation_fee_bps as u128) + 9999) / 10_000
+            mul_u128(notional, self.params.liquidation_fee_bps as u128).div_ceil(10_000)
         } else {
             0
         };
@@ -2535,7 +2527,7 @@ impl RiskEngine {
         // Liquidation fee
         let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
         let fee_raw = if notional > 0 && self.params.liquidation_fee_bps > 0 {
-            (mul_u128(notional, self.params.liquidation_fee_bps as u128) + 9999) / 10_000
+            mul_u128(notional, self.params.liquidation_fee_bps as u128).div_ceil(10_000)
         } else {
             0
         };
@@ -2773,7 +2765,7 @@ impl RiskEngine {
 
         // Clamp to max_bps_per_slot
         let max_abs = max_bps_per_slot.unsigned_abs() as i128;
-        let clamped = rate_unclamped.clamp(-(max_abs as i128), max_abs as i128);
+        let clamped = rate_unclamped.clamp(-max_abs, max_abs);
 
         clamped as i64
     }
@@ -3094,10 +3086,10 @@ impl RiskEngine {
         self.pay_fee_debt_from_capital(idx);
 
         // 6. Re-check maintenance margin after fee debt sweep
-        if !self.accounts[idx as usize].position_size.is_zero() {
-            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price) {
-                return Err(RiskError::Undercollateralized);
-            }
+        if !self.accounts[idx as usize].position_size.is_zero()
+            && !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price)
+        {
+            return Err(RiskError::Undercollateralized);
         }
 
         Ok(())
@@ -3106,6 +3098,7 @@ impl RiskEngine {
     /// Minimal touch for crank liquidations: funding + maintenance only.
     /// Skips warmup settlement for performance - losses are handled inline
     /// by the deferred close helpers, positive warmup left for user ops.
+    #[allow(dead_code)]
     fn touch_account_for_crank(
         &mut self,
         idx: u16,
@@ -3163,8 +3156,8 @@ impl RiskEngine {
             let pay = core::cmp::min(owed, deposit_remaining);
 
             deposit_remaining -= pay;
-            self.insurance_fund.balance = self.insurance_fund.balance + pay;
-            self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+            self.insurance_fund.balance += pay;
+            self.insurance_fund.fee_revenue += pay;
 
             // Credit back what was paid
             account.fee_credits = account
@@ -3297,13 +3290,13 @@ impl RiskEngine {
 
         // Post-withdrawal MTM maintenance margin check at oracle price
         // This is a safety belt to ensure we never leave an account in liquidatable state
-        if !self.accounts[idx as usize].position_size.is_zero() {
-            if !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price) {
-                // Revert the withdrawal (via set_capital to maintain c_tot)
-                self.set_capital(idx as usize, old_capital.get());
-                self.vault = U128::new(add_u128(self.vault.get(), amount));
-                return Err(RiskError::Undercollateralized);
-            }
+        if !self.accounts[idx as usize].position_size.is_zero()
+            && !self.is_above_maintenance_margin_mtm(&self.accounts[idx as usize], oracle_price)
+        {
+            // Revert the withdrawal (via set_capital to maintain c_tot)
+            self.set_capital(idx as usize, old_capital.get());
+            self.vault = U128::new(add_u128(self.vault.get(), amount));
+            return Err(RiskError::Undercollateralized);
         }
 
         // Regression assert: after settle + withdraw, negative PnL should have been settled
@@ -3321,12 +3314,6 @@ impl RiskEngine {
     // Trading
     // ========================================
 
-    /// Realized-only equity: max(0, capital + realized_pnl).
-    ///
-    /// DEPRECATED for margin checks: Use account_equity_mtm_at_oracle instead.
-    /// This helper is retained for reporting, PnL display, and test assertions that
-    /// specifically need realized-only equity.
-    #[inline]
     // ========================================
     // Dynamic Fee Computation (PERC-120)
     // ========================================
@@ -3375,7 +3362,7 @@ impl RiskEngine {
             10_000u64 // Fully utilized
         } else {
             // (oi * 10_000 / vault_2x) as u64
-            ((oi as u128).saturating_mul(10_000) / (vault_2x as u128).max(1)) as u64
+            (oi.saturating_mul(10_000) / vault_2x.max(1)) as u64
         };
 
         // surge = fee_utilization_surge_bps * util_bps / 10_000
@@ -3495,6 +3482,7 @@ impl RiskEngine {
     /// Real liquidation still calls touch_account_full() and checks margin properly.
     /// A "wrong" top-K pick is harmless: it just won't liquidate.
     #[inline]
+    #[allow(dead_code)]
     fn liq_priority_score(&self, a: &Account, oracle_price: u64) -> u128 {
         if a.position_size.is_zero() {
             return 0;
@@ -3522,11 +3510,7 @@ impl RiskEngine {
             price_maint
         };
 
-        if equity >= maint {
-            0
-        } else {
-            maint - equity
-        }
+        maint.saturating_sub(equity)
     }
 
     /// Risk-reduction-only mode is entered when the system is in deficit. Warmups are frozen so pending PNL cannot become principal. Withdrawals of principal (capital) are allowed (subject to margin). Risk-increasing actions are blocked; only risk-reducing/neutral operations are allowed.
@@ -3688,7 +3672,7 @@ impl RiskEngine {
         let fee_bps = self.compute_dynamic_fee_bps(notional);
         let fee = if notional > 0 && fee_bps > 0 {
             // Ceiling division: ensures at least 1 atomic unit fee for any real trade
-            (mul_u128(notional, fee_bps as u128) + 9999) / 10_000
+            mul_u128(notional, fee_bps as u128).div_ceil(10_000)
         } else {
             0
         };
@@ -4385,6 +4369,15 @@ mod skew_rebate_proofs {
 mod skew_rebate_tests {
     use super::*;
 
+    /// Helper to run a closure on a thread with 8MB stack to avoid overflow
+    /// from large RiskEngine (contains [Account; MAX_ACCOUNTS] on the stack).
+    fn with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
+        extern crate std;
+        let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+        let handle = builder.spawn(f).expect("failed to spawn thread");
+        handle.join().expect("test thread panicked");
+    }
+
     fn test_engine() -> RiskEngine {
         let params = RiskParams {
             warmup_period_slots: 10,
@@ -4434,28 +4427,34 @@ mod skew_rebate_tests {
 
     #[test]
     fn test_fund_balance_reserve() {
-        let mut engine = test_engine();
-        engine.fund_balance_reserve(10_000, 500);
-        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
-        engine.fund_balance_reserve(10_000, 0);
-        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
+        with_large_stack(|| {
+            let mut engine = test_engine();
+            engine.fund_balance_reserve(10_000, 500);
+            assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
+            engine.fund_balance_reserve(10_000, 0);
+            assert_eq!(engine.insurance_fund.balance_incentive_reserve, 500);
+        });
     }
 
     #[test]
     fn test_pay_skew_rebate_capped() {
-        let mut engine = test_engine();
-        engine.insurance_fund.balance_incentive_reserve = 100;
-        let paid = engine.pay_skew_rebate(0, 200);
-        assert_eq!(paid, 100);
-        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 0);
+        with_large_stack(|| {
+            let mut engine = test_engine();
+            engine.insurance_fund.balance_incentive_reserve = 100;
+            let paid = engine.pay_skew_rebate(0, 200);
+            assert_eq!(paid, 100);
+            assert_eq!(engine.insurance_fund.balance_incentive_reserve, 0);
+        });
     }
 
     #[test]
     fn test_pay_skew_rebate_exact() {
-        let mut engine = test_engine();
-        engine.insurance_fund.balance_incentive_reserve = 100;
-        let paid = engine.pay_skew_rebate(0, 50);
-        assert_eq!(paid, 50);
-        assert_eq!(engine.insurance_fund.balance_incentive_reserve, 50);
+        with_large_stack(|| {
+            let mut engine = test_engine();
+            engine.insurance_fund.balance_incentive_reserve = 100;
+            let paid = engine.pay_skew_rebate(0, 50);
+            assert_eq!(paid, 50);
+            assert_eq!(engine.insurance_fund.balance_incentive_reserve, 50);
+        });
     }
 }
