@@ -3844,7 +3844,11 @@ impl RiskEngine {
         {
             // Helper: compute long/short OI contribution for a position
             fn long_short_oi(pos: i128) -> (u128, u128) {
-                if pos > 0 { (pos as u128, 0) } else { (0, saturating_abs_i128(pos) as u128) }
+                if pos > 0 {
+                    (pos as u128, 0)
+                } else {
+                    (0, saturating_abs_i128(pos) as u128)
+                }
             }
             let (old_user_long, old_user_short) = long_short_oi(old_user_pos);
             let (new_user_long, new_user_short) = long_short_oi(new_user_position);
