@@ -864,6 +864,11 @@ impl RiskEngine {
     ///
     /// # Panics
     /// Panics if `params` fails validation (see `RiskParams::validate`).
+    ///
+    /// Excluded from SBF builds to prevent linker stack-overflow warnings
+    /// (128 KiB–2 MiB frame vs. the 4 KiB SBF limit). On-chain code must
+    /// use `engine_mut()` + `init_in_place()` instead.
+    #[cfg(not(target_os = "solana"))]
     pub fn new(params: RiskParams) -> Self {
         params.validate().expect("invalid RiskParams");
         let mut engine = Self {
