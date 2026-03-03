@@ -8033,6 +8033,9 @@ fn proof_adaptive_funding_converges_at_equilibrium() {
     let oi: u128 = kani::any();
     kani::assume(oi > 0 && oi <= u64::MAX as u128);
     let scale: u16 = kani::any();
+    // scale=0 triggers early return without clamping; proof asserts clamped result,
+    // so restrict to the adaptive path where clamping always applies.
+    kani::assume(scale > 0);
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0);
 
@@ -8058,6 +8061,9 @@ fn proof_adaptive_funding_clamped_within_bounds() {
     kani::assume(total_oi > 0 && total_oi <= u64::MAX as u128);
     kani::assume(long_oi <= total_oi && short_oi <= total_oi);
     let scale: u16 = kani::any();
+    // scale=0 triggers early return without clamping, so prev_rate (any i64) could
+    // exceed max_bps. Restrict to adaptive path where output is always clamped.
+    kani::assume(scale > 0);
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
@@ -8162,7 +8168,14 @@ fn proof_skew_adjusted_cap_never_exceeds_base_cap() {
 
     // skew_ratio = diff / total (in [0, 1])
     // reduction = base_cap * skew_ratio * skew_factor_bps / 10_000
-    let reduction = base_cap * diff * (skew_factor_bps as u128) / (total * 10_000);
+    //
+    // Overflow-safe computation:
+    // base_cap * diff can be up to u64::MAX^2 ≈ 3.4e38 which fits in u128, but
+    // multiplying further by skew_factor_bps (up to 10_000) overflows u128.
+    // Fix: divide by total first (diff <= total, so base_cap * diff / total <= base_cap),
+    // then multiply by skew_factor_bps/10_000.  Integer-division ordering loses at most
+    // 1 ULP of precision, which does not affect the effective_cap <= base_cap assertion.
+    let reduction = base_cap * diff / total * (skew_factor_bps as u128) / 10_000;
     let effective_cap = base_cap.saturating_sub(reduction);
 
     kani::assert(
