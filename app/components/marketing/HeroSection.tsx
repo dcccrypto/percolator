@@ -221,7 +221,7 @@ export function HeroSection() {
           />
           <HeroDataChip
             icon="⚡"
-            text="412ms fill time"
+            text="< 400ms fills"
             delay={1.2}
             floatPhase={0}
             className="absolute -bottom-4 -right-4 z-20 lg:right-0 lg:-bottom-8"
