@@ -4,8 +4,8 @@
   "private": true,
   "description": "PERC-374/380: Oracle keeper — mirrors Binance spot prices to Percolator devnet markets",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "start": "tsx index.ts",
+    "dev": "tsx watch index.ts"
   },
   "dependencies": {
     "@percolator/sdk": "workspace:*",
