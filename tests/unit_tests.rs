@@ -5694,14 +5694,20 @@ fn test_execute_trade_tier3_fee() {
 #[test]
 fn test_blended_mark_no_twap() {
     let mark = RiskEngine::compute_blended_mark_price(1_000_000, 0, 7_000);
-    assert_eq!(mark, 1_000_000, "With zero TWAP, mark should be pure oracle");
+    assert_eq!(
+        mark, 1_000_000,
+        "With zero TWAP, mark should be pure oracle"
+    );
 }
 
 /// Blended mark price: pure TWAP when oracle is zero.
 #[test]
 fn test_blended_mark_no_oracle() {
     let mark = RiskEngine::compute_blended_mark_price(0, 2_000_000, 7_000);
-    assert_eq!(mark, 2_000_000, "With zero oracle, mark should be pure TWAP");
+    assert_eq!(
+        mark, 2_000_000,
+        "With zero oracle, mark should be pure TWAP"
+    );
 }
 
 /// Blended mark price: 70/30 oracle/TWAP blend.
@@ -5710,7 +5716,10 @@ fn test_blended_mark_70_30() {
     // oracle=100, twap=200, w=7000 (70%)
     // mark = (100*7000 + 200*3000) / 10000 = (700_000 + 600_000) / 10000 = 130
     let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 7_000);
-    assert_eq!(mark, 130_000_000, "70/30 blend of 100M and 200M should be 130M");
+    assert_eq!(
+        mark, 130_000_000,
+        "70/30 blend of 100M and 200M should be 130M"
+    );
 }
 
 /// Blended mark price: 100% oracle weight.
@@ -5731,7 +5740,10 @@ fn test_blended_mark_full_twap() {
 #[test]
 fn test_blended_mark_weight_clamped() {
     let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 20_000);
-    assert_eq!(mark, 100_000_000, "Weight > 10000 should clamp to pure oracle");
+    assert_eq!(
+        mark, 100_000_000,
+        "Weight > 10000 should clamp to pure oracle"
+    );
 }
 
 /// Trade TWAP: bootstrap on first trade.
@@ -5742,7 +5754,10 @@ fn test_twap_bootstrap() {
     assert_eq!(engine.trade_twap_e6, 0);
 
     engine.update_trade_twap(50_000_000, 5_000_000, 100);
-    assert_eq!(engine.trade_twap_e6, 50_000_000, "First trade bootstraps TWAP");
+    assert_eq!(
+        engine.trade_twap_e6, 50_000_000,
+        "First trade bootstraps TWAP"
+    );
     assert_eq!(engine.twap_last_slot, 100);
 }
 
@@ -5753,8 +5768,11 @@ fn test_twap_ignores_dust() {
     let mut engine = Box::new(RiskEngine::new(params));
 
     engine.update_trade_twap(50_000_000, 5_000_000, 100); // bootstrap
-    engine.update_trade_twap(999_000_000, 500_000, 200);   // dust: notional < 1e6
-    assert_eq!(engine.trade_twap_e6, 50_000_000, "Dust trade should not move TWAP");
+    engine.update_trade_twap(999_000_000, 500_000, 200); // dust: notional < 1e6
+    assert_eq!(
+        engine.trade_twap_e6, 50_000_000,
+        "Dust trade should not move TWAP"
+    );
 }
 
 /// Trade TWAP: EMA converges toward new price over time.
@@ -5764,7 +5782,7 @@ fn test_twap_ema_converges() {
     let mut engine = Box::new(RiskEngine::new(params));
 
     engine.update_trade_twap(100_000_000, 10_000_000, 0); // bootstrap at 100
-    // Many trades at 200 over many slots → TWAP should converge toward 200
+                                                          // Many trades at 200 over many slots → TWAP should converge toward 200
     for slot in (100..10_000).step_by(100) {
         engine.update_trade_twap(200_000_000, 10_000_000, slot);
     }
@@ -5793,5 +5811,8 @@ fn test_set_mark_price_blended() {
 
     // 50/50 blend
     engine.set_mark_price_blended(100_000_000, 5_000);
-    assert_eq!(engine.mark_price_e6, 125_000_000, "50/50 blend of 100M and 150M = 125M");
+    assert_eq!(
+        engine.mark_price_e6, 125_000_000,
+        "50/50 blend of 100M and 150M = 125M"
+    );
 }

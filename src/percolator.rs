@@ -2824,11 +2824,7 @@ impl RiskEngine {
     ///
     /// If TWAP is zero (no trades), returns oracle price.
     /// If oracle is zero, returns TWAP (or 0 if both zero).
-    pub fn compute_blended_mark_price(
-        oracle_e6: u64,
-        twap_e6: u64,
-        oracle_weight_bps: u64,
-    ) -> u64 {
+    pub fn compute_blended_mark_price(oracle_e6: u64, twap_e6: u64, oracle_weight_bps: u64) -> u64 {
         // Degenerate cases: use whichever is non-zero
         if twap_e6 == 0 {
             return oracle_e6;
@@ -3787,10 +3783,8 @@ impl RiskEngine {
         // Uses the same EMA formula as the oracle mark: alpha controls how fast
         // the TWAP tracks recent fills. Notional-weighted to resist dust manipulation.
         {
-            let notional = mul_u128(
-                saturating_abs_i128(exec_size) as u128,
-                exec_price as u128,
-            ) / 1_000_000;
+            let notional =
+                mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
             self.update_trade_twap(exec_price, notional, now_slot);
         }
 
