@@ -613,6 +613,16 @@ pub struct RiskEngine {
     pub last_breaker_slot: u64,
 
     // ========================================
+    // Trade TWAP (PERC-118: Mark Price Blend)
+    // ========================================
+    /// EMA of trade execution prices (e6), updated on each fill.
+    /// Used as the "impact mid price" component of the blended mark.
+    pub trade_twap_e6: u64,
+
+    /// Last slot when trade_twap_e6 was updated.
+    pub twap_last_slot: u64,
+
+    // ========================================
     // Slab Management
     // ========================================
     /// Occupancy bitmap (4096 bits = 64 u64 words)
@@ -903,6 +913,8 @@ impl RiskEngine {
             emergency_oi_mode: 0,
             emergency_start_slot: 0,
             last_breaker_slot: 0,
+            trade_twap_e6: 0,
+            twap_last_slot: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -2790,6 +2802,97 @@ impl RiskEngine {
         self.mark_price_e6 = mark_price_e6;
     }
 
+    /// Set mark price using blended formula: mark = blend(oracle, trade_twap).
+    ///
+    /// `oracle_weight_bps`: 10_000 = 100% oracle, 0 = 100% TWAP.
+    /// Falls back to pure oracle when TWAP is zero (no trades yet).
+    ///
+    /// PERC-118: The trade TWAP acts as an on-chain "impact mid price" that
+    /// anchors the mark to actual execution prices, making it resistant to
+    /// oracle-only manipulation. The oracle component anchors mark to the
+    /// external reference price.
+    pub fn set_mark_price_blended(&mut self, oracle_e6: u64, oracle_weight_bps: u64) {
+        let twap = self.trade_twap_e6;
+        let mark = Self::compute_blended_mark_price(oracle_e6, twap, oracle_weight_bps);
+        self.mark_price_e6 = mark;
+    }
+
+    /// Compute blended mark price from oracle and trade TWAP.
+    ///
+    /// Formula: mark = (oracle * w + twap * (10000 - w)) / 10000
+    /// where w = oracle_weight_bps (clamped to 10000).
+    ///
+    /// If TWAP is zero (no trades), returns oracle price.
+    /// If oracle is zero, returns TWAP (or 0 if both zero).
+    pub fn compute_blended_mark_price(
+        oracle_e6: u64,
+        twap_e6: u64,
+        oracle_weight_bps: u64,
+    ) -> u64 {
+        // Degenerate cases: use whichever is non-zero
+        if twap_e6 == 0 {
+            return oracle_e6;
+        }
+        if oracle_e6 == 0 {
+            return twap_e6;
+        }
+
+        let w = oracle_weight_bps.min(10_000);
+        let tw = 10_000u64.saturating_sub(w);
+
+        // u128 arithmetic: max(oracle_e6) * 10_000 < 2^64 * 2^14 = 2^78, fits u128
+        let blended = (oracle_e6 as u128)
+            .saturating_mul(w as u128)
+            .saturating_add((twap_e6 as u128).saturating_mul(tw as u128))
+            / 10_000u128;
+
+        blended.min(u64::MAX as u128) as u64
+    }
+
+    // ========================================
+    // Trade TWAP Maintenance (PERC-118)
+    // ========================================
+
+    /// Update the trade execution price TWAP.
+    ///
+    /// Uses an exponential moving average weighted by trade notional.
+    /// Small trades (notional < MIN_TWAP_NOTIONAL) are ignored to prevent
+    /// dust-trade manipulation of the TWAP.
+    ///
+    /// Alpha = 347 (out of 1_000_000) per slot ≈ 8-hour half-life at 400ms slots.
+    /// With dt_slots, effective alpha = min(alpha * dt, 1_000_000).
+    pub fn update_trade_twap(&mut self, exec_price_e6: u64, notional: u128, now_slot: u64) {
+        // Minimum notional to affect TWAP (anti-dust: ~$1 at reasonable prices)
+        const MIN_TWAP_NOTIONAL: u128 = 1_000_000; // 1e6 = $1 in e6 units
+
+        if exec_price_e6 == 0 || notional < MIN_TWAP_NOTIONAL {
+            return;
+        }
+
+        if self.trade_twap_e6 == 0 {
+            // Bootstrap: first trade sets the TWAP directly
+            self.trade_twap_e6 = exec_price_e6;
+            self.twap_last_slot = now_slot;
+            return;
+        }
+
+        // Time-weighted alpha: larger dt → faster convergence
+        let dt = now_slot.saturating_sub(self.twap_last_slot).max(1);
+        // TWAP_ALPHA_E6 = 347 per slot ≈ 8h half-life (matches oracle EMA)
+        const TWAP_ALPHA_E6: u64 = 347;
+        let eff_alpha = ((TWAP_ALPHA_E6 as u128) * (dt as u128)).min(1_000_000) as u64;
+        let one_minus = 1_000_000u64.saturating_sub(eff_alpha);
+
+        // EMA: new_twap = exec * alpha + old_twap * (1 - alpha)
+        let new_twap = (exec_price_e6 as u128)
+            .saturating_mul(eff_alpha as u128)
+            .saturating_add((self.trade_twap_e6 as u128).saturating_mul(one_minus as u128))
+            / 1_000_000u128;
+
+        self.trade_twap_e6 = new_twap.min(u64::MAX as u128) as u64;
+        self.twap_last_slot = now_slot;
+    }
+
     /// Compute premium-based funding rate (bps per slot).
     ///
     /// premium = (mark_price - index_price) / index_price
@@ -3678,6 +3781,17 @@ impl RiskEngine {
         // Must be partial fill at most (abs(exec) <= abs(request))
         if saturating_abs_i128(exec_size) > saturating_abs_i128(size) {
             return Err(RiskError::InvalidMatchingEngine);
+        }
+
+        // PERC-118: Update trade TWAP with execution price (volume-weighted EMA).
+        // Uses the same EMA formula as the oracle mark: alpha controls how fast
+        // the TWAP tracks recent fills. Notional-weighted to resist dust manipulation.
+        {
+            let notional = mul_u128(
+                saturating_abs_i128(exec_size) as u128,
+                exec_price as u128,
+            ) / 1_000_000;
+            self.update_trade_twap(exec_price, notional, now_slot);
         }
 
         // Settle funding, mark-to-market, and maintenance fees for both accounts
