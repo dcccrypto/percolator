@@ -44,4 +44,4 @@ ENV HEALTH_HOST=0.0.0.0
 ENV MAX_PRICE_MOVE_PCT=10
 ENV STALE_THRESHOLD_S=30
 
-CMD ["npx", "tsx", "index.ts"]
+CMD ["pnpm", "run", "start"]
