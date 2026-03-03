@@ -295,13 +295,19 @@ async function main() {
   log(`Push interval: ${PUSH_INTERVAL_MS}ms | Circuit breaker: ${MAX_PRICE_MOVE_PCT}% | Stale threshold: ${STALE_THRESHOLD_S}s`);
 
   const deployPath = "/tmp/percolator-devnet-deployment.json";
-  if (!fs.existsSync(deployPath)) {
+  let deployRaw: string | undefined;
+  if (fs.existsSync(deployPath)) {
+    deployRaw = fs.readFileSync(deployPath, "utf8");
+  } else if (process.env.DEPLOYMENT_JSON) {
+    log("Deployment file not found — falling back to DEPLOYMENT_JSON env var");
+    deployRaw = process.env.DEPLOYMENT_JSON;
+  } else {
     console.error("❌ Deployment info not found at", deployPath);
-    console.error("   Run deploy-devnet-mm.ts first, or set up manually.");
+    console.error("   Run deploy-devnet-mm.ts first, or set DEPLOYMENT_JSON env var.");
     process.exit(1);
   }
 
-  const deploy = JSON.parse(fs.readFileSync(deployPath, "utf8"));
+  const deploy = JSON.parse(deployRaw);
   const programId = new PublicKey(deploy.programId);
   const markets = deploy.markets as MarketInfo[];
 
