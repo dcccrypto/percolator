@@ -4863,10 +4863,14 @@ fn proof_crank_with_funding_preserves_inv() {
 ///
 /// This proof verifies that closing a position with a different LP produces
 /// the same user equity gain as closing with the original LP.
+/// NOTE: Moved to nightly CI — SAT-hard over all (open_price, close_price, size) triples;
+/// observed ~7358s (122 min) on PR runners with 4 parallel jobs.
+/// Tagged `nightly_` so ci.yml filter `--harness proof_` skips it;
+/// nightly.yml runs it with `--harness nightly_` at 5h timeout.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_variation_margin_no_pnl_teleport() {
+fn nightly_variation_margin_no_pnl_teleport() {
     // Scenario: user opens long with LP1 at P1, price moves to P2, closes with LP2
     // Expected: user gains (P2 - P1) * size regardless of which LP closes
 

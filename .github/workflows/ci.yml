@@ -71,7 +71,9 @@ jobs:
         uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
           # Exclude harnesses prefixed nightly_* — they run in .github/workflows/nightly.yml.
-          # Currently excluded: nightly_funding_zero_sum_across_accounts (~slow, OOM risk).
+          # Currently excluded:
+          #   nightly_funding_zero_sum_across_accounts (~slow, OOM risk)
+          #   nightly_variation_margin_no_pnl_teleport (~7358s / 122 min — SAT-hard)
           # Note: --harness uses substring matching against the full path (module::fn_name).
           # Anchored regex (^) and alternation (|) do not work — use separate bare-prefix flags.
           args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_
