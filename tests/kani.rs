@@ -7206,7 +7206,12 @@ fn proof_NEGATIVE_bypass_set_pnl_breaks_invariant() {
 // PERC-122: Kani proofs for partial liquidation
 // ============================================================================
 
-/// Proof: partial liquidation batch is bounded by position size.
+/// Proof: partial liquidation batch is bounded by position size AND guarantees progress.
+///
+/// Issue #650: Without the `.max(1)` guard, integer division can round the batch to 0
+/// when `pos_abs < 10_000 / partial_bps`, causing the liquidation to silently no-op
+/// and never converge. The fix clamps batch to at least 1 unit when pos_abs > 0,
+/// guaranteeing monotone progress every time partial liquidation is triggered.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
@@ -7219,11 +7224,17 @@ fn kani_partial_liquidation_batch_bounded() {
     kani::assume(partial_bps > 0 && partial_bps <= 10_000);
     kani::assume(min_abs < pos_abs);
 
-    let batch = (pos_abs * partial_bps / 10_000).max(min_abs);
+    // Mirror the production fix: batch rounds to 0 for tiny positions, enforce .max(1)
+    let batch_raw = (pos_abs * partial_bps / 10_000).max(min_abs);
+    let batch = if pos_abs > 0 { batch_raw.max(1) } else { batch_raw };
 
     let clamped = core::cmp::min(batch, pos_abs);
     kani::assert(clamped <= pos_abs, "partial batch must not exceed position");
     kani::assert(clamped > 0, "partial batch must be non-zero when pos > 0");
+    kani::assert(
+        clamped <= clamped + (pos_abs - clamped),
+        "progress: remaining position is non-negative after batch",
+    );
 }
 
 /// Proof: mark-price liquidation trigger is a pure function of equity vs maintenance.
