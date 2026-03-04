@@ -64,6 +64,70 @@ function simulateLongFraction(
 // Tests
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// Cluster Guard (PERC-404)
+// ═══════════════════════════════════════════════════════════════
+
+// Mirror the allowlist logic for unit tests (avoids importing the full module
+// which pulls in @solana/web3.js Connection etc.)
+const DEVNET_PATTERNS = ["devnet", "localhost", "127.0.0.1", "0.0.0.0", "[::1]"];
+function assertDevnetOnly(rpcUrl: string): void {
+  const lower = rpcUrl.toLowerCase();
+  if (!DEVNET_PATTERNS.some((p) => lower.includes(p))) {
+    throw new Error(`TraderFleetBot: refusing to start on non-devnet cluster.`);
+  }
+}
+
+describe("assertDevnetOnly (PERC-404 cluster guard)", () => {
+  it("allows standard devnet RPC", () => {
+    expect(() => assertDevnetOnly("https://api.devnet.solana.com")).not.toThrow();
+  });
+
+  it("allows localhost", () => {
+    expect(() => assertDevnetOnly("http://localhost:8899")).not.toThrow();
+  });
+
+  it("allows 127.0.0.1", () => {
+    expect(() => assertDevnetOnly("http://127.0.0.1:8899")).not.toThrow();
+  });
+
+  it("allows [::1] (IPv6 loopback)", () => {
+    expect(() => assertDevnetOnly("http://[::1]:8899")).not.toThrow();
+  });
+
+  it("allows 0.0.0.0", () => {
+    expect(() => assertDevnetOnly("http://0.0.0.0:8899")).not.toThrow();
+  });
+
+  it("allows Helius devnet RPC", () => {
+    expect(() =>
+      assertDevnetOnly("https://devnet.helius-rpc.com/?api-key=abc123"),
+    ).not.toThrow();
+  });
+
+  it("rejects mainnet-beta", () => {
+    expect(() =>
+      assertDevnetOnly("https://api.mainnet-beta.solana.com"),
+    ).toThrow(/refusing to start/);
+  });
+
+  it("rejects Helius mainnet RPC", () => {
+    expect(() =>
+      assertDevnetOnly("https://mainnet.helius-rpc.com/?api-key=abc123"),
+    ).toThrow(/refusing to start/);
+  });
+
+  it("rejects unknown custom RPC (could be mainnet)", () => {
+    expect(() =>
+      assertDevnetOnly("https://my-custom-rpc.example.com"),
+    ).toThrow(/refusing to start/);
+  });
+
+  it("rejects empty string", () => {
+    expect(() => assertDevnetOnly("")).toThrow(/refusing to start/);
+  });
+});
+
 describe("pickPersonality", () => {
   it("cycles through personalities by index", () => {
     expect(pickPersonality(0)).toBe("aggressive");

@@ -379,6 +379,30 @@ function decideAction(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Cluster Guard (PERC-404)
+// ═══════════════════════════════════════════════════════════════
+
+/** Allowed RPC endpoint patterns — devnet and local only. */
+const DEVNET_PATTERNS = ["devnet", "localhost", "127.0.0.1", "0.0.0.0", "[::1]"];
+
+/**
+ * Assert that the given RPC URL is a devnet or local endpoint.
+ * Throws if the URL doesn't match any allowed pattern.
+ * Exported for testing.
+ */
+export function assertDevnetOnly(rpcUrl: string): void {
+  const lower = rpcUrl.toLowerCase();
+  if (!DEVNET_PATTERNS.some((p) => lower.includes(p))) {
+    throw new Error(
+      `TraderFleetBot: refusing to start on non-devnet cluster.\n` +
+      `  RPC endpoint: ${rpcUrl}\n` +
+      `  This bot is devnet-only. It generates simulated volume and mints tokens.\n` +
+      `  Set RPC_URL to a devnet endpoint (e.g. https://api.devnet.solana.com).`,
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // TraderFleetBot
 // ═══════════════════════════════════════════════════════════════
 
@@ -534,16 +558,11 @@ export class TraderFleetBot {
   async start(): Promise<void> {
     if (this.running) return;
 
-    // Guard: TraderFleetBot is DEVNET ONLY — refuse to start on mainnet.
-    const rpcUrl = this.botConfig.rpcUrl.toLowerCase();
-    const MAINNET_PATTERNS = ["mainnet-beta", "mainnet"];
-    if (MAINNET_PATTERNS.some((p) => rpcUrl.includes(p))) {
-      throw new Error(
-        `TraderFleetBot refuses to start on a mainnet RPC endpoint: ${this.botConfig.rpcUrl}\n` +
-        `This bot generates simulated volume on DEVNET ONLY.\n` +
-        `Set RPC_URL to a devnet endpoint (e.g. https://api.devnet.solana.com).`,
-      );
-    }
+    // PERC-404: TraderFleetBot is DEVNET ONLY — allowlist-based cluster guard.
+    // Allowlist approach: only permit known devnet/local endpoints.
+    // This is safer than a blocklist because unknown/custom RPC endpoints
+    // (which could point to mainnet) are rejected by default.
+    assertDevnetOnly(this.botConfig.rpcUrl);
 
     await this.initialize();
 
