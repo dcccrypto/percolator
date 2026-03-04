@@ -74,6 +74,7 @@ jobs:
           # Currently excluded:
           #   nightly_funding_zero_sum_across_accounts (~slow, OOM risk)
           #   nightly_variation_margin_no_pnl_teleport (~7358s / 122 min — SAT-hard)
+          #   nightly_gap3_conservation_crank_funding_positions (>2.5h / cadical SAT — hard symbolic path)
           # Note: --harness uses substring matching against the full path (module::fn_name).
           # Anchored regex (^) and alternation (|) do not work — use separate bare-prefix flags.
           args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_

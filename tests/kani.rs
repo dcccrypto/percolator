@@ -6311,7 +6311,7 @@ fn proof_gap3_conservation_trade_entry_neq_oracle() {
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_gap3_conservation_crank_funding_positions() {
+fn nightly_gap3_conservation_crank_funding_positions() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = U128::new(200_000);
     engine.insurance_fund.balance = U128::new(10_000);
