@@ -45,19 +45,31 @@ export async function GET(
     // 2. Fallback: market_stats for the most recent price
     const { data: stats } = await (db as any)
       .from("market_stats")
-      .select("mark_price_e6, last_updated")
+      .select("mark_price, updated_at")
       .eq("slab_address", slab)
-      .order("last_updated", { ascending: false })
+      .order("updated_at", { ascending: false })
       .limit(1);
 
     if (stats && stats.length > 0) {
+      const markPriceUsd = stats[0].mark_price as number | null | undefined;
+
+      // Guard: null/zero/invalid mark_price must return empty — never inject a zero price
+      if (
+        typeof markPriceUsd !== "number" ||
+        !Number.isFinite(markPriceUsd) ||
+        markPriceUsd <= 0
+      ) {
+        return NextResponse.json({ prices: [] });
+      }
+
+      // Convert USD price -> e6 integer string (match oracle_prices schema)
+      const priceE6 = String(Math.round(markPriceUsd * 1_000_000));
+      const ts = stats[0].updated_at
+        ? new Date(stats[0].updated_at).getTime()
+        : Date.now();
+
       return NextResponse.json({
-        prices: [
-          {
-            price_e6: String(stats[0].mark_price_e6),
-            timestamp: new Date(stats[0].last_updated).getTime(),
-          },
-        ],
+        prices: [{ price_e6: priceE6, timestamp: ts }],
       });
     }
 
