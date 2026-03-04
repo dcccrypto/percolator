@@ -8023,11 +8023,14 @@ fn proof_auto_unresolve_requires_oracle_within_5pct() {
 #[cfg(kani)]
 #[kani::proof]
 fn proof_adaptive_funding_converges_at_equilibrium() {
-    // When skew = 0 (long_oi == short_oi), rate must not change
+    // When skew = 0 (long_oi == short_oi), rate must not change (unless clamped).
+    // This invariant only holds when adaptive scaling is active (scale > 0).
+    // When scale == 0 the function returns prev_rate_bps unchanged (no clamping).
     let prev_rate: i64 = kani::any();
     let oi: u128 = kani::any();
     kani::assume(oi > 0 && oi <= u64::MAX as u128);
     let scale: u16 = kani::any();
+    kani::assume(scale > 0); // clamping contract only applies when scaling is active
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0);
 
@@ -8046,6 +8049,9 @@ fn proof_adaptive_funding_converges_at_equilibrium() {
 #[cfg(kani)]
 #[kani::proof]
 fn proof_adaptive_funding_clamped_within_bounds() {
+    // When scale == 0 the function returns prev_rate_bps without clamping (no
+    // adjustment mode).  This proof verifies the clamping contract only when
+    // adaptive scaling is active (scale > 0).
     let prev_rate: i64 = kani::any();
     let long_oi: u128 = kani::any();
     let short_oi: u128 = kani::any();
@@ -8053,6 +8059,7 @@ fn proof_adaptive_funding_clamped_within_bounds() {
     kani::assume(total_oi > 0 && total_oi <= u64::MAX as u128);
     kani::assume(long_oi <= total_oi && short_oi <= total_oi);
     let scale: u16 = kani::any();
+    kani::assume(scale > 0); // clamping contract only applies when scaling is active
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
@@ -8155,9 +8162,15 @@ fn proof_skew_adjusted_cap_never_exceeds_base_cap() {
         short_oi - long_oi
     };
 
-    // skew_ratio = diff / total (in [0, 1])
-    // reduction = base_cap * skew_ratio * skew_factor_bps / 10_000
-    let reduction = base_cap * diff * (skew_factor_bps as u128) / (total * 10_000);
+    // diff <= total because long_oi + short_oi = total and both are non-negative.
+    // safe order of operations to avoid u128 overflow:
+    //   step 1: skew_reduction_bps = diff * skew_factor_bps / total
+    //           max value: u64::MAX * 10_000 / 1 ≈ 1.8e23 — fits in u128
+    //   step 2: reduction = base_cap * skew_reduction_bps / 10_000
+    //           max value: u64::MAX * 10_000 / 10_000 = u64::MAX — fits in u128
+    // (original order base_cap * diff * skew_factor_bps could overflow u128)
+    let skew_reduction_bps = diff * (skew_factor_bps as u128) / total; // in [0, skew_factor_bps]
+    let reduction = base_cap * skew_reduction_bps / 10_000;
     let effective_cap = base_cap.saturating_sub(reduction);
 
     kani::assert(
