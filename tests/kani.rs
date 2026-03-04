@@ -5045,11 +5045,17 @@ fn kani_no_teleport_cross_lp_close() {
     let mut engine = RiskEngine::new(params);
 
     // Create two LPs — concrete inputs must always succeed; use assert_ok! to fail loudly.
-    let lp1 = assert_ok!(engine.add_lp([1u8; 32], [0u8; 32], 0), "add_lp[1] must succeed");
+    let lp1 = assert_ok!(
+        engine.add_lp([1u8; 32], [0u8; 32], 0),
+        "add_lp[1] must succeed"
+    );
     engine.accounts[lp1 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
-    let lp2 = assert_ok!(engine.add_lp([2u8; 32], [0u8; 32], 0), "add_lp[2] must succeed");
+    let lp2 = assert_ok!(
+        engine.add_lp([2u8; 32], [0u8; 32], 0),
+        "add_lp[2] must succeed"
+    );
     engine.accounts[lp2 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
