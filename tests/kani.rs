@@ -3751,12 +3751,14 @@ fn gc_frees_only_true_dust() {
 // WITHDRAWAL MARGIN SAFETY (Bug 5 fix verification)
 // ============================================================================
 
-/// After successful withdrawal with position, account must be above maintenance margin
-/// This verifies Bug 5 fix: withdrawal uses oracle_price (not entry_price) for margin
+/// Withdrawal with an open position is always rejected.
+/// Since withdraw() immediately returns Err(Undercollateralized) when pos != 0,
+/// this harness is a pure rejection proof. Non-vacuity is ensured by the
+/// kani::assume(pos != 0) guard above.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn withdrawal_maintains_margin_above_maintenance() {
+fn kani_withdrawal_rejects_when_position_open() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = U128::new(1_000_000);
     engine.insurance_fund.balance = U128::new(10_000);
@@ -3794,22 +3796,10 @@ fn withdrawal_maintains_margin_above_maintenance() {
     // Try withdrawal
     let result = engine.withdraw(idx, amount, 100, oracle_price);
 
-    // Post-withdrawal with position must be above maintenance
-    // NOTE: Must use MTM version since withdraw() checks MTM maintenance margin
-    if result.is_ok() && !engine.accounts[idx as usize].position_size.is_zero() {
-        assert!(
-            engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price),
-            "Post-withdrawal account with position must be above maintenance margin"
-        );
-    }
-
-    // Non-vacuity: withdraw() always rejects when account has an open position
-    // (implementation returns Err(Undercollateralized) immediately for pos != 0).
-    // pos != 0 is guaranteed by the kani::assume above, so this is always exercised.
-    kani::assert(
-        !result.is_ok(),
-        "non-vacuity: withdrawal with open position must be rejected",
-    );
+    // withdraw() must be rejected when account has an open position.
+    // Implementation returns Err(Undercollateralized) immediately for pos != 0.
+    // pos != 0 is guaranteed by the kani::assume above, so this assertion is always exercised.
+    assert_err!(result, "withdrawal with open position must be rejected");
 }
 
 /// Deterministic regression test: withdrawal that would drop below initial margin
@@ -5054,23 +5044,17 @@ fn kani_no_teleport_cross_lp_close() {
 
     let mut engine = RiskEngine::new(params);
 
-    // Create two LPs
-    let r_lp1 = engine.add_lp([1u8; 32], [0u8; 32], 0);
-    kani::assume(r_lp1.is_ok());
-    let lp1 = r_lp1.unwrap();
+    // Create two LPs — concrete inputs must always succeed; use assert_ok! to fail loudly.
+    let lp1 = assert_ok!(engine.add_lp([1u8; 32], [0u8; 32], 0), "add_lp[1] must succeed");
     engine.accounts[lp1 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
-    let r_lp2 = engine.add_lp([2u8; 32], [0u8; 32], 0);
-    kani::assume(r_lp2.is_ok());
-    let lp2 = r_lp2.unwrap();
+    let lp2 = assert_ok!(engine.add_lp([2u8; 32], [0u8; 32], 0), "add_lp[2] must succeed");
     engine.accounts[lp2 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
     // Create user
-    let r_user = engine.add_user(0);
-    kani::assume(r_user.is_ok());
-    let user = r_user.unwrap();
+    let user = assert_ok!(engine.add_user(0), "add_user must succeed");
     engine.accounts[user as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
@@ -7723,7 +7707,17 @@ fn nightly_funding_zero_sum_across_accounts() {
     kani::assume(slot_advance > 0 && slot_advance <= 5);
     let now_slot: u64 = 100 + slot_advance as u64;
 
-    let _ = engine.keeper_crank(user, now_slot, 1_000_000, funding_rate_i64, false);
+    // Crank must succeed for the zero-sum assertion to be meaningful.
+    // Assert success so any crank failure is a hard proof failure rather than a
+    // silently vacuous check. Then verify the slot advanced (funding settled).
+    assert_ok!(
+        engine.keeper_crank(user, now_slot, 1_000_000, funding_rate_i64, false),
+        "keeper_crank must succeed before zero-sum check"
+    );
+    kani::assert(
+        engine.current_slot == now_slot,
+        "current_slot must advance after keeper_crank",
+    );
 
     // Total capital + pnl should be conserved (funding is zero-sum)
     let total_after = {

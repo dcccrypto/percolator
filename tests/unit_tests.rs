@@ -5847,3 +5847,43 @@ fn test_set_mark_price_blended() {
         "50/50 blend of 100M and 150M = 125M"
     );
 }
+
+/// Integration: execute_trade bootstraps trade_twap_e6 via update_trade_twap.
+/// Verifies that the execute_trade code path calls update_trade_twap so that
+/// trade_twap_e6 and twap_last_slot reflect the fill after the first trade.
+///
+/// Note: update_trade_twap only runs when notional >= MIN_TWAP_NOTIONAL ($1 in e6).
+/// With oracle = 1_000_000 and size = 10_000_000:
+///   notional = 10_000_000 × 1_000_000 / 1_000_000 = 10_000_000 ≥ 1_000_000 ✓
+#[test]
+fn test_execute_trade_updates_twap() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // position_value = 10_000_000; initial_margin (10%) = 1_000_000 → need > 1M capital.
+    engine.deposit(user_idx, 2_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(20_000_000);
+    engine.vault += 20_000_000;
+
+    assert_eq!(engine.trade_twap_e6, 0, "TWAP starts at 0");
+    assert_eq!(engine.twap_last_slot, 0, "twap_last_slot starts at 0");
+
+    let oracle_price: u64 = 1_000_000; // $1.00 in e6
+    let trade_slot: u64 = 42;
+    let size: i128 = 10_000_000; // Large enough that notional >= MIN_TWAP_NOTIONAL
+
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, trade_slot, oracle_price, size)
+        .expect("execute_trade must succeed");
+
+    // First trade bootstraps TWAP to exec_price (oracle for NoOpMatcher)
+    assert_eq!(
+        engine.trade_twap_e6, oracle_price,
+        "execute_trade must bootstrap trade_twap_e6 to exec_price on first fill"
+    );
+    assert_eq!(
+        engine.twap_last_slot, trade_slot,
+        "execute_trade must set twap_last_slot to trade slot"
+    );
+}
