@@ -2996,8 +2996,16 @@ impl RiskEngine {
         adaptive_scale_bps: u16,
         max_funding_bps: u64,
     ) -> i64 {
+        // Always clamp to [-max_funding_bps, +max_funding_bps] — even when no
+        // adjustment is possible. A previously-set rate may exceed current bounds
+        // (e.g. if max was lowered), so skipping the clamp would let an out-of-
+        // range value propagate and violate the invariant asserted by Kani proofs.
+        let max = max_funding_bps as i128;
+        let prev = prev_rate_bps as i128;
+
         if total_oi == 0 || adaptive_scale_bps == 0 {
-            return prev_rate_bps; // No adjustment possible
+            // No skew-delta to apply; just enforce bounds on the existing rate.
+            return prev.clamp(-max, max) as i64;
         }
 
         // skew = (long_oi - short_oi) / total_oi, range [-1, 1]
@@ -3011,10 +3019,9 @@ impl RiskEngine {
 
         let delta_bps = ((long - short) * scale) / total;
 
-        let new_rate = (prev_rate_bps as i128).saturating_add(delta_bps);
+        let new_rate = prev.saturating_add(delta_bps);
 
         // Clamp to [-max_funding_bps, +max_funding_bps]
-        let max = max_funding_bps as i128;
         new_rate.clamp(-max, max) as i64
     }
 
