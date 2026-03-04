@@ -5775,18 +5775,25 @@ fn test_twap_ignores_dust() {
     );
 }
 
-/// Trade TWAP: EMA converges toward new price over time.
+/// Trade TWAP: EMA converges toward new price over time (full-weight notional).
+///
+/// FULL_WEIGHT_NOTIONAL = $10,000 = 10_000_000_000 in e6 units.
+/// At full weight (notional_scale = 1.0), alpha = 347/slot — 8h half-life.
+/// After ~10k slots of continuous full-weight trades, TWAP must be within 5% of target.
 #[test]
 fn test_twap_ema_converges() {
     let params = default_params();
     let mut engine = Box::new(RiskEngine::new(params));
 
-    engine.update_trade_twap(100_000_000, 10_000_000, 0); // bootstrap at 100
-                                                          // Many trades at 200 over many slots → TWAP should converge toward 200
+    // Bootstrap at $100 with full-weight notional ($10,000 in e6 = 10_000_000_000)
+    const FULL_NOTIONAL: u128 = 10_000_000_000; // $10,000 in e6 units
+
+    engine.update_trade_twap(100_000_000, FULL_NOTIONAL, 0); // bootstrap at 100
+    // Many trades at 200 over many slots → TWAP should converge toward 200
     for slot in (100..10_000).step_by(100) {
-        engine.update_trade_twap(200_000_000, 10_000_000, slot);
+        engine.update_trade_twap(200_000_000, FULL_NOTIONAL, slot);
     }
-    // After ~10k slots at alpha=347/1e6 per slot, should be very close to 200
+    // After ~10k slots at alpha=347/1e6 per slot (full weight), should be very close to 200
     let diff = if engine.trade_twap_e6 > 200_000_000 {
         engine.trade_twap_e6 - 200_000_000
     } else {
@@ -5797,6 +5804,30 @@ fn test_twap_ema_converges() {
         "TWAP should converge toward 200M, got {} (diff={})",
         engine.trade_twap_e6,
         diff
+    );
+}
+
+/// Trade TWAP: smaller trades have proportionally less weight than full-size trades.
+#[test]
+fn test_twap_notional_weighting() {
+    let params = default_params();
+
+    // Full-weight ($10k) drive: 1 trade of dt=1000 slots
+    let mut engine_full = Box::new(RiskEngine::new(params.clone()));
+    engine_full.update_trade_twap(100_000_000, 10_000_000_000, 0); // bootstrap
+    engine_full.update_trade_twap(200_000_000, 10_000_000_000, 1_000);
+
+    // Half-weight ($5k = 5_000_000_000) drive: same slot step
+    let mut engine_half = Box::new(RiskEngine::new(params));
+    engine_half.update_trade_twap(100_000_000, 10_000_000_000, 0); // bootstrap
+    engine_half.update_trade_twap(200_000_000, 5_000_000_000, 1_000);
+
+    // Full-weight trade must move TWAP further than half-weight trade
+    let full_move = engine_full.trade_twap_e6.saturating_sub(100_000_000);
+    let half_move = engine_half.trade_twap_e6.saturating_sub(100_000_000);
+    assert!(
+        full_move > half_move,
+        "Full-weight trade should move TWAP more: full={full_move} half={half_move}"
     );
 }
 
