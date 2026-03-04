@@ -52,15 +52,21 @@ export async function GET(
 
     if (stats && stats.length > 0) {
       const markPriceUsd = stats[0].mark_price as number | null | undefined;
-      const updatedAt = stats[0].updated_at as string | null | undefined;
+
+      // Guard: null/zero/invalid mark_price must return empty — never inject a zero price
+      if (
+        typeof markPriceUsd !== "number" ||
+        !Number.isFinite(markPriceUsd) ||
+        markPriceUsd <= 0
+      ) {
+        return NextResponse.json({ prices: [] });
+      }
 
       // Convert USD price -> e6 integer string (match oracle_prices schema)
-      const priceE6 =
-        typeof markPriceUsd === "number" && Number.isFinite(markPriceUsd)
-          ? String(Math.round(markPriceUsd * 1_000_000))
-          : "0";
-
-      const ts = updatedAt ? new Date(updatedAt).getTime() : 0;
+      const priceE6 = String(Math.round(markPriceUsd * 1_000_000));
+      const ts = stats[0].updated_at
+        ? new Date(stats[0].updated_at).getTime()
+        : Date.now();
 
       return NextResponse.json({
         prices: [{ price_e6: priceE6, timestamp: ts }],
