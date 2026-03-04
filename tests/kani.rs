@@ -7229,11 +7229,12 @@ fn kani_partial_liquidation_batch_bounded() {
     };
 
     let clamped = core::cmp::min(batch, pos_abs);
+    let remaining = pos_abs - clamped;
     kani::assert(clamped <= pos_abs, "partial batch must not exceed position");
     kani::assert(clamped > 0, "partial batch must be non-zero when pos > 0");
     kani::assert(
-        clamped <= clamped + (pos_abs - clamped),
-        "progress: remaining position is non-negative after batch",
+        remaining < pos_abs,
+        "progress: remaining position must strictly decrease when pos_abs > 0",
     );
 }
 
