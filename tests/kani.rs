@@ -7623,10 +7623,11 @@ fn proof_trade_with_tiered_fees_preserves_inv() {
 
 /// Funding conservation: funding payments are zero-sum across all accounts.
 /// After a crank with non-zero funding rate, the net funding transfer is zero.
+/// SLOW: moved to nightly CI (nightly_* prefix) — too expensive for PR runners.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_funding_zero_sum_across_accounts() {
+fn nightly_funding_zero_sum_across_accounts() {
     let mut engine = RiskEngine::new(test_params());
     engine.current_slot = 100;
     engine.last_crank_slot = 100;
