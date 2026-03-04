@@ -533,7 +533,7 @@ macro_rules! assert_err {
             Ok(_) => {
                 kani::assert(false, $msg);
             }
-            Err(e) => e,
+            Err(_) => {}
         }
     };
 }
