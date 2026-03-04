@@ -2866,8 +2866,8 @@ impl RiskEngine {
     pub fn update_trade_twap(&mut self, exec_price_e6: u64, notional: u128, now_slot: u64) {
         // Minimum notional to affect TWAP (anti-dust: ~$1 at reasonable prices)
         const MIN_TWAP_NOTIONAL: u128 = 1_000_000; // 1e6 = $1 in e6 units
-        // Notional that receives full (1×) weight: $10,000 in e6 units.
-        // Trades below this are weighted proportionally (dust guard already removed <$1).
+                                                   // Notional that receives full (1×) weight: $10,000 in e6 units.
+                                                   // Trades below this are weighted proportionally (dust guard already removed <$1).
         const FULL_WEIGHT_NOTIONAL: u128 = 10_000_000_000; // 1e10 = $10,000 in e6 units
 
         if exec_price_e6 == 0 || notional < MIN_TWAP_NOTIONAL {
@@ -2888,8 +2888,8 @@ impl RiskEngine {
 
         // Notional scale: 0..=1_000_000 (e6), capped at 1× for trades >= FULL_WEIGHT_NOTIONAL.
         // Smaller trades are weighted proportionally — a $100 trade gets 1% of full weight.
-        let notional_scale_e6 = notional.min(FULL_WEIGHT_NOTIONAL) * 1_000_000
-            / FULL_WEIGHT_NOTIONAL;
+        let notional_scale_e6 =
+            notional.min(FULL_WEIGHT_NOTIONAL) * 1_000_000 / FULL_WEIGHT_NOTIONAL;
 
         // eff_alpha = base_alpha_per_slot × dt × notional_scale, capped at 1.0
         let eff_alpha = (TWAP_ALPHA_E6

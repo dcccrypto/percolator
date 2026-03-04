@@ -5789,7 +5789,7 @@ fn test_twap_ema_converges() {
     const FULL_NOTIONAL: u128 = 10_000_000_000; // $10,000 in e6 units
 
     engine.update_trade_twap(100_000_000, FULL_NOTIONAL, 0); // bootstrap at 100
-    // Many trades at 200 over many slots → TWAP should converge toward 200
+                                                             // Many trades at 200 over many slots → TWAP should converge toward 200
     for slot in (100..10_000).step_by(100) {
         engine.update_trade_twap(200_000_000, FULL_NOTIONAL, slot);
     }
