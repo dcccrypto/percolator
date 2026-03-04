@@ -7412,7 +7412,7 @@ fn kani_premium_funding_rate_sign_correctness() {
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_combined_funding_rate_convex() {
+fn nightly_combined_funding_rate_convex() {
     let inv_rate: i64 = kani::any();
     let prem_rate: i64 = kani::any();
     let weight: u64 = kani::any();
