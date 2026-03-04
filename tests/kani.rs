@@ -5055,9 +5055,6 @@ fn kani_no_teleport_cross_lp_close() {
     let mut engine = RiskEngine::new(params);
 
     // Create two LPs
-    // kani::assume guards: add_lp/add_user always succeed on a fresh engine with
-    // max_accounts=4; these assumes prevent false-positive unwrap_failed reports
-    // from solver paths that arise when RiskEngine::new is cfg-gated (#[cfg(not(target_os="solana"))]).
     let r_lp1 = engine.add_lp([1u8; 32], [0u8; 32], 0);
     kani::assume(r_lp1.is_ok());
     let lp1 = r_lp1.unwrap();
@@ -5180,8 +5177,7 @@ fn kani_rejects_invalid_matcher_output() {
 
     let mut engine = RiskEngine::new(params);
 
-    // Create LP — kani::assume guards prevent false-positive unwrap_failed from
-    // solver paths introduced when RiskEngine::new is cfg-gated.
+    // Create LP
     let r_lp = engine.add_lp([1u8; 32], [0u8; 32], 0);
     kani::assume(r_lp.is_ok());
     let lp = r_lp.unwrap();
