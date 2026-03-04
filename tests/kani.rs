@@ -7222,7 +7222,11 @@ fn kani_partial_liquidation_batch_bounded() {
 
     // Mirror the production fix: batch rounds to 0 for tiny positions, enforce .max(1)
     let batch_raw = (pos_abs * partial_bps / 10_000).max(min_abs);
-    let batch = if pos_abs > 0 { batch_raw.max(1) } else { batch_raw };
+    let batch = if pos_abs > 0 {
+        batch_raw.max(1)
+    } else {
+        batch_raw
+    };
 
     let clamped = core::cmp::min(batch, pos_abs);
     kani::assert(clamped <= pos_abs, "partial batch must not exceed position");
