@@ -32,7 +32,7 @@ jobs:
       - name: Run slow Kani harnesses (nightly_ prefix)
         uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
-          # --harness nightly_.* matches all slow harnesses (full-string regex).
+          # --harness nightly_ matches all slow harnesses via bare substring matching.
           # Currently: nightly_funding_zero_sum_across_accounts (OOM risk on PR runners)
-          args: --tests --output-format terse --jobs 2 --harness "nightly_.*"
+          args: --tests --output-format terse --jobs 2 --harness nightly_
         timeout-minutes: 295

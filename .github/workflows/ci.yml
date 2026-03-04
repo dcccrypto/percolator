@@ -69,5 +69,7 @@ jobs:
         with:
           # Exclude harnesses prefixed nightly_* — they run in .github/workflows/nightly.yml.
           # Currently excluded: nightly_funding_zero_sum_across_accounts (~slow, OOM risk).
-          args: --tests --output-format terse --jobs 4 --harness "^(kani|proof|inductive)_"
+          # Note: --harness uses substring matching against the full path (module::fn_name).
+          # Anchored regex (^) and alternation (|) do not work — use separate bare-prefix flags.
+          args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_
         timeout-minutes: 175
