@@ -2859,15 +2859,24 @@ impl RiskEngine {
 
     /// Update the trade execution price TWAP.
     ///
-    /// Uses an exponential moving average weighted by trade notional.
+    /// Uses an exponential moving average weighted by both elapsed time and trade notional.
     /// Small trades (notional < MIN_TWAP_NOTIONAL) are ignored to prevent
-    /// dust-trade manipulation of the TWAP.
+    /// dust-trade manipulation of the TWAP. Trades up to FULL_WEIGHT_NOTIONAL
+    /// receive proportionally increasing weight; trades at or above that cap
+    /// receive full (1×) weight.
     ///
-    /// Alpha = 347 (out of 1_000_000) per slot ≈ 8-hour half-life at 400ms slots.
-    /// With dt_slots, effective alpha = min(alpha * dt, 1_000_000).
+    /// Base alpha = 347 (out of 1_000_000) per slot ≈ 8-hour half-life at full weight.
+    /// Effective alpha = min(base_alpha × dt_slots × notional_scale, 1_000_000)
+    /// where notional_scale = min(notional, FULL_WEIGHT_NOTIONAL) / FULL_WEIGHT_NOTIONAL.
+    ///
+    /// This ensures large fills move the TWAP proportionally more than small fills,
+    /// making the TWAP resistant to manipulation via many small trades.
     pub fn update_trade_twap(&mut self, exec_price_e6: u64, notional: u128, now_slot: u64) {
         // Minimum notional to affect TWAP (anti-dust: ~$1 at reasonable prices)
         const MIN_TWAP_NOTIONAL: u128 = 1_000_000; // 1e6 = $1 in e6 units
+        // Notional that receives full (1×) weight: $10,000 in e6 units.
+        // Trades below this are weighted proportionally (dust guard already removed <$1).
+        const FULL_WEIGHT_NOTIONAL: u128 = 10_000_000_000; // 1e10 = $10,000 in e6 units
 
         if exec_price_e6 == 0 || notional < MIN_TWAP_NOTIONAL {
             return;
@@ -2880,11 +2889,22 @@ impl RiskEngine {
             return;
         }
 
-        // Time-weighted alpha: larger dt → faster convergence
+        // Time component: larger dt → faster convergence
         let dt = now_slot.saturating_sub(self.twap_last_slot).max(1);
-        // TWAP_ALPHA_E6 = 347 per slot ≈ 8h half-life (matches oracle EMA)
-        const TWAP_ALPHA_E6: u64 = 347;
-        let eff_alpha = ((TWAP_ALPHA_E6 as u128) * (dt as u128)).min(1_000_000) as u64;
+        // TWAP_ALPHA_E6 = 347 per slot ≈ 8h half-life at full notional weight (matches oracle EMA)
+        const TWAP_ALPHA_E6: u128 = 347;
+
+        // Notional scale: 0..=1_000_000 (e6), capped at 1× for trades >= FULL_WEIGHT_NOTIONAL.
+        // Smaller trades are weighted proportionally — a $100 trade gets 1% of full weight.
+        let notional_scale_e6 = notional.min(FULL_WEIGHT_NOTIONAL) * 1_000_000
+            / FULL_WEIGHT_NOTIONAL;
+
+        // eff_alpha = base_alpha_per_slot × dt × notional_scale, capped at 1.0
+        let eff_alpha = (TWAP_ALPHA_E6
+            .saturating_mul(dt as u128)
+            .saturating_mul(notional_scale_e6)
+            / 1_000_000u128)
+            .min(1_000_000) as u64;
         let one_minus = 1_000_000u64.saturating_sub(eff_alpha);
 
         // EMA: new_twap = exec * alpha + old_twap * (1 - alpha)
