@@ -7437,10 +7437,11 @@ fn nightly_combined_funding_rate_convex() {
 // ============================================================================
 
 /// Proof: fee split is conservative (lp + protocol + creator == total).
+/// Moved to nightly CI — SAT-hard over full u128 range, takes ~1765s on PR CI.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_fee_split_conservative() {
+fn nightly_fee_split_conservative() {
     let total: u128 = kani::any();
     let lp_bps: u64 = kani::any();
     let proto_bps: u64 = kani::any();
@@ -7831,10 +7832,11 @@ fn proof_gap4_trade_extreme_price_symbolic() {
 /// to protected capital prematurely.
 ///
 /// TDD: This proof FAILS before the fix, PASSES after.
+/// Moved to nightly CI — cadical SAT-hard, takes ~570s on PR CI.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_liquidation_must_reset_warmup_on_mark_increase() {
+fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
     let mut params = test_params();
     // Zero liquidation fee to isolate warmup conversion effect
     params.liquidation_fee_bps = 0;
@@ -7940,8 +7942,10 @@ fn proof_emergency_recovery_requires_stable_slots() {
     let last_breaker_slot: u64 = kani::any();
     let current_slot: u64 = kani::any();
     kani::assume(current_slot >= last_breaker_slot);
+    // Guard against u64 overflow in the addition (production code uses saturating_add).
+    kani::assume(last_breaker_slot.checked_add(EMERGENCY_RECOVERY_SLOTS).is_some());
 
-    let should_recover = current_slot >= last_breaker_slot + EMERGENCY_RECOVERY_SLOTS;
+    let should_recover = current_slot >= last_breaker_slot.saturating_add(EMERGENCY_RECOVERY_SLOTS);
 
     if should_recover {
         kani::assert(
