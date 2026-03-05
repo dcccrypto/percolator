@@ -5277,7 +5277,7 @@ impl MatchingEngine for AtOracleMatcher {
 }
 
 #[kani::proof]
-fn kani_cross_lp_close_no_pnl_teleport() {
+fn nightly_cross_lp_close_no_pnl_teleport() {
     let mut engine = RiskEngine::new(params_for_inline_kani());
 
     let lp1 = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
