@@ -179,6 +179,12 @@ function YourPositionPanel({ position }: { position: UserPosition | null }) {
       <div className="border border-[var(--border)]/50 bg-[var(--panel-bg)] p-6 text-center">
         <p className="text-[11px] uppercase tracking-[0.15em] text-[var(--text-muted)]">No open positions</p>
         <p className="mt-1 text-[10px] text-[var(--text-dim)]">Deposit into a pool to get started</p>
+        <a
+          href="#deposit"
+          className="mt-3 inline-block text-[11px] font-medium text-[var(--accent)] transition-colors hover:text-white"
+        >
+          Deposit Now →
+        </a>
       </div>
     );
   }
@@ -264,6 +270,9 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
   const pool = pools.find((p) => p.id === selectedPool) ?? pools[0];
   const amountNum = parseFloat(amount) || 0;
 
+  // TODO: replace with real wallet token balance query
+  const walletBalance = connected ? 1_250.42 : 0;
+
   // LP token estimate: lp_out = (amount / pool_value) * total_lp_supply
   const lpEstimate = pool && pool.vaultBalance > 0
     ? (amountNum / pool.vaultBalance) * pool.totalLpSupply
@@ -294,7 +303,20 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
 
         {/* Amount input */}
         <div>
-          <label className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)]">Amount</label>
+          <div className="mb-1.5 flex items-center justify-between">
+            <label className="text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)]">Amount</label>
+            {connected && (
+              <button
+                type="button"
+                onClick={() => setAmount(String(walletBalance))}
+                className="text-[10px] text-[var(--text-muted)] tabular-nums transition-colors hover:text-[var(--accent)] cursor-pointer"
+                style={{ fontFamily: "var(--font-mono)" }}
+                title="Click to use max balance"
+              >
+                Balance: {walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {pool?.symbol ?? "USDC"}
+              </button>
+            )}
+          </div>
           <div className="flex gap-2">
             <input
               type="number"
@@ -306,7 +328,11 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
               className="flex-1 border border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2.5 text-[13px] text-white placeholder:text-[var(--text-muted)] outline-none transition-colors focus:border-[var(--accent)]/50 tabular-nums"
               style={{ fontFamily: "var(--font-mono)" }}
             />
-            <button className="border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)]/30 hover:text-[var(--accent)]">
+            <button
+              type="button"
+              onClick={() => { if (walletBalance > 0) setAmount(String(walletBalance)); }}
+              className="border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)]/30 hover:text-[var(--accent)]"
+            >
               MAX
             </button>
           </div>
