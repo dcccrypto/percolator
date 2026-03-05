@@ -7943,7 +7943,11 @@ fn proof_emergency_recovery_requires_stable_slots() {
     let current_slot: u64 = kani::any();
     kani::assume(current_slot >= last_breaker_slot);
     // Guard against u64 overflow in the addition (production code uses saturating_add).
-    kani::assume(last_breaker_slot.checked_add(EMERGENCY_RECOVERY_SLOTS).is_some());
+    kani::assume(
+        last_breaker_slot
+            .checked_add(EMERGENCY_RECOVERY_SLOTS)
+            .is_some(),
+    );
 
     let should_recover = current_slot >= last_breaker_slot.saturating_add(EMERGENCY_RECOVERY_SLOTS);
 

@@ -946,7 +946,10 @@ impl RiskEngine {
     #[inline]
     pub fn check_emergency_recovery(&mut self, current_slot: u64) {
         if self.emergency_oi_mode != 0
-            && current_slot >= self.last_breaker_slot.saturating_add(EMERGENCY_RECOVERY_SLOTS)
+            && current_slot
+                >= self
+                    .last_breaker_slot
+                    .saturating_add(EMERGENCY_RECOVERY_SLOTS)
         {
             self.emergency_oi_mode = 0;
             self.emergency_start_slot = 0;
