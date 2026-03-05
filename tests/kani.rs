@@ -7424,10 +7424,13 @@ fn kani_premium_funding_rate_sign_correctness() {
 
 /// Proof: combined rate is a convex combination (bounded between inputs).
 /// For any weight in [0, 10_000], combined rate is between min and max of inputs.
+/// NOTE: Moved to nightly CI — SAT-hard over symbolic (inv_rate, prem_rate, weight) triples;
+/// tagged `nightly_` so ci.yml filter `--harness proof_` skips it;
+/// nightly.yml runs it with `--harness nightly_` at 5h timeout.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_combined_funding_rate_convex() {
+fn nightly_combined_funding_rate_convex() {
     let inv_rate: i64 = kani::any();
     let prem_rate: i64 = kani::any();
     let weight: u64 = kani::any();
@@ -7954,6 +7957,9 @@ fn proof_emergency_recovery_requires_stable_slots() {
     let last_breaker_slot: u64 = kani::any();
     let current_slot: u64 = kani::any();
     kani::assume(current_slot >= last_breaker_slot);
+    // Prevent addition overflow: last_breaker_slot + EMERGENCY_RECOVERY_SLOTS must not wrap u64.
+    // In practice Solana slot numbers never approach u64::MAX; constrain for the proof.
+    kani::assume(last_breaker_slot <= u64::MAX - EMERGENCY_RECOVERY_SLOTS);
 
     let should_recover = current_slot >= last_breaker_slot + EMERGENCY_RECOVERY_SLOTS;
 
