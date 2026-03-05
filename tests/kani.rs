@@ -5317,7 +5317,10 @@ fn kani_cross_lp_close_no_pnl_teleport() {
     // Check total value (pnl + capital). Warmup converts pnl→capital at haircut ratio,
     // so the sum is conserved as long as haircut == 1 (vault fully covers PnL claims).
     let user_pnl_raw = engine.accounts[user as usize].pnl.get();
-    assert!(user_pnl_raw >= 0, "user PnL should not be negative after profitable close");
+    assert!(
+        user_pnl_raw >= 0,
+        "user PnL should not be negative after profitable close"
+    );
     let user_pnl = user_pnl_raw as u128;
     let user_cap = engine.accounts[user as usize].capital.get();
     assert_eq!(user_pnl + user_cap, initial_cap + coin_pnl);
