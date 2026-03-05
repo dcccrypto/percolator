@@ -5305,17 +5305,26 @@ fn kani_cross_lp_close_no_pnl_teleport() {
     assert_eq!(engine.accounts[lp2 as usize].warmup_started_at_slot, 101);
 
     // Teleport check: LP2 should not absorb LP1's earlier loss when closing at oracle.
-    let ten_k_e6: u128 = (10_000 * E6_INLINE) as u128;
+    //
+    // This is a coin-margined perp: PnL is in the base token, not quote.
+    // trade_pnl = price_diff * size / oracle = (10k * E6) * ONE_BASE / (100k * E6) = 100_000
+    // (0.1 BTC profit for buying 1 BTC 10k below oracle)
+    let coin_pnl: u128 =
+        (10_000u128 * E6_INLINE as u128) * (ONE_BASE.unsigned_abs() as u128) / ORACLE_100K as u128;
+    // coin_pnl = 100_000 base-token atoms
     let initial_cap = 50_000_000_000u128;
     assert_eq!(engine.accounts[user as usize].position_size.get(), 0);
-    // Check total value rather than exact pnl (warmup may partially settle)
-    let user_pnl = engine.accounts[user as usize].pnl.get() as u128;
+    // Check total value (pnl + capital). Warmup converts pnl→capital at haircut ratio,
+    // so the sum is conserved as long as haircut == 1 (vault fully covers PnL claims).
+    let user_pnl_raw = engine.accounts[user as usize].pnl.get();
+    assert!(user_pnl_raw >= 0, "user PnL should not be negative after profitable close");
+    let user_pnl = user_pnl_raw as u128;
     let user_cap = engine.accounts[user as usize].capital.get();
-    assert_eq!(user_pnl + user_cap, initial_cap + ten_k_e6);
+    assert_eq!(user_pnl + user_cap, initial_cap + coin_pnl);
     assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
     assert_eq!(
         engine.accounts[lp1 as usize].capital.get(),
-        initial_cap - ten_k_e6
+        initial_cap - coin_pnl
     );
     assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
     assert_eq!(engine.accounts[lp2 as usize].capital.get(), initial_cap);
