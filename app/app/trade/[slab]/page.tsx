@@ -574,6 +574,7 @@ function SlugResolvePage({ slug }: { slug: string }) {
 export default function TradePage({ params }: { params: Promise<{ slab: string }> }) {
   const { slab } = use(params);
 
+  // If not a valid pubkey, try resolving as a market slug (e.g. SOL-PERP)
   if (!isValidPublicKey(slab)) {
     // Not a valid base58 pubkey — try slug resolution (e.g. "SOL-PERP" → actual slab address)
     return <SlugResolvePage slug={slab} />;
