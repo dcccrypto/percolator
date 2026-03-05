@@ -5052,15 +5052,22 @@ fn kani_no_teleport_cross_lp_close() {
 
     // Create two LPs
     let lp1 = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    // Pin index: RiskEngine::new initialises the freelist 0→1→2→…, so the
+    // first alloc is always slot 0. Without this kani::assume Kani treats the
+    // return value as symbolic (the freelist init loop exceeds the unwind bound),
+    // which causes symbolic array accesses and path explosion.
+    kani::assume(lp1 == 0);
     engine.accounts[lp1 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
     let lp2 = engine.add_lp([2u8; 32], [0u8; 32], 0).unwrap();
+    kani::assume(lp2 == 1); // Second alloc is always slot 1.
     engine.accounts[lp2 as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
     // Create user
     let user = engine.add_user(0).unwrap();
+    kani::assume(user == 2); // Third alloc is always slot 2.
     engine.accounts[user as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
@@ -5168,11 +5175,15 @@ fn kani_rejects_invalid_matcher_output() {
 
     // Create LP
     let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+    // Pin index to avoid symbolic array accesses caused by the freelist init loop
+    // exceeding the unwind bound (see kani_no_teleport_cross_lp_close for detail).
+    kani::assume(lp == 0);
     engine.accounts[lp as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
     // Create user
     let user = engine.add_user(0).unwrap();
+    kani::assume(user == 1); // Second alloc is always slot 1.
     engine.accounts[user as usize].capital = U128::new(1_000_000);
     engine.vault = engine.vault + U128::new(1_000_000);
 
@@ -5274,8 +5285,15 @@ fn kani_cross_lp_close_no_pnl_teleport() {
     let mut engine = RiskEngine::new(params_for_inline_kani());
 
     let lp1 = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+    // Pin indices: the freelist init loop in RiskEngine::new (0..MAX_ACCOUNTS-1)
+    // exceeds the harness unwind bound, so Kani treats alloc_slot() return values
+    // as symbolic without these assumptions — causing symbolic array indexing and
+    // spurious .unwrap() failures.  First three allocs are always slots 0, 1, 2.
+    kani::assume(lp1 == 0);
     let lp2 = engine.add_lp([3u8; 32], [4u8; 32], 0).unwrap();
+    kani::assume(lp2 == 1);
     let user = engine.add_user(0).unwrap();
+    kani::assume(user == 2);
 
     // Fund everyone (keep values small but safe)
     engine.deposit(lp1, 50_000_000_000u128, 100).unwrap();
@@ -5298,17 +5316,25 @@ fn kani_cross_lp_close_no_pnl_teleport() {
     assert_eq!(engine.accounts[lp2 as usize].warmup_started_at_slot, 101);
 
     // Teleport check: LP2 should not absorb LP1's earlier loss when closing at oracle.
-    let ten_k_e6: u128 = (10_000 * E6_INLINE) as u128;
+    //
+    // Expected user gain: trade_pnl = (ORACLE_100K - P90k) * ONE_BASE / ORACLE_100K
+    //   = 10_000 * E6_INLINE * ONE_BASE / ORACLE_100K
+    //   = 10_000_000_000 * 1_000_000 / 100_000_000_000
+    //   = 100_000
+    // (The protocol normalises PnL by oracle_price, so the raw price-diff must be
+    //  divided by ORACLE_100K.  The old `ten_k_e6 = 10_000 * E6_INLINE` constant
+    //  was the raw price deviation, not the realised PnL — off by 100_000×.)
+    let expected_gain: u128 = 100_000;
     let initial_cap = 50_000_000_000u128;
     assert_eq!(engine.accounts[user as usize].position_size.get(), 0);
     // Check total value rather than exact pnl (warmup may partially settle)
     let user_pnl = engine.accounts[user as usize].pnl.get() as u128;
     let user_cap = engine.accounts[user as usize].capital.get();
-    assert_eq!(user_pnl + user_cap, initial_cap + ten_k_e6);
+    assert_eq!(user_pnl + user_cap, initial_cap + expected_gain);
     assert_eq!(engine.accounts[lp1 as usize].pnl.get(), 0);
     assert_eq!(
         engine.accounts[lp1 as usize].capital.get(),
-        initial_cap - ten_k_e6
+        initial_cap - expected_gain
     );
     assert_eq!(engine.accounts[lp2 as usize].pnl.get(), 0);
     assert_eq!(engine.accounts[lp2 as usize].capital.get(), initial_cap);
@@ -7214,6 +7240,11 @@ fn kani_partial_liquidation_batch_bounded() {
     kani::assume(pos_abs > 0 && pos_abs < u64::MAX as u128);
     kani::assume(partial_bps > 0 && partial_bps <= 10_000);
     kani::assume(min_abs < pos_abs);
+    // Guard: exclude inputs where batch rounds to zero.
+    // When (pos_abs * partial_bps) < 10_000 AND min_abs == 0, the batch is 0 and
+    // the production code returns Ok(false) (no-op liquidation). That is valid
+    // behaviour, but outside the scope of this "non-zero batch" property.
+    kani::assume(pos_abs * partial_bps >= 10_000 || min_abs > 0);
 
     let batch = (pos_abs * partial_bps / 10_000).max(min_abs);
 
