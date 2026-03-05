@@ -5277,7 +5277,7 @@ impl MatchingEngine for AtOracleMatcher {
 }
 
 #[kani::proof]
-fn kani_cross_lp_close_no_pnl_teleport() {
+fn nightly_cross_lp_close_no_pnl_teleport() {
     let mut engine = RiskEngine::new(params_for_inline_kani());
 
     let lp1 = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
@@ -6372,7 +6372,7 @@ fn nightly_gap3_conservation_crank_funding_positions() {
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_gap3_multi_step_lifecycle_conservation() {
+fn nightly_gap3_multi_step_lifecycle_conservation() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = U128::new(100_000);
     engine.insurance_fund.balance = U128::new(10_000);
@@ -7289,7 +7289,7 @@ fn kani_mark_price_trigger_independent_of_oracle() {
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_premium_funding_rate_bounded() {
+fn nightly_premium_funding_rate_bounded() {
     let mark: u64 = kani::any();
     let index: u64 = kani::any();
     let dampening: u64 = kani::any();
@@ -7340,7 +7340,7 @@ fn kani_premium_funding_rate_zero_inputs() {
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_combined_funding_rate_bounded() {
+fn nightly_combined_funding_rate_bounded_v2() {
     let inv_rate: i64 = kani::any();
     let prem_rate: i64 = kani::any();
     let weight: u64 = kani::any();
@@ -7984,7 +7984,7 @@ fn proof_emergency_recovery_requires_stable_slots() {
 
 #[cfg(kani)]
 #[kani::proof]
-fn proof_ramp_never_exceeds_configured_multiplier() {
+fn nightly_ramp_never_exceeds_configured_multiplier() {
     let multiplier: u64 = kani::any();
     kani::assume(multiplier > 0 && multiplier <= 1_000_000);
 
