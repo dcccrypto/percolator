@@ -6369,7 +6369,7 @@ fn nightly_gap3_conservation_crank_funding_positions() {
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_gap3_multi_step_lifecycle_conservation() {
+fn nightly_gap3_multi_step_lifecycle_conservation() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = U128::new(100_000);
     engine.insurance_fund.balance = U128::new(10_000);
@@ -7965,7 +7965,7 @@ fn proof_emergency_recovery_requires_stable_slots() {
 
 #[cfg(kani)]
 #[kani::proof]
-fn proof_ramp_never_exceeds_configured_multiplier() {
+fn nightly_ramp_never_exceeds_configured_multiplier() {
     let multiplier: u64 = kani::any();
     kani::assume(multiplier > 0 && multiplier <= 1_000_000);
 
