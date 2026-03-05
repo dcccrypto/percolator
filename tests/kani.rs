@@ -7321,7 +7321,7 @@ fn kani_premium_funding_rate_zero_inputs() {
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_combined_funding_rate_bounded() {
+fn nightly_combined_funding_rate_bounded() {
     let inv_rate: i64 = kani::any();
     let prem_rate: i64 = kani::any();
     let weight: u64 = kani::any();
