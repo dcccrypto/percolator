@@ -75,9 +75,12 @@ jobs:
           #   nightly_funding_zero_sum_across_accounts              (~slow, OOM risk)
           #   nightly_variation_margin_no_pnl_teleport              (~7358s / 122 min — SAT-hard full symbolic)
           #   nightly_gap3_conservation_crank_funding_positions      (>2.5h / cadical SAT — hard symbolic path)
+          #   nightly_gap3_multi_step_lifecycle_conservation         (~29.8 min — cadical SAT-hard)
+          #   nightly_combined_funding_rate_bounded                  (~2h42m — SAT-hard symbolic)
           #   nightly_combined_funding_rate_convex                   (slow combined-rate proof)
           #   nightly_fee_split_conservative                         (~1765s / 29 min — u128 range SAT-hard)
           #   nightly_liquidation_must_reset_warmup_on_mark_increase (~570s / cadical)
+          #   nightly_ramp_never_exceeds_configured_multiplier       (~2h39m — SAT-hard symbolic)
           # Note: --harness uses substring matching against the full path (module::fn_name).
           # Anchored regex (^) and alternation (|) do not work — use separate bare-prefix flags.
           args: --tests --output-format terse --jobs 4 --harness kani_ --harness proof_
