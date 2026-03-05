@@ -5685,3 +5685,205 @@ fn test_execute_trade_tier3_fee() {
         "Tier 3 fee (15 bps) should apply for 10M notional"
     );
 }
+
+// ============================================================================
+// PERC-118: Mark Price Blend Tests
+// ============================================================================
+
+/// Blended mark price: pure oracle when TWAP is zero.
+#[test]
+fn test_blended_mark_no_twap() {
+    let mark = RiskEngine::compute_blended_mark_price(1_000_000, 0, 7_000);
+    assert_eq!(
+        mark, 1_000_000,
+        "With zero TWAP, mark should be pure oracle"
+    );
+}
+
+/// Blended mark price: pure TWAP when oracle is zero.
+#[test]
+fn test_blended_mark_no_oracle() {
+    let mark = RiskEngine::compute_blended_mark_price(0, 2_000_000, 7_000);
+    assert_eq!(
+        mark, 2_000_000,
+        "With zero oracle, mark should be pure TWAP"
+    );
+}
+
+/// Blended mark price: 70/30 oracle/TWAP blend.
+#[test]
+fn test_blended_mark_70_30() {
+    // oracle=100, twap=200, w=7000 (70%)
+    // mark = (100*7000 + 200*3000) / 10000 = (700_000 + 600_000) / 10000 = 130
+    let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 7_000);
+    assert_eq!(
+        mark, 130_000_000,
+        "70/30 blend of 100M and 200M should be 130M"
+    );
+}
+
+/// Blended mark price: 100% oracle weight.
+#[test]
+fn test_blended_mark_full_oracle() {
+    let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 10_000);
+    assert_eq!(mark, 100_000_000, "100% oracle weight should return oracle");
+}
+
+/// Blended mark price: 0% oracle weight (100% TWAP).
+#[test]
+fn test_blended_mark_full_twap() {
+    let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 0);
+    assert_eq!(mark, 200_000_000, "0% oracle weight should return TWAP");
+}
+
+/// Blended mark price: weight > 10000 clamped to 10000.
+#[test]
+fn test_blended_mark_weight_clamped() {
+    let mark = RiskEngine::compute_blended_mark_price(100_000_000, 200_000_000, 20_000);
+    assert_eq!(
+        mark, 100_000_000,
+        "Weight > 10000 should clamp to pure oracle"
+    );
+}
+
+/// Trade TWAP: bootstrap on first trade.
+#[test]
+fn test_twap_bootstrap() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+    assert_eq!(engine.trade_twap_e6, 0);
+
+    engine.update_trade_twap(50_000_000, 5_000_000, 100);
+    assert_eq!(
+        engine.trade_twap_e6, 50_000_000,
+        "First trade bootstraps TWAP"
+    );
+    assert_eq!(engine.twap_last_slot, 100);
+}
+
+/// Trade TWAP: ignores dust trades below MIN_TWAP_NOTIONAL.
+#[test]
+fn test_twap_ignores_dust() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    engine.update_trade_twap(50_000_000, 5_000_000, 100); // bootstrap
+    engine.update_trade_twap(999_000_000, 500_000, 200); // dust: notional < 1e6
+    assert_eq!(
+        engine.trade_twap_e6, 50_000_000,
+        "Dust trade should not move TWAP"
+    );
+}
+
+/// Trade TWAP: EMA converges toward new price over time (full-weight notional).
+///
+/// FULL_WEIGHT_NOTIONAL = $10,000 = 10_000_000_000 in e6 units.
+/// At full weight (notional_scale = 1.0), alpha = 347/slot — 8h half-life.
+/// After ~10k slots of continuous full-weight trades, TWAP must be within 5% of target.
+#[test]
+fn test_twap_ema_converges() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Bootstrap at $100 with full-weight notional ($10,000 in e6 = 10_000_000_000)
+    const FULL_NOTIONAL: u128 = 10_000_000_000; // $10,000 in e6 units
+
+    engine.update_trade_twap(100_000_000, FULL_NOTIONAL, 0); // bootstrap at 100
+                                                             // Many trades at 200 over many slots → TWAP should converge toward 200
+    for slot in (100..10_000).step_by(100) {
+        engine.update_trade_twap(200_000_000, FULL_NOTIONAL, slot);
+    }
+    // After ~10k slots at alpha=347/1e6 per slot (full weight), should be very close to 200
+    let diff = if engine.trade_twap_e6 > 200_000_000 {
+        engine.trade_twap_e6 - 200_000_000
+    } else {
+        200_000_000 - engine.trade_twap_e6
+    };
+    assert!(
+        diff < 5_000_000, // within 5% of 200
+        "TWAP should converge toward 200M, got {} (diff={})",
+        engine.trade_twap_e6,
+        diff
+    );
+}
+
+/// Trade TWAP: smaller trades have proportionally less weight than full-size trades.
+#[test]
+fn test_twap_notional_weighting() {
+    let params = default_params();
+
+    // Full-weight ($10k) drive: 1 trade of dt=1000 slots
+    let mut engine_full = Box::new(RiskEngine::new(params.clone()));
+    engine_full.update_trade_twap(100_000_000, 10_000_000_000, 0); // bootstrap
+    engine_full.update_trade_twap(200_000_000, 10_000_000_000, 1_000);
+
+    // Half-weight ($5k = 5_000_000_000) drive: same slot step
+    let mut engine_half = Box::new(RiskEngine::new(params));
+    engine_half.update_trade_twap(100_000_000, 10_000_000_000, 0); // bootstrap
+    engine_half.update_trade_twap(200_000_000, 5_000_000_000, 1_000);
+
+    // Full-weight trade must move TWAP further than half-weight trade
+    let full_move = engine_full.trade_twap_e6.saturating_sub(100_000_000);
+    let half_move = engine_half.trade_twap_e6.saturating_sub(100_000_000);
+    assert!(
+        full_move > half_move,
+        "Full-weight trade should move TWAP more: full={full_move} half={half_move}"
+    );
+}
+
+/// set_mark_price_blended uses blend formula.
+#[test]
+fn test_set_mark_price_blended() {
+    let params = default_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Bootstrap TWAP
+    engine.update_trade_twap(150_000_000, 10_000_000, 0);
+
+    // 50/50 blend
+    engine.set_mark_price_blended(100_000_000, 5_000);
+    assert_eq!(
+        engine.mark_price_e6, 125_000_000,
+        "50/50 blend of 100M and 150M = 125M"
+    );
+}
+
+/// Integration: execute_trade bootstraps trade_twap_e6 via update_trade_twap.
+/// Verifies that the execute_trade code path calls update_trade_twap so that
+/// trade_twap_e6 and twap_last_slot reflect the fill after the first trade.
+///
+/// Note: update_trade_twap only runs when notional >= MIN_TWAP_NOTIONAL ($1 in e6).
+/// With oracle = 1_000_000 and size = 10_000_000:
+///   notional = 10_000_000 × 1_000_000 / 1_000_000 = 10_000_000 ≥ 1_000_000 ✓
+#[test]
+fn test_execute_trade_updates_twap() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // position_value = 10_000_000; initial_margin (10%) = 1_000_000 → need > 1M capital.
+    engine.deposit(user_idx, 2_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(20_000_000);
+    engine.vault += 20_000_000;
+
+    assert_eq!(engine.trade_twap_e6, 0, "TWAP starts at 0");
+    assert_eq!(engine.twap_last_slot, 0, "twap_last_slot starts at 0");
+
+    let oracle_price: u64 = 1_000_000; // $1.00 in e6
+    let trade_slot: u64 = 42;
+    let size: i128 = 10_000_000; // Large enough that notional >= MIN_TWAP_NOTIONAL
+
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, trade_slot, oracle_price, size)
+        .expect("execute_trade must succeed");
+
+    // First trade bootstraps TWAP to exec_price (oracle for NoOpMatcher)
+    assert_eq!(
+        engine.trade_twap_e6, oracle_price,
+        "execute_trade must bootstrap trade_twap_e6 to exec_price on first fill"
+    );
+    assert_eq!(
+        engine.twap_last_slot, trade_slot,
+        "execute_trade must set twap_last_slot to trade slot"
+    );
+}
