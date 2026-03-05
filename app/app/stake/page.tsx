@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { useWalletCompat } from "@/hooks/useWalletCompat";
+import { useWalletCompat, useConnectionCompat } from "@/hooks/useWalletCompat";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { PublicKey } from "@solana/web3.js";
+/** Devnet test USDC mint — mirrors NEXT_PUBLIC_TEST_USDC_MINT env var */
+const DEVNET_USDC_MINT =
+  process.env.NEXT_PUBLIC_TEST_USDC_MINT ?? "DvH13uxzTzo1xVFwkbJ6YASkZWs6bm3vFDH4xu7kUYTs";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 import { GradientText } from "@/components/ui/GradientText";
 import { ProgressBar } from "@/components/ui/ProgressBar";
@@ -15,6 +20,8 @@ interface StakePool {
   name: string;
   symbol: string;
   slabAddress: string;
+  /** SPL mint for pool collateral (USDC). Used to query wallet ATA balance. */
+  collateralMint?: string;
   tvl: number;
   apr: number;
   capUsed: number;
@@ -44,6 +51,7 @@ const MOCK_POOLS: StakePool[] = [
     name: "SOL-PERP Pool",
     symbol: "SOL-PERP",
     slabAddress: "So11111111111111111111111111111111111111112",
+    collateralMint: DEVNET_USDC_MINT,
     tvl: 50_000_000,
     apr: 12.4,
     capUsed: 4_250_000,
@@ -57,6 +65,7 @@ const MOCK_POOLS: StakePool[] = [
     name: "BTC-PERP Pool",
     symbol: "BTC-PERP",
     slabAddress: "BTC1111111111111111111111111111111111111112",
+    collateralMint: DEVNET_USDC_MINT,
     tvl: 12_300_000,
     apr: 9.2,
     capUsed: 2_300_000,
@@ -70,6 +79,7 @@ const MOCK_POOLS: StakePool[] = [
     name: "ETH-PERP Pool",
     symbol: "ETH-PERP",
     slabAddress: "ETH1111111111111111111111111111111111111112",
+    collateralMint: DEVNET_USDC_MINT,
     tvl: 8_100_000,
     apr: 7.8,
     capUsed: 6_100_000,
@@ -263,15 +273,38 @@ function YourPositionPanel({ position }: { position: UserPosition | null }) {
 /* ── Deposit Widget ── */
 
 function DepositWidget({ pools }: { pools: StakePool[] }) {
-  const { connected } = useWalletCompat();
+  const { connected, publicKey } = useWalletCompat();
+  const { connection } = useConnectionCompat();
   const [selectedPool, setSelectedPool] = useState(pools[0]?.id ?? "");
   const [amount, setAmount] = useState("");
+  const [walletBalanceRaw, setWalletBalanceRaw] = useState<bigint | null>(null);
+  const [balanceDecimals, setBalanceDecimals] = useState(6);
 
   const pool = pools.find((p) => p.id === selectedPool) ?? pools[0];
   const amountNum = parseFloat(amount) || 0;
 
-  // TODO: replace with real wallet token balance query
-  const walletBalance = connected ? 1_250.42 : 0;
+  // Fetch real SPL token balance for the selected pool's collateral mint
+  useEffect(() => {
+    if (!publicKey || !pool?.collateralMint) { setWalletBalanceRaw(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const mint = new PublicKey(pool.collateralMint!);
+        const ata = getAssociatedTokenAddressSync(mint, publicKey);
+        const info = await connection.getTokenAccountBalance(ata);
+        if (!cancelled) {
+          setWalletBalanceRaw(BigInt(info.value.amount));
+          setBalanceDecimals(info.value.decimals ?? 6);
+        }
+      } catch { if (!cancelled) setWalletBalanceRaw(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [publicKey, pool?.collateralMint, connection]);
+
+  // Human-readable balance (null = unknown / not fetched)
+  const walletBalance: number | null = walletBalanceRaw !== null
+    ? Number(walletBalanceRaw) / Math.pow(10, balanceDecimals)
+    : null;
 
   // LP token estimate: lp_out = (amount / pool_value) * total_lp_supply
   const lpEstimate = pool && pool.vaultBalance > 0
@@ -305,7 +338,7 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
         <div>
           <div className="mb-1.5 flex items-center justify-between">
             <label className="text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)]">Amount</label>
-            {connected && (
+            {connected && walletBalance !== null && (
               <button
                 type="button"
                 onClick={() => setAmount(String(walletBalance))}
@@ -313,7 +346,7 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
                 style={{ fontFamily: "var(--font-mono)" }}
                 title="Click to use max balance"
               >
-                Balance: {walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {pool?.symbol ?? "USDC"}
+                Balance: {walletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC
               </button>
             )}
           </div>
@@ -330,7 +363,7 @@ function DepositWidget({ pools }: { pools: StakePool[] }) {
             />
             <button
               type="button"
-              onClick={() => { if (walletBalance > 0) setAmount(String(walletBalance)); }}
+              onClick={() => { if (walletBalance !== null && walletBalance > 0) setAmount(String(walletBalance)); }}
               className="border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 text-[10px] font-medium uppercase tracking-[0.15em] text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)]/30 hover:text-[var(--accent)]"
             >
               MAX
