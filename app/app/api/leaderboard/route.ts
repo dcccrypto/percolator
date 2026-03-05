@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
-import { getServiceClient } from "@/lib/supabase";
-export const dynamic = "force-dynamic";
+import { getSupabase } from "@/lib/supabase";
+
+/**
+ * ISR: recompute at most once every 30 seconds.
+ * Eliminates the need for per-IP rate limiting — repeated requests
+ * within the window are served from cache without hitting Supabase.
+ */
+export const revalidate = 30;
 
 export interface LeaderboardEntry {
   rank: number;
@@ -11,10 +17,15 @@ export interface LeaderboardEntry {
 }
 
 /**
- * GET /api/leaderboard?period=24h|alltime&limit=50
+ * GET /api/leaderboard?period=24h|7d|alltime&limit=50
  *
  * Returns top traders ranked by cumulative volume (sum of |size|).
  * Volume unit matches the `size` column in `trades` — raw token base units.
+ *
+ * Security notes (fixes #676, #677):
+ * - Uses anon Supabase client (respects RLS) instead of service-role client
+ * - Uses Next.js ISR (revalidate=30) instead of force-dynamic to prevent
+ *   cache-bypass abuse that would hammer the DB
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -23,7 +34,7 @@ export async function GET(request: Request) {
   const limit = Math.min(Math.max(1, Number.isNaN(rawLimit) ? 50 : rawLimit), 200);
 
   try {
-    const supabase = getServiceClient();
+    const supabase = getSupabase();
 
     let query = supabase
       .from("trades")
@@ -95,11 +106,6 @@ export async function GET(request: Request) {
 
     return NextResponse.json(
       { leaderboard, period, generatedAt: new Date().toISOString() },
-      {
-        headers: {
-          "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
-        },
-      },
     );
   } catch (err) {
     console.error("[leaderboard] error:", err);
