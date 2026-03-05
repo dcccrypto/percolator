@@ -946,7 +946,10 @@ impl RiskEngine {
     #[inline]
     pub fn check_emergency_recovery(&mut self, current_slot: u64) {
         if self.emergency_oi_mode != 0
-            && current_slot >= self.last_breaker_slot + EMERGENCY_RECOVERY_SLOTS
+            && current_slot
+                >= self
+                    .last_breaker_slot
+                    .saturating_add(EMERGENCY_RECOVERY_SLOTS)
         {
             self.emergency_oi_mode = 0;
             self.emergency_start_slot = 0;
@@ -2531,6 +2534,11 @@ impl RiskEngine {
         let (close_abs, is_full_close) = if can_partial {
             let batch = mul_u128(pos_abs, self.params.partial_liquidation_bps as u128) / 10_000;
             let batch = batch.max(self.params.min_liquidation_abs.get());
+            // Issue #650: guarantee liveness — integer division can round batch to 0
+            // when pos_abs < 10_000 / partial_liquidation_bps. Without this guard,
+            // close_abs == 0 causes an early return (Ok(false)) and the account is
+            // never liquidated. Enforce a minimum of 1 unit so we always make progress.
+            let batch = if pos_abs > 0 { batch.max(1) } else { batch };
             if batch >= pos_abs {
                 (pos_abs, true)
             } else {

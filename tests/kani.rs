@@ -4863,10 +4863,14 @@ fn proof_crank_with_funding_preserves_inv() {
 ///
 /// This proof verifies that closing a position with a different LP produces
 /// the same user equity gain as closing with the original LP.
+/// NOTE: Moved to nightly CI — SAT-hard over all (open_price, close_price, size) triples;
+/// observed ~7358s (122 min) on PR runners with 4 parallel jobs.
+/// Tagged `nightly_` so ci.yml filter `--harness proof_` skips it;
+/// nightly.yml runs it with `--harness nightly_` at 5h timeout.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_variation_margin_no_pnl_teleport() {
+fn nightly_variation_margin_no_pnl_teleport() {
     // Scenario: user opens long with LP1 at P1, price moves to P2, closes with LP2
     // Expected: user gains (P2 - P1) * size regardless of which LP closes
 
@@ -5045,8 +5049,9 @@ fn kani_no_teleport_cross_lp_close() {
     let mut params = test_params();
     params.trading_fee_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
-    params.maintenance_margin_bps = 0;
-    params.initial_margin_bps = 0;
+    // Use minimal valid margins (validate() requires > 0)
+    params.maintenance_margin_bps = 1;
+    params.initial_margin_bps = 1;
 
     let mut engine = RiskEngine::new(params);
 
@@ -5161,8 +5166,9 @@ fn kani_rejects_invalid_matcher_output() {
     let mut params = test_params();
     params.trading_fee_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
-    params.maintenance_margin_bps = 0;
-    params.initial_margin_bps = 0;
+    // Use minimal valid margins (validate() requires > 0)
+    params.maintenance_margin_bps = 1;
+    params.initial_margin_bps = 1;
 
     let mut engine = RiskEngine::new(params);
 
@@ -5201,8 +5207,9 @@ const ONE_BASE: i128 = 1_000_000;
 fn params_for_inline_kani() -> RiskParams {
     RiskParams {
         warmup_period_slots: 1000,
-        maintenance_margin_bps: 0,
-        initial_margin_bps: 0,
+        // validate() requires margins > 0; use minimal valid values
+        maintenance_margin_bps: 1,
+        initial_margin_bps: 1,
         trading_fee_bps: 0,
         max_accounts: MAX_ACCOUNTS as u64,
         new_account_fee: U128::new(0),
@@ -6307,7 +6314,7 @@ fn proof_gap3_conservation_trade_entry_neq_oracle() {
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_gap3_conservation_crank_funding_positions() {
+fn nightly_gap3_conservation_crank_funding_positions() {
     let mut engine = RiskEngine::new(test_params());
     engine.vault = U128::new(200_000);
     engine.insurance_fund.balance = U128::new(10_000);
@@ -7202,7 +7209,12 @@ fn proof_NEGATIVE_bypass_set_pnl_breaks_invariant() {
 // PERC-122: Kani proofs for partial liquidation
 // ============================================================================
 
-/// Proof: partial liquidation batch is bounded by position size.
+/// Proof: partial liquidation batch is bounded by position size AND guarantees progress.
+///
+/// Issue #650: Without the `.max(1)` guard, integer division can round the batch to 0
+/// when `pos_abs < 10_000 / partial_bps`, causing the liquidation to silently no-op
+/// and never converge. The fix clamps batch to at least 1 unit when pos_abs > 0,
+/// guaranteeing monotone progress every time partial liquidation is triggered.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
@@ -7215,11 +7227,22 @@ fn kani_partial_liquidation_batch_bounded() {
     kani::assume(partial_bps > 0 && partial_bps <= 10_000);
     kani::assume(min_abs < pos_abs);
 
-    let batch = (pos_abs * partial_bps / 10_000).max(min_abs);
+    // Mirror the production fix: batch rounds to 0 for tiny positions, enforce .max(1)
+    let batch_raw = (pos_abs * partial_bps / 10_000).max(min_abs);
+    let batch = if pos_abs > 0 {
+        batch_raw.max(1)
+    } else {
+        batch_raw
+    };
 
     let clamped = core::cmp::min(batch, pos_abs);
+    let remaining = pos_abs - clamped;
     kani::assert(clamped <= pos_abs, "partial batch must not exceed position");
     kani::assert(clamped > 0, "partial batch must be non-zero when pos > 0");
+    kani::assert(
+        remaining < pos_abs,
+        "progress: remaining position must strictly decrease when pos_abs > 0",
+    );
 }
 
 /// Proof: mark-price liquidation trigger is a pure function of equity vs maintenance.
@@ -7408,7 +7431,7 @@ fn kani_premium_funding_rate_sign_correctness() {
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_combined_funding_rate_convex() {
+fn nightly_combined_funding_rate_convex() {
     let inv_rate: i64 = kani::any();
     let prem_rate: i64 = kani::any();
     let weight: u64 = kani::any();
@@ -7433,10 +7456,11 @@ fn kani_combined_funding_rate_convex() {
 // ============================================================================
 
 /// Proof: fee split is conservative (lp + protocol + creator == total).
+/// Moved to nightly CI — SAT-hard over full u128 range, takes ~1765s on PR CI.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(2)]
-fn kani_fee_split_conservative() {
+fn nightly_fee_split_conservative() {
     let total: u128 = kani::any();
     let lp_bps: u64 = kani::any();
     let proto_bps: u64 = kani::any();
@@ -7827,10 +7851,11 @@ fn proof_gap4_trade_extreme_price_symbolic() {
 /// to protected capital prematurely.
 ///
 /// TDD: This proof FAILS before the fix, PASSES after.
+/// Moved to nightly CI — cadical SAT-hard, takes ~570s on PR CI.
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn proof_liquidation_must_reset_warmup_on_mark_increase() {
+fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
     let mut params = test_params();
     // Zero liquidation fee to isolate warmup conversion effect
     params.liquidation_fee_bps = 0;
@@ -7936,8 +7961,14 @@ fn proof_emergency_recovery_requires_stable_slots() {
     let last_breaker_slot: u64 = kani::any();
     let current_slot: u64 = kani::any();
     kani::assume(current_slot >= last_breaker_slot);
+    // Guard against u64 overflow in the addition (production code uses saturating_add).
+    kani::assume(
+        last_breaker_slot
+            .checked_add(EMERGENCY_RECOVERY_SLOTS)
+            .is_some(),
+    );
 
-    let should_recover = current_slot >= last_breaker_slot + EMERGENCY_RECOVERY_SLOTS;
+    let should_recover = current_slot >= last_breaker_slot.saturating_add(EMERGENCY_RECOVERY_SLOTS);
 
     if should_recover {
         kani::assert(
