@@ -5049,8 +5049,9 @@ fn kani_no_teleport_cross_lp_close() {
     let mut params = test_params();
     params.trading_fee_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
-    params.maintenance_margin_bps = 0;
-    params.initial_margin_bps = 0;
+    // Use minimal valid margins (validate() requires > 0)
+    params.maintenance_margin_bps = 1;
+    params.initial_margin_bps = 1;
 
     let mut engine = RiskEngine::new(params);
 
@@ -5165,8 +5166,9 @@ fn kani_rejects_invalid_matcher_output() {
     let mut params = test_params();
     params.trading_fee_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
-    params.maintenance_margin_bps = 0;
-    params.initial_margin_bps = 0;
+    // Use minimal valid margins (validate() requires > 0)
+    params.maintenance_margin_bps = 1;
+    params.initial_margin_bps = 1;
 
     let mut engine = RiskEngine::new(params);
 
@@ -5205,8 +5207,9 @@ const ONE_BASE: i128 = 1_000_000;
 fn params_for_inline_kani() -> RiskParams {
     RiskParams {
         warmup_period_slots: 1000,
-        maintenance_margin_bps: 0,
-        initial_margin_bps: 0,
+        // validate() requires margins > 0; use minimal valid values
+        maintenance_margin_bps: 1,
+        initial_margin_bps: 1,
         trading_fee_bps: 0,
         max_accounts: MAX_ACCOUNTS as u64,
         new_account_fee: U128::new(0),
