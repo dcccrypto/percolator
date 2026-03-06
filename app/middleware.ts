@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
 // In-memory rate limiter (per-IP, resets on deploy)
 // Two tiers: RPC proxy gets a higher limit since Solana web3.js generates many calls per page load.
@@ -36,7 +37,55 @@ function getRateLimit(ip: string, isRpc: boolean = false): { remaining: number; 
   };
 }
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
+  // ── Admin route guard (server-side session check) ──────────────────────────
+  // The /admin page component does a client-side auth check, but that fires
+  // after pre-render HTML is served (visible with JS disabled).  This guard
+  // ensures any unauthenticated request to /admin/* is redirected before any
+  // server-rendered content is produced.  Actual data is also protected by
+  // Supabase RLS + admin_users table, so this is defense-in-depth (LOW risk).
+  const isAdminRoute =
+    request.nextUrl.pathname.startsWith("/admin") &&
+    !request.nextUrl.pathname.startsWith("/admin/login");
+
+  if (isAdminRoute) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      // Env vars missing — redirect to login rather than expose admin
+      const loginUrl = new URL("/admin/login", request.url);
+      return NextResponse.redirect(loginUrl);
+    }
+
+    const response = NextResponse.next();
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            response.cookies.set(name, value, options);
+          });
+        },
+      },
+    });
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      const loginUrl = new URL("/admin/login", request.url);
+      return NextResponse.redirect(loginUrl);
+    }
+
+    // User is authenticated — continue to admin route with security headers
+    addSecurityHeaders(response);
+    return response;
+  }
+
   // Extract client IP respecting TRUSTED_PROXY_DEPTH env var.
   // - TRUSTED_PROXY_DEPTH=0: Ignore X-Forwarded-For (direct exposure, no proxy)
   // - TRUSTED_PROXY_DEPTH=1: One proxy layer (Vercel, Cloudflare) — use last IP
