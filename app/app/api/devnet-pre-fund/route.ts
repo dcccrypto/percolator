@@ -90,7 +90,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Validate mintAddress against allowlist before touching any keys/RPC
-    if (DEVNET_ALLOWED_MINTS.size > 0 && !DEVNET_ALLOWED_MINTS.has(mintAddress)) {
+    // Fail closed: if no allowlist is configured, reject all mints
+    if (DEVNET_ALLOWED_MINTS.size === 0 || !DEVNET_ALLOWED_MINTS.has(mintAddress)) {
       return NextResponse.json({ error: "mintAddress not permitted" }, { status: 400 });
     }
 
