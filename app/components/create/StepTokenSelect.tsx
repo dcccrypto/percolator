@@ -67,10 +67,8 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   // On devnet: skip the check — any valid base58 pubkey is accepted so users can
   // enter mainnet token CAs and the auto-mirror endpoint will create a devnet mint.
   // On mainnet: verify the mint actually exists on-chain.
-  const network = typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_SOLANA_NETWORK ?? "mainnet")
-    : "mainnet";
-  const isDevnet = network === "devnet";
+  // Detect devnet from the live RPC endpoint (not build-time env var)
+  const isDevnet = connection.rpcEndpoint.includes("devnet");
 
   useEffect(() => {
     if (!mintPk) {
