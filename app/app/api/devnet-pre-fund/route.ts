@@ -101,9 +101,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Validate mintAddress: check static allowlist first, then dynamic devnet_mints table.
-    // PERC-456: Support dynamically-created mirror mints in addition to env allowlist.
-    let mintPermitted = DEVNET_ALLOWED_MINTS.has(mintAddress);
+    // Validate mintAddress: check static allowlist OR dynamic devnet_mints table.
+    // PERC-456: Mirror mints are validated by mint authority ownership (on-chain) below.
+    // We permit any valid base58 pubkey here and let the on-chain authority check
+    // (getMint pre-flight below) be the true permission gate — if our keypair is
+    // not the mint authority, the pre-flight will reject with a clear error.
+    // Static allowlist still supported for explicit env-based overrides.
+    const mintPermitted =
+      DEVNET_ALLOWED_MINTS.size === 0 || DEVNET_ALLOWED_MINTS.has(mintAddress);
+    // When allowlist is configured AND mint is not on it, check the dynamic table.
+    let finallyPermitted = mintPermitted;
     if (!mintPermitted) {
       try {
         const supabase = getServiceClient();
@@ -112,17 +119,17 @@ export async function POST(req: NextRequest) {
           .select("devnet_mint")
           .eq("devnet_mint", mintAddress)
           .maybeSingle();
-        if (mirrorRow?.devnet_mint) {
-          mintPermitted = true;
-        }
+        finallyPermitted = !!mirrorRow?.devnet_mint;
       } catch (e) {
-        // DB check failed — fall through to rejection (fail closed)
+        // If DB is unavailable, fall back to authority check below
         Sentry.captureException(e, {
           tags: { endpoint: "/api/devnet-pre-fund", phase: "dynamic-mint-check" },
         });
+        // Allow through — on-chain authority check will be the gate
+        finallyPermitted = true;
       }
     }
-    if (!mintPermitted) {
+    if (!finallyPermitted) {
       return NextResponse.json({ error: "mintAddress not permitted" }, { status: 400 });
     }
 
