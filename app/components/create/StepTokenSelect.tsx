@@ -63,11 +63,25 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   );
   const tokenMeta = useTokenMeta(mintPk);
 
-  // On-chain mint existence validation — ensures the CA exists on the current network
+  // On-chain mint existence validation
+  // On devnet: skip the check — any valid base58 pubkey is accepted so users can
+  // enter mainnet token CAs and the auto-mirror endpoint will create a devnet mint.
+  // On mainnet: verify the mint actually exists on-chain.
+  const network = typeof window !== "undefined"
+    ? (process.env.NEXT_PUBLIC_SOLANA_NETWORK ?? "mainnet")
+    : "mainnet";
+  const isDevnet = network === "devnet";
+
   useEffect(() => {
     if (!mintPk) {
       setMintNetworkStatus("idle");
       onMintNetworkValidChange?.(false);
+      return;
+    }
+    // Devnet: accept any valid pubkey — mirror endpoint handles devnet mint creation
+    if (isDevnet) {
+      setMintNetworkStatus("valid");
+      onMintNetworkValidChange?.(true);
       return;
     }
     let cancelled = false;
@@ -77,12 +91,10 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
         const accountInfo = await connection.getAccountInfo(mintPk);
         if (cancelled) return;
         if (!accountInfo) {
-          // Account does not exist on this network
           setMintNetworkStatus("invalid");
           onMintNetworkValidChange?.(false);
           return;
         }
-        // Verify the account is owned by a Token program (SPL Token or Token-2022)
         const ownerKey = accountInfo.owner.toBase58();
         const isTokenMint =
           ownerKey === TOKEN_PROGRAM_ID.toBase58() ||
@@ -102,7 +114,7 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       }
     })();
     return () => { cancelled = true; };
-  }, [mintPk, connection, onMintNetworkValidChange]);
+  }, [mintPk, connection, onMintNetworkValidChange, isDevnet]);
 
   // Propagate token meta changes
   useEffect(() => {
@@ -257,3 +269,4 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
     </div>
   );
 };
+
