@@ -47,6 +47,44 @@ crankService.getMarkets().forEach((_, slabAddress) => {
 const startupTime = Date.now();
 const healthPort = Number(process.env.KEEPER_HEALTH_PORT ?? 8081);
 const healthServer = http.createServer((req, res) => {
+  // POST /register — hot-register a new market without waiting for discovery cycle
+  // Body: { slabAddress: string, mainnetCA?: string }
+  // Auth: requires x-shared-secret header matching KEEPER_REGISTER_SECRET env var (defense-in-depth; #780)
+  if (req.url === "/register" && req.method === "POST") {
+    const registerSecret = process.env.KEEPER_REGISTER_SECRET ?? "";
+    if (!registerSecret) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
+      return;
+    }
+    const provided = req.headers["x-shared-secret"] ?? "";
+    if (provided !== registerSecret) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { slabAddress, mainnetCA } = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
+        if (!slabAddress) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, message: "slabAddress is required" }));
+          return;
+        }
+        const result = await crankService.registerMarket(slabAddress, mainnetCA);
+        res.writeHead(result.success ? 200 : 422, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        logger.error("Register endpoint error", { error: err instanceof Error ? err.message : String(err) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, message: "Internal error" }));
+      }
+    });
+    return;
+  }
+
   if (req.url === "/health" && req.method === "GET") {
     const markets = crankService.getMarkets();
     const marketsTracked = markets.size;
