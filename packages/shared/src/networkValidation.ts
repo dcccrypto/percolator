@@ -81,7 +81,7 @@ export function validateNetworkConfig(env: {
   }
 
   // 5. Validate program ID looks like a valid Solana address (base58, ~44 chars)
-  if (!/[1-9A-HJ-NP-Za-km-z]{40,45}/.test(programIdEnv)) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(programIdEnv)) {
     throw new Error(
       `❌ PROGRAM_ID does not look like a valid Solana address.\n` +
       `Got: ${programIdEnv}\n` +

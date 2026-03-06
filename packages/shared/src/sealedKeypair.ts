@@ -137,7 +137,7 @@ export function validateSigner(
   const publicKey = signer.publicKey();
 
   // Basic validation: public key looks like a Solana address
-  if (!/[1-9A-HJ-NP-Z]{40,45}/.test(publicKey)) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(publicKey)) {
     throw new Error(
       `❌ Invalid public key from signer: ${publicKey}. ` +
       `Expected base58-encoded Solana address.`
