@@ -73,6 +73,9 @@ function materializeKeypairFromEnv(
   if (!process.env[pathEnvVar]) {
     process.env[pathEnvVar] = filePath;
   }
+  // Scrub the raw key bytes from the environment so crash reporters,
+  // child processes, and /proc/<PID>/environ cannot read them.
+  delete process.env[envVar];
   console.log(`✅ Materialized ${envVar} → ${filePath}`);
 }
 
