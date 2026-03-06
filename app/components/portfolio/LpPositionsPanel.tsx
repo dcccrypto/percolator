@@ -184,6 +184,7 @@ interface LpPositionsPanelProps {
   positions: LpPosition[];
   totalRedeemable: number;
   error: string | null;
+  onRetry?: () => void;
 }
 
 export function LpPositionsPanel({
@@ -191,6 +192,7 @@ export function LpPositionsPanel({
   positions,
   totalRedeemable,
   error,
+  onRetry,
 }: LpPositionsPanelProps) {
   return (
     <div>
@@ -234,8 +236,20 @@ export function LpPositionsPanel({
           ))}
         </div>
       ) : error ? (
-        <div className="border border-[var(--border)] bg-[var(--panel-bg)] p-6 text-center">
-          <p className="text-[12px] text-[var(--short)]">Failed to load LP positions</p>
+        <div className="border border-[var(--border)] bg-[var(--panel-bg)] p-6 flex flex-col items-center gap-3 text-center">
+          <span className="text-xl leading-none">⚠️</span>
+          <div>
+            <p className="text-[12px] font-semibold text-[var(--text-secondary)]">Unable to load LP positions</p>
+            <p className="mt-0.5 text-[11px] text-[var(--text-dim)]">Please try refreshing</p>
+          </div>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="rounded-sm border border-[var(--border)] bg-[var(--panel-bg)] px-4 py-2 text-xs text-[var(--text-secondary)] transition-all hover:border-[var(--accent)]/40 hover:text-[var(--text)]"
+            >
+              Retry
+            </button>
+          )}
         </div>
       ) : positions.length === 0 ? (
         <div className="border border-[var(--border)] bg-[var(--panel-bg)] p-6 flex items-center justify-between gap-4">
