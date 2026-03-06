@@ -380,7 +380,6 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
 
   const sig = await sendAndConfirmTransaction(conn, tx, [admin], {
     commitment: "confirmed",
-    skipPreflight: true,
   });
 
   s.lastPrice = price;

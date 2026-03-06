@@ -124,7 +124,6 @@ async function crankMarket(market: DiscoveredMarket): Promise<string> {
 
   return sendAndConfirmTransaction(connection, tx, [payer], {
     commitment: "confirmed",
-    skipPreflight: true,
   });
 }
 
