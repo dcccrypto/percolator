@@ -109,7 +109,7 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     console.error("[oracle/publishers] Error:", err);
     return NextResponse.json(
-      { error: "Failed to fetch publisher data", detail: String(err) },
+      { error: "Failed to fetch publisher data" },
       { status: 500 },
     );
   }
