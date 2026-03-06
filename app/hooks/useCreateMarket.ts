@@ -161,6 +161,7 @@ export function useCreateMarket() {
       const selectedProgramId = cfg.programsBySlabTier?.[tierKey] ?? cfg.programId;
       const programId = new PublicKey(selectedProgramId);
       const isAdminOracle = params.oracleFeed === ALL_ZEROS_FEED;
+      const isDevnetEnv = (process.env.NEXT_PUBLIC_SOLANA_NETWORK?.trim() ?? "mainnet") === "devnet";
       const startStep = retryFromStep ?? 0;
 
       setState((s) => ({
@@ -238,24 +239,43 @@ export function useCreateMarket() {
                 wallet.publicKey, vaultAta, vaultPda, params.mint,
               );
 
-              // Pre-flight: verify user holds enough tokens for the vault seed transfer
+              // Pre-flight: verify user holds enough tokens for the vault seed transfer.
+              // On devnet, auto-fund via /api/devnet-pre-fund if the user is short.
               const userCollateralAtaRecovery = await getAssociatedTokenAddress(params.mint, wallet.publicKey);
               let recoveryBalance = 0n;
               try {
                 const acct = await getAccount(connection, userCollateralAtaRecovery);
                 recoveryBalance = acct.amount;
               } catch {
-                // Account doesn't exist
+                // Account doesn't exist — balance stays 0
               }
               if (recoveryBalance < MIN_INIT_MARKET_SEED) {
-                const decimals = params.decimals ?? 6;
-                const needed = Number(MIN_INIT_MARKET_SEED) / 10 ** decimals;
-                const have = Number(recoveryBalance) / 10 ** decimals;
-                throw new Error(
-                  `Insufficient token balance for vault seed. ` +
-                  `You need at least ${needed.toLocaleString()} tokens but your wallet holds ${have.toLocaleString()}. ` +
-                  `Please fund your wallet with the collateral mint before creating a market.`
-                );
+                if (isDevnetEnv) {
+                  setState((s) => ({ ...s, stepLabel: "Funding devnet wallet for vault seed..." }));
+                  const fundResp = await fetch("/api/devnet-pre-fund", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      mintAddress: params.mint.toBase58(),
+                      walletAddress: wallet.publicKey.toBase58(),
+                    }),
+                  });
+                  if (!fundResp.ok) {
+                    const err = await fundResp.json().catch(() => ({ error: "Unknown error" }));
+                    throw new Error(`Devnet pre-fund failed: ${err.error ?? fundResp.status}`);
+                  }
+                  // Reset label — don't leave UI stuck at "Funding devnet wallet…"
+                  setState((s) => ({ ...s, stepLabel: STEP_LABELS[0] }));
+                } else {
+                  const decimals = params.decimals ?? 6;
+                  const needed = Number(MIN_INIT_MARKET_SEED) / 10 ** decimals;
+                  const have = Number(recoveryBalance) / 10 ** decimals;
+                  throw new Error(
+                    `Insufficient token balance for vault seed. ` +
+                    `You need at least ${needed.toLocaleString()} tokens but your wallet holds ${have.toLocaleString()}. ` +
+                    `Please fund your wallet with the collateral mint before creating a market.`
+                  );
+                }
               }
               const seedTransferIxRecovery = createTransferInstruction(
                 userCollateralAtaRecovery, vaultAta, wallet.publicKey, MIN_INIT_MARKET_SEED,
@@ -309,8 +329,8 @@ export function useCreateMarket() {
 
             // Pre-flight: verify user holds enough tokens for the vault seed transfer.
             // Without this check the TX fails at the Transfer instruction with an opaque
-            // "invalid account data" error (the user's ATA doesn't exist or has
-            // insufficient balance).
+            // "invalid account data" error when the user's ATA doesn't exist or is empty.
+            // On devnet, auto-fund via /api/devnet-pre-fund; on mainnet, surface a clear error.
             const userCollateralAtaCheck = await getAssociatedTokenAddress(params.mint, wallet.publicKey);
             let userTokenBalance = 0n;
             try {
@@ -320,15 +340,34 @@ export function useCreateMarket() {
               // Account doesn't exist — balance stays 0
             }
             if (userTokenBalance < MIN_INIT_MARKET_SEED) {
-              const decimals = params.decimals ?? 6;
-              const needed = Number(MIN_INIT_MARKET_SEED) / 10 ** decimals;
-              const have = Number(userTokenBalance) / 10 ** decimals;
-              throw new Error(
-                `Insufficient token balance for vault seed. ` +
-                `You need at least ${needed.toLocaleString()} tokens (${MIN_INIT_MARKET_SEED.toString()} raw) ` +
-                `but your wallet holds ${have.toLocaleString()}. ` +
-                `Please fund your wallet with the collateral mint before creating a market.`
-              );
+              if (isDevnetEnv) {
+                // Auto-fund: server mints seed tokens directly to user wallet
+                setState((s) => ({ ...s, stepLabel: "Funding devnet wallet for vault seed..." }));
+                const fundResp = await fetch("/api/devnet-pre-fund", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    mintAddress: params.mint.toBase58(),
+                    walletAddress: wallet.publicKey.toBase58(),
+                  }),
+                });
+                if (!fundResp.ok) {
+                  const err = await fundResp.json().catch(() => ({ error: "Unknown error" }));
+                  throw new Error(`Devnet pre-fund failed: ${err.error ?? fundResp.status}`);
+                }
+                // Re-check label for the actual creation step
+                setState((s) => ({ ...s, stepLabel: STEP_LABELS[0] }));
+              } else {
+                const decimals = params.decimals ?? 6;
+                const needed = Number(MIN_INIT_MARKET_SEED) / 10 ** decimals;
+                const have = Number(userTokenBalance) / 10 ** decimals;
+                throw new Error(
+                  `Insufficient token balance for vault seed. ` +
+                  `You need at least ${needed.toLocaleString()} tokens (${MIN_INIT_MARKET_SEED.toString()} raw) ` +
+                  `but your wallet holds ${have.toLocaleString()}. ` +
+                  `Please fund your wallet with the collateral mint before creating a market.`
+                );
+              }
             }
 
             const effectiveSlabSize = params.slabDataSize ?? DEFAULT_SLAB_SIZE;
@@ -657,7 +696,7 @@ export function useCreateMarket() {
         // PERC-361: Post-creation hooks — register oracle bridge + mint devnet token
         const slabAddr = slabPk.toBase58();
         const mintAddr = params.mint.toBase58();
-        const isDevnet = (process.env.NEXT_PUBLIC_SOLANA_NETWORK?.trim() || "devnet") === "devnet";
+        const isDevnet = (process.env.NEXT_PUBLIC_SOLANA_NETWORK?.trim() ?? "mainnet") === "devnet";
 
         if (isDevnet && slabAddr) {
           // Register with oracle bridge (fire-and-forget)
