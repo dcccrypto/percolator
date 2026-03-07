@@ -108,7 +108,9 @@ export function useConnectionCompat() {
 
     return new Connection(url, {
       commitment: "confirmed",
-      ...(wsEndpoint ? { wsEndpoint } : {}),
+      // #869: Must always pass wsEndpoint — omitting it lets @solana/web3.js
+      // auto-derive wss:// from the HTTP proxy URL, causing reconnect storms on Vercel.
+      wsEndpoint: wsEndpoint ?? "wss://0.0.0.0",
       // Disable web3.js built-in retry — our batch transport handles retries
       // with proper exponential backoff instead of flat 500ms delays
       ...(isClient ? { disableRetryOnRateLimit: true } : {}),
