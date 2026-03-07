@@ -9,13 +9,15 @@
  *
  * Flow:
  * 1. Validate mintAddress is in devnet_mints table → get mainnet_ca, symbol, decimals
- * 2. Fetch current mainnet price from DexScreener for mainnet_ca
- * 3. Calculate amount = $500 USD at current price
+ * 2. INSERT-as-gate: atomically reserve the claim slot (eliminates TOCTOU race)
+ * 3. Fetch current mainnet price from DexScreener for mainnet_ca
+ * 4. Calculate amount = $500 USD at current price
  *    (min: 1_000 raw, max: 3_200_000_000 raw at 6 decimals = 3,200 tokens)
- * 4. Mint to walletAddress using DEVNET_MINT_AUTHORITY_KEYPAIR
- * 5. Return { signature, amount, symbol }
+ * 5. Mint to walletAddress using DEVNET_MINT_AUTHORITY_KEYPAIR
+ *    On mint failure: release the reserved slot so user can retry.
+ * 6. Return { signature, amount, symbol }
  *
- * Rate limit: 1 request per wallet per mint per 24h (Supabase-backed, distributed-safe).
+ * Rate limit: 1 request per wallet per mint per 24h (Supabase-backed, TOCTOU-safe).
  * Only callable on devnet.
  *
  * Requires: DEVNET_MINT_AUTHORITY_KEYPAIR env var (JSON secret key bytes)
@@ -54,59 +56,106 @@ const MAX_RAW = 3_200_000_000n; // 3,200 tokens — cap prevents draining low-pr
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Check whether a claim is allowed for this wallet+mint pair.
- * Uses Supabase devnet_airdrop_claims table — distributed-safe across Vercel instances.
- * Returns { allowed, retryAfterSecs, claimedAt? }.
+ * Atomically try to reserve a claim slot for wallet+mint (INSERT-as-gate).
+ *
+ * This eliminates the SELECT→INSERT TOCTOU race present in the previous
+ * checkRateLimit + recordClaim two-step approach. Because the
+ * devnet_airdrop_claims table has a UNIQUE INDEX on (wallet, mint), the DB
+ * serialises concurrent INSERTs — exactly one will succeed; the rest get a
+ * unique-violation and are denied without any window for a double-spend.
+ *
+ * Re-claim after 24h: before the gate INSERT we delete any expired row for
+ * this wallet+mint so the unique slot is free for a new window.
+ *
+ * Returns:
+ *   { allowed: true,  claimId }  — slot reserved, proceed with mint
+ *   { allowed: false, retryAfterSecs } — already claimed within 24h
  */
-async function checkRateLimit(
+async function tryClaimGate(
   supabase: ReturnType<typeof getServiceClient>,
   walletAddress: string,
   mintAddress: string,
-): Promise<{ allowed: boolean; retryAfterSecs: number }> {
+): Promise<{ allowed: boolean; retryAfterSecs: number; claimId?: number }> {
   const windowStart = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
 
-  const { data, error } = await (supabase as any)
-    .from("devnet_airdrop_claims")
-    .select("claimed_at")
-    .eq("wallet", walletAddress)
-    .eq("mint", mintAddress)
-    .gte("claimed_at", windowStart)
-    .maybeSingle();
+  try {
+    // Step 1: Clear any expired claim so the unique slot is free for re-claiming.
+    // This is safe even under concurrency: two concurrent DELETEs on the same
+    // expired row are idempotent; the second finds nothing and succeeds silently.
+    await (supabase as any)
+      .from("devnet_airdrop_claims")
+      .delete()
+      .eq("wallet", walletAddress)
+      .eq("mint", mintAddress)
+      .lt("claimed_at", windowStart);
 
-  if (error) {
-    // DB error — fail open (allow claim) to avoid blocking users on DB issues
-    console.warn("[devnet-airdrop] rate limit DB check failed:", error.message);
+    // Step 2: INSERT-as-gate.
+    // Only one concurrent request can win the unique constraint; all others get
+    // a postgres error code 23505 and are denied — atomically, with no gap.
+    const { data, error } = await (supabase as any)
+      .from("devnet_airdrop_claims")
+      .insert({ wallet: walletAddress, mint: mintAddress, claimed_at: new Date().toISOString() })
+      .select("id, claimed_at")
+      .maybeSingle();
+
+    if (error) {
+      if (error.code === "23505") {
+        // Unique violation = active claim within 24h. Fetch it to compute retry time.
+        const { data: existing } = await (supabase as any)
+          .from("devnet_airdrop_claims")
+          .select("claimed_at")
+          .eq("wallet", walletAddress)
+          .eq("mint", mintAddress)
+          .maybeSingle();
+
+        if (existing) {
+          const age = Date.now() - new Date(existing.claimed_at as string).getTime();
+          const retryAfterSecs = Math.ceil((RATE_LIMIT_WINDOW_MS - age) / 1000);
+          return { allowed: false, retryAfterSecs: Math.max(0, retryAfterSecs) };
+        }
+        // Row vanished between the conflict and the read (highly unlikely) — deny conservatively.
+        return { allowed: false, retryAfterSecs: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000) };
+      }
+
+      // Unexpected DB error — fail open to avoid blocking users; capture for alerting.
+      const dbErr = new Error(`[devnet-airdrop] gate INSERT failed: ${error.message}`);
+      console.warn(dbErr.message);
+      Sentry.captureException(dbErr, {
+        tags: { endpoint: "/api/devnet-airdrop", step: "try_claim_gate" },
+        extra: { supabase_code: error.code, walletAddress, mintAddress },
+      });
+      return { allowed: true, retryAfterSecs: 0 };
+    }
+
+    return { allowed: true, retryAfterSecs: 0, claimId: (data as any)?.id };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[devnet-airdrop] tryClaimGate threw:", msg);
+    Sentry.captureException(err, {
+      tags: { endpoint: "/api/devnet-airdrop", step: "try_claim_gate" },
+      extra: { walletAddress, mintAddress },
+    });
     return { allowed: true, retryAfterSecs: 0 };
   }
-
-  if (data) {
-    const age = Date.now() - new Date(data.claimed_at as string).getTime();
-    const retryAfterSecs = Math.ceil((RATE_LIMIT_WINDOW_MS - age) / 1000);
-    return { allowed: false, retryAfterSecs: Math.max(0, retryAfterSecs) };
-  }
-
-  return { allowed: true, retryAfterSecs: 0 };
 }
 
 /**
- * Record a successful claim for wallet+mint.
- * Uses UPSERT (ON CONFLICT DO UPDATE) so a retry after expiry resets the 24h window.
+ * Release a reserved claim slot identified by its row id.
+ *
+ * Called only when the on-chain mint fails AFTER tryClaimGate succeeded,
+ * so the user isn't locked out for 24h due to a transient network/RPC error.
  */
-async function recordClaim(
+async function releaseClaim(
   supabase: ReturnType<typeof getServiceClient>,
-  walletAddress: string,
-  mintAddress: string,
+  claimId: number,
 ): Promise<void> {
   const { error } = await (supabase as any)
     .from("devnet_airdrop_claims")
-    .upsert(
-      { wallet: walletAddress, mint: mintAddress, claimed_at: new Date().toISOString() },
-      { onConflict: "wallet,mint" },
-    );
+    .delete()
+    .eq("id", claimId);
 
   if (error) {
-    // Non-fatal — log and continue (claim already succeeded on-chain)
-    console.warn("[devnet-airdrop] failed to record claim in DB:", error.message);
+    console.warn("[devnet-airdrop] failed to release claim slot:", error.message);
   }
 }
 
@@ -195,8 +244,9 @@ export async function POST(req: NextRequest) {
     const { mainnet_ca: mainnetCa, symbol, decimals: rawDecimals } = mintRow;
     const decimals: number = rawDecimals ?? 6;
 
-    // 2. Rate limit: 1 per wallet per mint per 24h (Supabase-backed)
-    const { allowed, retryAfterSecs } = await checkRateLimit(supabase, walletAddress, mintAddress);
+    // 2. INSERT-as-gate: atomically reserve the claim slot BEFORE minting.
+    //    This eliminates the TOCTOU race in the previous SELECT→UPSERT flow.
+    const { allowed, retryAfterSecs, claimId } = await tryClaimGate(supabase, walletAddress, mintAddress);
     if (!allowed) {
       const h = Math.floor(retryAfterSecs / 3600);
       const m = Math.floor((retryAfterSecs % 3600) / 60);
@@ -233,6 +283,7 @@ export async function POST(req: NextRequest) {
     // 4. Load mint authority
     const mintAuthKeyJson = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
     if (!mintAuthKeyJson) {
+      if (claimId !== undefined) await releaseClaim(supabase, claimId);
       return NextResponse.json(
         { error: "Server not configured for devnet minting (DEVNET_MINT_AUTHORITY_KEYPAIR missing)" },
         { status: 500 },
@@ -242,6 +293,7 @@ export async function POST(req: NextRequest) {
     try {
       mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(mintAuthKeyJson)));
     } catch {
+      if (claimId !== undefined) await releaseClaim(supabase, claimId);
       return NextResponse.json({ error: "Server keypair configuration is invalid" }, { status: 500 });
     }
 
@@ -258,7 +310,8 @@ export async function POST(req: NextRequest) {
       // ATA doesn't exist yet — will be created in tx
     }
 
-    // 5. Build and send mint transaction
+    // 5. Build and send mint transaction.
+    //    On failure: release the reserved claim slot so the user can retry.
     const tx = new Transaction();
     if (!ataExists) {
       tx.add(
@@ -272,14 +325,19 @@ export async function POST(req: NextRequest) {
     }
     tx.add(createMintToInstruction(mintPk, ata, mintAuthority.publicKey, rawAmount));
 
-    const sig = await withTimeout(
-      sendAndConfirmTransaction(connection, tx, [mintAuthority], { commitment: "confirmed" }),
-      30_000,
-    );
+    let sig: string;
+    try {
+      sig = await withTimeout(
+        sendAndConfirmTransaction(connection, tx, [mintAuthority], { commitment: "confirmed" }),
+        30_000,
+      );
+    } catch (mintErr) {
+      // Mint failed — release the gate so the user can retry without waiting 24h.
+      if (claimId !== undefined) await releaseClaim(supabase, claimId);
+      throw mintErr; // re-throw to be caught by the outer catch (Sentry + 500)
+    }
 
-    // Record claim only after successful mint (Supabase-backed)
-    await recordClaim(supabase, walletAddress, mintAddress);
-
+    // Claim slot is already recorded from step 2 — no separate recordClaim needed.
     const humanAmount = Number(rawAmount) / 10 ** decimals;
 
     return NextResponse.json({
