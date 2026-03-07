@@ -4,6 +4,9 @@ name: Nightly Kani (Slow Proofs)
 # Triggered nightly at 02:00 UTC and on manual dispatch.
 # Harnesses prefixed with `nightly_` live in tests/kani.rs and are excluded
 # from ci.yml (which runs kani_*, proof_*, and inductive_* harnesses).
+#
+# Each harness runs in its own parallel job so the ~3h worst-case harnesses
+# no longer block all others and can't exhaust the per-job ceiling.
 
 on:
   schedule:
@@ -23,16 +26,32 @@ env:
 
 jobs:
   kani-nightly:
-    name: Kani Proofs (Nightly — Slow Harnesses)
+    name: Kani — ${{ matrix.harness }}
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # 5h ceiling — gives nightly_funding_zero_sum_across_accounts room to complete
+    # 3.5 h per harness — enough headroom for the slowest ones (~2h55m observed)
+    timeout-minutes: 210
+    strategy:
+      fail-fast: false   # a single harness timeout must not cancel siblings
+      matrix:
+        harness:
+          - nightly_variation_margin_no_pnl_teleport
+          - nightly_cross_lp_close_no_pnl_teleport
+          - nightly_gap3_conservation_crank_funding_positions
+          - nightly_gap3_multi_step_lifecycle_conservation
+          - nightly_premium_funding_rate_bounded
+          - nightly_combined_funding_rate_bounded_v2
+          - nightly_combined_funding_rate_convex
+          - nightly_fee_split_conservative
+          - nightly_funding_zero_sum_across_accounts
+          - nightly_liquidation_must_reset_warmup_on_mark_increase
+          - nightly_ramp_never_exceeds_configured_multiplier
+
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Run slow Kani harnesses (nightly_ prefix)
+      - name: Run ${{ matrix.harness }}
         uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
         with:
-          # --harness nightly_ matches all slow harnesses via bare substring matching.
-          # Currently: nightly_funding_zero_sum_across_accounts (OOM risk on PR runners)
-          args: --tests --output-format terse --jobs 2 --harness nightly_
-        timeout-minutes: 295
+          # Exact harness name — no substring matching, no cross-contamination.
+          args: --tests --output-format terse --jobs 4 --harness ${{ matrix.harness }}
+        timeout-minutes: 205
