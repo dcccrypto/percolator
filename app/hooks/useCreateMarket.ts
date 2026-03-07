@@ -217,7 +217,12 @@ export function useCreateMarket() {
       // - "pyth": index_feed_id = pyth hex, uses KeeperCrank with Pyth PDA
       // - "hyperp": index_feed_id = zeros, uses UpdateHyperpMark (reads DEX pool directly)
       // - "admin": index_feed_id = zeros, uses PushOraclePrice + KeeperCrank
-      const oracleMode = params.oracleMode ?? (params.oracleFeed === ALL_ZEROS_FEED ? "admin" : "pyth");
+      // PERC-470 devnet guard: Hyperp mode reads live DEX pool accounts on-chain.
+      // On devnet, mirror tokens have no PumpSwap pool — mainnet pool addresses are invalid.
+      // Force admin oracle mode for all devnet mirror markets (params.mainnetCA is set).
+      const isDevnetMirror = !!params.mainnetCA;
+      const resolvedOracleMode = params.oracleMode ?? (params.oracleFeed === ALL_ZEROS_FEED ? "admin" : "pyth");
+      const oracleMode: "pyth" | "hyperp" | "admin" = (resolvedOracleMode === "hyperp" && isDevnetMirror) ? "admin" : resolvedOracleMode;
       const isAdminOracle = oracleMode === "admin";
       const isHyperpOracle = oracleMode === "hyperp";
       const isDevnetEnv = (process.env.NEXT_PUBLIC_SOLANA_NETWORK?.trim() ?? "mainnet") === "devnet";
