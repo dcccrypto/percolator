@@ -76,10 +76,35 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
   const { connection } = useConnectionCompat();
   const { state: createState, create, reset: resetCreate } = useCreateMarket();
 
-  const [wizard, setWizard] = useState<WizardState>(() => ({
-    ...DEFAULT_STATE,
-    mintAddress: initialMint ?? "",
-  }));
+  // PERC-516: Persist wizard state to localStorage so form survives page refresh.
+  // This fixes the "Continue button does nothing" bug — without persisted state,
+  // allValid is false after refresh because all fields are empty.
+  const WIZARD_STORAGE_KEY = "percolator-wizard-state";
+
+  const [wizard, setWizard] = useState<WizardState>(() => {
+    try {
+      const persisted = typeof window !== "undefined" ? localStorage.getItem(WIZARD_STORAGE_KEY) : null;
+      if (persisted) {
+        const parsed = JSON.parse(persisted);
+        // Restore serializable fields only — bigint and complex objects need special handling
+        return {
+          ...DEFAULT_STATE,
+          ...parsed,
+          // bigint fields can't survive JSON — restore as bigint or null
+          walletBalance: parsed.walletBalance != null ? BigInt(parsed.walletBalance) : null,
+          // DexPoolResult is a plain object, survives JSON
+          dexPool: parsed.dexPool ?? null,
+          pythFeed: parsed.pythFeed ?? null,
+          tokenMeta: parsed.tokenMeta ?? null,
+          // initialMint prop overrides persisted mint
+          mintAddress: initialMint ?? parsed.mintAddress ?? "",
+        };
+      }
+    } catch {
+      // Corrupted data — ignore
+    }
+    return { ...DEFAULT_STATE, mintAddress: initialMint ?? "" };
+  });
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set());
   /**
    * PERC-513: Track which step to resume from when recovering a stuck slab.
@@ -87,6 +112,21 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
    * When non-null, handleLaunch skips slab creation and resumes from this step.
    */
   const [resumeFromStep, setResumeFromStep] = useState<number | null>(null);
+
+  // PERC-516: Persist wizard state to localStorage whenever it changes.
+  // Clear on successful market creation (handled in the success callback).
+  useEffect(() => {
+    try {
+      const serializable = {
+        ...wizard,
+        // bigint can't be JSON-serialized — convert to string
+        walletBalance: wizard.walletBalance != null ? wizard.walletBalance.toString() : null,
+      };
+      localStorage.setItem(WIZARD_STORAGE_KEY, JSON.stringify(serializable));
+    } catch {
+      // localStorage full or unavailable — non-critical
+    }
+  }, [wizard]);
 
   // Quick launch auto-detection for parameters
   const quickMintForHook = wizard.mode === "quick" && wizard.mintAddress.length >= 32 ? wizard.mintAddress : null;
@@ -443,10 +483,22 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
     setWizard({ ...DEFAULT_STATE });
     setCompletedSteps(new Set());
     setDevnetMintAddress(null);
+    // PERC-516: Clear persisted wizard state
+    try { localStorage.removeItem(WIZARD_STORAGE_KEY); } catch {}
     setResumeFromStep(null);
   };
 
   // --- Render ---
+
+  // PERC-516: Clear persisted state on success so a refresh doesn't show stale wizard
+  useEffect(() => {
+    if (createState.step >= 5 && createState.slabAddress) {
+      try {
+        localStorage.removeItem(WIZARD_STORAGE_KEY);
+        localStorage.removeItem("percolator-pending-slab-keypair");
+      } catch {}
+    }
+  }, [createState.step, createState.slabAddress]);
 
   // Success state
   if (createState.step >= 5 && createState.slabAddress) {
