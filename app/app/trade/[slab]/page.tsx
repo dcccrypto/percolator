@@ -400,7 +400,7 @@ function TradePageInner({ slab }: { slab: string }) {
         {/* Chart */}
         <ErrorBoundary label="TradingChart">
           <div className="w-full overflow-hidden">
-            <TradingChart slabAddress={slab} />
+            <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
           </div>
         </ErrorBoundary>
 
@@ -455,7 +455,7 @@ function TradePageInner({ slab }: { slab: string }) {
         <div className="min-w-0 space-y-1.5">
           {/* Chart */}
           <ErrorBoundary label="TradingChart">
-            <TradingChart slabAddress={slab} />
+            <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
           </ErrorBoundary>
 
           {/* My Positions / Account — tabbed */}

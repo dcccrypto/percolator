@@ -3,6 +3,7 @@
 import { FC, useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useSlabState } from "@/components/providers/SlabProvider";
 import { useLivePrice } from "@/hooks/useLivePrice";
+import { useTokenChart } from "@/hooks/useTokenChart";
 import { ChartEmptyState } from "./ChartEmptyState";
 
 type ChartType = "line" | "candle";
@@ -68,16 +69,28 @@ const CHART_H = 300;
 const VOLUME_H = 60;
 const PAD = { top: 20, bottom: 40, left: 60, right: 20 };
 
-export const TradingChart: FC<{ slabAddress: string }> = ({ slabAddress }) => {
+export const TradingChart: FC<{ slabAddress: string; mintAddress?: string }> = ({
+  slabAddress,
+  mintAddress,
+}) => {
   const { config } = useSlabState();
   const { priceUsd } = useLivePrice();
   const [chartType, setChartType] = useState<ChartType>("line");
   const [timeframe, setTimeframe] = useState<Timeframe>("1d");
-  const [prices, setPrices] = useState<PricePoint[]>([]);
+  const [oraclePrices, setOraclePrices] = useState<PricePoint[]>([]);
   const [hoveredCandle, setHoveredCandle] = useState<CandleData | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Fetch price history
+  // PERC-512: Fetch external token OHLCV from GeckoTerminal (free, no key)
+  const {
+    candles: externalCandles,
+    status: externalStatus,
+    poolAddress,
+  } = useTokenChart(mintAddress ?? null, timeframe);
+
+  const hasExternalData = externalStatus === "success" && externalCandles.length > 0;
+
+  // Fetch oracle price history (always — used when external data unavailable)
   useEffect(() => {
     fetch(`/api/markets/${slabAddress}/prices`)
       .then((r) => r.json())
@@ -86,35 +99,52 @@ export const TradingChart: FC<{ slabAddress: string }> = ({ slabAddress }) => {
           timestamp: p.timestamp,
           price: parseInt(p.price_e6) / 1e6,
         }));
-        setPrices(apiPrices);
+        setOraclePrices(apiPrices);
       })
       .catch(() => {});
   }, [slabAddress]);
 
-  // Add live price updates
+  // Add live price updates to oracle prices
   useEffect(() => {
     if (!config || !priceUsd) return;
     const now = Date.now();
-    setPrices((prev) => {
+    setOraclePrices((prev) => {
       const last = prev[prev.length - 1];
       if (last && now - last.timestamp < 5000) return prev;
       return [...prev, { timestamp: now, price: priceUsd }].slice(-1000);
     });
   }, [config, priceUsd]);
 
-  // Filter by timeframe
-  const filteredPrices = useMemo(() => {
+  // Derive oracle-based price array (filtered by timeframe)
+  const oracleFiltered = useMemo(() => {
     const cutoff = Date.now() - TIMEFRAME_MS[timeframe];
-    return prices.filter((p) => p.timestamp >= cutoff);
-  }, [prices, timeframe]);
+    return oraclePrices.filter((p) => p.timestamp >= cutoff);
+  }, [oraclePrices, timeframe]);
 
-  // Generate candles or use line data
+  // Merge external + oracle: external data is preferred when available.
+  // For line chart, convert external candle close prices to PricePoints.
   const { candles, lineData } = useMemo(() => {
-    if (chartType === "candle") {
-      return { candles: aggregateCandles(filteredPrices, CANDLE_INTERVAL_MS), lineData: [] };
+    if (hasExternalData) {
+      // External data available: use it for both candle and line views
+      const externalLine: PricePoint[] = externalCandles.map((c) => ({
+        timestamp: c.timestamp,
+        price: c.close,
+      }));
+      if (chartType === "candle") {
+        return { candles: externalCandles as CandleData[], lineData: [] };
+      }
+      return { candles: [], lineData: externalLine };
     }
-    return { candles: [], lineData: filteredPrices };
-  }, [filteredPrices, chartType]);
+
+    // Fallback: oracle prices only
+    if (chartType === "candle") {
+      return {
+        candles: aggregateCandles(oracleFiltered, CANDLE_INTERVAL_MS),
+        lineData: [],
+      };
+    }
+    return { candles: [], lineData: oracleFiltered };
+  }, [hasExternalData, externalCandles, oracleFiltered, chartType]);
 
   // Calculate chart bounds
   const { minPrice, maxPrice, minTime, maxTime, priceRange } = useMemo(() => {
@@ -205,13 +235,17 @@ export const TradingChart: FC<{ slabAddress: string }> = ({ slabAddress }) => {
     return labels;
   }, [minTime, maxTime, timeframe, CHART_W]);
 
-  const currentPrice = filteredPrices[filteredPrices.length - 1]?.price ?? priceUsd ?? 0;
-  const firstPrice = filteredPrices[0]?.price ?? currentPrice;
+  // Use external line data or oracle line data for price stats
+  const activeLineData = lineData.length > 0 ? lineData : oracleFiltered;
+  const currentPrice = activeLineData[activeLineData.length - 1]?.price ?? priceUsd ?? 0;
+  const firstPrice = activeLineData[0]?.price ?? currentPrice;
   const priceChange = currentPrice - firstPrice;
   const priceChangePercent = firstPrice > 0 ? (priceChange / firstPrice) * 100 : 0;
   const isUp = priceChange >= 0;
 
-  if (filteredPrices.length === 0) {
+  // Show empty state only if BOTH external and oracle data are missing
+  const totalDataPoints = lineData.length + candles.length;
+  if (totalDataPoints === 0) {
     return (
       <ChartEmptyState
         currentPrice={priceUsd ?? undefined}
@@ -228,8 +262,30 @@ export const TradingChart: FC<{ slabAddress: string }> = ({ slabAddress }) => {
           <div className="text-2xl font-bold" style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums", color: isUp ? "var(--long)" : "var(--short)" }}>
             ${currentPrice.toFixed(currentPrice < 1 ? 4 : 2)}
           </div>
-          <div className="text-xs" style={{ color: isUp ? "var(--long)" : "var(--short)" }}>
-            {isUp ? "+" : ""}{priceChange.toFixed(4)} ({isUp ? "+" : ""}{priceChangePercent.toFixed(2)}%)
+          <div className="flex items-center gap-2">
+            <span className="text-xs" style={{ color: isUp ? "var(--long)" : "var(--short)" }}>
+              {isUp ? "+" : ""}{priceChange.toFixed(4)} ({isUp ? "+" : ""}{priceChangePercent.toFixed(2)}%)
+            </span>
+            {/* PERC-512: Data source badge */}
+            {hasExternalData ? (
+              <span
+                className="text-[9px] font-medium uppercase tracking-[0.08em] px-1.5 py-0.5 rounded-sm"
+                style={{ background: "var(--accent)/0.1", color: "var(--accent)", border: "1px solid color-mix(in srgb, var(--accent) 30%, transparent)" }}
+                title={poolAddress ? `GeckoTerminal pool: ${poolAddress}` : "Source: GeckoTerminal"}
+              >
+                DEX
+              </span>
+            ) : (
+              mintAddress && externalStatus !== "idle" && (
+                <span
+                  className="text-[9px] font-medium uppercase tracking-[0.08em] px-1.5 py-0.5 rounded-sm"
+                  style={{ background: "var(--bg-elevated)", color: "var(--text-dim)", border: "1px solid var(--border)" }}
+                  title="Showing oracle price history (no DEX data found)"
+                >
+                  Oracle
+                </span>
+              )
+            )}
           </div>
         </div>
 
