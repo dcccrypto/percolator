@@ -47,7 +47,7 @@ const GECKO_HEADERS = {
 
 async function getTopPool(mint: string): Promise<string | null> {
   try {
-    const url = `${GECKO_BASE}/networks/solana/tokens/${mint}/pools?limit=1&sort=h24_volume_usd_liquidity_sum`;
+    const url = `${GECKO_BASE}/networks/solana/tokens/${mint}/pools?limit=1&sort=h24_volume_usd_liquidity_desc`;
     const res = await fetch(url, { headers: GECKO_HEADERS, next: { revalidate: 300 } });
     if (!res.ok) return null;
     const json = await res.json();
