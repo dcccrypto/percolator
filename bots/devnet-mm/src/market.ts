@@ -19,6 +19,7 @@ import {
   getAssociatedTokenAddress,
   getAccount,
   createAssociatedTokenAccountInstruction,
+  TokenAccountNotFoundError,
 } from "@solana/spl-token";
 import {
   encodeInitUser,
@@ -282,7 +283,11 @@ async function ensureWalletAta(
   try {
     await getAccount(connection, ata);
     return ata; // already exists
-  } catch {
+  } catch (e) {
+    // Only proceed to create if the account genuinely doesn't exist.
+    // Rethrow transient RPC errors so callers can retry rather than
+    // spuriously creating a new ATA.
+    if (!(e instanceof TokenAccountNotFoundError)) throw e;
     // ATA does not exist — create it
     log("setup", `${label}: walletAta missing — creating ATA for mint ${mint.toBase58().slice(0, 12)}...`);
     if (dryRun) {
