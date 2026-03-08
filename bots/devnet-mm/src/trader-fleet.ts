@@ -250,6 +250,7 @@ async function ensureSol(
     if (bal / LAMPORTS_PER_SOL >= minSol) return;
 
     log("fleet", `${label}: low SOL (${(bal / LAMPORTS_PER_SOL).toFixed(3)}) — requesting airdrop...`);
+    if (connection.rpcEndpoint.includes("mainnet")) return; // never airdrop on mainnet
     const sig = await connection.requestAirdrop(wallet.publicKey, 2 * LAMPORTS_PER_SOL);
     await connection.confirmTransaction(sig, "confirmed");
     log("fleet", `${label}: ✅ airdrop +2 SOL`);
