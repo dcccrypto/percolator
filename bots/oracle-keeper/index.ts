@@ -46,6 +46,10 @@ const PUSH_INTERVAL_MS = Number(process.env.PUSH_INTERVAL_MS ?? "3000");
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? "18810");
 const MAX_PRICE_MOVE_PCT = Number(process.env.MAX_PRICE_MOVE_PCT ?? "10");
 const STALE_THRESHOLD_S = Number(process.env.STALE_THRESHOLD_S ?? "30");
+// Comma-separated list of slab addresses to permanently skip (wrong oracle_authority, etc.)
+const ORACLE_KEEPER_BLOCKED_MARKETS = new Set<string>(
+  (process.env.ORACLE_KEEPER_BLOCKED_MARKETS ?? "").split(",").map(s => s.trim()).filter(Boolean)
+);
 const ADMIN_KP_PATH = process.env.ADMIN_KEYPAIR_PATH ??
   `${process.env.HOME}/.config/solana/percolator-upgrade-authority.json`;
 const RPC_URL = process.env.RPC_URL ?? "https://api.devnet.solana.com";
@@ -317,6 +321,9 @@ function log(msg: string) {
 async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<void> {
   const s = getOrCreateStats(market);
 
+  // Skip markets explicitly blocked via ORACLE_KEEPER_BLOCKED_MARKETS env var
+  if (ORACLE_KEEPER_BLOCKED_MARKETS.has(market.slab)) return;
+
   // Skip markets where we've already confirmed we're not the oracle authority
   if (skippedMarkets.has(market.slab)) return;
 
@@ -554,7 +561,13 @@ async function main() {
 
   const deploy = deployRaw ? JSON.parse(deployRaw) : { programId: process.env.PROGRAM_ID, markets: [] };
   const programId = new PublicKey(deploy.programId);
-  const markets: MarketInfo[] = [...(deploy.markets as MarketInfo[])];
+  const markets: MarketInfo[] = (deploy.markets as MarketInfo[]).filter(m => {
+    if (ORACLE_KEEPER_BLOCKED_MARKETS.has(m.slab)) {
+      log(`⛔ STARTUP: ${m.label} (${m.slab.slice(0, 12)}...) — in ORACLE_KEEPER_BLOCKED_MARKETS, skipping`);
+      return false;
+    }
+    return true;
+  });
 
   log(`Program: ${programId.toBase58().slice(0, 12)}...`);
   log(`Markets: ${markets.map(m => m.label).join(", ")}`);
@@ -642,6 +655,10 @@ async function main() {
         if (newMarkets.length > 0) {
           log(`🔍 Discovered ${newMarkets.length} new market(s): ${newMarkets.map(m => m.label).join(", ")}`);
           for (const m of newMarkets) {
+            if (ORACLE_KEEPER_BLOCKED_MARKETS.has(m.slab)) {
+              log(`⛔ ${m.label}: in ORACLE_KEEPER_BLOCKED_MARKETS — skipping`);
+              continue;
+            }
             markets.push(m);
             getOrCreateStats(m);
             // Verify oracle authority for new market
