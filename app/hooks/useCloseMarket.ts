@@ -2,9 +2,9 @@
 
 import { useState, useCallback } from "react";
 import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { parseHeader } from "@percolator/sdk";
 import { useWalletCompat } from "@/hooks/useWalletCompat";
 import { useConnectionCompat } from "@/hooks/useWalletCompat";
-import { getConfig } from "@/lib/config";
 
 /**
  * Tag 13 = CloseSlab instruction in percolator-prog.
@@ -12,11 +12,15 @@ import { getConfig } from "@/lib/config";
  * Data: [13] (1 byte)
  *
  * Requirements:
- * - Admin must sign
+ * - Admin must sign (on-chain guard — mismatch = guaranteed rejection)
  * - Vault balance must be zero
  * - Insurance balance must be zero
  * - No open user accounts
  * - dust_base must be zero
+ *
+ * SECURITY: This hook reads the on-chain slab header and validates that the
+ * connected wallet is the market admin BEFORE building or sending any tx.
+ * Non-admin callers get a clear error with zero fees wasted.
  */
 const TAG_CLOSE_SLAB = 13;
 
@@ -26,20 +30,22 @@ interface CloseResult {
 }
 
 export function useCloseMarket() {
-  const { wallet } = useWalletCompat();
+  const walletCompat = useWalletCompat();
   const { connection } = useConnectionCompat();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   /**
    * Close a slab and reclaim rent.
-   * Only works if vault/insurance are empty and no user accounts exist.
+   * Only works if the connected wallet is the market admin AND
+   * vault/insurance are empty with no open user accounts.
+   *
    * @param slabAddress - The slab account public key
    * @param programIdOverride - Optional program ID (auto-detected from slab owner if omitted)
    */
   const closeSlab = useCallback(
     async (slabAddress: string, programIdOverride?: string): Promise<CloseResult | null> => {
-      if (!wallet.publicKey || !wallet.signTransaction) {
+      if (!walletCompat.publicKey || !walletCompat.signTransaction) {
         setError("Wallet not connected");
         return null;
       }
@@ -50,16 +56,42 @@ export function useCloseMarket() {
       try {
         const slabPk = new PublicKey(slabAddress);
 
-        // Fetch the slab account to get its owner (program ID) and lamports
+        // Fetch the slab account
         const accountInfo = await connection.getAccountInfo(slabPk);
         if (!accountInfo) {
           // Account doesn't exist — nothing to reclaim.
-          // Clean up localStorage.
           localStorage.removeItem("percolator-pending-slab-keypair");
           setError("Slab account no longer exists (already reclaimed or rolled back).");
           setLoading(false);
           return null;
         }
+
+        // --- SECURITY GUARD: parse header and verify admin before sending any tx ---
+        let slabAdmin: PublicKey;
+        try {
+          const header = parseHeader(accountInfo.data);
+          slabAdmin = header.admin;
+        } catch {
+          // parseHeader throws when magic bytes are wrong (uninitialised slab).
+          // CloseSlab (tag 13) requires an initialised slab — use ReclaimSlabRent
+          // (tag 52 / useReclaimSlabRent) for uninitialised slabs instead.
+          setError(
+            "This slab is not yet initialised. Use the ReclaimSlabRent flow to recover SOL from an uninitialised slab."
+          );
+          setLoading(false);
+          return null;
+        }
+
+        if (!slabAdmin.equals(walletCompat.publicKey)) {
+          setError(
+            "Only the market admin can close this slab. " +
+            `Admin: ${slabAdmin.toBase58().slice(0, 8)}… — ` +
+            "connect the admin wallet to proceed."
+          );
+          setLoading(false);
+          return null;
+        }
+        // --- END SECURITY GUARD ---
 
         const reclaimableLamports = accountInfo.lamports;
         const programId = programIdOverride
@@ -70,17 +102,20 @@ export function useCloseMarket() {
         const ix = new TransactionInstruction({
           programId,
           keys: [
-            { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
+            { pubkey: walletCompat.publicKey, isSigner: true, isWritable: true },
             { pubkey: slabPk, isSigner: false, isWritable: true },
           ],
           data: Buffer.from([TAG_CLOSE_SLAB]),
         });
 
         const { blockhash } = await connection.getLatestBlockhash("confirmed");
-        const tx = new Transaction({ recentBlockhash: blockhash, feePayer: wallet.publicKey });
+        const tx = new Transaction({
+          recentBlockhash: blockhash,
+          feePayer: walletCompat.publicKey,
+        });
         tx.add(ix);
 
-        const signed = await wallet.signTransaction(tx);
+        const signed = await walletCompat.signTransaction(tx);
         const sig = await connection.sendRawTransaction(signed.serialize(), {
           skipPreflight: false,
           preflightCommitment: "confirmed",
@@ -113,7 +148,7 @@ export function useCloseMarket() {
         return null;
       }
     },
-    [wallet, connection],
+    [walletCompat, connection],
   );
 
   return { closeSlab, loading, error };
