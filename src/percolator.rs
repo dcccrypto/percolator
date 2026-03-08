@@ -3129,25 +3129,25 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)?;
 
         if delta_f != 0 && !account.position_size.is_zero() {
-            // payment = position × ΔF / 1e6
-            // Round UP for positive payments (account pays), truncate for negative (account receives)
-            // This ensures vault always has at least what's owed (one-sided conservation slack).
+            // payment = position × ΔF / 1e6 (truncated toward zero for both payers and receivers)
+            //
+            // ZERO-SUM INVARIANT: For any two accounts with opposite positions (+delta / -delta),
+            // raw_a = delta * ΔF and raw_b = -delta * ΔF. Rust integer division truncates toward
+            // zero, so raw_b / 1e6 == -(raw_a / 1e6). The sum of both pnl changes is therefore
+            // zero — funding is a pure transfer between counterparties, no capital created or
+            // destroyed. Dust (remainder of raw mod 1e6) remains in the vault implicitly.
+            //
+            // Previously this used ceil(raw/1e6) for payers, which over-collected 1 quantum per
+            // non-divisible payment and violated the Kani nightly_funding_zero_sum_across_accounts
+            // proof (GitHub issue #909).
             let raw = account
                 .position_size
                 .get()
                 .checked_mul(delta_f)
                 .ok_or(RiskError::Overflow)?;
 
-            let payment = if raw > 0 {
-                // Account is paying: round UP to ensure vault gets at least theoretical amount
-                raw.checked_add(999_999)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_div(1_000_000)
-                    .ok_or(RiskError::Overflow)?
-            } else {
-                // Account is receiving: truncate towards zero to give at most theoretical amount
-                raw.checked_div(1_000_000).ok_or(RiskError::Overflow)?
-            };
+            // Symmetric truncation toward zero — preserves zero-sum invariant (PERC-492 / #909)
+            let payment = raw.checked_div(1_000_000).ok_or(RiskError::Overflow)?;
 
             // Longs pay when funding positive: pnl -= payment
             // Use set_pnl helper to maintain pnl_pos_tot aggregate (spec §4.2)
@@ -4485,11 +4485,8 @@ impl RiskEngine {
                     .saturating_sub(account.funding_index.get());
                 if delta_f != 0 {
                     let raw = account.position_size.get().saturating_mul(delta_f);
-                    let payment = if raw > 0 {
-                        raw.saturating_add(999_999).saturating_div(1_000_000)
-                    } else {
-                        raw.saturating_div(1_000_000)
-                    };
+                    // Use same symmetric truncation-toward-zero as settle_account_funding (PERC-492)
+                    let payment = raw.saturating_div(1_000_000);
                     settled_pnl = settled_pnl.saturating_sub(payment);
                 }
 
