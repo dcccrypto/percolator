@@ -2,6 +2,7 @@
 
 import { FC, useState } from "react";
 import { useStuckSlabs, type StuckSlab } from "@/hooks/useStuckSlabs";
+import { useCloseMarket } from "@/hooks/useCloseMarket";
 
 interface RecoverSolBannerProps {
   /**
@@ -25,7 +26,9 @@ interface RecoverSolBannerProps {
  */
 export const RecoverSolBanner: FC<RecoverSolBannerProps> = ({ onResume }) => {
   const { stuckSlab, loading, clearStuck, refresh } = useStuckSlabs();
+  const { closeSlab, loading: closeLoading, error: closeError } = useCloseMarket();
   const [dismissed, setDismissed] = useState(false);
+  const [reclaimResult, setReclaimResult] = useState<{ sig: string; sol: number } | null>(null);
 
   // Don't show while loading
   if (loading) return null;
@@ -125,6 +128,39 @@ export const RecoverSolBanner: FC<RecoverSolBannerProps> = ({ onResume }) => {
           )}
           <button
             type="button"
+            disabled={closeLoading}
+            onClick={async () => {
+              const result = await closeSlab(stuckSlab.publicKey.toBase58());
+              if (result) {
+                setReclaimResult({
+                  sig: result.signature,
+                  sol: result.reclaimedLamports / 1_000_000_000,
+                });
+                clearStuck();
+              }
+            }}
+            className="border border-[var(--accent)]/50 bg-[var(--accent)]/[0.08] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.1em] text-[var(--accent)] hover:bg-[var(--accent)]/[0.15] transition-colors disabled:opacity-50"
+          >
+            {closeLoading ? "RECLAIMING..." : `RECLAIM ~${rentSol} SOL`}
+          </button>
+          {closeError && (
+            <p className="w-full text-[10px] text-[var(--short)]">{closeError}</p>
+          )}
+          {reclaimResult && (
+            <p className="w-full text-[10px] text-[var(--long)]">
+              ✓ Reclaimed {reclaimResult.sol.toFixed(4)} SOL —{" "}
+              <a
+                href={`https://solscan.io/tx/${reclaimResult.sig}?cluster=devnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                View tx
+              </a>
+            </p>
+          )}
+          <button
+            type="button"
             onClick={() => {
               clearStuck();
               setDismissed(true);
@@ -184,6 +220,39 @@ export const RecoverSolBanner: FC<RecoverSolBannerProps> = ({ onResume }) => {
           >
             RETRY INITIALIZATION →
           </button>
+        )}
+        <button
+          type="button"
+          disabled={closeLoading}
+          onClick={async () => {
+            const result = await closeSlab(stuckSlab.publicKey.toBase58());
+            if (result) {
+              setReclaimResult({
+                sig: result.signature,
+                sol: result.reclaimedLamports / 1_000_000_000,
+              });
+              clearStuck();
+            }
+          }}
+          className="border border-[var(--accent)]/50 bg-[var(--accent)]/[0.08] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.1em] text-[var(--accent)] hover:bg-[var(--accent)]/[0.15] transition-colors disabled:opacity-50"
+        >
+          {closeLoading ? "RECLAIMING..." : `RECLAIM ~${rentSol} SOL`}
+        </button>
+        {closeError && (
+          <p className="w-full text-[10px] text-[var(--short)]">{closeError}</p>
+        )}
+        {reclaimResult && (
+          <p className="w-full text-[10px] text-[var(--long)]">
+            ✓ Reclaimed {reclaimResult.sol.toFixed(4)} SOL —{" "}
+            <a
+              href={`https://solscan.io/tx/${reclaimResult.sig}?cluster=devnet`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              View tx
+            </a>
+          </p>
         )}
         <button
           type="button"
