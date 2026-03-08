@@ -96,7 +96,7 @@ describe("RecoverSolBanner", () => {
     render(<RecoverSolBanner onResume={onResume} />);
 
     fireEvent.click(screen.getByRole("button", { name: /RESUME/i }));
-    expect(onResume).toHaveBeenCalledWith(kp.publicKey.toBase58());
+    expect(onResume).toHaveBeenCalledWith(kp.publicKey.toBase58(), 1);
   });
 
   it("calls clearStuck when discard clicked", () => {
@@ -126,7 +126,8 @@ describe("RecoverSolBanner", () => {
       lamports: 3_500_000_000, // 3.5 SOL
     });
     render(<RecoverSolBanner />);
-    expect(screen.getByText(/3\.5000 SOL/)).toBeDefined();
+    // Multiple elements show the SOL amount (banner text + reclaim button)
+    expect(screen.getAllByText(/3\.5000 SOL/).length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows explorer link for stuck uninitialized slab", () => {
