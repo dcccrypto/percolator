@@ -100,7 +100,9 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const initialMarginBps = params?.initialMarginBps ?? 1000n;
   const maintenanceMarginBps = params?.maintenanceMarginBps ?? 500n;
   const tradingFeeBps = params?.tradingFeeBps ?? 30n;
-  const maxLeverage = initialMarginBps > 0n ? Number(10000n / initialMarginBps) : 1;
+  // Clamp to minimum 1 — if initialMarginBps > 10000 (>100% margin), integer division yields
+  // 0 which breaks the slider (min=1 > max=0) and causes the "1x and 0x simultaneously" bug.
+  const maxLeverage = initialMarginBps > 0n ? Math.max(1, Number(10000n / initialMarginBps)) : 1;
 
   const availableLeverage = useMemo(() => {
     const arr = LEVERAGE_PRESETS.filter((l) => l <= maxLeverage);
