@@ -15,6 +15,7 @@ import { EngineHealthCard } from "@/components/trade/EngineHealthCard";
 import { MarketStatsCard } from "@/components/trade/MarketStatsCard";
 import { MarketBookCard } from "@/components/trade/MarketBookCard";
 import { TradingChart } from "@/components/trade/TradingChart";
+import { useIsLargeScreen } from "@/hooks/useIsLargeScreen";
 import { TradeHistory } from "@/components/trade/TradeHistory";
 import { LiquidationAnalytics } from "@/components/trade/LiquidationAnalytics";
 import { CrankHealthCard } from "@/components/trade/CrankHealthCard";
@@ -145,6 +146,11 @@ function CopyButton({ text }: { text: string }) {
 /* ── Main inner page ──────────────────────────────────────── */
 
 function TradePageInner({ slab }: { slab: string }) {
+  // Render TradingChart exactly once by tracking breakpoint in JS.
+  // CSS-only hidden/shown dual-mount caused two ChartEmptyState instances to stack
+  // during SSR/hydration before the responsive classes were applied (P0 render bug).
+  const isLargeScreen = useIsLargeScreen();
+
   const { engine, config, header, accounts, loading: slabLoading, error: slabError } = useSlabState();
   const tokenMeta = useTokenMeta(config?.collateralMint ?? null);
   const { priceUsd } = useLivePrice();
@@ -397,12 +403,14 @@ function TradePageInner({ slab }: { slab: string }) {
           Single column, everything stacked
           ════════════════════════════════════════════════════════ */}
       <div className="flex flex-col gap-1.5 px-2 pt-2 pb-4 lg:hidden min-w-0 w-full">
-        {/* Chart */}
-        <ErrorBoundary label="TradingChart">
-          <div className="w-full overflow-hidden">
-            <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
-          </div>
-        </ErrorBoundary>
+        {/* Chart — only mount on mobile to prevent dual ChartEmptyState stacking */}
+        {!isLargeScreen && (
+          <ErrorBoundary label="TradingChart">
+            <div className="w-full overflow-hidden">
+              <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
+            </div>
+          </ErrorBoundary>
+        )}
 
         {/* Deposit trigger */}
         <ErrorBoundary label="DepositTrigger">
@@ -453,10 +461,12 @@ function TradePageInner({ slab }: { slab: string }) {
       <div className="hidden lg:grid grid-cols-[1fr_380px] gap-4 px-4 lg:px-6 pb-3 pt-2">
         {/* ── Left column ── */}
         <div className="min-w-0 space-y-1.5">
-          {/* Chart */}
-          <ErrorBoundary label="TradingChart">
-            <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
-          </ErrorBoundary>
+          {/* Chart — only mount on desktop to prevent dual ChartEmptyState stacking */}
+          {isLargeScreen && (
+            <ErrorBoundary label="TradingChart">
+              <TradingChart slabAddress={slab} mintAddress={mintAddress || undefined} />
+            </ErrorBoundary>
+          )}
 
           {/* My Positions / Account — tabbed */}
           <Tabs tabs={["My Positions", "Positions & Liqs"]}>
