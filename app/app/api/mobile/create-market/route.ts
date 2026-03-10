@@ -63,9 +63,12 @@ import {
   type SlabTierKey,
 } from "@percolator/sdk";
 import { getConfig, getRpcEndpoint } from "@/lib/config";
+import { getClientIp } from "@/lib/get-client-ip";
+import {
+  checkCreateMarketRateLimit,
+  CREATE_MARKET_RATE_LIMIT,
+} from "@/lib/create-market-rate-limit";
 import * as Sentry from "@sentry/nextjs";
-
-export const dynamic = "force-dynamic";
 
 /** Minimum token amount for vault seed transfer (matches on-chain guard). */
 const MIN_INIT_MARKET_SEED = 500_000_000n;
@@ -100,6 +103,25 @@ interface MobileCreateMarketBody {
 }
 
 export async function POST(req: NextRequest) {
+  // ── Rate limit check: sliding-window 5 req/min per IP (#990, #PERC-577) ─
+  const clientIp = getClientIp(req);
+  const rl = await checkCreateMarketRateLimit(clientIp);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded — max 5 create-market requests per minute" },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(rl.retryAfterSecs),
+          "X-RateLimit-Limit": String(CREATE_MARKET_RATE_LIMIT),
+          "X-RateLimit-Remaining": "0",
+          // seconds-until-reset (matches middleware.ts convention)
+          "X-RateLimit-Reset": String(Math.max(0, rl.retryAfterSecs)),
+        },
+      },
+    );
+  }
+
   try {
     const body: MobileCreateMarketBody = await req.json();
     const {
