@@ -19,9 +19,10 @@ import { isMockSlab, getMockUserAccount } from "@/lib/mock-trade-data";
 
 interface DepositWithdrawCardProps {
   slabAddress: string;
+  isDevnetMirror?: boolean;
 }
 
-export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress }) => {
+export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress, isDevnetMirror = false }) => {
   const { connected: walletConnected, publicKey } = useWalletCompat();
   const { connection } = useConnectionCompat();
   const realUserAccount = useUserAccount();
@@ -89,6 +90,13 @@ export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress 
                 mintAddress={mktConfig.collateralMint.toBase58()}
                 symbol={symbol}
               />
+            ) : mktConfig?.collateralMint ? (
+              <a
+                href={`/devnet-mint?mint=${mktConfig.collateralMint.toBase58()}&symbol=${encodeURIComponent(symbol)}`}
+                className="text-[10px] text-[var(--warning)] underline underline-offset-2 hover:text-[var(--warning)]/80"
+              >
+                Mint some from the faucet →
+              </a>
             ) : null}
           </div>
         )}
@@ -198,10 +206,20 @@ export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress 
           <p className="text-[10px] text-[var(--warning)]">
             Wallet has 0 {symbol}. You may have a different token with the same name.
           </p>
-          <DevnetTokenFaucetButton
-            mintAddress={mktConfig.collateralMint.toBase58()}
-            symbol={symbol}
-          />
+          {/* PERC-475: Devnet mirror market — self-service faucet button */}
+          {isDevnetMirror ? (
+            <DevnetTokenFaucetButton
+              mintAddress={mktConfig.collateralMint.toBase58()}
+              symbol={symbol}
+            />
+          ) : (
+            <a
+              href={mktConfig?.collateralMint ? `/devnet-mint?mint=${mktConfig.collateralMint.toBase58()}&symbol=${encodeURIComponent(symbol)}` : "/devnet-mint"}
+              className="text-[10px] text-[var(--warning)] underline underline-offset-2 hover:text-[var(--warning)]/80"
+            >
+              Mint more →
+            </a>
+          )}
           <p className="text-[9px] text-[var(--text-dim)] break-all" style={{ fontFamily: "var(--font-mono)" }}>
             Mint: {mktConfig.collateralMint.toBase58()}
           </p>
