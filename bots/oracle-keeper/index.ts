@@ -36,7 +36,7 @@ import {
   encodePushOraclePrice, encodeKeeperCrank,
   ACCOUNTS_PUSH_ORACLE_PRICE, ACCOUNTS_KEEPER_CRANK,
   buildAccountMetas, buildIx, WELL_KNOWN,
-  fetchSlab, parseConfig,
+  parseConfig,
 } from "@percolator/sdk";
 import * as fs from "fs";
 import * as http from "http";
@@ -88,6 +88,12 @@ const HEALTH_AUTH_TOKEN = process.env.HEALTH_AUTH_TOKEN ?? "";
 const skippedMarkets = new Set<string>();
 // Track markets where oracle authority has been successfully verified
 const authorityVerified = new Set<string>();
+// Cache the on-chain program owner (slab.owner) per slab address.
+// Dynamic markets discovered via Supabase may be owned by a different program tier
+// than the one in deployment.json (e.g. old program FwfB... vs current FxfD...).
+// We must use the slab's actual owner as the programId when building instructions,
+// otherwise the Solana runtime rejects with "Provided owner is not allowed" (0x10).
+const slabProgramId = new Map<string, PublicKey>();
 
 // ── Supabase Auto-Discovery ─────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -344,17 +350,28 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
     (s.totalErrors === 0 || s.totalErrors % 50 === 0);
   if (needsAuthorityCheck) {
     try {
-      const slabData = await fetchSlab(conn, new PublicKey(market.slab));
+      // Use getAccountInfo directly (not fetchSlab) so we can also cache the
+      // slab's on-chain owner program. Dynamic markets discovered via Supabase
+      // may be owned by a different deployed program than the one in
+      // deployment.json (e.g. old FwfB... vs current FxfD...).
+      const slabInfo = await conn.getAccountInfo(new PublicKey(market.slab));
+      if (!slabInfo) throw new Error(`Slab account not found: ${market.slab}`);
+      const slabData = new Uint8Array(slabInfo.data);
       const cfg = parseConfig(slabData);
       if (!cfg.oracleAuthority.equals(admin.publicKey)) {
         log(`🚨 ${market.label}: ORACLE AUTHORITY MISMATCH — slab has ${cfg.oracleAuthority.toBase58()}, keeper is signing as ${admin.publicKey.toBase58()}. Needs reinit. Skipping.`);
         skippedMarkets.add(market.slab);
         return;
       }
+      // Cache the slab's actual program owner for use in instruction building
+      slabProgramId.set(market.slab, slabInfo.owner);
+      if (!slabInfo.owner.equals(programId)) {
+        log(`ℹ️ ${market.label}: slab owned by ${slabInfo.owner.toBase58().slice(0, 12)}... (differs from deployment.json programId ${programId.toBase58().slice(0, 12)}...) — will use slab owner`);
+      }
       authorityVerified.add(market.slab);
       log(`✓ ${market.label}: oracle authority verified (${admin.publicKey.toBase58().slice(0, 12)}...)`);
     } catch (e) {
-      // fetchSlab/parseConfig failed — we cannot confirm we have authority.
+      // getAccountInfo/parseConfig failed — we cannot confirm we have authority.
       // Skip this tick rather than pushing blindly and generating 'Provided owner is not allowed' spam.
       log(`⚠️ ${market.label}: failed to verify oracle authority — skipping tick (attempt ${s.totalErrors + 1}): ${(e as Error).message?.slice(0, 80)}`);
       s.totalErrors++;
@@ -381,6 +398,11 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   const timestamp = BigInt(Math.floor(Date.now() / 1000));
   const slab = new PublicKey(market.slab);
 
+  // Use the slab's actual on-chain program owner, not the deployment.json
+  // programId. This handles Supabase-discovered markets that may have been
+  // created by a different program tier/version than the BTC-PERP markets.
+  const effectiveProgramId = slabProgramId.get(market.slab) ?? programId;
+
   const pushData = encodePushOraclePrice({ priceE6: priceE6.toString(), timestamp: timestamp.toString() });
   const pushKeys = buildAccountMetas(ACCOUNTS_PUSH_ORACLE_PRICE, [admin.publicKey, slab]);
 
@@ -392,8 +414,8 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   const tx = new Transaction().add(
     ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
-    buildIx({ programId, keys: pushKeys, data: pushData }),
-    buildIx({ programId, keys: crankKeys, data: crankData }),
+    buildIx({ programId: effectiveProgramId, keys: pushKeys, data: pushData }),
+    buildIx({ programId: effectiveProgramId, keys: crankKeys, data: crankData }),
   );
   tx.feePayer = admin.publicKey;
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
@@ -591,12 +613,21 @@ async function main() {
   log(`Verifying oracle authority for ${markets.length} market(s)...`);
   for (const m of markets) {
     try {
-      const slabData = await fetchSlab(conn, new PublicKey(m.slab));
+      // Use getAccountInfo directly to capture both slab data and program owner.
+      // The owner is cached in slabProgramId and used when building instructions,
+      // preventing "Provided owner is not allowed" for markets on different program tiers.
+      const slabInfo = await conn.getAccountInfo(new PublicKey(m.slab));
+      if (!slabInfo) throw new Error(`Slab account not found`);
+      const slabData = new Uint8Array(slabInfo.data);
       const cfg = parseConfig(slabData);
       if (!cfg.oracleAuthority.equals(admin.publicKey)) {
         log(`🚨 STARTUP: ${m.label} (${m.slab.slice(0, 12)}...) — authority MISMATCH. Slab: ${cfg.oracleAuthority.toBase58()} | Keeper: ${admin.publicKey.toBase58()} → SLAB NEEDS REINIT`);
         skippedMarkets.add(m.slab);
       } else {
+        slabProgramId.set(m.slab, slabInfo.owner);
+        if (!slabInfo.owner.equals(programId)) {
+          log(`ℹ️ STARTUP: ${m.label} — slab owned by ${slabInfo.owner.toBase58().slice(0, 12)}... (differs from deployment programId)`);
+        }
         authorityVerified.add(m.slab);
         log(`✅ STARTUP: ${m.label} — authority OK (${admin.publicKey.toBase58().slice(0, 12)}...)`);
       }
@@ -677,12 +708,18 @@ async function main() {
             getOrCreateStats(m);
             // Verify oracle authority for new market
             try {
-              const slabData = await fetchSlab(conn, new PublicKey(m.slab));
+              const slabInfo = await conn.getAccountInfo(new PublicKey(m.slab));
+              if (!slabInfo) throw new Error(`Slab account not found`);
+              const slabData = new Uint8Array(slabInfo.data);
               const cfg = parseConfig(slabData);
               if (!cfg.oracleAuthority.equals(admin.publicKey)) {
                 log(`🚨 ${m.label}: authority MISMATCH — skipping`);
                 skippedMarkets.add(m.slab);
               } else {
+                slabProgramId.set(m.slab, slabInfo.owner);
+                if (!slabInfo.owner.equals(programId)) {
+                  log(`ℹ️ ${m.label}: slab owned by ${slabInfo.owner.toBase58().slice(0, 12)}... (different program tier)`);
+                }
                 authorityVerified.add(m.slab);
                 log(`✅ ${m.label}: authority OK`);
               }
