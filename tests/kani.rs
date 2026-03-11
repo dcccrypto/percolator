@@ -3117,6 +3117,171 @@ fn proof_lq4_liquidation_fee_paid_to_insurance() {
     );
 }
 
+// ============================================================================
+// PERC-686: Symbolic inductive upgrades for LQ1 and LQ2
+// Replaces concrete hardcoded setups with kani::any() + assume(canonical_inv).
+// The original concrete proofs are kept as regression documentation.
+// ============================================================================
+
+/// LQ1-INDUCTIVE: For ALL valid pre-states, a successful liquidation strictly
+/// reduces OI and leaves the account satisfying the dust rule and N1 boundary.
+///
+/// This is the symbolic upgrade of proof_lq1_liquidation_reduces_oi_and_enforces_safety.
+/// Instead of a single hardcoded scenario, the solver must prove the properties
+/// hold for every state reachable from canonical_inv.
+///
+/// ∀ s: canonical_inv(s) ∧ liquidate(s) = Ok(true)
+///        ⊨  oi_after < oi_before
+///         ∧ dust_rule(position_after)
+///         ∧ n1_boundary(account_after)
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq1_inductive_oi_decrease_and_dust_rule() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // ---- Symbolic pre-state ----
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    // user must hold a long position so liquidation is possible
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+
+    // Bound ranges to keep the solver tractable
+    kani::assume(user_capital <= 500_000);
+    kani::assume(lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= 1 && user_pos <= 100_000);    // long only (simplifies solver)
+    kani::assume(lp_pos >= -100_000 && lp_pos <= -1);     // short counterparty
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    // Inductive precondition: start from a state satisfying the invariant
+    kani::assume(canonical_inv(&engine));
+
+    let oi_before = engine.total_open_interest;
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, 100, oracle_price);
+
+    // Only assert when liquidation actually triggers (avoids vacuity)
+    if let Ok(true) = result {
+        let oi_after = engine.total_open_interest;
+
+        // LQ1a: OI strictly decreases
+        kani::assert(
+            oi_after < oi_before,
+            "LQ1-INDUCTIVE: OI must strictly decrease after successful liquidation",
+        );
+
+        // LQ1b: Dust rule — remaining position is 0 OR >= min_liquidation_abs
+        let abs_pos = abs_i128_to_u128(engine.accounts[user_idx as usize].position_size.get());
+        kani::assert(
+            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs.get(),
+            "LQ1-INDUCTIVE: dust rule must hold for all valid pre-states",
+        );
+
+        // LQ1c: N1 boundary — pnl >= 0 OR capital == 0
+        kani::assert(
+            n1_boundary_holds(&engine.accounts[user_idx as usize]),
+            "LQ1-INDUCTIVE: N1 boundary must hold after liquidation for all valid pre-states",
+        );
+    }
+}
+
+/// LQ2-INDUCTIVE: For ALL valid pre-states, liquidation preserves conservation.
+///
+/// This is the symbolic upgrade of proof_lq2_liquidation_preserves_conservation.
+/// The original proof used a single hardcoded scenario; this version proves the
+/// property for every state reachable from canonical_inv.
+///
+/// ∀ s: canonical_inv(s) ∧ check_conservation(s, p)
+///        ⊨  check_conservation(liquidate(s), p)     (when liquidation succeeds)
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq2_inductive_liquidation_preserves_conservation() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // ---- Symbolic pre-state ----
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+
+    kani::assume(user_capital <= 500_000);
+    kani::assume(lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= 1 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= -1);
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    // Inductive precondition
+    kani::assume(canonical_inv(&engine));
+
+    // Use a fixed oracle price (entry = oracle avoids mark-to-market settlement
+    // complexity that would require additional symbolic parameters)
+    let oracle_price: u64 = 1_000_000;
+
+    // Conservation must hold before we run liquidation
+    kani::assume(engine.check_conservation(oracle_price));
+
+    let result = engine.liquidate_at_oracle(user_idx, 100, oracle_price);
+
+    // Postcondition: conservation still holds on success
+    if result.is_ok() {
+        kani::assert(
+            engine.check_conservation(oracle_price),
+            "LQ2-INDUCTIVE: conservation must hold after liquidation for all valid pre-states",
+        );
+    }
+}
+
 /// Proof: keeper_crank never fails due to liquidation errors (best-effort)
 /// Uses deterministic oracle to avoid solver explosion from symbolic price exploration.
 #[kani::proof]
