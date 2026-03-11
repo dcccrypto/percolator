@@ -115,6 +115,35 @@ describe('MarketDiscovery', () => {
       expect(marketDiscovery.getMarkets().size).toBe(1);
     });
 
+    it('should preserve stale markets when all programs fail', async () => {
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketStale1111111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+
+      // First call succeeds
+      vi.mocked(core.discoverMarkets)
+        .mockResolvedValueOnce([mockMarket] as any)
+        .mockResolvedValueOnce([]);
+
+      await marketDiscovery.discover();
+      expect(marketDiscovery.getMarkets().size).toBe(1);
+
+      // Second call: all programs fail (RPC down)
+      vi.mocked(core.discoverMarkets)
+        .mockRejectedValueOnce(new Error('502 Bad Gateway'))
+        .mockRejectedValueOnce(new Error('502 Bad Gateway'));
+
+      const result = await marketDiscovery.discover();
+
+      // Should return empty but preserve stale markets in map
+      expect(result).toHaveLength(0);
+      expect(marketDiscovery.getMarkets().size).toBe(1); // stale preserved
+    }, 15000);
+
     it('should add delay between program discoveries', async () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([]);
 
@@ -202,70 +231,106 @@ describe('MarketDiscovery', () => {
 
   describe('start and stop', () => {
     it('should start timer and perform initial discovery', async () => {
-      vi.mocked(core.discoverMarkets).mockResolvedValue([]);
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketStart11111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
 
-      marketDiscovery.start(100); // Short interval for testing
-
-      // Wait for initial discovery
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await marketDiscovery.start(60_000);
 
       expect(core.discoverMarkets).toHaveBeenCalled();
+      expect(marketDiscovery.getMarkets().size).toBe(1);
     });
 
-    it('should perform periodic discoveries', async () => {
-      vi.mocked(core.discoverMarkets).mockResolvedValue([]);
+    it('should set up periodic timer after initial discovery', async () => {
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketPeriodic111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
 
-      marketDiscovery.start(3000); // interval shorter than discovery time
+      await marketDiscovery.start(3000);
 
-      // Wait for initial discovery (2 programs × 2s delay = ~4s) plus one more cycle
-      await new Promise(resolve => setTimeout(resolve, 12000));
+      const callsAfterStart = vi.mocked(core.discoverMarkets).mock.calls.length;
+      expect(callsAfterStart).toBeGreaterThanOrEqual(2); // 2 programs
 
-      // Should have been called at least 4 times (2 programs × 2 cycles)
-      expect(vi.mocked(core.discoverMarkets).mock.calls.length).toBeGreaterThanOrEqual(4);
+      // Wait for one periodic cycle
+      await new Promise(resolve => setTimeout(resolve, 8000));
+
+      expect(vi.mocked(core.discoverMarkets).mock.calls.length).toBeGreaterThan(callsAfterStart);
     }, 20000);
 
     it('should stop timer', async () => {
-      vi.mocked(core.discoverMarkets).mockResolvedValue([]);
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketStop1111111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
 
-      marketDiscovery.start(50);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await marketDiscovery.start(60_000);
 
       const callsBefore = vi.mocked(core.discoverMarkets).mock.calls.length;
 
       marketDiscovery.stop();
 
       // Wait a bit and verify no more calls
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 200));
       const callsAfter = vi.mocked(core.discoverMarkets).mock.calls.length;
 
       expect(callsAfter).toBe(callsBefore);
     });
 
-    it('should handle discovery errors during periodic cycle', async () => {
+    it('should retry on initial failure and eventually start periodic timer', async () => {
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketRetry1111111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+
       let callCount = 0;
       vi.mocked(core.discoverMarkets).mockImplementation(async () => {
         callCount++;
-        if (callCount === 1) {
-          throw new Error('Discovery failed');
+        // First 2 calls (attempt 1, both programs) fail, next 2 succeed
+        if (callCount <= 2) {
+          throw new Error('RPC down');
         }
-        return [];
+        return [mockMarket] as any;
       });
 
-      marketDiscovery.start(100);
+      await marketDiscovery.start(60_000);
 
-      // Wait for multiple cycles
-      await new Promise(resolve => setTimeout(resolve, 250));
-
-      // Should continue despite error
-      expect(callCount).toBeGreaterThanOrEqual(2);
-    });
+      // Should have retried and eventually succeeded
+      expect(callCount).toBeGreaterThanOrEqual(4);
+      expect(marketDiscovery.getMarkets().size).toBe(1);
+    }, 30000);
 
     it('should not crash if stop is called before start', () => {
       expect(() => marketDiscovery.stop()).not.toThrow();
     });
 
-    it('should not crash if stop is called multiple times', () => {
-      marketDiscovery.start(1000);
+    it('should not crash if stop is called multiple times', async () => {
+      const mockMarket = {
+        slabAddress: { toBase58: () => 'MarketMultiStop111111111111111111111111' },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {},
+        params: {},
+        header: {},
+      };
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
+
+      await marketDiscovery.start(60_000);
       marketDiscovery.stop();
       
       expect(() => marketDiscovery.stop()).not.toThrow();

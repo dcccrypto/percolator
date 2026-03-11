@@ -87,8 +87,7 @@ setInterval(async () => {
 }, 30_000); // Check every 30s
 
 async function start() {
-  await discovery.discover();
-  discovery.start();
+  await discovery.start();
   statsCollector.start();
   tradeIndexer.start();
   insuranceService.start();
