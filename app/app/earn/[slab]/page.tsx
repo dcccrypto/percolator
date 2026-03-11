@@ -4,12 +4,13 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
-import { SlabProvider } from '@/components/providers/SlabProvider';
+import { SlabProvider, useSlabState } from '@/components/providers/SlabProvider';
 import { useStakePool } from '@/hooks/useStakePool';
 import { useStakeDeposit } from '@/hooks/useStakeDeposit';
 import { useStakeWithdraw } from '@/hooks/useStakeWithdraw';
 import { useEngineState } from '@/hooks/useEngineState';
 import { useEarnStats, type MarketVaultInfo } from '@/hooks/useEarnStats';
+import { useTokenMeta } from '@/hooks/useTokenMeta';
 import { getSupabase } from '@/lib/supabase';
 import { OiCapMeter } from '@/components/earn/OiCapMeter';
 import { ScrollReveal } from '@/components/ui/ScrollReveal';
@@ -65,6 +66,13 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
   const { withdraw: stakeWithdraw, loading: withdrawLoading } = useStakeWithdraw();
   const { engine, totalOI, vault: engineVault } = useEngineState();
 
+  // BUG-5 FIX: resolve actual collateral mint from on-chain slab data.
+  // Previously hardcoded to USDC — wrong for coin-margined markets.
+  const { config: slabConfig } = useSlabState();
+  const collateralTokenMeta = useTokenMeta(slabConfig?.collateralMint ?? null);
+  const collateralSymbol = collateralTokenMeta?.symbol ?? 'Token';
+  const collateralDecimals = collateralTokenMeta?.decimals ?? 6;
+
   // Get market info from earn stats
   const { stats: earnStats, loading: earnLoading } = useEarnStats();
   const marketInfo = useMemo<MarketVaultInfo | null>(() => {
@@ -113,7 +121,8 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
   const maxOI = marketInfo?.maxOI ?? 0;
   const currentOI = marketInfo?.totalOI ?? (totalOI ? Number(totalOI) / 1e6 : 0);
   const estimatedApy = marketInfo?.estimatedApyPct ?? 0;
-  const vaultUsd = Number(poolState.vaultBalance) / 1e6;
+  const collateralScale = Math.pow(10, collateralDecimals);
+  const vaultUsd = Number(poolState.vaultBalance) / collateralScale;
   const insuranceFund = marketInfo?.insuranceFund ?? 0;
 
   return (
@@ -235,8 +244,8 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
               userLpBalance={poolState.userLpBalance}
               lpSupply={poolState.lpSupply}
               vaultBalance={poolState.vaultBalance}
-              decimals={6}
-              collateralSymbol="USDC"
+              decimals={collateralDecimals}
+              collateralSymbol={collateralSymbol}
               estimatedApyPct={estimatedApy}
               redemptionRateE6={poolState.redemptionRateE6}
               loading={loading}
@@ -250,8 +259,8 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
               userLpBalance={poolState.userLpBalance}
               vaultBalance={poolState.vaultBalance}
               lpSupply={poolState.lpSupply}
-              decimals={6}
-              collateralSymbol="USDC"
+              decimals={collateralDecimals}
+              collateralSymbol={collateralSymbol}
               loading={loading || depositLoading || withdrawLoading}
               cooldownElapsed={poolState.cooldownElapsed}
               onDeposit={handleDeposit}
@@ -291,7 +300,7 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
                 label="Deposit Cap"
                 value={
                   poolState.depositCap > 0n
-                    ? `${formatCompact(Number(poolState.depositCap) / 1e6)} USDC`
+                    ? `${formatCompact(Number(poolState.depositCap) / collateralScale)} ${collateralSymbol}`
                     : 'Unlimited'
                 }
               />
