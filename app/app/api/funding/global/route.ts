@@ -34,14 +34,15 @@ export interface FundingGlobalEntry {
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? "10")));
+    const rawLimit = Number(url.searchParams.get("limit") ?? "10");
+    const limit = Math.min(50, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 10));
 
     const db = getServiceClient();
 
     // Join market_stats with markets to get base symbol
     const { data, error } = await db
       .from("market_stats")
-      .select("slab_address, funding_rate, markets(base_symbol)")
+      .select("slab_address, funding_rate, markets(symbol)")
       .not("funding_rate", "is", null)
       .order("funding_rate", { ascending: false });
 
@@ -53,10 +54,10 @@ export async function GET(req: Request) {
     type Row = {
       slab_address: string;
       funding_rate: number | null;
-      markets: { base_symbol: string | null } | { base_symbol: string | null }[] | null;
+      markets: { symbol: string | null } | { symbol: string | null }[] | null;
     };
 
-    const rows = (data ?? []) as Row[];
+    const rows = (data ?? []) as unknown as Row[];
 
     // Build entries, sanitize, compute derived fields
     const entries: FundingGlobalEntry[] = rows.map((row) => {
@@ -65,7 +66,7 @@ export async function GET(req: Request) {
       const m = Array.isArray(row.markets) ? row.markets[0] : row.markets;
       return {
         slabAddress: row.slab_address,
-        baseSymbol: m?.base_symbol ?? null,
+        baseSymbol: m?.symbol ?? null,
         rateBpsPerSlot: rateBps,
         hourlyRatePercent,
         dailyRatePercent: hourlyRatePercent * 24,
