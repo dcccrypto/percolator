@@ -336,11 +336,13 @@ export default function AdminDashboard() {
   // ── Data fetching ──────────────────────────────────────────────────────────
 
   const fetchBugs = useCallback(async () => {
-    const { data } = await getAuthClient()
-      .from("bug_reports")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (data) setBugs(data as BugReport[]);
+    // Use server-side /api/admin/bugs which fetches with service_role, returning
+    // all columns including those restricted from the authenticated Supabase role
+    // by migration 034 (twitter_handle, admin_notes, bounty_wallet, ip, etc.).
+    const res = await fetch("/api/admin/bugs").catch(() => null);
+    if (!res?.ok) return;
+    const data = await res.json().catch(() => null);
+    if (Array.isArray(data)) setBugs(data as BugReport[]);
   }, []);
 
   const fetchPlatformStats = useCallback(async () => {
@@ -387,10 +389,11 @@ export default function AdminDashboard() {
 
   const updateStatus = async (bugId: string, newStatus: string) => {
     setSaving(true);
-    await getAuthClient()
-      .from("bug_reports")
-      .update({ status: newStatus, updated_at: new Date().toISOString() })
-      .eq("id", bugId);
+    await fetch("/api/admin/bugs", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: bugId, status: newStatus }),
+    });
     await fetchBugs();
     if (selectedBug?.id === bugId) {
       setSelectedBug((prev) => (prev ? { ...prev, status: newStatus } : null));
@@ -401,13 +404,11 @@ export default function AdminDashboard() {
   const saveNotes = async () => {
     if (!selectedBug) return;
     setSaving(true);
-    await getAuthClient()
-      .from("bug_reports")
-      .update({
-        admin_notes: adminNotes,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", selectedBug.id);
+    await fetch("/api/admin/bugs", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: selectedBug.id, admin_notes: adminNotes }),
+    });
     await fetchBugs();
     setSelectedBug((prev) =>
       prev ? { ...prev, admin_notes: adminNotes } : null
