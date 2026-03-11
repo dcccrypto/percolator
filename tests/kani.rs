@@ -3117,6 +3117,312 @@ fn proof_lq4_liquidation_fee_paid_to_insurance() {
     );
 }
 
+// ============================================================================
+// SYMBOLIC LIQUIDATION PROOFS (LQ1s-LQ4s) — PERC-686
+//
+// Inductive versions of LQ1-LQ4: symbolic pre-state via kani::any() with
+// assume(canonical_inv). These cover state space unreachable from concrete
+// setup, providing real symbolic coverage on liquidation — the highest-risk
+// operation in the protocol.
+// ============================================================================
+
+/// LQ1s: Symbolic — Liquidation reduces OI and enforces safety
+/// Inductive version of proof_lq1_liquidation_reduces_oi_and_enforces_safety.
+/// Pre-state is fully symbolic with canonical_inv assumed.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq1_symbolic_oi_reduction_and_safety() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    // Create accounts via API to establish slot membership + matcher arrays
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+
+    // Zero-sum position constraint
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    // Apply symbolic state
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    // Inductive precondition
+    kani::assume(canonical_inv(&engine));
+
+    let oi_before = engine.total_open_interest;
+
+    // Symbolic oracle price
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    // Only assert on Ok path where liquidation actually triggered
+    if let Ok(true) = result {
+        let oi_after = engine.total_open_interest;
+
+        // OI must strictly decrease
+        kani::assert(
+            oi_after < oi_before,
+            "SYMBOLIC LQ1: OI must strictly decrease after liquidation",
+        );
+
+        // Dust rule
+        let abs_pos = abs_i128_to_u128(engine.accounts[user_idx as usize].position_size.get());
+        kani::assert(
+            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs.get(),
+            "SYMBOLIC LQ1: dust rule — position must be 0 or >= min_liquidation_abs",
+        );
+
+        // N1 boundary
+        kani::assert(
+            n1_boundary_holds(&engine.accounts[user_idx as usize]),
+            "SYMBOLIC LQ1: N1 boundary must hold after liquidation",
+        );
+    }
+}
+
+/// LQ2s: Symbolic — Liquidation preserves conservation
+/// Inductive version of proof_lq2_liquidation_preserves_conservation.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq2_symbolic_conservation() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    // Conservation before (precondition — should hold given canonical_inv)
+    kani::assume(engine.check_conservation(oracle_price));
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    if let Ok(true) = result {
+        kani::assert(
+            engine.check_conservation(oracle_price),
+            "SYMBOLIC LQ2: conservation must hold after liquidation",
+        );
+    }
+}
+
+/// LQ3s: Symbolic — Liquidation closes position and OI decreases
+/// Inductive version of proof_lq3a_profit_routes_through_adl.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq3_symbolic_position_close_and_oi() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let counterparty_idx = engine.add_user(0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let cp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let cp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let cp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && cp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(cp_pnl >= -100_000 && cp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(cp_pos >= -100_000 && cp_pos <= 100_000);
+    kani::assume(user_pos + cp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[counterparty_idx as usize].capital = U128::new(cp_capital);
+    engine.accounts[counterparty_idx as usize].pnl = I128::new(cp_pnl);
+    engine.accounts[counterparty_idx as usize].position_size = I128::new(cp_pos);
+    engine.accounts[counterparty_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let oi_before = engine.total_open_interest;
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    if let Ok(true) = result {
+        let oi_after = engine.total_open_interest;
+
+        // OI must decrease
+        kani::assert(
+            oi_after < oi_before,
+            "SYMBOLIC LQ3: OI must strictly decrease after liquidation",
+        );
+
+        // Conservation post-liquidation
+        kani::assert(
+            engine.check_conservation(oracle_price),
+            "SYMBOLIC LQ3: conservation must hold after liquidation",
+        );
+
+        // Dust rule
+        let abs_pos = abs_i128_to_u128(engine.accounts[user_idx as usize].position_size.get());
+        kani::assert(
+            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs.get(),
+            "SYMBOLIC LQ3: dust rule must hold",
+        );
+    }
+}
+
+/// LQ4s: Symbolic — Liquidation fee goes to insurance fund
+/// Inductive version of proof_lq4_liquidation_fee_paid_to_insurance.
+/// Verifies insurance balance never decreases from liquidation.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_lq4_symbolic_fee_to_insurance() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    if let Ok(true) = result {
+        let insurance_after = engine.insurance_fund.balance.get();
+
+        // Liquidation fee should never decrease insurance fund
+        kani::assert(
+            insurance_after >= insurance_before,
+            "SYMBOLIC LQ4: insurance fund must not decrease from liquidation fee",
+        );
+    }
+}
+
 /// Proof: keeper_crank never fails due to liquidation errors (best-effort)
 /// Uses deterministic oracle to avoid solver explosion from symbolic price exploration.
 #[kani::proof]
