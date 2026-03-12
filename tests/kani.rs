@@ -3173,7 +3173,8 @@ fn proof_lq1_symbolic_oi_reduction_and_safety() {
     kani::assume(insurance_amount <= 100_000);
 
     // entry_price must be > 0 when position != 0 (production invariant:
-    // execute_trade always sets entry_price = oracle_price before creating positions)
+    // execute_trade always sets entry_price = oracle_price before creating positions).
+    // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
     kani::assume(user_entry > 0 && user_entry <= 2_000_000);
@@ -3265,7 +3266,8 @@ fn proof_lq2_symbolic_conservation() {
     kani::assume(insurance_amount <= 100_000);
 
     // entry_price must be > 0 when position != 0 (production invariant:
-    // execute_trade always sets entry_price = oracle_price before creating positions)
+    // execute_trade always sets entry_price = oracle_price before creating positions).
+    // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
     kani::assume(user_entry > 0 && user_entry <= 2_000_000);
@@ -3356,7 +3358,8 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     kani::assume(insurance_amount <= 100_000);
 
     // entry_price must be > 0 when position != 0 (production invariant:
-    // execute_trade always sets entry_price = oracle_price before creating positions)
+    // execute_trade always sets entry_price = oracle_price before creating positions).
+    // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let cp_entry: u64 = kani::any();
     kani::assume(user_entry > 0 && user_entry <= 2_000_000);
@@ -3457,7 +3460,8 @@ fn proof_lq4_symbolic_fee_to_insurance() {
     kani::assume(insurance_amount <= 100_000);
 
     // entry_price must be > 0 when position != 0 (production invariant:
-    // execute_trade always sets entry_price = oracle_price before creating positions)
+    // execute_trade always sets entry_price = oracle_price before creating positions).
+    // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
     kani::assume(user_entry > 0 && user_entry <= 2_000_000);
