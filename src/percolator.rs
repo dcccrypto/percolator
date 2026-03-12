@@ -679,6 +679,9 @@ pub enum RiskError {
 
     /// Account kind mismatch
     AccountKindMismatch,
+
+    /// Entry price must be positive when opening a position
+    InvalidEntryPrice,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -4136,6 +4139,10 @@ impl RiskEngine {
                 user.reserved_pnl = max_reserved;
             }
         }
+        // PA5 defense-in-depth: entry_price must be positive when position is non-zero
+        if new_user_position != 0 && oracle_price == 0 {
+            return Err(RiskError::InvalidEntryPrice);
+        }
         user.position_size = I128::new(new_user_position);
         user.entry_price = oracle_price;
         // Commit fee deduction from user capital (spec §8.1)
@@ -4154,6 +4161,10 @@ impl RiskEngine {
             if lp.reserved_pnl > max_reserved {
                 lp.reserved_pnl = max_reserved;
             }
+        }
+        // PA5 defense-in-depth: entry_price must be positive when position is non-zero
+        if new_lp_position != 0 && oracle_price == 0 {
+            return Err(RiskError::InvalidEntryPrice);
         }
         lp.position_size = I128::new(new_lp_position);
         lp.entry_price = oracle_price;
