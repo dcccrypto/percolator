@@ -451,6 +451,14 @@ fn inv_per_account(engine: &RiskEngine) -> bool {
             if account.warmup_slope_per_step.get() == u128::MAX {
                 return false;
             }
+
+            // PA5: entry_price must be > 0 when position != 0
+            // Production invariant: execute_trade always sets entry_price = oracle_price
+            // before creating positions. entry_price == 0 with position != 0 is unreachable
+            // and causes mark_pnl_for_position to compute nonsensical values.
+            if !account.position_size.is_zero() && account.entry_price == 0 {
+                return false;
+            }
         }
     }
 
@@ -3164,14 +3172,23 @@ fn proof_lq1_symbolic_oi_reduction_and_safety() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // entry_price must be > 0 when position != 0 (production invariant:
+    // execute_trade always sets entry_price = oracle_price before creating positions)
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
+    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+
     // Apply symbolic state
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
@@ -3247,13 +3264,22 @@ fn proof_lq2_symbolic_conservation() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // entry_price must be > 0 when position != 0 (production invariant:
+    // execute_trade always sets entry_price = oracle_price before creating positions)
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
+    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
@@ -3329,13 +3355,22 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // entry_price must be > 0 when position != 0 (production invariant:
+    // execute_trade always sets entry_price = oracle_price before creating positions)
+    let user_entry: u64 = kani::any();
+    let cp_entry: u64 = kani::any();
+    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
+    kani::assume(cp_entry > 0 && cp_entry <= 2_000_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[counterparty_idx as usize].capital = U128::new(cp_capital);
     engine.accounts[counterparty_idx as usize].pnl = I128::new(cp_pnl);
     engine.accounts[counterparty_idx as usize].position_size = I128::new(cp_pos);
+    engine.accounts[counterparty_idx as usize].entry_price = cp_entry;
     engine.accounts[counterparty_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
@@ -3421,13 +3456,22 @@ fn proof_lq4_symbolic_fee_to_insurance() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // entry_price must be > 0 when position != 0 (production invariant:
+    // execute_trade always sets entry_price = oracle_price before creating positions)
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
+    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
