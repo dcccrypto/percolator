@@ -1024,7 +1024,6 @@ fn pnl_withdrawal_requires_warmup() {
     }
 }
 
-
 // ============================================================================
 // Edge Cases
 // ============================================================================
@@ -8877,7 +8876,6 @@ fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
     );
 }
 
-
 // ========================================
 // PERC-300: Adaptive Funding Rate
 // ========================================
@@ -8935,7 +8933,6 @@ fn proof_adaptive_funding_clamped_within_bounds() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // PERC-300: Adaptive funding — direction and overflow
 // ---------------------------------------------------------------------------
@@ -8968,7 +8965,6 @@ fn proof_adaptive_funding_increases_when_long_skewed() {
         "long skew must increase or maintain funding rate",
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // PERC-311: Skew rebate
