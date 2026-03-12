@@ -662,6 +662,10 @@ fn fast_i2_deposit_preserves_conservation() {
     // Force Ok: deposit on fresh account with bounded amount must succeed
     assert_ok!(engine.deposit(user_idx, amount, 0), "deposit must succeed");
 
+    // Non-vacuity: confirm the Ok path is actually reachable under these assumptions.
+    // Without this, if deposit() were unreachable, Kani would pass silently.
+    kani::cover!(true, "fast_i2_deposit: deposit Ok path is reachable");
+
     assert!(
         conservation_fast_no_funding(&engine),
         "I2: Deposit must preserve conservation"
@@ -694,6 +698,9 @@ fn fast_i2_withdraw_preserves_conservation() {
         engine.withdraw(user_idx, withdraw, 0, 1_000_000),
         "withdraw must succeed"
     );
+
+    // Non-vacuity: confirm the Ok path is reachable under these assumptions.
+    kani::cover!(true, "fast_i2_withdraw: withdraw Ok path is reachable");
 
     assert!(
         conservation_fast_no_funding(&engine),
@@ -3210,6 +3217,13 @@ fn proof_lq1_symbolic_oi_reduction_and_safety() {
 
     // Only assert on Ok path where liquidation actually triggered
     if let Ok(true) = result {
+        // Non-vacuity: confirm the Ok(true) path is reachable under canonical_inv.
+        // Without this, Kani would pass silently if liquidation never triggers.
+        kani::cover!(
+            true,
+            "SYMBOLIC LQ1: liquidation triggered — Ok(true) path is reachable"
+        );
+
         let oi_after = engine.total_open_interest;
 
         // OI must strictly decrease
@@ -3302,6 +3316,12 @@ fn proof_lq2_symbolic_conservation() {
     let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
 
     if let Ok(true) = result {
+        // Non-vacuity: confirm the Ok(true) path is reachable under canonical_inv.
+        kani::cover!(
+            true,
+            "SYMBOLIC LQ2: liquidation triggered — Ok(true) path is reachable"
+        );
+
         // Primary conservation: vault >= C_tot + Insurance (spec §4.1).
         // The extended check_conservation (which includes mark-PnL terms) can
         // legitimately fail after a write-off (§6.1 step 4): when a user's
@@ -3404,6 +3424,12 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
 
     if let Ok(true) = result {
+        // Non-vacuity: confirm the Ok(true) path is reachable under canonical_inv.
+        kani::cover!(
+            true,
+            "SYMBOLIC LQ3: liquidation triggered — Ok(true) path is reachable"
+        );
+
         let oi_after = engine.total_open_interest;
 
         // OI must decrease
@@ -3508,6 +3534,12 @@ fn proof_lq4_symbolic_fee_to_insurance() {
     let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
 
     if let Ok(true) = result {
+        // Non-vacuity: confirm the Ok(true) path is reachable under canonical_inv.
+        kani::cover!(
+            true,
+            "SYMBOLIC LQ4: liquidation triggered — Ok(true) path is reachable"
+        );
+
         let insurance_after = engine.insurance_fund.balance.get();
 
         // Liquidation fee should never decrease insurance fund
