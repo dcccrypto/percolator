@@ -13,6 +13,8 @@ interface StepReviewProps {
   mintAddress: string;
   tokenDecimals: number;
   priceUsd?: number;
+  mintValid: boolean;
+  mintExistsOnNetwork: boolean;
   // Oracle
   oracleType: "pyth" | "hyperp_ema" | "admin";
   oracleLabel: string;
@@ -53,6 +55,8 @@ export const StepReview: FC<StepReviewProps> = ({
   tokenName,
   mintAddress,
   tokenDecimals,
+  mintValid,
+  mintExistsOnNetwork,
   priceUsd,
   oracleType,
   oracleLabel,
@@ -86,16 +90,35 @@ export const StepReview: FC<StepReviewProps> = ({
 
   const launchButtonLabel = useMemo(() => {
     if (!walletConnected) return "Connect Wallet to Launch";
+    if (!mintValid) return "❌ Invalid Mint Address";
+    if (!mintExistsOnNetwork) return "❌ Mint Not Found on Network";
     if (!isDevnet && !hasTokens) return "No Tokens — Mint First";
     if (!isDevnet && !hasSufficientTokensForSeed) return "Insufficient Tokens for Vault Seed (500)";
     if (feeConflict) return "Fix Parameters to Continue";
     if (!hasSufficientBalance) return "Insufficient SOL";
     if (isDevnet) return "LAUNCH & MINT TOKENS →";
     return "LAUNCH MARKET →";
-  }, [walletConnected, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet]);
+  }, [walletConnected, mintValid, mintExistsOnNetwork, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet]);
 
   return (
     <div className="space-y-5">
+      {/* Mint validation status */}
+      {!mintValid && (
+        <div className="p-3 bg-red-500/20 border border-red-500 rounded text-red-500 text-sm">
+          ❌ Invalid mint address: &quot;{mintAddress}&quot;
+        </div>
+      )}
+      {mintValid && !mintExistsOnNetwork && (
+        <div className="p-3 bg-yellow-500/20 border border-yellow-500 rounded text-yellow-500 text-sm">
+          ⚠️ Mint not found on {getNetwork() === "devnet" ? "devnet" : "mainnet"}
+        </div>
+      )}
+      {mintValid && mintExistsOnNetwork && (
+        <div className="p-3 bg-green-500/20 border border-green-500 rounded text-green-500 text-sm">
+          ✅ Mint verified on {getNetwork() === "devnet" ? "devnet" : "mainnet"}
+        </div>
+      )}
+
       {/* Market Preview Card */}
       <div>
         <p className="mb-2 text-[9px] font-medium uppercase tracking-[0.15em] text-[var(--text-dim)]">
@@ -219,7 +242,7 @@ export const StepReview: FC<StepReviewProps> = ({
         <button
           type="button"
           onClick={onLaunch}
-          disabled={!canLaunch}
+          disabled={!canLaunch || !mintValid || !mintExistsOnNetwork}
           className="flex-1 border border-[var(--accent)]/50 bg-[var(--accent)]/[0.08] py-3.5 text-[14px] font-bold uppercase tracking-[0.1em] text-[var(--accent)] transition-all duration-200 hud-btn-corners hover:border-[var(--accent)] hover:bg-[var(--accent)]/[0.15] disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-transparent disabled:text-[var(--text-dim)] disabled:opacity-50"
         >
           {launchButtonLabel}
