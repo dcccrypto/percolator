@@ -56,6 +56,39 @@ export function MusicPlayer() {
   const prefersReduced = usePrefersReducedMotion();
   const pathname = usePathname();
 
+  /* Suppress OS-level media transport overlay.
+   * The hidden <audio> element triggers the browser/OS media session API which
+   * surfaces native play/pause/skip controls independently of DOM controls.
+   * (1) disableRemotePlayback prevents AirPlay/Chromecast picker triggering OS controls.
+   * (2) Clearing mediaSession.metadata + nulling all action handlers suppresses the OS overlay. */
+  useEffect(() => {
+    // disableRemotePlayback is a standard HTMLMediaElement property but is not in
+    // React's JSX types, so we set it imperatively.
+    if (audioRef.current) {
+      (audioRef.current as HTMLAudioElement & { disableRemotePlayback?: boolean }).disableRemotePlayback = true;
+    }
+
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.metadata = null;
+    (
+      [
+        "play",
+        "pause",
+        "stop",
+        "seekbackward",
+        "seekforward",
+        "previoustrack",
+        "nexttrack",
+      ] as MediaSessionAction[]
+    ).forEach((action) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, null);
+      } catch {
+        // Older browsers may not support all actions — ignore
+      }
+    });
+  }, []);
+
   /* Determine if the player should be hidden on mobile for this route */
   const hideOnMobile = HIDE_ON_MOBILE_ROUTES.some((r) => pathname?.startsWith(r));
 
