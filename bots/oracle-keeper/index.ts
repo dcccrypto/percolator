@@ -248,7 +248,9 @@ async function fetchJupiterPrice(symbol: string): Promise<number | null> {
     );
     const json = (await resp.json()) as any;
     const data = json.data?.[mint];
-    return data?.price ? parseFloat(data.price) : null;
+    if (!data?.price) return null;
+    const p = parseFloat(data.price);
+    return isFinite(p) && p > 0 ? p : null;
   } catch { return null; }
 }
 
@@ -263,7 +265,9 @@ async function fetchDexScreenerPrice(symbol: string): Promise<number | null> {
     );
     const json = (await resp.json()) as any;
     const pair = json.pairs?.[0];
-    return pair?.priceUsd ? parseFloat(pair.priceUsd) : null;
+    if (!pair?.priceUsd) return null;
+    const p = parseFloat(pair.priceUsd);
+    return isFinite(p) && p > 0 ? p : null;
   } catch { return null; }
 }
 
@@ -291,6 +295,14 @@ async function getPrice(symbol: string, slab?: string): Promise<{ price: number;
   }
 
   return null;
+}
+
+/**
+ * Sanity-check a price before pushing it on-chain.
+ * Rejects zero, negative, or non-finite values which would corrupt market state.
+ */
+function isPriceValid(price: number): boolean {
+  return typeof price === "number" && isFinite(price) && price > 0;
 }
 
 // ── Stats ───────────────────────────────────────────────────
@@ -390,6 +402,15 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   }
 
   const { price, source } = result;
+
+  // Reject zero or negative prices — these would corrupt market state on-chain.
+  // Some DEX APIs return priceUsd="0" for newly-created tokens with no liquidity.
+  if (!isPriceValid(price)) {
+    log(`⚠️ ${market.label}: invalid price $${price} from ${source} — skipping push`);
+    s.totalErrors++;
+    s.consecutiveErrors++;
+    return;
+  }
 
   // Circuit breaker
   if (!checkCircuitBreaker(s, price)) return;
@@ -549,7 +570,10 @@ async function fetchPriceByCA(mainnetCA: string): Promise<{ price: number; sourc
     );
     const json = (await resp.json()) as any;
     const data = json.data?.[mainnetCA];
-    if (data?.price) return { price: parseFloat(data.price), source: "jupiter-ca" };
+    if (data?.price) {
+      const p = parseFloat(data.price);
+      if (isFinite(p) && p > 0) return { price: p, source: "jupiter-ca" };
+    }
   } catch {}
 
   // DexScreener fallback
@@ -560,7 +584,10 @@ async function fetchPriceByCA(mainnetCA: string): Promise<{ price: number; sourc
     );
     const json = (await resp.json()) as any;
     const pair = json.pairs?.[0];
-    if (pair?.priceUsd) return { price: parseFloat(pair.priceUsd), source: "dexscreener-ca" };
+    if (pair?.priceUsd) {
+      const p = parseFloat(pair.priceUsd);
+      if (isFinite(p) && p > 0) return { price: p, source: "dexscreener-ca" };
+    }
   } catch {}
 
   return null;
