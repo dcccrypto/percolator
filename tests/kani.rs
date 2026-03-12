@@ -3639,7 +3639,7 @@ fn proof_liq_partial_1_safety_after_liquidation() {
     );
 }
 
-/// LIQ-PARTIAL-2: Dust Elimination
+/// LIQ-PARTIAL-2: Dust Elimination (concrete baseline)
 /// After any liquidation, the remaining position is either:
 ///   - 0 (fully closed), OR
 ///   - >= min_liquidation_abs (economically meaningful)
@@ -3684,6 +3684,74 @@ fn proof_liq_partial_2_dust_elimination() {
         abs_pos >= min_liquidation_abs.get(),
         "Partial close: remaining position must be >= min_liquidation_abs (no dust)"
     );
+}
+
+/// LIQ-PARTIAL-2s: Symbolic Dust Elimination [PERC-785]
+/// Symbolic version: all capital, position, PnL, and oracle inputs are symbolic.
+/// After any successful liquidation, the remaining position must be either
+/// 0 (fully closed) or >= min_liquidation_abs (no dust).
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_liq_partial_2_symbolic_dust_elimination() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let min_liquidation_abs = engine.params.min_liquidation_abs;
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    if let Ok(true) = result {
+        let abs_pos = abs_i128_to_u128(engine.accounts[user_idx as usize].position_size.get());
+
+        // Dust rule: position is either fully closed or >= min_liquidation_abs
+        kani::assert(
+            abs_pos == 0 || abs_pos >= min_liquidation_abs.get(),
+            "SYMBOLIC LIQ-PARTIAL-2: remaining position must be 0 or >= min_liquidation_abs (no dust)",
+        );
+    }
 }
 
 /// LIQ-PARTIAL-3: Routing is Complete via Conservation and N1
@@ -3769,6 +3837,96 @@ fn proof_liq_partial_3_routing_is_complete_via_conservation_and_n1() {
         engine.is_above_maintenance_margin_mtm(account, oracle_price),
         "Partial close: account must be above maintenance margin after fee"
     );
+}
+
+/// LIQ-PARTIAL-3s: Symbolic Routing Completeness [PERC-785]
+/// Symbolic version: verifies conservation, N1 boundary, dust rule, and
+/// canonical invariant hold after any successful liquidation with symbolic inputs.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_liq_partial_3_symbolic_routing_conservation_n1() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 500_000 && lp_capital <= 500_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 1_000_000);
+    kani::assume(insurance_amount <= 100_000);
+
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    kani::assume(canonical_inv(&engine));
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
+
+    let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
+
+    if let Ok(true) = result {
+        let account = &engine.accounts[user_idx as usize];
+        let abs_pos = abs_i128_to_u128(account.position_size.get());
+
+        // Primary conservation: vault >= C_tot + Insurance (see LQ2 rationale —
+        // extended check_conservation too strict after write-offs per §6.1)
+        kani::assert(
+            engine.vault.get()
+                >= engine
+                    .c_tot
+                    .get()
+                    .saturating_add(engine.insurance_fund.balance.get())
+                    .saturating_add(engine.insurance_fund.isolated_balance.get()),
+            "SYMBOLIC LIQ-PARTIAL-3: primary conservation (vault >= C_tot + I) must hold",
+        );
+
+        // N1 boundary: pnl >= 0 or capital == 0
+        kani::assert(
+            n1_boundary_holds(account),
+            "SYMBOLIC LIQ-PARTIAL-3: N1 boundary must hold after liquidation",
+        );
+
+        // Dust rule
+        kani::assert(
+            abs_pos == 0 || abs_pos >= engine.params.min_liquidation_abs.get(),
+            "SYMBOLIC LIQ-PARTIAL-3: dust rule must hold",
+        );
+
+        // Canonical invariant preserved
+        kani::assert(
+            canonical_inv(&engine),
+            "SYMBOLIC LIQ-PARTIAL-3: canonical invariant must hold after liquidation",
+        );
+    }
 }
 
 /// LIQ-PARTIAL-4: Conservation Preservation
