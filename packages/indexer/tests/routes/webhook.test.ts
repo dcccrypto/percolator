@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as nodeCrypto from 'node:crypto';
 
 vi.mock('@percolator/sdk', () => ({
   IX_TAG: { TradeNoCpi: 10, TradeCpi: 11 },
@@ -43,7 +44,7 @@ vi.mock('@percolator/shared', () => ({
 }));
 
 import * as shared from '@percolator/shared';
-import { webhookRoutes } from '../../src/routes/webhook.js';
+import { webhookRoutes, verifyWebhookSignature } from '../../src/routes/webhook.js';
 
 const PROGRAM_ID = 'FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD';
 const TRADER = 'So11111111111111111111111111111111111111112';
@@ -308,6 +309,123 @@ describe('POST /webhook/trades — price extraction', () => {
   it('returns 401 when auth header is missing and webhookSecret is set', async () => {
     // Pass null as secret to omit the authorization header
     const req = makeRequest([], null);
+    const res = await app.fetch(req);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 when wrong static token is sent', async () => {
+    const req = makeRequest([], 'wrong-token');
+    const res = await app.fetch(req);
+    expect(res.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PERC-750: HMAC-SHA256 signature verification
+// ---------------------------------------------------------------------------
+
+/** Compute the expected x-helius-hmac-sha256 header value for a given body and secret. */
+function computeHmac(body: unknown, secret: string): string {
+  const raw = JSON.stringify(body);
+  return nodeCrypto.createHmac('sha256', secret).update(raw).digest('hex');
+}
+
+/** Build a request with the HMAC signature in x-helius-hmac-sha256 (no Authorization). */
+function makeHmacRequest(body: unknown, secret = TEST_WEBHOOK_SECRET): Request {
+  const raw = JSON.stringify(body);
+  const sig = nodeCrypto.createHmac('sha256', secret).update(raw).digest('hex');
+  return new Request('http://localhost/webhook/trades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-helius-hmac-sha256': sig },
+    body: raw,
+  });
+}
+
+describe('verifyWebhookSignature — unit tests', () => {
+  const SECRET = 'unit-test-secret';
+  const BODY = Buffer.from('{"test":true}', 'utf8');
+  const validHmac = nodeCrypto.createHmac('sha256', SECRET).update(BODY).digest('hex');
+
+  it('accepts a correct HMAC-SHA256 signature', () => {
+    expect(verifyWebhookSignature(BODY, '', SECRET, validHmac)).toBe(true);
+  });
+
+  it('rejects a wrong HMAC-SHA256 signature', () => {
+    expect(verifyWebhookSignature(BODY, '', SECRET, 'deadbeef'.repeat(8))).toBe(false);
+  });
+
+  it('rejects a truncated HMAC-SHA256 signature', () => {
+    expect(verifyWebhookSignature(BODY, '', SECRET, validHmac.slice(0, 32))).toBe(false);
+  });
+
+  it('accepts a correct static token when no HMAC header is present', () => {
+    expect(verifyWebhookSignature(BODY, SECRET, SECRET)).toBe(true);
+  });
+
+  it('rejects a wrong static token when no HMAC header is present', () => {
+    expect(verifyWebhookSignature(BODY, 'wrong-secret', SECRET)).toBe(false);
+  });
+
+  it('rejects when both auth and HMAC headers are absent', () => {
+    expect(verifyWebhookSignature(BODY, '', SECRET)).toBe(false);
+  });
+
+  it('prefers HMAC header over static auth header (HMAC correct, auth wrong)', () => {
+    expect(verifyWebhookSignature(BODY, 'totally-wrong', SECRET, validHmac)).toBe(true);
+  });
+
+  it('HMAC verifies body integrity — fails when body is different from what was signed', () => {
+    const signedOverDifferentBody = nodeCrypto.createHmac('sha256', SECRET).update('tampered').digest('hex');
+    expect(verifyWebhookSignature(BODY, '', SECRET, signedOverDifferentBody)).toBe(false);
+  });
+});
+
+describe('POST /webhook/trades — HMAC-SHA256 mode (PERC-750)', () => {
+  let app: ReturnType<typeof webhookRoutes>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    app = webhookRoutes();
+  });
+
+  it('accepts a request with a valid x-helius-hmac-sha256 header', async () => {
+    const body = [{
+      signature: SIG,
+      instructions: makeBaseInstructions(),
+      innerInstructions: [],
+      accountData: [],
+      logs: [],
+    }];
+    const res = await app.fetch(makeHmacRequest(body));
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a request with a wrong x-helius-hmac-sha256 header', async () => {
+    const raw = JSON.stringify([]);
+    const req = new Request('http://localhost/webhook/trades', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-helius-hmac-sha256': 'badhash'.padEnd(64, '0'),
+      },
+      body: raw,
+    });
+    const res = await app.fetch(req);
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a tampered body even when HMAC was computed over original body', async () => {
+    // Compute HMAC over original payload, but send a different body
+    const originalBody = [{ signature: SIG }];
+    const sig = computeHmac(originalBody, TEST_WEBHOOK_SECRET);
+    const req = new Request('http://localhost/webhook/trades', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-helius-hmac-sha256': sig,
+      },
+      body: JSON.stringify([{ signature: 'TAMPERED' }]),
+    });
     const res = await app.fetch(req);
     expect(res.status).toBe(401);
   });

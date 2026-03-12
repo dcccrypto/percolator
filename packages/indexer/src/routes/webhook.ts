@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { IX_TAG, detectSlabLayout } from "@percolator/sdk";
 import { config, insertTrade, eventBus, decodeBase58, readU128LE, parseTradeSize, createLogger } from "@percolator/shared";
 
@@ -27,23 +28,32 @@ export function webhookRoutes(): Hono {
   const app = new Hono();
 
   app.post("/webhook/trades", async (c) => {
-    // PERC-1063: Fail-closed — 503 if secret not configured, 401 if header mismatch.
-    // No unauthenticated requests accepted regardless of environment.
-    const authHeader = c.req.header("authorization");
+    // PERC-750: Read raw body first — required for HMAC-SHA256 body signature verification.
+    let rawBody: Buffer;
+    try {
+      rawBody = Buffer.from(await c.req.arrayBuffer());
+    } catch {
+      return c.json({ error: "Failed to read request body" }, 400);
+    }
+
+    // PERC-1063 / PERC-750: Fail-closed — 503 if secret not configured, 401 if verification fails.
     if (!config.webhookSecret) {
       logger.error("Webhook request rejected: HELIUS_WEBHOOK_SECRET not configured");
       return c.json({ error: "Webhook auth not configured" }, 503);
     }
-    if (authHeader !== config.webhookSecret) {
-      logger.warn("Webhook auth failed", { hasHeader: !!authHeader });
+
+    const authHeader = c.req.header("authorization") ?? "";
+    const hmacHeader = c.req.header("x-helius-hmac-sha256") ?? "";
+    if (!verifyWebhookSignature(rawBody, authHeader, config.webhookSecret, hmacHeader || undefined)) {
+      logger.warn("Webhook signature verification failed", { hasHeader: !!authHeader, hasHmac: !!hmacHeader });
       return c.json({ error: "Unauthorized" }, 401);
     }
 
-    // Parse body — Helius sends an array of enhanced transactions
+    // Parse body from the already-read buffer (avoids consuming the stream twice).
     let transactions: any[];
     try {
-      const body = await c.req.json();
-      transactions = Array.isArray(body) ? body : [body];
+      const parsed = JSON.parse(rawBody.toString("utf-8"));
+      transactions = Array.isArray(parsed) ? parsed : [parsed];
     } catch {
       return c.json({ error: "Invalid JSON" }, 400);
     }
@@ -62,6 +72,50 @@ export function webhookRoutes(): Hono {
   });
 
   return app;
+}
+
+/**
+ * Verify Helius webhook request authenticity. (PERC-750)
+ *
+ * Supports two modes, checked in priority order:
+ *
+ * 1. **HMAC-SHA256 body signature** (preferred — body-bound, prevents payload tampering):
+ *    The `x-helius-hmac-sha256` header contains hex(HMAC-SHA256(rawBody, secret)).
+ *    Used when Helius or an intermediary proxy signs the payload.
+ *
+ * 2. **Static token** (current Helius `authHeader` behavior):
+ *    The `Authorization` header is compared timing-safely to the configured secret.
+ *    Timing-safe comparison prevents oracle attacks on the static token.
+ *
+ * All comparisons use `crypto.timingSafeEqual` to prevent timing side-channels.
+ *
+ * @param rawBody    Raw request body bytes (must be read before JSON.parse).
+ * @param authHeader Value of the `Authorization` request header.
+ * @param secret     Configured `HELIUS_WEBHOOK_SECRET`.
+ * @param hmacHeader Optional value of the `x-helius-hmac-sha256` request header.
+ */
+export function verifyWebhookSignature(
+  rawBody: Buffer,
+  authHeader: string,
+  secret: string,
+  hmacHeader?: string,
+): boolean {
+  // Mode 1: HMAC-SHA256 body signature (preferred)
+  if (hmacHeader) {
+    const expectedHmac = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const hmacBytes = Buffer.from(hmacHeader, "utf8");
+    const expectedBytes = Buffer.from(expectedHmac, "utf8");
+    // timingSafeEqual requires equal-length buffers; length mismatch is an immediate reject.
+    if (hmacBytes.length !== expectedBytes.length) return false;
+    return timingSafeEqual(hmacBytes, expectedBytes);
+  }
+
+  // Mode 2: Static token — timing-safe comparison (current Helius authHeader behavior).
+  if (!authHeader) return false;
+  const authBytes = Buffer.from(authHeader, "utf8");
+  const secretBytes = Buffer.from(secret, "utf8");
+  if (authBytes.length !== secretBytes.length) return false;
+  return timingSafeEqual(authBytes, secretBytes);
 }
 
 async function processTransactions(transactions: any[]): Promise<void> {
