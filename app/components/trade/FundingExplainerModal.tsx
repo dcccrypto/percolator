@@ -48,10 +48,12 @@ export const FundingExplainerModal: FC<FundingExplainerModalProps> = ({ onClose 
       ref={overlayRef}
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       onClick={handleOverlayClick}
+    style={{ opacity: 0 }}
     >
       <div
         ref={modalRef}
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-sm border border-[var(--border)] bg-[var(--bg)] shadow-2xl"
+      style={{ opacity: 0 }}
       >
         {/* Header */}
         <div className="sticky top-0 flex items-center justify-between border-b border-[var(--border)]/50 bg-[var(--bg)] px-4 py-3">

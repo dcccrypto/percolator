@@ -154,10 +154,12 @@ export const InsuranceTopUpModal: FC<InsuranceTopUpModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="insurance-topup-title"
+    style={{ opacity: 0 }}
     >
       <div
         ref={modalRef}
         className="w-full max-w-md overflow-hidden rounded-none border border-[var(--border)] bg-[var(--bg)] shadow-2xl"
+      style={{ opacity: 0 }}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--border)]/50 bg-[var(--bg)] px-4 py-3">

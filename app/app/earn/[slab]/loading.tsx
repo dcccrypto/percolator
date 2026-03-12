@@ -1,6 +1,6 @@
 export default function VaultDetailLoading() {
   return (
-    <div className="min-h-[calc(100vh-48px)]">
+    <div className="min-h-[calc(100dvh-48px)]">
       <div className="mx-auto max-w-5xl px-4 pt-8 pb-16">
         {/* Breadcrumb */}
         <div className="h-4 w-40 bg-[var(--border)] rounded animate-pulse mb-6" />

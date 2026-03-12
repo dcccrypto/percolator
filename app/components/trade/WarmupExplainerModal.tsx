@@ -54,10 +54,12 @@ export const WarmupExplainerModal: FC<WarmupExplainerModalProps> = ({
       ref={overlayRef}
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4"
       onClick={handleOverlayClick}
+    style={{ opacity: 0 }}
     >
       <div
         ref={modalRef}
         className="w-full max-w-sm border border-[var(--border)] bg-[var(--bg)] shadow-2xl shadow-black/30"
+      style={{ opacity: 0 }}
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--border)]/50 px-4 py-2">

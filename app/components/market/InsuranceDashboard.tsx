@@ -274,7 +274,10 @@ export const InsuranceDashboard: FC<{ slabAddress: string }> = ({
 
       {/* Modals */}
       {showExplainer && (
-        <InsuranceExplainerModal onClose={() => setShowExplainer(false)} />
+        <InsuranceExplainerModal
+          onClose={() => setShowExplainer(false)}
+          onTopUp={() => setShowTopUp(true)}
+        />
       )}
       {showTopUp && (
         <InsuranceTopUpModal

@@ -11,7 +11,7 @@ export default function VaultDetailError({
   reset: () => void;
 }) {
   return (
-    <div className="min-h-[calc(100vh-48px)] flex items-center justify-center">
+    <div className="min-h-[calc(100dvh-48px)] flex items-center justify-center">
       <div className="max-w-md mx-auto text-center px-4">
         <div className="text-4xl mb-4">⚠️</div>
         <h1

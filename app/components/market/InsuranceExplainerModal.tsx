@@ -7,10 +7,12 @@ import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 
 interface InsuranceExplainerModalProps {
   onClose: () => void;
+  onTopUp?: () => void;
 }
 
 export const InsuranceExplainerModal: FC<InsuranceExplainerModalProps> = ({
   onClose,
+  onTopUp,
 }) => {
   const overlayRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
@@ -53,11 +55,13 @@ export const InsuranceExplainerModal: FC<InsuranceExplainerModalProps> = ({
     <div
       ref={overlayRef}
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      style={{ opacity: 0 }}
       onClick={handleOverlayClick}
     >
       <div
         ref={modalRef}
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-none border border-[var(--border)] bg-[var(--bg)] shadow-2xl"
+        style={{ opacity: 0 }}
       >
         {/* Header */}
         <div className="sticky top-0 flex items-center justify-between border-b border-[var(--border)]/50 bg-[var(--bg)] px-4 py-3">
@@ -320,7 +324,7 @@ export const InsuranceExplainerModal: FC<InsuranceExplainerModalProps> = ({
           <button
             onClick={() => {
               onClose();
-              // This will be handled by parent component to open TopUp modal
+              onTopUp?.();
             }}
             className="flex-1 rounded-none border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/20"
           >

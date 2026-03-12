@@ -33,7 +33,7 @@ export default function GuidePage() {
   ];
 
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
       <main className="relative mx-auto max-w-4xl px-4 py-10 space-y-16">
       {/* Header */}

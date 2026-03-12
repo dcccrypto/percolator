@@ -12,7 +12,7 @@ const badge = "inline-block rounded-sm px-2 py-0.5 text-[10px] font-semibold upp
 
 export default function AgentsPage() {
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
       <div className="relative mx-auto max-w-4xl px-4 py-10 space-y-8">
         {/* Header */}

@@ -377,7 +377,7 @@ const MarketCard: FC<{
 
 /* loading skeleton */
 const LoadingSkeleton: FC = () => (
-  <div className="min-h-[calc(100vh-48px)] relative">
+  <div className="min-h-[calc(100dvh-48px)] relative">
     <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
     <main className="relative mx-auto max-w-4xl px-4 py-10">
       <div className="mb-2 h-3 w-16 animate-pulse bg-[var(--border)]/20" />
@@ -472,7 +472,7 @@ const MyMarketsPage: FC = () => {
 
   if (!connected) {
     return (
-      <div className="min-h-[calc(100vh-48px)] relative">
+      <div className="min-h-[calc(100dvh-48px)] relative">
         <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
         <main className="relative mx-auto max-w-4xl px-4 py-10">
           {pageHeader}
@@ -492,7 +492,7 @@ const MyMarketsPage: FC = () => {
 
   if (error) {
     return (
-      <div className="min-h-[calc(100vh-48px)] relative">
+      <div className="min-h-[calc(100dvh-48px)] relative">
         <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
         <main className="relative mx-auto max-w-4xl px-4 py-10">
           {pageHeader}
@@ -510,7 +510,7 @@ const MyMarketsPage: FC = () => {
 
   if (myMarkets.length === 0) {
     return (
-      <div className="min-h-[calc(100vh-48px)] relative">
+      <div className="min-h-[calc(100dvh-48px)] relative">
         <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
         <main className="relative mx-auto max-w-4xl px-4 py-10">
           {pageHeader}
@@ -543,7 +543,7 @@ const MyMarketsPage: FC = () => {
   const totalInsurance = myMarkets.reduce((acc, m) => acc + m.engine.insuranceFund.balance, 0n);
 
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
       <main ref={pageRef} className="relative mx-auto max-w-4xl px-4 py-10 gsap-fade">
         {/* Page Title */}

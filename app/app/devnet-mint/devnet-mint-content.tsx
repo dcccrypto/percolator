@@ -473,7 +473,7 @@ const DevnetMintContent: FC = () => {
   const walletReady = !!publicKey && !!signTransaction;
 
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       <div className="absolute inset-x-0 top-0 h-16 bg-grid pointer-events-none opacity-50" />
       <div className="relative mx-auto max-w-4xl px-4 pt-4 pb-6 sm:pb-10">
         <ScrollReveal>

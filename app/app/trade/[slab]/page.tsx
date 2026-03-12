@@ -245,7 +245,7 @@ function TradePageInner({ slab }: { slab: string }) {
   // Loading state — show while slab data is being fetched
   if (slabLoading && !engine) {
     return (
-      <div className="min-h-[calc(100vh-48px)] flex flex-col items-center justify-center gap-3">
+      <div className="min-h-[calc(100dvh-48px)] flex flex-col items-center justify-center gap-3">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent" />
         <p className="text-[11px] text-[var(--text-muted)] uppercase tracking-[0.15em]">Loading market data...</p>
         <p className="text-[10px] text-[var(--text-dim)]" style={{ fontFamily: "var(--font-mono)" }}>{slab.slice(0, 8)}...{slab.slice(-8)}</p>
@@ -256,7 +256,7 @@ function TradePageInner({ slab }: { slab: string }) {
   // Error state — show when slab data fails to load
   if (slabError && !engine) {
     return (
-      <div className="min-h-[calc(100vh-48px)] flex flex-col items-center justify-center gap-3">
+      <div className="min-h-[calc(100dvh-48px)] flex flex-col items-center justify-center gap-3">
         <div className="border border-[var(--short)]/30 bg-[var(--short)]/5 p-6 text-center max-w-md">
           <p className="text-sm font-medium text-[var(--short)]">Failed to load market</p>
           <p className="mt-2 text-[11px] text-[var(--text-secondary)]">{slabError}</p>
@@ -525,7 +525,7 @@ function isValidPublicKey(address: string): boolean {
 
 function InvalidAddressPage({ address }: { address: string }) {
   return (
-    <div className="min-h-[calc(100vh-48px)] flex flex-col items-center justify-center gap-3">
+    <div className="min-h-[calc(100dvh-48px)] flex flex-col items-center justify-center gap-3">
       <div className="border border-[var(--short)]/30 bg-[var(--short)]/5 p-6 text-center max-w-md">
         <p className="text-sm font-medium text-[var(--short)]">Market not found</p>
         <p className="mt-2 text-[11px] text-[var(--text-secondary)]">
@@ -605,7 +605,7 @@ function SlugResolvePage({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="min-h-[calc(100vh-48px)] flex flex-col items-center justify-center gap-3">
+    <div className="min-h-[calc(100dvh-48px)] flex flex-col items-center justify-center gap-3">
       <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent" />
       <p className="text-[11px] text-[var(--text-muted)] uppercase tracking-[0.15em]">Resolving market…</p>
       <p className="text-[10px] text-[var(--text-dim)]" style={{ fontFamily: "var(--font-mono)" }}>{slug}</p>

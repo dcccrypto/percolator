@@ -1,6 +1,6 @@
 export default function EarnLoading() {
   return (
-    <div className="min-h-[calc(100vh-48px)]">
+    <div className="min-h-[calc(100dvh-48px)]">
       {/* Header skeleton */}
       <div className="relative">
         <div className="mx-auto max-w-6xl px-4 pt-10 pb-6">

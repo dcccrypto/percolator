@@ -61,7 +61,7 @@ export default function DashboardPage() {
   // Not connected state
   if (!connected) {
     return (
-      <div className="min-h-[calc(100vh-48px)] relative">
+      <div className="min-h-[calc(100dvh-48px)] relative">
         <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
         <div className="relative mx-auto max-w-5xl px-4 py-10">
           <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.25em] text-[var(--accent)]/60">
@@ -108,7 +108,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       {/* Grid background */}
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
 

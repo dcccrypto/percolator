@@ -21,7 +21,7 @@ export default function NotFound() {
   }, []);
 
   return (
-    <div className="min-h-[calc(100vh-48px)] relative flex items-center justify-center">
+    <div className="min-h-[calc(100dvh-48px)] relative flex items-center justify-center">
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
       <div ref={containerRef} className="relative mx-auto max-w-xl px-4 py-20 text-center" style={{ opacity: 0 }}>
         <div className="mb-4">

@@ -2,7 +2,7 @@ import { ShimmerSkeleton } from "@/components/ui/ShimmerSkeleton";
 
 export default function TradingPageLoading() {
   return (
-    <div className="min-h-[calc(100vh-48px)]">
+    <div className="min-h-[calc(100dvh-48px)]">
       {/* Mobile: Sticky header skeleton */}
       <div className="sticky top-0 z-30 border-b border-[var(--border)]/50 bg-[var(--bg)]/95 px-3 py-2 backdrop-blur-sm lg:hidden">
         <div className="flex items-center justify-between">

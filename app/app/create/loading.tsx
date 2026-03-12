@@ -2,7 +2,7 @@ import { ShimmerSkeleton } from "@/components/ui/ShimmerSkeleton";
 
 export default function CreateLoading() {
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       {/* Grid background */}
       <div className="absolute inset-x-0 top-0 h-32 bg-grid pointer-events-none" />
 

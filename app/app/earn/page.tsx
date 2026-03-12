@@ -56,7 +56,7 @@ export default function EarnPage() {
   const { stats, loading, error } = useEarnStats();
 
   return (
-    <div className="min-h-[calc(100vh-48px)]">
+    <div className="min-h-[calc(100dvh-48px)]">
       {/* Header with stats banner */}
       <EarnHeader stats={stats} loading={loading} />
 

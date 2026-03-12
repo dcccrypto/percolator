@@ -127,7 +127,7 @@ function VaultDetailInner({ slabAddress }: { slabAddress: string }) {
   const insuranceFund = marketInfo?.insuranceFund ?? 0;
 
   return (
-    <div className="min-h-[calc(100vh-48px)]">
+    <div className="min-h-[calc(100dvh-48px)]">
       {/* Background */}
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
 

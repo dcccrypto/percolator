@@ -297,7 +297,7 @@ function WalletPageInner() {
 
 function WalletLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-[calc(100vh-48px)] relative">
+    <div className="min-h-[calc(100dvh-48px)] relative">
       <div className="absolute inset-x-0 top-0 h-48 bg-grid pointer-events-none" />
       <div className="relative mx-auto max-w-5xl px-4 py-10">
         <ScrollReveal>
