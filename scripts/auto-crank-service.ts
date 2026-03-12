@@ -7,7 +7,7 @@
  *
  * Env vars:
  *   NETWORK          — devnet | testnet | mainnet (REQUIRED)
- *   SOLANA_RPC_URL   — RPC endpoint (validated for network)
+ *   RPC_URL          — Solana RPC endpoint (required for mainnet; devnet defaults to public endpoint)
  *   CRANK_KEYPAIR    — Base58-encoded or JSON-array private key
  *   CRANK_INTERVAL_MS — Interval between crank cycles (default: 30000)
  *   PROGRAM_ID       — Percolator program ID (REQUIRED)

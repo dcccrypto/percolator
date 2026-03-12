@@ -19,6 +19,12 @@ const jetbrainsMono = JetBrains_Mono({ variable: "--font-jetbrains-mono", subset
 const interTight = Inter_Tight({ variable: "--font-inter-tight", subsets: ["latin"], weight: ["400", "500", "600", "700", "800", "900"] });
 const outfit = Outfit({ variable: "--font-outfit", subsets: ["latin"], weight: ["300", "400", "500", "600", "700", "800"] });
 
+// PERC-695 (bug bounty — CSP static nonce): Force dynamic rendering so each request
+// generates a fresh layout render with the new per-request nonce from middleware.
+// Without this, Next.js may serve a cached layout with a stale nonce baked into
+// data-nonce, causing a CSP mismatch with the freshly generated nonce in the header.
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   metadataBase: new URL("https://percolatorlaunch.com"),
   title: "Percolator | Permissionless Perpetual Markets on Solana",

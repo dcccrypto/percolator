@@ -111,7 +111,7 @@ function PositionCard({ pos, symbol }: { pos: PortfolioPosition; symbol: string 
           <div>
             <span className="text-[var(--text-dim)]">Entry: </span>
             <span className="text-[var(--text-secondary)]" style={{ fontFamily: "var(--font-jetbrains-mono)" }}>
-              {formatPriceE6(pos.account.entryPrice)}
+              {pos.account?.entryPrice != null ? formatPriceE6(pos.account.entryPrice) : "—"}
             </span>
           </div>
           <div>

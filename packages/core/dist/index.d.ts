@@ -1772,7 +1772,7 @@ type Network = "devnet" | "mainnet";
  * Priority:
  * 1. PROGRAM_ID env var (explicit override)
  * 2. Network-specific default (NETWORK env var)
- * 3. Devnet default (safest fallback)
+ * 3. Devnet default (safest fallback — bug bounty PERC-697)
  */
 declare function getProgramId(network?: Network): PublicKey;
 /**
@@ -1781,7 +1781,15 @@ declare function getProgramId(network?: Network): PublicKey;
 declare function getMatcherProgramId(network?: Network): PublicKey;
 /**
  * Get the current network from environment.
- * Defaults fail-closed to mainnet — set NETWORK=devnet explicitly for devnet environments.
+ *
+ * SECURITY (PERC-697): Removed silent mainnet default.
+ * Previously defaulted to "mainnet" when NETWORK was unset, which could cause
+ * crank/keeper scripts run without env vars to silently target mainnet program IDs.
+ *
+ * Now defaults to "devnet" — the safer fallback for a devnet-first protocol.
+ * Production deployments always set NETWORK explicitly via Railway/env.
+ * For mainnet operations use networkValidation.ts (ensureNetworkConfigValid) which
+ * enforces FORCE_MAINNET=1.
  */
 declare function getCurrentNetwork(): Network;
 

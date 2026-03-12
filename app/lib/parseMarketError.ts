@@ -12,8 +12,10 @@ const PERCOLATOR_ERRORS: Record<number, string> = {
   1: "Invalid version — program upgrade may be needed.",                                   // InvalidVersion
   2: "Market is already initialized. Cannot re-initialize.",                               // AlreadyInitialized
   3: "Market is not initialized. The slab account may not have been set up correctly.",     // NotInitialized
-  4: "Invalid slab length. The account size doesn't match the deployed program. "          // InvalidSlabLen
-   + "Try a different slab tier or check that you're using the correct program for this tier.",
+  4: "Invalid slab length. This market uses an older program version — its account size "   // InvalidSlabLen (PERC-698)
+   + "is incompatible with the current deployed program. The market may need to be "
+   + "re-initialized by the market creator. If you are the creator, please contact support. "
+   + "Otherwise, try a newer market or a different slab tier.",
   5: "Invalid oracle key. The oracle feed ID doesn't match.",                              // InvalidOracleKey
   6: "Oracle price is stale. The oracle hasn't been updated recently enough.",              // OracleStale
   7: "Oracle confidence interval too wide. Price may be unreliable.",                       // OracleConfTooWide
