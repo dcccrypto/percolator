@@ -1061,7 +1061,10 @@ fn non_positive_pnl_withdrawable_is_zero() {
 
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(withdrawable == 0, "Non-positive PNL means zero withdrawable");
+    assert!(
+        withdrawable == 0,
+        "Non-positive PNL means zero withdrawable"
+    );
 }
 
 #[kani::proof]
