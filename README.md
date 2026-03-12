@@ -157,16 +157,18 @@ The normative specification lives in [`spec.md`](spec.md) (v7). It defines:
 
 ### Running Kani Proofs
 
+> **Kani runs locally only** — it is not run automatically on every PR (removed in [#47](https://github.com/dcccrypto/percolator/pull/47) due to CI runtime). If your PR touches math, proof logic, or invariant code, run Kani locally before merging. You can also trigger a run via the [Kani (Manual)](../../actions/workflows/kani-manual.yml) GitHub Actions workflow.
+
 ```bash
 # Install Kani (one-time)
 cargo install --locked kani-verifier
 cargo kani setup
 
 # Run all proofs
-cargo kani
+cargo kani --tests --harness proof_
 
 # Run a specific harness
-cargo kani --harness conservation_deposit_withdraw
+cargo kani --tests --harness proof_deposit_preserves_inv_inductive
 ```
 
 ### Property Tests
