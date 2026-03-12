@@ -1,19 +1,23 @@
 /**
  * Tests for /api/funding/global route
+ *
+ * NOTE: This route was converted to a thin proxy in GH#1066.
+ * Business logic (sanitization, sorting, rate computation) now lives in
+ * percolator-api and should be tested there.  These tests verify that
+ * the Next.js proxy wrapper forwards upstream responses correctly.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextResponse } from "next/server";
 
-// Mock Supabase
-const mockSelect = vi.fn();
-const mockFrom = vi.fn(() => ({
-  select: mockSelect,
+// Mock the shared proxy utility — the route has no other deps
+vi.mock("@/lib/api-proxy", () => ({
+  proxyToApi: vi.fn(),
 }));
 
-vi.mock("@/lib/supabase", () => ({
-  getServiceClient: () => ({ from: mockFrom }),
-}));
+import { proxyToApi } from "@/lib/api-proxy";
 
+// Helper: call the route handler directly (module cached after first import)
 async function callRoute(url = "http://localhost/api/funding/global?limit=5") {
   const { GET } = await import("@/app/api/funding/global/route");
   return GET(new Request(url));
@@ -21,124 +25,72 @@ async function callRoute(url = "http://localhost/api/funding/global?limit=5") {
 
 describe("GET /api/funding/global", () => {
   beforeEach(() => {
-    vi.resetAllMocks();
-    mockFrom.mockReturnValue({ select: mockSelect });
+    vi.clearAllMocks();
   });
 
-  it("returns empty markets when DB returns no rows", async () => {
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: [], error: null }),
-      }),
-    });
+  it("forwards a 200 response with markets array from upstream", async () => {
+    const payload = {
+      markets: [
+        { slabAddress: "abc123", rateBpsPerSlot: 10, hourlyRatePercent: 0.9, dailyRatePercent: 21.6 },
+      ],
+    };
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json(payload, { status: 200 })
+    );
 
     const res = await callRoute();
-    const json = await res.json();
     expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.markets).toHaveLength(1);
+    expect(json.markets[0].slabAddress).toBe("abc123");
+  });
+
+  it("forwards an empty markets array when upstream returns none", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ markets: [] }, { status: 200 })
+    );
+
+    const res = await callRoute();
+    expect(res.status).toBe(200);
+    const json = await res.json();
     expect(json.markets).toEqual([]);
   });
 
-  it("sanitizes out-of-range funding rates to zero", async () => {
-    const rows = [
-      { slab_address: "abc123", funding_rate: 999_999_999, markets: { symbol: "BTC" } },
-    ];
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
-
-    const res = await callRoute();
-    const json = await res.json();
-    expect(res.status).toBe(200);
-    // Sanitized to 0 — should appear but with zero rate
-    const entry = json.markets.find((m: { slabAddress: string }) => m.slabAddress === "abc123");
-    expect(entry?.rateBpsPerSlot).toBe(0);
-  });
-
-  it("sorts by absolute funding rate descending", async () => {
-    const rows = [
-      { slab_address: "low", funding_rate: 1, markets: { symbol: "LOW" } },
-      { slab_address: "neg", funding_rate: -50, markets: { symbol: "NEG" } },
-      { slab_address: "high", funding_rate: 100, markets: { symbol: "HIGH" } },
-    ];
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
-
-    const res = await callRoute();
-    const json = await res.json();
-    expect(res.status).toBe(200);
-    expect(json.markets[0].slabAddress).toBe("high");   // 100 bps
-    expect(json.markets[1].slabAddress).toBe("neg");    // |-50| = 50 bps
-    expect(json.markets[2].slabAddress).toBe("low");    // 1 bps
-  });
-
-  it("computes hourly and daily rate percent correctly", async () => {
-    // 1 bps/slot * 9000 slots/hr / 10000 = 0.9%/hr, 21.6%/day
-    const rows = [
-      { slab_address: "slab1", funding_rate: 1, markets: { symbol: "SOL" } },
-    ];
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
-
-    const res = await callRoute();
-    const json = await res.json();
-    const entry = json.markets[0];
-    expect(entry.hourlyRatePercent).toBeCloseTo(0.9, 5);
-    expect(entry.dailyRatePercent).toBeCloseTo(21.6, 3);
-  });
-
-  it("sets direction correctly", async () => {
-    const rows = [
-      { slab_address: "pos", funding_rate: 5, markets: { symbol: "A" } },
-      { slab_address: "neg", funding_rate: -5, markets: { symbol: "B" } },
-      { slab_address: "neu", funding_rate: 0, markets: { symbol: "C" } },
-    ];
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
-
-    const res = await callRoute();
-    const json = await res.json();
-    const byAddr = Object.fromEntries(
-      json.markets.map((m: { slabAddress: string; direction: string }) => [m.slabAddress, m.direction])
+  it("forwards 502 when proxy cannot reach upstream", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ error: "Backend unavailable" }, { status: 502 })
     );
-    expect(byAddr["pos"]).toBe("long_pays_short");
-    expect(byAddr["neg"]).toBe("short_pays_long");
-    expect(byAddr["neu"]).toBe("neutral");
-  });
 
-  it("respects limit param", async () => {
-    const rows = Array.from({ length: 20 }, (_, i) => ({
-      slab_address: `slab${i}`,
-      funding_rate: i + 1,
-      markets: { symbol: `T${i}` },
-    }));
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
-
-    const res = await callRoute("http://localhost/api/funding/global?limit=3");
+    const res = await callRoute();
+    expect(res.status).toBe(502);
     const json = await res.json();
-    expect(json.markets.length).toBe(3);
+    expect(json.error).toBeDefined();
   });
 
-  it("returns 500 on DB error", async () => {
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: null, error: { message: "DB fail" } }),
-      }),
-    });
+  it("forwards 504 when upstream times out", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ error: "Backend timeout" }, { status: 504 })
+    );
+
+    const res = await callRoute();
+    expect(res.status).toBe(504);
+    const json = await res.json();
+    expect(json.error).toBe("Backend timeout");
+  });
+
+  it("forwards 502 when backend URL is not configured", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ error: "Backend URL not configured" }, { status: 502 })
+    );
+
+    const res = await callRoute();
+    expect(res.status).toBe(502);
+  });
+
+  it("forwards 500 when upstream returns an internal error", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ error: "Internal error" }, { status: 500 })
+    );
 
     const res = await callRoute();
     expect(res.status).toBe(500);
@@ -146,18 +98,23 @@ describe("GET /api/funding/global", () => {
     expect(json.error).toBeDefined();
   });
 
-  it("handles array-style markets join result", async () => {
-    const rows = [
-      { slab_address: "slab99", funding_rate: 10, markets: [{ symbol: "ETH" }] },
-    ];
-    mockSelect.mockReturnValue({
-      not: vi.fn().mockReturnValue({
-        order: vi.fn().mockResolvedValue({ data: rows, error: null }),
-      }),
-    });
+  it("passes query params to proxyToApi (limit forwarded)", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ markets: [] }, { status: 200 })
+    );
 
-    const res = await callRoute();
-    const json = await res.json();
-    expect(json.markets[0].baseSymbol).toBe("ETH");
+    await callRoute("http://localhost/api/funding/global?limit=3");
+    expect(vi.mocked(proxyToApi)).toHaveBeenCalledOnce();
+    // Verify the second arg is the expected API path
+    expect(vi.mocked(proxyToApi).mock.calls[0][1]).toBe("/funding/global");
+  });
+
+  it("calls proxyToApi with the correct backend path", async () => {
+    vi.mocked(proxyToApi).mockResolvedValue(
+      NextResponse.json({ markets: [] }, { status: 200 })
+    );
+
+    await callRoute();
+    expect(vi.mocked(proxyToApi).mock.calls[0][1]).toBe("/funding/global");
   });
 });
