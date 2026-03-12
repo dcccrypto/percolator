@@ -679,6 +679,9 @@ pub enum RiskError {
 
     /// Account kind mismatch
     AccountKindMismatch,
+
+    /// Entry price must be non-zero when opening a position
+    InvalidEntryPrice,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -3185,6 +3188,13 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
+        // §INV PA5: entry_price must be non-zero when position is non-zero.
+        // Defense-in-depth: reject zero oracle_price to prevent creating
+        // a state where entry_price = 0 with an open position.
+        if oracle_price == 0 {
+            return Err(RiskError::InvalidEntryPrice);
+        }
+
         if self.accounts[idx as usize].position_size.is_zero() {
             // No position: just set entry to oracle for determinism
             self.accounts[idx as usize].entry_price = oracle_price;
@@ -3218,6 +3228,11 @@ impl RiskEngine {
     fn settle_mark_to_oracle_best_effort(&mut self, idx: u16, oracle_price: u64) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
+        }
+
+        // §INV PA5: reject zero oracle_price (defense-in-depth)
+        if oracle_price == 0 {
+            return Err(RiskError::InvalidEntryPrice);
         }
 
         if self.accounts[idx as usize].position_size.is_zero() {
