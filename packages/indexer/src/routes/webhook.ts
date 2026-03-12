@@ -27,12 +27,14 @@ export function webhookRoutes(): Hono {
   const app = new Hono();
 
   app.post("/webhook/trades", async (c) => {
-    // PERC-692: Always validate auth when secret is configured; reject if missing in production
+    // PERC-1063: Fail-closed — 503 if secret not configured, 401 if header mismatch.
+    // No unauthenticated requests accepted regardless of environment.
     const authHeader = c.req.header("authorization");
     if (!config.webhookSecret) {
-      // No secret configured — only allowed in non-production (checked at startup)
-      logger.warn("Webhook request accepted without auth (no secret configured)");
-    } else if (authHeader !== config.webhookSecret) {
+      logger.error("Webhook request rejected: HELIUS_WEBHOOK_SECRET not configured");
+      return c.json({ error: "Webhook auth not configured" }, 503);
+    }
+    if (authHeader !== config.webhookSecret) {
       logger.warn("Webhook auth failed", { hasHeader: !!authHeader });
       return c.json({ error: "Unauthorized" }, 401);
     }

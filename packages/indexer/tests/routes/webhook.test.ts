@@ -10,10 +10,14 @@ vi.mock('@percolator/sdk', () => ({
   }),
 }));
 
+// NOTE: This constant must be a literal string used inside vi.mock (which is hoisted before const declarations).
+// The string 'test-secret-token' is duplicated intentionally — do not replace with a variable reference.
+const TEST_WEBHOOK_SECRET = 'test-secret-token';
+
 vi.mock('@percolator/shared', () => ({
   config: {
     allProgramIds: ['FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD'],
-    webhookSecret: null,
+    webhookSecret: 'test-secret-token', // must be a literal — vi.mock is hoisted
   },
   insertTrade: vi.fn(),
   eventBus: { publish: vi.fn() },
@@ -47,10 +51,12 @@ const SLAB = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SIG = '5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW';
 const SIG2 = '4VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW';
 
-function makeRequest(body: any): Request {
+function makeRequest(body: any, secret: string | null = TEST_WEBHOOK_SECRET): Request {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (secret !== null) headers['authorization'] = secret;
   return new Request('http://localhost/webhook/trades', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
 }
@@ -280,22 +286,29 @@ describe('POST /webhook/trades — price extraction', () => {
   it('returns 400 for invalid JSON body', async () => {
     const req = new Request('http://localhost/webhook/trades', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'authorization': TEST_WEBHOOK_SECRET },
       body: 'not-json',
     });
     const res = await app.fetch(req);
     expect(res.status).toBe(400);
   });
 
-  it('returns 401 when auth header is missing and webhookSecret is set', async () => {
+  it('returns 503 when webhookSecret is not configured', async () => {
     const origSecret = (shared.config as any).webhookSecret;
-    (shared.config as any).webhookSecret = 'secret-token';
+    (shared.config as any).webhookSecret = null;
     try {
       const req = makeRequest([]);
       const res = await app.fetch(req);
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(503);
     } finally {
       (shared.config as any).webhookSecret = origSecret;
     }
+  });
+
+  it('returns 401 when auth header is missing and webhookSecret is set', async () => {
+    // Pass null as secret to omit the authorization header
+    const req = makeRequest([], null);
+    const res = await app.fetch(req);
+    expect(res.status).toBe(401);
   });
 });
