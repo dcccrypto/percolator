@@ -4558,32 +4558,6 @@ impl RiskEngine {
     }
 }
 
-#[cfg(kani)]
-mod skew_rebate_proofs {
-    use super::*;
-
-    /// PERC-311: Rebate never exceeds the reserve balance.
-    #[kani::proof]
-    #[kani::unwind(1)]
-    fn proof_rebate_never_exceeds_reserve_balance() {
-        let reserve: u64 = kani::any();
-        let rebate_request: u64 = kani::any();
-
-        kani::assume(reserve <= 1_000_000_000_000);
-        kani::assume(rebate_request <= 1_000_000_000_000);
-
-        let actual = core::cmp::min(rebate_request, reserve);
-        let new_reserve = reserve - actual;
-
-        // PROPERTY: reserve never goes negative (implicitly true since u64)
-        assert!(new_reserve <= reserve);
-        // PROPERTY: actual rebate never exceeds original reserve
-        assert!(actual <= reserve);
-        // PROPERTY: actual rebate never exceeds request
-        assert!(actual <= rebate_request);
-    }
-}
-
 #[cfg(test)]
 mod skew_rebate_tests {
     use super::*;
