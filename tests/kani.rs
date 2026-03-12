@@ -3177,8 +3177,10 @@ fn proof_lq1_symbolic_oi_reduction_and_safety() {
     // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
-    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
-    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
 
     // Apply symbolic state
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
@@ -3270,8 +3272,10 @@ fn proof_lq2_symbolic_conservation() {
     // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
-    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
-    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
 
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
@@ -3362,8 +3366,10 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let cp_entry: u64 = kani::any();
-    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
-    kani::assume(cp_entry > 0 && cp_entry <= 2_000_000);
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(cp_pos == 0 || cp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(cp_entry <= 2_000_000);
 
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
@@ -3464,8 +3470,10 @@ fn proof_lq4_symbolic_fee_to_insurance() {
     // Upper bound <= 2_000_000 is a SAT tractability bound for CBMC, not a protocol price cap.
     let user_entry: u64 = kani::any();
     let lp_entry: u64 = kani::any();
-    kani::assume(user_entry > 0 && user_entry <= 2_000_000);
-    kani::assume(lp_entry > 0 && lp_entry <= 2_000_000);
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
 
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
@@ -5280,13 +5288,26 @@ fn proof_execute_trade_preserves_inv_inductive() {
     kani::assume(vault_amount <= 2_000_000);
     kani::assume(insurance_amount <= 200_000);
 
+    // Seed entry_price: PA5 requires entry_price > 0 when position != 0.
+    // Use conditional assume to match PA5 exactly and avoid vacuity on non-flat states.
+    // Without this, entry_price defaults to 0; when pos != 0 PA5 fails → canonical_inv()
+    // always false → assume(canonical_inv) vacuous (only explores flat pos=0 states).
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
+
     // Apply symbolic state
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
     sync_engine_aggregates(&mut engine);
@@ -5360,12 +5381,24 @@ fn proof_liquidate_preserves_inv_inductive() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // Seed entry_price: PA5 requires entry_price > 0 when position != 0.
+    // Without this, entry_price defaults to 0; when pos != 0 PA5 fails →
+    // canonical_inv() always false → assume(canonical_inv) vacuous.
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
     sync_engine_aggregates(&mut engine);
@@ -8333,9 +8366,17 @@ fn proof_gc_dust_symbolic_criteria() {
     kani::assume(pnl > -100 && pnl < 100);
     kani::assume(position > -100 && position < 100);
 
+    // Seed entry_price: PA5 requires entry_price > 0 when position != 0.
+    // Without this, entry_price defaults to 0; when position != 0 PA5 fails →
+    // canonical_inv() always false → assume(canonical_inv) vacuous (only explores pos=0).
+    let entry_price: u64 = kani::any();
+    kani::assume(position == 0 || entry_price > 0);
+    kani::assume(entry_price <= 2_000_000);
+
     engine.accounts[user as usize].capital = U128::new(capital);
     engine.accounts[user as usize].pnl = I128::new(pnl);
     engine.accounts[user as usize].position_size = I128::new(position);
+    engine.accounts[user as usize].entry_price = entry_price;
     engine.vault = U128::new(capital + 1000);
     engine.insurance_fund.balance = U128::new(1000);
     sync_engine_aggregates(&mut engine);
