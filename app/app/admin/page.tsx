@@ -389,11 +389,16 @@ export default function AdminDashboard() {
 
   const updateStatus = async (bugId: string, newStatus: string) => {
     setSaving(true);
-    await fetch("/api/admin/bugs", {
+    const res = await fetch("/api/admin/bugs", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: bugId, status: newStatus }),
-    });
+    }).catch(() => null);
+    if (!res?.ok) {
+      console.error("Failed to update bug status");
+      setSaving(false);
+      return;
+    }
     await fetchBugs();
     if (selectedBug?.id === bugId) {
       setSelectedBug((prev) => (prev ? { ...prev, status: newStatus } : null));
@@ -404,11 +409,16 @@ export default function AdminDashboard() {
   const saveNotes = async () => {
     if (!selectedBug) return;
     setSaving(true);
-    await fetch("/api/admin/bugs", {
+    const res = await fetch("/api/admin/bugs", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: selectedBug.id, admin_notes: adminNotes }),
-    });
+    }).catch(() => null);
+    if (!res?.ok) {
+      console.error("Failed to save admin notes");
+      setSaving(false);
+      return;
+    }
     await fetchBugs();
     setSelectedBug((prev) =>
       prev ? { ...prev, admin_notes: adminNotes } : null

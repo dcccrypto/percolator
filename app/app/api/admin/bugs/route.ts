@@ -58,11 +58,14 @@ export async function GET(req: NextRequest) {
   }
 
   // 2. Verify admin
+  if (!user.email) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const sb = getServiceClient();
   const { data: adminRow } = await (sb as any)
     .from("admin_users")
     .select("id")
-    .eq("email", user.email!)
+    .eq("email", user.email)
     .maybeSingle();
 
   if (!adminRow) {
@@ -92,11 +95,14 @@ export async function PATCH(req: NextRequest) {
   }
 
   // 2. Verify admin
+  if (!user.email) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const sb = getServiceClient();
   const { data: adminRow } = await (sb as any)
     .from("admin_users")
     .select("id")
-    .eq("email", user.email!)
+    .eq("email", user.email)
     .maybeSingle();
 
   if (!adminRow) {
@@ -109,7 +115,20 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "Missing bug id" }, { status: 400 });
   }
 
-  const { id, ...updates } = body;
+  const { id } = body;
+
+  // Whitelist allowed fields — prevent arbitrary column writes
+  const ALLOWED_FIELDS = ["status", "admin_notes"] as const;
+  type AllowedField = typeof ALLOWED_FIELDS[number];
+  const updates: Partial<Record<AllowedField, string>> & { updated_at?: string } = {};
+  for (const field of ALLOWED_FIELDS) {
+    if (field in body && body[field] !== undefined) {
+      updates[field] = body[field] as string;
+    }
+  }
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ error: "No updatable fields provided" }, { status: 400 });
+  }
   // Ensure updated_at is refreshed
   updates.updated_at = new Date().toISOString();
 
