@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
+import { getConfig } from "@/lib/config";
 import { isMockMode } from "@/lib/mock-mode";
 import { MOCK_SLAB_ADDRESSES, getMockMarketData } from "@/lib/mock-trade-data";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
@@ -97,7 +98,7 @@ export default function Home() {
   const [stats, setStats] = useState({ markets: 0, volume: 0, insurance: 0 });
   const [statsLoaded, setStatsLoaded] = useState(false);
   const [featured, setFeatured] = useState<{ slab_address: string; symbol: string | null; volume_24h: number; last_price: number | null; total_open_interest: number }[]>([]);
-  // network config moved to HeroSection (PERC-158)
+  const [network] = useState<"mainnet" | "devnet">(() => getConfig().network as "mainnet" | "devnet");
 
   useEffect(() => {
     async function loadStats() {
@@ -224,19 +225,22 @@ export default function Home() {
                   {
                     label: "Markets Live",
                     value: statsLoaded ? String(stats.markets) : null,
+                    suffix: network !== "mainnet" ? " (devnet)" : undefined,
                     color: "text-[var(--accent)]",
                   },
                   {
                     label: "24h Volume",
-                    value: statsLoaded ? (stats.volume > 0 ? formatCompact(stats.volume) : "— (devnet)") : null,
+                    value: statsLoaded ? (stats.volume > 0 ? formatCompact(stats.volume) : "$0") : null,
+                    suffix: network !== "mainnet" ? " (devnet)" : undefined,
                     color: stats.volume > 0 ? "text-[var(--long)]" : "text-[var(--text-secondary)]",
                   },
                   {
                     label: "Insurance Fund",
                     value: statsLoaded ? formatCompact(stats.insurance) : null,
+                    suffix: network !== "mainnet" ? " (devnet)" : undefined,
                     color: "text-[var(--accent)]",
                   },
-                  { label: "Access", value: "Open", color: "text-[var(--long)]" },
+                  { label: "Access", value: "Open", suffix: network !== "mainnet" ? " (devnet)" : undefined, color: "text-[var(--long)]" },
                 ].map((stat) => (
                   <div key={stat.label} className="bg-[var(--panel-bg)] p-4 sm:p-5 transition-colors duration-200 hover:bg-[var(--bg-elevated)]">
                     <p className="mb-2 text-[10px] font-medium uppercase tracking-[0.2em] text-[#9ca3af]">{stat.label}</p>
@@ -245,6 +249,7 @@ export default function Home() {
                     ) : (
                       <p className={`text-lg sm:text-xl font-semibold tracking-tight tabular-nums ${stat.color}`} style={{ fontFamily: "var(--font-heading)" }}>
                         {stat.value}
+                        {(stat as { suffix?: string }).suffix && <span className="ml-1 text-[11px] font-medium text-white/25">{(stat as { suffix?: string }).suffix}</span>}
                       </p>
                     )}
                   </div>
