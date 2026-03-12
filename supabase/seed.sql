@@ -6,10 +6,12 @@
 -- 1. Admin Users (Example - replace with real emails)
 -- ============================================================================
 
-INSERT INTO admin_users (email, role)
+-- NOTE: admin_users table only has (id, email, created_at) — no role column.
+-- Replace these placeholder emails with real Supabase auth emails.
+INSERT INTO admin_users (email)
 VALUES 
-  ('admin@percolator.com', 'admin'),
-  ('dev@percolator.com', 'developer')
+  ('admin@percolator.com'),
+  ('dev@percolator.com')
 ON CONFLICT (email) DO NOTHING;
 
 -- ============================================================================
