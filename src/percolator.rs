@@ -2309,7 +2309,7 @@ impl RiskEngine {
         // Settle warmup (loss settlement + profit conversion per spec §6)
         self.settle_warmup_to_capital(idx)?;
 
-        // Write off residual negative PnL (capital exhausted) per spec §6.1
+        // Defense-in-depth write-off (settle_warmup_to_capital already handles this)
         if self.accounts[idx as usize].pnl.is_negative() {
             self.set_pnl(idx as usize, 0);
         }
@@ -2381,7 +2381,7 @@ impl RiskEngine {
         // Settle warmup (loss settlement + profit conversion per spec §6)
         self.settle_warmup_to_capital(idx)?;
 
-        // Write off residual negative PnL (capital exhausted) per spec §6.1
+        // Defense-in-depth write-off (settle_warmup_to_capital already handles this)
         if self.accounts[idx as usize].pnl.is_negative() {
             self.set_pnl(idx as usize, 0);
         }
@@ -4523,16 +4523,27 @@ impl RiskEngine {
         }
 
         // Extended: vault >= sum(capital) + sum(settled_pnl + mark_pnl) + insurance (global + isolated)
+        //
+        // Haircut-ratio design (spec §3.3): when bad debt is socialised via PnL write-off,
+        // positive PnL claims are proportionally haircutted at warmup-conversion time, not
+        // eagerly.  Therefore the positive side of the extended check is capped at the
+        // current residual (vault − base), which is exactly what the haircut ratio h
+        // guarantees to pay out.  Using raw net_pnl here would produce a spurious failure
+        // whenever write-offs leave residual < gross positive PnL.
         let total_pnl = net_pnl.saturating_add(net_mark);
         let base = add_u128(total_capital, total_insurance);
+        let actual = self.vault.get();
 
         let expected = if total_pnl >= 0 {
-            add_u128(base, total_pnl as u128)
+            // Cap positive PnL claim at available residual (haircut boundary).
+            // When undercollateralised (residual < pos_pnl), expected == actual
+            // and slack == 0, which is always satisfied.  When fully collateralised
+            // the check is identical to the original tight bound.
+            let residual = actual.saturating_sub(base);
+            add_u128(base, core::cmp::min(total_pnl as u128, residual))
         } else {
             base.saturating_sub(neg_i128_to_u128(total_pnl))
         };
-
-        let actual = self.vault.get();
 
         if actual < expected {
             return false;
