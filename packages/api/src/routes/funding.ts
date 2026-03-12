@@ -135,9 +135,15 @@ export function fundingRoutes(): Hono {
       const dailyRatePercent = (rateBps / 10000.0) * SLOTS_PER_DAY;
       const annualizedPercent = (rateBps / 10000.0) * SLOTS_PER_YEAR;
 
-      // Fetch 24h funding history
+      // Fetch 24h funding history — gracefully degrade if table is unavailable
       const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const history = await getFundingHistorySince(slab, since24h);
+      let history: Awaited<ReturnType<typeof getFundingHistorySince>>;
+      try {
+        history = await getFundingHistorySince(slab, since24h);
+      } catch (histErr) {
+        logger.warn("funding_history unavailable, returning empty history", { slab, error: histErr });
+        history = [];
+      }
 
       // Format history for response
       const last24hHistory = history.map((h) => ({
