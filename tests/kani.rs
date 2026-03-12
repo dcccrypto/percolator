@@ -1024,24 +1024,47 @@ fn pnl_withdrawal_requires_warmup() {
     }
 }
 
+// ============================================================================
+// Arithmetic Safety
+// ============================================================================
+
+// REMOVED: saturating_arithmetic_prevents_overflow (PERC-786)
+// Proved Rust stdlib behaviour (saturating_add/saturating_sub), not application logic.
+// Covered implicitly by every proof that uses saturating arithmetic on engine fields.
 
 // ============================================================================
 // Edge Cases
 // ============================================================================
 
+/// Symbolic version: for any pnl <= 0, withdrawable_pnl must be 0.
+/// Replaces the old concrete pnl=0 test with full symbolic coverage (PERC-786).
 #[kani::proof]
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
-fn zero_pnl_withdrawable_is_zero() {
+fn non_positive_pnl_withdrawable_is_zero() {
     let mut engine = RiskEngine::new(test_params());
     let user_idx = engine.add_user(0).unwrap();
 
-    engine.accounts[user_idx as usize].pnl = I128::new(0);
-    engine.current_slot = 1000; // Far in future
+    let pnl: i128 = kani::any();
+    kani::assume(pnl <= 0);
+    kani::assume(pnl > -1_000_000); // bounded for tractability
+
+    engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+
+    let slope: u128 = kani::any();
+    kani::assume(slope < 1_000);
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
+
+    let slots: u64 = kani::any();
+    kani::assume(slots < 1_000_000);
+    engine.current_slot = slots;
 
     let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
 
-    assert!(withdrawable == 0, "Zero PNL means zero withdrawable");
+    assert!(
+        withdrawable == 0,
+        "Non-positive PNL means zero withdrawable"
+    );
 }
 
 #[kani::proof]
@@ -8129,12 +8152,9 @@ fn proof_recompute_aggregates_correct() {
     );
 }
 
-// REMOVED: proof_NEGATIVE_bypass_set_pnl_breaks_invariant (PERC-685)
-//
-// Was a negative proof designed to FAIL Kani verification (#[kani::should_panic]).
-// A deliberately-failing Kani harness provides no symbolic coverage and masks
-// real CI regressions. The invariant it tested (bypassing set_pnl breaks
-// pnl_pos_tot) is already covered by the positive inductive proofs above.
+// REMOVED: proof_NEGATIVE_bypass_set_pnl_breaks_invariant (PERC-685/786)
+// Vacuous negative proof — always reported a counterexample, masked real failures.
+// Covered by positive inductive proofs above.
 //
 // See: security audit 2026-03-11-kani-proof-quality.md
 
@@ -8877,7 +8897,6 @@ fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
     );
 }
 
-
 // ========================================
 // PERC-300: Adaptive Funding Rate
 // ========================================
@@ -8935,7 +8954,6 @@ fn proof_adaptive_funding_clamped_within_bounds() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // PERC-300: Adaptive funding — direction and overflow
 // ---------------------------------------------------------------------------
@@ -8968,7 +8986,6 @@ fn proof_adaptive_funding_increases_when_long_skewed() {
         "long skew must increase or maintain funding rate",
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // PERC-311: Skew rebate
