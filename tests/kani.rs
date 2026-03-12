@@ -5431,6 +5431,181 @@ fn proof_liquidate_preserves_inv_inductive() {
 }
 
 // ============================================================================
+// DEPOSIT / WITHDRAW INDUCTIVE PROOFS
+// ============================================================================
+
+/// deposit: INDUCTIVE — INV preserved from any valid symbolic pre-state
+///
+/// Key improvement over proof_deposit_preserves_inv:
+/// - Capital, pnl, position_size, vault, insurance are all kani::any()
+/// - Covers state space unreachable from RiskEngine::new() with fixed vault
+/// - Solver must prove: ∀ s satisfying canonical_inv: deposit(s) ⊨ canonical_inv
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_deposit_preserves_inv_inductive() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    // Create accounts via API (establishes slot membership + matcher arrays)
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state: accounts can hold any valid-range values ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    // Bound to keep SAT tractable while still covering non-trivial state space
+    kani::assume(user_capital <= 1_000_000 && lp_capital <= 1_000_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+
+    // Zero-sum position constraint
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 2_000_000);
+    kani::assume(insurance_amount <= 200_000);
+
+    // PA5: entry_price > 0 when position != 0.
+    // Upper bound <= 2_000_000 is a SAT tractability bound, not a protocol price cap.
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
+
+    // Apply symbolic state
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    // Inductive precondition: assume canonical_inv holds on this symbolic state
+    // (Key difference from proof_deposit_preserves_inv — state is not from new())
+    kani::assume(canonical_inv(&engine));
+
+    // Symbolic deposit amount
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount <= 100_000);
+
+    let result = engine.deposit(user_idx, amount, 100);
+
+    // Postcondition: INV preserved on the Ok path
+    if result.is_ok() {
+        kani::assert(
+            canonical_inv(&engine),
+            "INDUCTIVE: canonical_inv must hold after deposit for any valid pre-state",
+        );
+    }
+}
+
+/// withdraw: INDUCTIVE — INV preserved from any valid symbolic pre-state
+///
+/// Key improvement over proof_withdraw_preserves_inv:
+/// - Capital, pnl, position_size, vault, insurance are all kani::any()
+/// - Covers withdrawal from states unreachable from RiskEngine::new()
+/// - Solver must prove: ∀ s satisfying canonical_inv: withdraw(s) ⊨ canonical_inv
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_withdraw_preserves_inv_inductive() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    // Create accounts via API (establishes slot membership + matcher arrays)
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // --- Symbolic pre-state ---
+    let user_capital: u128 = kani::any();
+    let lp_capital: u128 = kani::any();
+    let user_pnl: i128 = kani::any();
+    let lp_pnl: i128 = kani::any();
+    let user_pos: i128 = kani::any();
+    let lp_pos: i128 = kani::any();
+
+    kani::assume(user_capital <= 1_000_000 && lp_capital <= 1_000_000);
+    kani::assume(user_pnl >= -100_000 && user_pnl <= 100_000);
+    kani::assume(lp_pnl >= -100_000 && lp_pnl <= 100_000);
+    kani::assume(user_pos >= -100_000 && user_pos <= 100_000);
+    kani::assume(lp_pos >= -100_000 && lp_pos <= 100_000);
+
+    // Zero-sum position constraint
+    kani::assume(user_pos + lp_pos == 0);
+
+    let vault_amount: u128 = kani::any();
+    let insurance_amount: u128 = kani::any();
+    kani::assume(vault_amount <= 2_000_000);
+    kani::assume(insurance_amount <= 200_000);
+
+    // PA5: entry_price > 0 when position != 0.
+    // Upper bound <= 2_000_000 is a SAT tractability bound, not a protocol price cap.
+    let user_entry: u64 = kani::any();
+    let lp_entry: u64 = kani::any();
+    kani::assume(user_pos == 0 || user_entry > 0);
+    kani::assume(lp_pos == 0 || lp_entry > 0);
+    kani::assume(user_entry <= 2_000_000);
+    kani::assume(lp_entry <= 2_000_000);
+
+    // Apply symbolic state
+    engine.accounts[user_idx as usize].capital = U128::new(user_capital);
+    engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
+    engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
+    engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
+    engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry;
+    engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.vault = U128::new(vault_amount);
+    engine.insurance_fund.balance = U128::new(insurance_amount);
+    sync_engine_aggregates(&mut engine);
+
+    // Inductive precondition: assume canonical_inv holds on this symbolic state
+    // (Key difference from proof_withdraw_preserves_inv — state is not from new())
+    kani::assume(canonical_inv(&engine));
+
+    // Symbolic withdraw amount and oracle price
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount <= 100_000);
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 900_000 && oracle_price <= 1_100_000);
+
+    let result = engine.withdraw(user_idx, amount, 100, oracle_price);
+
+    // Postcondition: INV preserved on the Ok path
+    if result.is_ok() {
+        kani::assert(
+            canonical_inv(&engine),
+            "INDUCTIVE: canonical_inv must hold after withdraw for any valid pre-state",
+        );
+    }
+}
+
+// ============================================================================
 // Variation Margin / No PnL Teleportation Proofs
 // ============================================================================
 
