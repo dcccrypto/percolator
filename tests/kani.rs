@@ -3390,6 +3390,15 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     let oracle_price: u64 = kani::any();
     kani::assume(oracle_price >= 800_000 && oracle_price <= 1_200_000);
 
+    // Inductive precondition: conservation must hold *before* the operation.
+    // canonical_inv only guarantees the primary check (vault >= c_tot + insurance).
+    // check_conservation also verifies the extended invariant (net_pnl + mark_pnl
+    // accounting + MAX_ROUNDING_SLACK bound). Without this assume, Kani explores
+    // pre-states where vault >> base + total_pnl, causing the slack bound to fail
+    // post-liquidation even when the operation itself preserves the invariant.
+    // Matches the same pattern used in proof_lq2_symbolic_conservation.
+    kani::assume(engine.check_conservation(oracle_price));
+
     let oi_before = engine.total_open_interest;
 
     let result = engine.liquidate_at_oracle(user_idx, 0, oracle_price);
