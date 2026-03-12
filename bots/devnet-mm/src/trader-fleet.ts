@@ -651,6 +651,7 @@ export class TraderFleetBot {
 
   getStatus() {
     return {
+      running: this.running,
       stats: { ...this.stats },
       traders: this.traders.map((t) => ({
         id: t.id,
