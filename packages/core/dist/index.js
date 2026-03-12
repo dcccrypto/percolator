@@ -143,10 +143,20 @@ var IX_TAG = {
   AttestCrossMargin: 55,
   /** PERC-622: Advance oracle phase (permissionless crank) */
   AdvanceOraclePhase: 56,
-  /** PERC-623: Top up keeper fund (permissionless) */
+  /** PERC-623: Top up a market's keeper fund (permissionless) */
   TopUpKeeperFund: 57,
-  /** PERC-629: Slash creation deposit (permissionless crank) */
-  SlashCreationDeposit: 58
+  /** PERC-629: Slash a market creator's deposit (permissionless) */
+  SlashCreationDeposit: 58,
+  /** PERC-628: Initialize the global shared vault (admin) */
+  InitSharedVault: 59,
+  /** PERC-628: Allocate virtual liquidity to a market (admin) */
+  AllocateMarket: 60,
+  /** PERC-628: Queue a withdrawal for the current epoch */
+  QueueWithdrawalSV: 61,
+  /** PERC-628: Claim a queued withdrawal after epoch elapses */
+  ClaimEpochWithdrawal: 62,
+  /** PERC-628: Advance the shared vault epoch (permissionless crank) */
+  AdvanceEpoch: 63
 };
 function encodeFeedId(feedId) {
   const hex = feedId.startsWith("0x") ? feedId.slice(2) : feedId;
@@ -473,6 +483,28 @@ function checkPhaseTransition(currentSlot, marketCreatedSlot, oraclePhase, cumul
 }
 function encodeTopUpKeeperFund(args) {
   return concatBytes(encU8(IX_TAG.TopUpKeeperFund), encU64(args.amount));
+}
+function encodeSlashCreationDeposit() {
+  return encU8(IX_TAG.SlashCreationDeposit);
+}
+function encodeInitSharedVault(args) {
+  return concatBytes(
+    encU8(IX_TAG.InitSharedVault),
+    encU64(args.epochDurationSlots),
+    encU16(args.maxMarketExposureBps)
+  );
+}
+function encodeAllocateMarket(args) {
+  return concatBytes(encU8(IX_TAG.AllocateMarket), encU128(args.amount));
+}
+function encodeQueueWithdrawalSV(args) {
+  return concatBytes(encU8(IX_TAG.QueueWithdrawalSV), encU64(args.lpAmount));
+}
+function encodeClaimEpochWithdrawal() {
+  return encU8(IX_TAG.ClaimEpochWithdrawal);
+}
+function encodeAdvanceEpoch() {
+  return encU8(IX_TAG.AdvanceEpoch);
 }
 
 // src/abi/accounts.ts
@@ -3073,7 +3105,10 @@ export {
   encU64,
   encU8,
   encodeAdminForceClose,
+  encodeAdvanceEpoch,
   encodeAdvanceOraclePhase,
+  encodeAllocateMarket,
+  encodeClaimEpochWithdrawal,
   encodeCloseAccount,
   encodeCloseSlab,
   encodeCreateInsuranceMint,
@@ -3082,11 +3117,13 @@ export {
   encodeFundMarketInsurance,
   encodeInitLP,
   encodeInitMarket,
+  encodeInitSharedVault,
   encodeInitUser,
   encodeKeeperCrank,
   encodeLiquidateAtOracle,
   encodePauseMarket,
   encodePushOraclePrice,
+  encodeQueueWithdrawalSV,
   encodeRenounceAdmin,
   encodeResolveMarket,
   encodeSetInsuranceIsolation,
@@ -3095,6 +3132,7 @@ export {
   encodeSetOraclePriceCap,
   encodeSetPythOracle,
   encodeSetRiskThreshold,
+  encodeSlashCreationDeposit,
   encodeStakeAccrueFees,
   encodeStakeAdminResolveMarket,
   encodeStakeAdminSetHwmConfig,

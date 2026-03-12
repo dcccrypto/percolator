@@ -78,10 +78,20 @@ export const IX_TAG = {
   AttestCrossMargin: 55,
   /** PERC-622: Advance oracle phase (permissionless crank) */
   AdvanceOraclePhase: 56,
-  /** PERC-623: Top up keeper fund (permissionless) */
+  /** PERC-623: Top up a market's keeper fund (permissionless) */
   TopUpKeeperFund: 57,
-  /** PERC-629: Slash creation deposit (permissionless crank) */
+  /** PERC-629: Slash a market creator's deposit (permissionless) */
   SlashCreationDeposit: 58,
+  /** PERC-628: Initialize the global shared vault (admin) */
+  InitSharedVault: 59,
+  /** PERC-628: Allocate virtual liquidity to a market (admin) */
+  AllocateMarket: 60,
+  /** PERC-628: Queue a withdrawal for the current epoch */
+  QueueWithdrawalSV: 61,
+  /** PERC-628: Claim a queued withdrawal after epoch elapses */
+  ClaimEpochWithdrawal: 62,
+  /** PERC-628: Advance the shared vault epoch (permissionless crank) */
+  AdvanceEpoch: 63,
 } as const;
 
 /**
@@ -932,3 +942,127 @@ export function encodeTopUpKeeperFund(args: TopUpKeeperFundArgs): Uint8Array {
 // Note: WithdrawKeeperReward does NOT exist as a separate instruction.
 // Keeper rewards are paid automatically during KeeperCrank (tag 5).
 // The keeper fund PDA is debited in-place when a successful crank is executed.
+
+// ============================================================================
+// PERC-629: Dynamic Creation Deposit
+// ============================================================================
+
+/**
+ * SlashCreationDeposit (Tag 58) — permissionless: slash a market creator's deposit
+ * after the spam grace period has elapsed (PERC-629).
+ *
+ * Instruction data: 1 byte (tag only)
+ *
+ * Accounts:
+ *   0. [signer]           Caller (anyone)
+ *   1. []                 Slab
+ *   2. [writable]         Creator history PDA
+ *   3. [writable]         Insurance vault
+ *   4. [writable]         Treasury
+ *   5. []                 System program
+ */
+export function encodeSlashCreationDeposit(): Uint8Array {
+  return encU8(IX_TAG.SlashCreationDeposit);
+}
+
+// ============================================================================
+// PERC-628: Elastic Shared Vault + Epoch Withdrawals
+// ============================================================================
+
+/**
+ * InitSharedVault (Tag 59) — admin: create the global shared vault PDA (PERC-628).
+ *
+ * Instruction data: tag(1) + epochDurationSlots(8) + maxMarketExposureBps(2) = 11 bytes
+ *
+ * Accounts:
+ *   0. [signer]           Admin
+ *   1. [writable]         Shared vault PDA
+ *   2. []                 System program
+ */
+export interface InitSharedVaultArgs {
+  epochDurationSlots: bigint | string;
+  maxMarketExposureBps: number;
+}
+
+export function encodeInitSharedVault(args: InitSharedVaultArgs): Uint8Array {
+  return concatBytes(
+    encU8(IX_TAG.InitSharedVault),
+    encU64(args.epochDurationSlots),
+    encU16(args.maxMarketExposureBps),
+  );
+}
+
+/**
+ * AllocateMarket (Tag 60) — admin: allocate virtual liquidity from the shared vault
+ * to a market (PERC-628).
+ *
+ * Instruction data: tag(1) + amount(16) = 17 bytes
+ *
+ * Accounts:
+ *   0. [signer]           Admin
+ *   1. []                 Slab
+ *   2. [writable]         Shared vault PDA
+ *   3. [writable]         Market alloc PDA
+ *   4. []                 System program
+ */
+export interface AllocateMarketArgs {
+  amount: bigint | string;
+}
+
+export function encodeAllocateMarket(args: AllocateMarketArgs): Uint8Array {
+  return concatBytes(encU8(IX_TAG.AllocateMarket), encU128(args.amount));
+}
+
+/**
+ * QueueWithdrawalSV (Tag 61) — user: queue a withdrawal request for the current
+ * epoch (PERC-628). Tokens are locked until the epoch elapses.
+ *
+ * Instruction data: tag(1) + lpAmount(8) = 9 bytes
+ *
+ * Accounts:
+ *   0. [signer]           User
+ *   1. [writable]         Shared vault PDA
+ *   2. [writable]         Withdraw request PDA
+ *   3. []                 System program
+ */
+export interface QueueWithdrawalSVArgs {
+  lpAmount: bigint | string;
+}
+
+export function encodeQueueWithdrawalSV(args: QueueWithdrawalSVArgs): Uint8Array {
+  return concatBytes(encU8(IX_TAG.QueueWithdrawalSV), encU64(args.lpAmount));
+}
+
+/**
+ * ClaimEpochWithdrawal (Tag 62) — user: claim a queued withdrawal after the epoch
+ * has elapsed (PERC-628). Receives pro-rata collateral from the vault.
+ *
+ * Instruction data: 1 byte (tag only)
+ *
+ * Accounts:
+ *   0. [signer]           User
+ *   1. [writable]         Shared vault PDA
+ *   2. [writable]         Withdraw request PDA
+ *   3. []                 Slab
+ *   4. [writable]         Vault
+ *   5. [writable]         User ATA
+ *   6. []                 Vault authority
+ *   7. []                 Token program
+ */
+export function encodeClaimEpochWithdrawal(): Uint8Array {
+  return encU8(IX_TAG.ClaimEpochWithdrawal);
+}
+
+/**
+ * AdvanceEpoch (Tag 63) — permissionless crank: move the shared vault to the next
+ * epoch once `epoch_duration_slots` have elapsed (PERC-628).
+ *
+ * Instruction data: 1 byte (tag only)
+ *
+ * Accounts:
+ *   0. [signer]           Caller (anyone)
+ *   1. [writable]         Shared vault PDA
+ */
+export function encodeAdvanceEpoch(): Uint8Array {
+  return encU8(IX_TAG.AdvanceEpoch);
+}
