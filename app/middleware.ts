@@ -219,6 +219,10 @@ export async function middleware(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   addSecurityHeaders(response, nonce);
+  // PERC-695: Prevent CDN/edge caching of nonce-protected HTML responses.
+  // A cached response would carry the old nonce in data-nonce while the middleware
+  // generates a fresh nonce for the CSP header — making the nonce effectively static.
+  response.headers.set("Cache-Control", "no-store, must-revalidate");
   return response;
 }
 
