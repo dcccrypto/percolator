@@ -2422,6 +2422,11 @@ impl RiskEngine {
             return Ok(false);
         }
 
+        // Defensive: entry_price must be valid for mark-to-market calculations
+        if self.accounts[idx as usize].entry_price == 0 {
+            return Err(RiskError::Overflow);
+        }
+
         // Settle funding + mark-to-market + best-effort fees
         self.touch_account_for_liquidation(idx, now_slot, oracle_price)?;
 

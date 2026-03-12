@@ -3247,13 +3247,22 @@ fn proof_lq2_symbolic_conservation() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // Entry prices must be positive and within oracle range (entry_price=0 is
+    // unreachable in production — all positions open at non-zero oracle price)
+    let user_entry_price: u64 = kani::any();
+    let lp_entry_price: u64 = kani::any();
+    kani::assume(user_entry_price >= 800_000 && user_entry_price <= 1_200_000);
+    kani::assume(lp_entry_price >= 800_000 && lp_entry_price <= 1_200_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry_price;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[lp_idx as usize].capital = U128::new(lp_capital);
     engine.accounts[lp_idx as usize].pnl = I128::new(lp_pnl);
     engine.accounts[lp_idx as usize].position_size = I128::new(lp_pos);
+    engine.accounts[lp_idx as usize].entry_price = lp_entry_price;
     engine.accounts[lp_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
@@ -3311,13 +3320,22 @@ fn proof_lq3_symbolic_position_close_and_oi() {
     kani::assume(vault_amount <= 1_000_000);
     kani::assume(insurance_amount <= 100_000);
 
+    // Entry prices must be positive and within oracle range (entry_price=0 is
+    // unreachable in production — all positions open at non-zero oracle price)
+    let user_entry_price: u64 = kani::any();
+    let cp_entry_price: u64 = kani::any();
+    kani::assume(user_entry_price >= 800_000 && user_entry_price <= 1_200_000);
+    kani::assume(cp_entry_price >= 800_000 && cp_entry_price <= 1_200_000);
+
     engine.accounts[user_idx as usize].capital = U128::new(user_capital);
     engine.accounts[user_idx as usize].pnl = I128::new(user_pnl);
     engine.accounts[user_idx as usize].position_size = I128::new(user_pos);
+    engine.accounts[user_idx as usize].entry_price = user_entry_price;
     engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.accounts[counterparty_idx as usize].capital = U128::new(cp_capital);
     engine.accounts[counterparty_idx as usize].pnl = I128::new(cp_pnl);
     engine.accounts[counterparty_idx as usize].position_size = I128::new(cp_pos);
+    engine.accounts[counterparty_idx as usize].entry_price = cp_entry_price;
     engine.accounts[counterparty_idx as usize].warmup_slope_per_step = U128::new(0);
     engine.vault = U128::new(vault_amount);
     engine.insurance_fund.balance = U128::new(insurance_amount);
