@@ -1171,15 +1171,17 @@ interface DiscoveredMarket {
  *       Previous SLAB_TIERS used CONFIG_LEN=536 (wrong — that's a stale comment from pre-PERC-328
  *       when an extra _reserved field existed in the native layout). The deployed programs use 496.
  *       ENGINE_OFF = align_up(104 + 496, 8) = 600 (not 640 — 40-byte discrepancy fixed in PERC-1094).
- *       Verified by querying on-chain Small program accounts: single initialized slab has 65312 bytes.
- *       RiskEngine grew by 32 bytes (PERC-298: long_oi + short_oi) + 24 (PERC-299: emergency OI).
+ *       NOTE: The deployed devnet Small-tier program binary was compiled with the V0 layout
+ *       (ENGINE_OFF=480, ACCOUNT_SIZE=240) → SLAB_LEN=62_808. On-chain query (GH #1104) confirms
+ *       127 accounts at 62_808 bytes; 0 at 65_312. PR #1096 incorrectly set Small to the V1 value.
+ *       Medium and Large tiers are compiled with V1 layout and retain their V1 sizes.
  */
 declare const SLAB_TIERS: {
     readonly small: {
         readonly maxAccounts: 256;
-        readonly dataSize: 65312;
+        readonly dataSize: 62808;
         readonly label: "Small";
-        readonly description: "256 slots · ~0.45 SOL";
+        readonly description: "256 slots · ~0.44 SOL";
     };
     readonly medium: {
         readonly maxAccounts: 1024;
@@ -1219,9 +1221,9 @@ declare const SLAB_TIERS_V0: {
 declare const SLAB_TIERS_V1: {
     readonly small: {
         readonly maxAccounts: 256;
-        readonly dataSize: 65312;
+        readonly dataSize: 62808;
         readonly label: "Small";
-        readonly description: "256 slots · ~0.45 SOL";
+        readonly description: "256 slots · ~0.44 SOL";
     };
     readonly medium: {
         readonly maxAccounts: 1024;
