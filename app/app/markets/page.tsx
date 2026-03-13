@@ -227,13 +227,16 @@ function MarketsPageInner() {
 
   const filtered = useMemo(() => {
     let list = activeMarkets;
-    // Text search — matches on-chain symbol, name, slab address, OR mint address
+    // Text search — matches on-chain symbol, name, slab address, mint address,
+    // OR Supabase market name/symbol (e.g. "BTC-PERP-1", "BTC") — fixes #1132
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.toLowerCase();
       list = list.filter((m) => {
         const onChainMeta = tokenMetaMap.get(m.mintAddress);
         return onChainMeta?.symbol?.toLowerCase().includes(q) ||
           onChainMeta?.name?.toLowerCase().includes(q) ||
+          m.supabase?.name?.toLowerCase().includes(q) ||
+          m.supabase?.symbol?.toLowerCase().includes(q) ||
           m.slabAddress.toLowerCase().includes(q) ||
           m.mintAddress.toLowerCase().includes(q);
       });
