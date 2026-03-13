@@ -66,6 +66,10 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   // Don't rely solely on tokenMeta which may fail for cross-network tokens
   const [onChainDecimals, setOnChainDecimals] = useState<number | null>(null);
   const decimals = onChainDecimals ?? tokenMeta?.decimals ?? 6;
+
+  // GH#1133: Wallet ATA balance — shown in Bal: when no user account exists yet
+  // (before CreateAccount+Deposit; capital=0n from null userAccount is misleading)
+  const [walletAtaBalance, setWalletAtaBalance] = useState<bigint | null>(null);
   
   const prefersReduced = usePrefersReducedMotion();
 
@@ -135,11 +139,13 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
     [capital, decimals]
   );
 
-  // BUG FIX: Fetch on-chain decimals from user's token account
-  // This ensures correct decimals even for cross-network tokens or missing metadata
+  // BUG FIX: Fetch on-chain decimals AND wallet ATA balance from user's token account.
+  // Decimals: ensures correct precision for cross-network tokens or missing metadata.
+  // Wallet balance (GH#1133): show real wallet balance when no trading account exists yet.
   useEffect(() => {
     if (!publicKey || !mktConfig?.collateralMint || mockMode) {
       setOnChainDecimals(null);
+      setWalletAtaBalance(null);
       return;
     }
     let cancelled = false;
@@ -147,12 +153,13 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
       try {
         const ata = getAssociatedTokenAddressSync(mktConfig.collateralMint, publicKey);
         const info = await connection.getTokenAccountBalance(ata);
-        if (!cancelled && info.value.decimals !== undefined) {
-          setOnChainDecimals(info.value.decimals);
+        if (!cancelled) {
+          if (info.value.decimals !== undefined) setOnChainDecimals(info.value.decimals);
+          if (info.value.amount) setWalletAtaBalance(BigInt(info.value.amount));
         }
       } catch {
-        // Token account may not exist yet, keep using fallback decimals
-        if (!cancelled) setOnChainDecimals(null);
+        // Token account may not exist yet (no wallet balance), keep using fallback decimals
+        if (!cancelled) { setOnChainDecimals(null); setWalletAtaBalance(null); }
       }
     })();
     return () => { cancelled = true; };
@@ -307,7 +314,8 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
         <div className="mb-1 flex items-center justify-between">
           <label className="text-[10px] uppercase tracking-[0.15em] text-[var(--text-dim)]">Margin ({symbol})<InfoIcon tooltip="The amount of collateral you're putting up for this trade. If your position loses more than your margin, you get liquidated." /></label>
           <span className="text-[10px] text-[var(--text-dim)]" style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-            Bal: {formatPerc(capital, decimals)}
+            {/* GH#1133: When no trading account exists yet, show wallet ATA balance (not 0) */}
+            Bal: {userAccount ? formatPerc(capital, decimals) : (walletAtaBalance !== null ? formatPerc(walletAtaBalance, decimals) : "—")}
           </span>
         </div>
         <div className="relative">

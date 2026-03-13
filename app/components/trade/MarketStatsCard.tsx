@@ -22,6 +22,12 @@ function formatNum(n: number): string {
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// Max sane on-chain mark price: $1M USD (matches markets page cap). Values above this
+// indicate corrupted/stale authorityPriceE6 data (e.g. raw token amounts stored as price).
+// When exceeded, fall back to live WebSocket price (#1131).
+const MAX_SANE_MARK_PRICE_USD = 1_000_000; // $1M
+const MAX_SANE_MARK_E6 = BigInt(MAX_SANE_MARK_PRICE_USD) * 1_000_000n;
+
 /** Format a price in E6 format as a USD string with appropriate precision. */
 function formatPriceE6(priceE6: bigint): string {
   const price = Number(priceE6) / 1_000_000;
@@ -62,9 +68,11 @@ export const MarketStatsCard: FC = () => {
     if (mode === "hyperp" || mode === "admin") {
       // authorityPriceE6 = latest pushed/mark price
       // lastEffectivePriceE6 = EMA / effective / index price
-      mark = sanitizePriceE6(mktConfig.authorityPriceE6);
+      const rawMark = sanitizePriceE6(mktConfig.authorityPriceE6);
+      // Bug #1131: for HYPERP/admin markets, authorityPriceE6 can be corrupted (e.g. raw token
+      // vault amounts stored as price). Guard: reject if price > $1M — use live WS price instead.
+      mark = rawMark > 0n && rawMark <= MAX_SANE_MARK_E6 ? rawMark : null;
       index = sanitizePriceE6(mktConfig.lastEffectivePriceE6);
-      if (mark === 0n) mark = null;
       if (index === 0n) index = null;
       // Bug #843: for admin mode, lastEffectivePriceE6 may be uninitialized (e.g. 1000 = $0.001)
       // when KeeperCrank hasn't run yet. If index is >100x smaller than mark, suppress it
