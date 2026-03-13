@@ -1071,9 +1071,9 @@ for (const n of TIERS) {
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
   V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
 }
-function buildLayout(version, maxAccounts) {
+function buildLayout(version, maxAccounts, engineOffOverride) {
   const isV0 = version === 0;
-  const engineOff = isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF;
+  const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
   const bitmapOff = isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
   const accountSize = isV0 ? V0_ACCOUNT_SIZE : V1_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
@@ -1135,7 +1135,7 @@ function detectSlabLayout(dataLen) {
   const v1n = V1_SIZES.get(dataLen);
   if (v1n !== void 0) return buildLayout(1, v1n);
   const v1ln = V1_SIZES_LEGACY.get(dataLen);
-  if (v1ln !== void 0) return buildLayout(1, v1ln);
+  if (v1ln !== void 0) return buildLayout(1, v1ln, V1_ENGINE_OFF_LEGACY);
   return null;
 }
 function detectLayout(dataLen) {
@@ -1764,11 +1764,12 @@ function parseEngineLight(data, layout, maxAccounts = 4096) {
       isolatedBalance: readU128LE2(data, base + 48),
       isolationBps: readU16LE2(data, base + 64)
     },
-    currentSlot: readU64LE2(data, base + 352),
-    fundingIndexQpbE6: readI128LE2(data, base + 360),
-    lastFundingSlot: readU64LE2(data, base + 376),
-    fundingRateBpsPerSlotLast: readI64LE2(data, base + 384),
-    lastCrankSlot: readU64LE2(data, base + 400),
+    currentSlot: readU64LE2(data, base + 360),
+    // PERC-1094: params end at 72+288=360 (was 352)
+    fundingIndexQpbE6: readI128LE2(data, base + 368),
+    lastFundingSlot: readU64LE2(data, base + 384),
+    fundingRateBpsPerSlotLast: readI64LE2(data, base + 392),
+    lastCrankSlot: readU64LE2(data, base + 424),
     maxCrankStalenessSlots: readU64LE2(data, base + 408),
     totalOpenInterest: readU128LE2(data, base + 416),
     longOi: readU128LE2(data, base + 432),
@@ -1790,7 +1791,8 @@ function parseEngineLight(data, layout, maxAccounts = 4096) {
     emergencyOiMode: data[base + 608] !== 0,
     emergencyStartSlot: readU64LE2(data, base + 616),
     lastBreakerSlot: readU64LE2(data, base + 624),
-    markPriceE6: readU64LE2(data, base + 392),
+    markPriceE6: readU64LE2(data, base + 400),
+    // PERC-1094: was 392
     numUsedAccounts: canReadNumUsed ? readU16LE2(data, base + numUsedOff) : 0,
     nextAccountId: canReadNextId ? readU64LE2(data, base + nextAccountIdOff) : 0n
   };
