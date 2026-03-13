@@ -625,6 +625,65 @@ function startHealthServer() {
 const knownSlabs = new Set<string>();
 
 /**
+ * Poll Supabase `oracle_markets` table for explicitly-registered oracle configs.
+ *
+ * This table is an override layer: rows here take precedence over
+ * markets.oracle_mode. Useful for registering HYPERP markets on devnet where
+ * all markets are forced to oracle_mode='admin' because devnet-mirrored tokens
+ * don't have real DEX pools (isDevnetMirror path in useCreateMarket).
+ *
+ * Any market listed here with oracle_type='hyperp' will be cranked via
+ * UpdateHyperpMark regardless of what markets.oracle_mode says.
+ * If the slab is already tracked with a different mode, this function
+ * updates it in-place and clears the pool cache so the new pool is resolved.
+ */
+async function discoverHyperpFromOracleTable(): Promise<MarketInfo[]> {
+  if (!supabaseEnabled) return [];
+  try {
+    const data = await supabaseQuery(
+      "oracle_markets",
+      "select=slab_address,oracle_type,dex_pool_address&oracle_type=eq.hyperp&enabled=eq.true",
+    );
+    if (!data) return [];
+
+    const newMarkets: MarketInfo[] = [];
+    for (const row of data) {
+      if (!row.slab_address || !row.dex_pool_address) continue;
+
+      if (knownSlabs.has(row.slab_address)) {
+        // Upgrade an already-tracked market from admin/pyth → hyperp
+        const existing = markets.find(m => m.slab === row.slab_address);
+        if (existing && existing.oracleMode !== "hyperp") {
+          log(`🔄 ${existing.label}: oracle_markets override → hyperp (pool=${row.dex_pool_address.slice(0, 12)}...)`);
+          existing.oracleMode = "hyperp";
+          existing.dexPoolAddress = row.dex_pool_address;
+          hyperpPoolCache.delete(row.slab_address); // force re-fetch with new pool
+        }
+        continue;
+      }
+
+      knownSlabs.add(row.slab_address);
+      newMarkets.push({
+        symbol: "HYPERP",
+        label: `${row.slab_address.slice(0, 8)}... (oracle_markets)`,
+        slab: row.slab_address,
+        oracleMode: "hyperp",
+        dexPoolAddress: row.dex_pool_address ?? undefined,
+      });
+    }
+
+    if (newMarkets.length > 0) {
+      log(`🗂 oracle_markets: ${newMarkets.length} new HYPERP slab(s) registered for cranking`);
+    }
+
+    return newMarkets;
+  } catch (e) {
+    log(`⚠️ oracle_markets discovery error: ${(e as Error).message?.slice(0, 80)}`);
+    return [];
+  }
+}
+
+/**
  * Poll Supabase `markets` table for newly created markets with a mainnet_ca.
  * Returns new MarketInfo entries that aren't already tracked.
  */
@@ -835,7 +894,10 @@ async function main() {
           }
         }
 
-        const newMarkets = await discoverNewMarkets();
+        // Also check the oracle_markets override table (HYPERP explicit registrations)
+        const oracleTableMarkets = await discoverHyperpFromOracleTable();
+
+        const newMarkets = [...(await discoverNewMarkets()), ...oracleTableMarkets];
         if (newMarkets.length > 0) {
           log(`🔍 Discovered ${newMarkets.length} new market(s): ${newMarkets.map(m => m.label).join(", ")}`);
           for (const m of newMarkets) {
