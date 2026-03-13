@@ -147,6 +147,8 @@ function MarketsPageInner() {
         continue;
       }
       const addr = d.slabAddress.toBase58();
+      // GH#1106: deduplicate — same slab can appear from multiple program scans
+      if (seenSlabs.has(addr)) continue;
       const mint = d.config.collateralMint.toBase58();
       const maxLev = d.params.initialMarginBps > 0n ? Math.floor(10000 / Number(d.params.initialMarginBps)) : 0;
       const oracleMode = detectOracleMode(d.config);
