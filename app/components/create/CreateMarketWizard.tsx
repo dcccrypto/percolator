@@ -199,6 +199,10 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
   const hasSufficientSol = solBalance !== null && solBalance >= requiredSol;
   // On devnet, tokens are auto-airdropped after market creation — skip token balance checks
   const isDevnet = getNetwork() === "devnet";
+  // GH#1117: True only when the selected token is a Percolator mirror mint
+  // (devnetMintAddress differs from the user's input = mirror flow ran).
+  // False for custom tokens entered directly (user = mint authority; no auto-airdrop).
+  const isPercolatorMirror = devnetMintAddress !== null && devnetMintAddress !== wizard.mintAddress;
   const allValid = step1Valid && step2Valid && step3Valid && (isDevnet || (hasTokens && hasSufficientTokensForSeed)) && hasSufficientSol;
 
   // Quick Launch auto-advance: step 1 → step 2 when token is resolved and params ready
@@ -751,6 +755,7 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
             hasTokens={hasTokens}
             hasSufficientTokensForSeed={hasSufficientTokensForSeed}
             feeConflict={feeConflict}
+            isPercolatorMirror={isPercolatorMirror}
             onBack={goBack}
             onLaunch={handleLaunch}
             canLaunch={allValid && !!publicKey}

@@ -32,6 +32,12 @@ interface StepReviewProps {
   hasTokens: boolean;
   hasSufficientTokensForSeed: boolean;
   feeConflict: boolean;
+  /**
+   * GH#1117: True only when the token is a Percolator-managed devnet mirror
+   * (Percolator = mint authority). False for custom tokens (user = mint authority).
+   * Controls whether the "tokens auto-airdropped" promise is shown at Review.
+   */
+  isPercolatorMirror?: boolean;
   // Actions
   onBack: () => void;
   onLaunch: () => void;
@@ -72,6 +78,7 @@ export const StepReview: FC<StepReviewProps> = ({
   hasTokens,
   hasSufficientTokensForSeed,
   feeConflict,
+  isPercolatorMirror = false,
   onBack,
   onLaunch,
   canLaunch,
@@ -96,9 +103,9 @@ export const StepReview: FC<StepReviewProps> = ({
     if (!isDevnet && !hasSufficientTokensForSeed) return "Insufficient Tokens for Vault Seed (500)";
     if (feeConflict) return "Fix Parameters to Continue";
     if (!hasSufficientBalance) return "Insufficient SOL";
-    if (isDevnet) return "LAUNCH & MINT TOKENS →";
+    if (isDevnet) return isPercolatorMirror ? "LAUNCH & MINT TOKENS →" : "LAUNCH MARKET →";
     return "LAUNCH MARKET →";
-  }, [walletConnected, mintValid, mintExistsOnNetwork, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet]);
+  }, [walletConnected, mintValid, mintExistsOnNetwork, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet, isPercolatorMirror]);
 
   return (
     <div className="space-y-5">
@@ -193,8 +200,8 @@ export const StepReview: FC<StepReviewProps> = ({
         </div>
       )}
 
-      {/* Devnet: tokens are auto-minted after market creation */}
-      {walletConnected && isDevnet && (
+      {/* Devnet: token funding info — differs by mint authority (GH#1117) */}
+      {walletConnected && isDevnet && isPercolatorMirror && (
         <div className="border border-[var(--long)]/20 bg-[var(--long)]/[0.04] px-4 py-3 space-y-1">
           <p className="text-[11px] text-[var(--text)]">
             <span className="text-[var(--long)] font-medium">✓ Devnet mode.</span>{" "}
@@ -202,6 +209,17 @@ export const StepReview: FC<StepReviewProps> = ({
           </p>
           <p className="text-[9px] text-[var(--text-dim)]">
             No tokens needed upfront — tokens are airdropped post-launch for testing.
+          </p>
+        </div>
+      )}
+      {walletConnected && isDevnet && !isPercolatorMirror && (
+        <div className="border border-[var(--accent)]/20 bg-[var(--accent)]/[0.04] px-4 py-3 space-y-1">
+          <p className="text-[11px] text-[var(--text)]">
+            <span className="text-[var(--accent)] font-medium">ℹ Custom token.</span>{" "}
+            You are the mint authority — tokens will not be auto-airdropped.
+          </p>
+          <p className="text-[9px] text-[var(--text-dim)]">
+            After launch, mint tokens from your wallet and deposit them into the vault to enable trading.
           </p>
         </div>
       )}
