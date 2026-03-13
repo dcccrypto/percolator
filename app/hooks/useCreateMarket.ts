@@ -293,7 +293,7 @@ export function useCreateMarket() {
         return;
       }
 
-      const [vaultPda] = deriveVaultAuthority(programId, slabPk);
+      let [vaultPda] = deriveVaultAuthority(programId, slabPk);
 
       try {
         // Step 0: Create slab + vault ATA + InitMarket (ATOMIC — all-or-nothing)
@@ -305,7 +305,31 @@ export function useCreateMarket() {
           vaultAta = await getAssociatedTokenAddress(params.mint, vaultPda, true);
 
           // Check if slab account already exists (previous attempt may have landed)
-          const existingAccount = await connection.getAccountInfo(slabKp.publicKey);
+          // PERC-1094 fix: also regenerate if the existing slab has the wrong size (stale
+          // orphan from old SDK — e.g. 65352-byte account created before ENGINE_OFF fix).
+          // Without this check, retries always call InitMarket on the wrong-sized slab and
+          // fail with InvalidSlabLen (error 0x4) even after the SDK size was corrected.
+          const expectedSlabSize = params.slabDataSize ?? DEFAULT_SLAB_SIZE;
+          let existingAccount = await connection.getAccountInfo(slabKp.publicKey);
+          if (existingAccount && existingAccount.data.length !== expectedSlabSize) {
+            console.warn(
+              `[useCreateMarket] PERC-1094: stale slab ${slabKp.publicKey.toBase58()} ` +
+              `(${existingAccount.data.length}B, expected ${expectedSlabSize}B). ` +
+              `Abandoning orphan and generating fresh keypair.`,
+            );
+            localStorage.removeItem("percolator-pending-slab-keypair");
+            slabKp = Keypair.generate();
+            slabKpRef.current = slabKp;
+            slabPk = slabKp.publicKey;
+            localStorage.setItem(
+              "percolator-pending-slab-keypair",
+              JSON.stringify(Array.from(slabKp.secretKey)),
+            );
+            // Recompute PDA and ATA for new slab keypair
+            [vaultPda] = deriveVaultAuthority(programId, slabPk);
+            vaultAta = await getAssociatedTokenAddress(params.mint, vaultPda, true);
+            existingAccount = null; // treat as fresh creation
+          }
           if (existingAccount) {
             // Slab already created — check if market is initialized
             const headerMagic = existingAccount.data.length >= 8
