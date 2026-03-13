@@ -374,8 +374,14 @@ export async function discoverMarkets(
   const accounts = rawAccounts;
 
   const markets: DiscoveredMarket[] = [];
+  // GH#1115: deduplicate raw accounts by pubkey — the same slab can appear in multiple
+  // tier queries if both V0 and V1 sizes match or if the RPC returns duplicate entries.
+  const seenPubkeys = new Set<string>();
 
   for (const { pubkey, account, maxAccounts, dataSize } of accounts) {
+    const pkStr = pubkey.toBase58();
+    if (seenPubkeys.has(pkStr)) continue;
+    seenPubkeys.add(pkStr);
     const data = new Uint8Array(account.data);
 
     let valid = true;

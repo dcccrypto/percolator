@@ -1862,7 +1862,11 @@ async function discoverMarkets(connection, programId) {
   }
   const accounts = rawAccounts;
   const markets = [];
+  const seenPubkeys = /* @__PURE__ */ new Set();
   for (const { pubkey, account, maxAccounts, dataSize } of accounts) {
+    const pkStr = pubkey.toBase58();
+    if (seenPubkeys.has(pkStr)) continue;
+    seenPubkeys.add(pkStr);
     const data = new Uint8Array(account.data);
     let valid = true;
     for (let i = 0; i < MAGIC_BYTES.length; i++) {

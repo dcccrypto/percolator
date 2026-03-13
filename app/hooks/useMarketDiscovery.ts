@@ -43,7 +43,16 @@ export function useMarketDiscovery() {
           programIds.map((pid) => discoverMarkets(connection, pid).catch(() => [] as DiscoveredMarket[]))
         );
         if (!cancelled) {
-          setMarkets(results.flat());
+          // GH#1115: deduplicate across program-ID scans — same slab can appear from
+          // multiple discoverMarkets calls if programsBySlabTier overlaps with programId.
+          const seenSlabs = new Set<string>();
+          const flat = results.flat().filter((m) => {
+            const addr = m.slabAddress.toBase58();
+            if (seenSlabs.has(addr)) return false;
+            seenSlabs.add(addr);
+            return true;
+          });
+          setMarkets(flat);
           setError(null);
         }
       } catch (err) {
