@@ -1,18 +1,20 @@
 /**
- * Tests for POST /api/oracle/advance-phase (GH#1120 fix)
+ * Tests for POST /api/oracle/advance-phase
  *
- * Server-side AdvanceOraclePhase crank — signs with CRANK_KEYPAIR,
- * no user wallet interaction.
+ * PERC-799 changes:
+ * - GH#1124: 60 req/IP/min rate limit
+ * - GH#1125: CRANK_KEYPAIR only — DEVNET_MINT_AUTHORITY_KEYPAIR fallback removed
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
-// --- Hoisted mock references (must use vi.hoisted to be accessible in vi.mock factories) ---
+// --- Hoisted mock references ---
 
-const { mockSendAndConfirm, mockFromSecretKey } = vi.hoisted(() => ({
+const { mockSendAndConfirm, mockFromSecretKey, mockCheckRateLimit } = vi.hoisted(() => ({
   mockSendAndConfirm: vi.fn(),
   mockFromSecretKey: vi.fn(),
+  mockCheckRateLimit: vi.fn(),
 }));
 
 // --- Mocks ---
@@ -25,13 +27,17 @@ vi.mock("@sentry/nextjs", () => ({
   captureException: vi.fn(),
 }));
 
+vi.mock("@/lib/advance-phase-rate-limit", () => ({
+  checkAdvancePhaseRateLimit: mockCheckRateLimit,
+  ADVANCE_PHASE_RATE_LIMIT: 60,
+}));
+
 vi.mock("@solana/web3.js", () => {
   const fakePublicKey = {
     toBase58: () => "11111111111111111111111111111111",
     toString: () => "11111111111111111111111111111111",
   };
   return {
-    // Must use regular function (not arrow) for constructors called with `new`
     Connection: vi.fn().mockImplementation(function () { return {}; }),
     Keypair: {
       fromSecretKey: mockFromSecretKey.mockReturnValue({ publicKey: fakePublicKey }),
@@ -58,7 +64,6 @@ vi.mock("@percolator/sdk", () => ({
   ACCOUNTS_ADVANCE_ORACLE_PHASE: [],
 }));
 
-// Import route ONCE (cached for all tests)
 import { POST } from "@/app/api/oracle/advance-phase/route";
 
 // --- Helpers ---
@@ -70,18 +75,22 @@ const FAKE_PUBKEY = {
   toString: () => "11111111111111111111111111111111",
 };
 
-function makeRequest(body: unknown): NextRequest {
+function makeRequest(body: unknown, ip = "1.2.3.4"): NextRequest {
   return new NextRequest("http://localhost/api/oracle/advance-phase", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-forwarded-for": ip },
     body: JSON.stringify(body),
   });
 }
+
+const RL_ALLOWED = { allowed: true, remaining: 59, retryAfterSecs: 60 };
+const RL_BLOCKED = { allowed: false, remaining: 0, retryAfterSecs: 42 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockSendAndConfirm.mockResolvedValue("sig_default_ok");
   mockFromSecretKey.mockReturnValue({ publicKey: FAKE_PUBKEY });
+  mockCheckRateLimit.mockResolvedValue(RL_ALLOWED);
 
   process.env.NEXT_PUBLIC_SOLANA_NETWORK = "devnet";
   process.env.CRANK_KEYPAIR = FAKE_KEYPAIR_JSON;
@@ -97,6 +106,8 @@ afterEach(() => {
 // --- Tests ---
 
 describe("POST /api/oracle/advance-phase", () => {
+  // ── Validation ────────────────────────────────────────────────────────
+
   it("returns 400 for missing slabAddress", async () => {
     const res = await POST(makeRequest({}));
     expect(res.status).toBe(400);
@@ -117,22 +128,53 @@ describe("POST /api/oracle/advance-phase", () => {
   it("returns 400 for malformed JSON body", async () => {
     const req = new NextRequest("http://localhost/api/oracle/advance-phase", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-forwarded-for": "1.2.3.4" },
       body: "{ bad json {{",
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
   });
 
-  it("returns skipped:true on mainnet", async () => {
+  // ── Network guard ─────────────────────────────────────────────────────
+
+  it("returns skipped:true on mainnet (rate limiter not called)", async () => {
     process.env.NEXT_PUBLIC_SOLANA_NETWORK = "mainnet";
     const res = await POST(makeRequest({ slabAddress: VALID_SLAB }));
     const json = await res.json();
     expect(json.skipped).toBe(true);
     expect(json.reason).toBe("not devnet");
+    // Rate limit check should not fire for no-op network guard
+    expect(mockCheckRateLimit).not.toHaveBeenCalled();
   });
 
-  it("returns skipped:true when no keypair env vars are set", async () => {
+  // ── GH#1124: Rate limiting ─────────────────────────────────────────────
+
+  it("returns 429 when rate limit exceeded", async () => {
+    mockCheckRateLimit.mockResolvedValue(RL_BLOCKED);
+    const res = await POST(makeRequest({ slabAddress: VALID_SLAB }));
+    expect(res.status).toBe(429);
+    const json = await res.json();
+    expect(json.error).toMatch(/rate limit/i);
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("X-RateLimit-Limit")).toBe("60");
+    expect(res.headers.get("X-RateLimit-Remaining")).toBe("0");
+  });
+
+  it("calls checkAdvancePhaseRateLimit with the client IP", async () => {
+    mockSendAndConfirm.mockResolvedValue("sig_ok");
+    await POST(makeRequest({ slabAddress: VALID_SLAB }, "10.0.0.1"));
+    expect(mockCheckRateLimit).toHaveBeenCalledWith("10.0.0.1");
+  });
+
+  it("does not call sendAndConfirm when rate limited", async () => {
+    mockCheckRateLimit.mockResolvedValue(RL_BLOCKED);
+    await POST(makeRequest({ slabAddress: VALID_SLAB }));
+    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+  });
+
+  // ── GH#1125: CRANK_KEYPAIR required, no fallback ──────────────────────
+
+  it("returns skipped:true when CRANK_KEYPAIR is not set", async () => {
     delete process.env.CRANK_KEYPAIR;
     delete process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
     const res = await POST(makeRequest({ slabAddress: VALID_SLAB }));
@@ -140,6 +182,19 @@ describe("POST /api/oracle/advance-phase", () => {
     expect(json.skipped).toBe(true);
     expect(json.reason).toMatch(/no crank keypair/);
   });
+
+  it("does NOT fall back to DEVNET_MINT_AUTHORITY_KEYPAIR when CRANK_KEYPAIR unset", async () => {
+    // GH#1125: mint authority key must not be used as crank key
+    delete process.env.CRANK_KEYPAIR;
+    process.env.DEVNET_MINT_AUTHORITY_KEYPAIR = FAKE_KEYPAIR_JSON;
+    const res = await POST(makeRequest({ slabAddress: VALID_SLAB }));
+    const json = await res.json();
+    // Should skip, not attempt to send a transaction
+    expect(json.skipped).toBe(true);
+    expect(mockSendAndConfirm).not.toHaveBeenCalled();
+  });
+
+  // ── Happy path ────────────────────────────────────────────────────────
 
   it("calls sendAndConfirmTransaction and returns success:true with signature", async () => {
     mockSendAndConfirm.mockResolvedValue("sig_advance_123");
@@ -150,6 +205,8 @@ describe("POST /api/oracle/advance-phase", () => {
     expect(json.signature).toBe("sig_advance_123");
   });
 
+  // ── Error handling ────────────────────────────────────────────────────
+
   it("returns skipped (non-error) when program returns expected on-chain error", async () => {
     mockSendAndConfirm.mockRejectedValue(
       new Error("Transaction simulation failed: custom program error: 0x64"),
@@ -158,15 +215,5 @@ describe("POST /api/oracle/advance-phase", () => {
     const json = await res.json();
     expect(json.success).toBe(false);
     expect(json.skipped).toBe(true);
-  });
-
-  it("falls back to DEVNET_MINT_AUTHORITY_KEYPAIR when CRANK_KEYPAIR not set", async () => {
-    delete process.env.CRANK_KEYPAIR;
-    process.env.DEVNET_MINT_AUTHORITY_KEYPAIR = FAKE_KEYPAIR_JSON;
-    mockSendAndConfirm.mockResolvedValue("sig_fallback_ok");
-    const res = await POST(makeRequest({ slabAddress: VALID_SLAB }));
-    const json = await res.json();
-    expect(json.success).toBe(true);
-    expect(mockFromSecretKey).toHaveBeenCalledTimes(1);
   });
 });
