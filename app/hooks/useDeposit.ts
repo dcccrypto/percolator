@@ -25,7 +25,7 @@ import { useSlabState } from "@/components/providers/SlabProvider";
 export function useDeposit(slabAddress: string) {
   const { connection } = useConnectionCompat();
   const wallet = useWalletCompat();
-  const { config: mktConfig, programId: slabProgramId, refresh: refreshSlab } = useSlabState();
+  const { config: mktConfig, programId: slabProgramId, params: slabParams, refresh: refreshSlab } = useSlabState();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inflightRef = useRef(false);
@@ -104,7 +104,8 @@ export function useDeposit(slabAddress: string) {
                 );
               }
 
-              // InitUser (tag 1, feePayment=0 — just registers the slot)
+              // InitUser (tag 1) — must pay at least newAccountFee (PERC-1126)
+              const accountFee = slabParams?.newAccountFee ?? 0n;
               instructions.push(
                 buildIx({
                   programId,
@@ -115,7 +116,7 @@ export function useDeposit(slabAddress: string) {
                     mktConfig.vaultPubkey,
                     WELL_KNOWN.tokenProgram,
                   ]),
-                  data: encodeInitUser({ feePayment: "0" }),
+                  data: encodeInitUser({ feePayment: accountFee.toString() }),
                 }),
               );
             }

@@ -24,16 +24,22 @@ import { useSlabState } from "@/components/providers/SlabProvider";
 export function useInitUser(slabAddress: string) {
   const { connection } = useConnectionCompat();
   const wallet = useWalletCompat();
-  const { config: mktConfig, programId: slabProgramId, raw: slabRaw, refresh: refreshSlab } = useSlabState();
+  const { config: mktConfig, programId: slabProgramId, raw: slabRaw, params, refresh: refreshSlab } = useSlabState();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const initUser = useCallback(
-    async (feePayment: bigint = 0n) => {
+    async (feePayment?: bigint) => {
       setLoading(true);
       setError(null);
       try {
         if (!wallet.publicKey || !mktConfig || !slabProgramId) throw new Error("Wallet not connected or market not loaded");
+
+        // PERC-1126: The on-chain program requires fee_payment >= new_account_fee.
+        // If the caller doesn't specify a fee (or passes 0), use the market's
+        // configured newAccountFee so the tx doesn't fail with Custom(13).
+        const minFee = params?.newAccountFee ?? 0n;
+        const effectiveFee = (feePayment != null && feePayment >= minFee) ? feePayment : minFee;
 
         // PERC-698 / bug bounty: Pre-flight V0/V1 slab version check.
         // If the slab is V0 size but the on-chain program now expects V1 layout,
@@ -73,7 +79,7 @@ export function useInitUser(slabAddress: string) {
           keys: buildAccountMetas(ACCOUNTS_INIT_USER, [
             wallet.publicKey, slabPk, userAta, mktConfig.vaultPubkey, WELL_KNOWN.tokenProgram,
           ]),
-          data: encodeInitUser({ feePayment: feePayment.toString() }),
+          data: encodeInitUser({ feePayment: effectiveFee.toString() }),
         });
         instructions.push(ix);
         const sig = await sendTx({ connection, wallet, instructions });
@@ -98,7 +104,7 @@ export function useInitUser(slabAddress: string) {
         setLoading(false);
       }
     },
-    [connection, wallet, mktConfig, slabAddress, slabProgramId, slabRaw, refreshSlab]
+    [connection, wallet, mktConfig, slabAddress, slabProgramId, slabRaw, params, refreshSlab]
   );
 
   return { initUser, loading, error };
