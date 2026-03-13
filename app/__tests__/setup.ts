@@ -1,6 +1,6 @@
 import { cleanup } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
-import '@testing-library/jest-dom/vitest';
+import '@testing-library/jest-dom';
 
 // jsdom doesn't implement window.matchMedia — mock it so hooks like
 // usePrefersReducedMotion don't throw during component tests.

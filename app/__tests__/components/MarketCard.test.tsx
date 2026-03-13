@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // In parallel CI workers the setupFiles import can intermittently fail to
 // register custom matchers on the Chai expect object, causing
 // "Invalid Chai property: toBeInTheDocument / toHaveTextContent" errors.
-import "@testing-library/jest-dom/vitest";
+import "@testing-library/jest-dom";
 import { render, screen, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MarketBrowser } from "@/components/market/MarketBrowser";
