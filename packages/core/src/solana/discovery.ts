@@ -37,22 +37,23 @@ const MAGIC_BYTES = new Uint8Array([0x54, 0x41, 0x4c, 0x4f, 0x43, 0x52, 0x45, 0x
  * IMPORTANT: dataSize must match the compiled program's SLAB_LEN for that MAX_ACCOUNTS.
  * The on-chain program has a hardcoded SLAB_LEN — slab account data.len() must equal it exactly.
  *
- * Layout: HEADER(104) + CONFIG(536) + RiskEngine(variable by tier)
- *   ENGINE_OFF = align_up(104 + 536, 8) = 640  (SBF: u128 align = 8)
+ * Layout: HEADER(104) + CONFIG(496) + RiskEngine(variable by tier)
+ *   ENGINE_OFF = align_up(104 + 496, 8) = 600  (SBF: u128 align = 8)
  *   RiskEngine = fixed(656) + bitmap(BW*8) + post_bitmap(18) + next_free(N*2) + pad + accounts(N*248)
  *
- * NOTE: CONFIG_LEN grew 368→384→400→416→432→496→536 across PERC-298 through PERC-328.
- *       PERC-306/307/312/314/315 added 64 bytes (isolation, orphan, safety valve, dispute, LP collateral).
- *       PERC-328 added 40 bytes (_reserved: [u8; 40] for SlabHeader isolation).
- *       ENGINE_OFF = 640 (verified against on-chain compile-time assertion: const _: [(); 536] = [(); CONFIG_LEN]).
+ * NOTE: CONFIG_LEN on BPF (SBF target) is 496 because u128 uses 8-byte alignment on BPF.
+ *       The native/test build assertion shows 512 (u128 align=16 on x86-64).
+ *       Previous SLAB_TIERS used CONFIG_LEN=536 (wrong — that's a stale comment from pre-PERC-328
+ *       when an extra _reserved field existed in the native layout). The deployed programs use 496.
+ *       ENGINE_OFF = align_up(104 + 496, 8) = 600 (not 640 — 40-byte discrepancy fixed in PERC-1094).
+ *       Verified by querying on-chain Small program accounts: single initialized slab has 65312 bytes.
  *       RiskEngine grew by 32 bytes (PERC-298: long_oi + short_oi) + 24 (PERC-299: emergency OI).
- *       Values below must be verified against BPF build before deployment.
  */
-// V1 sizes (deployed devnet program: HEADER=104, CONFIG=536, ENGINE_OFF=640, ACCOUNT_SIZE=248)
+// Deployed devnet program: HEADER=104, CONFIG=496 (BPF), ENGINE_OFF=600, ACCOUNT_SIZE=248
 export const SLAB_TIERS = {
-  small:  { maxAccounts: 256,  dataSize: 65_352,    label: "Small",  description: "256 slots · ~0.45 SOL" },
-  medium: { maxAccounts: 1024, dataSize: 257_448,   label: "Medium", description: "1,024 slots · ~1.79 SOL" },
-  large:  { maxAccounts: 4096, dataSize: 1_025_832, label: "Large",  description: "4,096 slots · ~7.14 SOL" },
+  small:  { maxAccounts: 256,  dataSize: 65_312,    label: "Small",  description: "256 slots · ~0.45 SOL" },
+  medium: { maxAccounts: 1024, dataSize: 257_408,   label: "Medium", description: "1,024 slots · ~1.79 SOL" },
+  large:  { maxAccounts: 4096, dataSize: 1_025_792, label: "Large",  description: "4,096 slots · ~7.14 SOL" },
 } as const;
 
 /** @deprecated V0 slab sizes — kept for backward compatibility with old on-chain slabs */
@@ -93,9 +94,9 @@ export function slabDataSize(maxAccounts: number): number {
   return ENGINE_OFF_V0 + accountsOff + maxAccounts * ACCOUNT_SIZE_V0;
 }
 
-/** Calculate slab data size for V1 layout (future program upgrade). */
+/** Calculate slab data size for deployed V1 layout (CONFIG_LEN=496 on BPF → ENGINE_OFF=600). */
 export function slabDataSizeV1(maxAccounts: number): number {
-  const ENGINE_OFF_V1 = 640;
+  const ENGINE_OFF_V1 = 600;  // align_up(HEADER=104 + CONFIG=496, 8) = 600 on BPF (PERC-1094)
   const ENGINE_BITMAP_OFF_V1 = 656;
   const ACCOUNT_SIZE_V1 = 248;
   const bitmapBytes = Math.ceil(maxAccounts / 64) * 8;

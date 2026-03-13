@@ -3,9 +3,7 @@
 import { useCallback, useState } from "react";
 import { Keypair, PublicKey, TransactionInstruction, Transaction } from "@solana/web3.js";
 import { useWalletCompat, useConnectionCompat } from "@/hooks/useWalletCompat";
-
-/** On-chain program ID (same as used across the app) */
-const PROGRAM_ID_ENV = process.env.NEXT_PUBLIC_PROGRAM_ID ?? "";
+import { getConfig } from "@/lib/config";
 
 /** PERC-511: ReclaimSlabRent instruction tag */
 const TAG_RECLAIM_SLAB_RENT = 52;
@@ -51,9 +49,16 @@ export function useReclaimSlabRent(): UseReclaimSlabRentResult {
         return;
       }
 
-      const programId = new PublicKey(PROGRAM_ID_ENV);
       const dest = walletCompat.publicKey;
       const slab = slabKeypair.publicKey;
+
+      // Build the set of all known Percolator program IDs (env default + all tier-specific programs).
+      // PERC-1095: Small/Medium/Large slabs are owned by their tier program, not NEXT_PUBLIC_PROGRAM_ID.
+      const cfg = getConfig();
+      const knownProgramIds = new Set<string>([
+        process.env.NEXT_PUBLIC_PROGRAM_ID ?? "",
+        ...(cfg.programsBySlabTier ? Object.values(cfg.programsBySlabTier) : []),
+      ].filter(Boolean));
 
       setStatus("sending");
       setError(null);
@@ -70,10 +75,13 @@ export function useReclaimSlabRent(): UseReclaimSlabRentResult {
           return;
         }
 
-        // Check it's owned by the program
-        if (!accountInfo.owner.equals(programId)) {
+        // PERC-1095: Use the slab's actual on-chain owner as the program ID.
+        // Small/Medium/Large slabs are owned by their respective tier programs,
+        // not necessarily NEXT_PUBLIC_PROGRAM_ID (the Large program).
+        const programId = accountInfo.owner;
+        if (!knownProgramIds.has(programId.toBase58())) {
           setError(
-            "Slab account is not owned by the Percolator program. Cannot reclaim."
+            "Slab account is not owned by a Percolator program. Cannot reclaim."
           );
           setStatus("error");
           return;

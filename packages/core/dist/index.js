@@ -1016,8 +1016,9 @@ var V0_ENGINE_LP_MAX_ABS_OFF = 288;
 var V0_ENGINE_LP_MAX_ABS_SWEEP_OFF = 304;
 var V0_ENGINE_BITMAP_OFF = 320;
 var V1_HEADER_LEN = 104;
-var V1_CONFIG_LEN = 536;
-var V1_ENGINE_OFF = 640;
+var V1_CONFIG_LEN = 496;
+var V1_ENGINE_OFF = 600;
+var V1_ENGINE_OFF_LEGACY = 640;
 var V1_ACCOUNT_SIZE = 248;
 var V1_RESERVED_OFF = 80;
 var V1_ENGINE_PARAMS_OFF = 72;
@@ -1064,9 +1065,11 @@ function computeSlabSize(engineOff, bitmapOff, accountSize, maxAccounts) {
 var TIERS = [64, 256, 1024, 4096];
 var V0_SIZES = /* @__PURE__ */ new Map();
 var V1_SIZES = /* @__PURE__ */ new Map();
+var V1_SIZES_LEGACY = /* @__PURE__ */ new Map();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
+  V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
 }
 function buildLayout(version, maxAccounts) {
   const isV0 = version === 0;
@@ -1131,6 +1134,8 @@ function detectSlabLayout(dataLen) {
   if (v0n !== void 0) return buildLayout(0, v0n);
   const v1n = V1_SIZES.get(dataLen);
   if (v1n !== void 0) return buildLayout(1, v1n);
+  const v1ln = V1_SIZES_LEGACY.get(dataLen);
+  if (v1ln !== void 0) return buildLayout(1, v1ln);
   return null;
 }
 function detectLayout(dataLen) {
@@ -1631,9 +1636,9 @@ async function fetchTokenAccount(connection, address, tokenProgramId = TOKEN_PRO
 var ENGINE_BITMAP_OFF_V0 = 320;
 var MAGIC_BYTES = new Uint8Array([84, 65, 76, 79, 67, 82, 69, 80]);
 var SLAB_TIERS = {
-  small: { maxAccounts: 256, dataSize: 65352, label: "Small", description: "256 slots \xB7 ~0.45 SOL" },
-  medium: { maxAccounts: 1024, dataSize: 257448, label: "Medium", description: "1,024 slots \xB7 ~1.79 SOL" },
-  large: { maxAccounts: 4096, dataSize: 1025832, label: "Large", description: "4,096 slots \xB7 ~7.14 SOL" }
+  small: { maxAccounts: 256, dataSize: 65312, label: "Small", description: "256 slots \xB7 ~0.45 SOL" },
+  medium: { maxAccounts: 1024, dataSize: 257408, label: "Medium", description: "1,024 slots \xB7 ~1.79 SOL" },
+  large: { maxAccounts: 4096, dataSize: 1025792, label: "Large", description: "4,096 slots \xB7 ~7.14 SOL" }
 };
 var SLAB_TIERS_V0 = {
   small: { maxAccounts: 256, dataSize: 62808, label: "Small", description: "256 slots \xB7 ~0.44 SOL" },
@@ -1653,7 +1658,7 @@ function slabDataSize(maxAccounts) {
   return ENGINE_OFF_V0 + accountsOff + maxAccounts * ACCOUNT_SIZE_V0;
 }
 function slabDataSizeV1(maxAccounts) {
-  const ENGINE_OFF_V1 = 640;
+  const ENGINE_OFF_V1 = 600;
   const ENGINE_BITMAP_OFF_V1 = 656;
   const ACCOUNT_SIZE_V1 = 248;
   const bitmapBytes = Math.ceil(maxAccounts / 64) * 8;

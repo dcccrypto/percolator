@@ -157,10 +157,16 @@ const V0_ENGINE_LP_MAX_ABS_OFF = 288;
 const V0_ENGINE_LP_MAX_ABS_SWEEP_OFF = 304;
 const V0_ENGINE_BITMAP_OFF = 320;
 
-// ---- V1 layout constants (future program upgrade) ----
+// ---- V1 layout constants (deployed devnet program, PERC-1094 corrected) ----
+// BPF (SBF) target: u128 alignment = 8, so CONFIG_LEN = 496 on-chain.
+// ENGINE_OFF = align_up(HEADER=104 + CONFIG=496, 8) = 600.
+// Previous value (640) was wrong — it assumed CONFIG_LEN=536 from the native build assertion.
 const V1_HEADER_LEN = 104;
-const V1_CONFIG_LEN = 536;
-const V1_ENGINE_OFF = 640;   // align_up(104 + 536, 8) = 640
+const V1_CONFIG_LEN = 496;   // BPF (SBF) on-chain value; native test build would be 512
+const V1_ENGINE_OFF = 600;   // align_up(104 + 496, 8) = 600  (was 640 — corrected in PERC-1094)
+// Legacy: CONFIG_LEN=536 was used in pre-PERC-1094 SDK. Some orphaned slabs on devnet may use
+// ENGINE_OFF=640 (65352 bytes for small). We add them to V1_SIZES_LEGACY for read-only parsing.
+const V1_ENGINE_OFF_LEGACY = 640;
 const V1_ACCOUNT_SIZE = 248;
 const V1_RESERVED_OFF = 80;
 
@@ -224,9 +230,12 @@ const TIERS = [64, 256, 1024, 4096] as const;
 // Pre-compute known slab sizes for fast lookup
 const V0_SIZES = new Map<number, number>();
 const V1_SIZES = new Map<number, number>();
+// Legacy V1 sizes using incorrect ENGINE_OFF=640 (pre-PERC-1094). Orphaned on devnet; read-only.
+const V1_SIZES_LEGACY = new Map<number, number>();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
+  V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
 }
 
 function buildLayout(version: 0 | 1, maxAccounts: number): SlabLayout {
@@ -296,13 +305,17 @@ function buildLayout(version: 0 | 1, maxAccounts: number): SlabLayout {
  * Returns a full SlabLayout descriptor or null if unrecognized.
  */
 export function detectSlabLayout(dataLen: number): SlabLayout | null {
-  // Check V0 sizes first (deployed devnet program)
+  // Check V0 sizes first (deployed devnet V0 program)
   const v0n = V0_SIZES.get(dataLen);
   if (v0n !== undefined) return buildLayout(0, v0n);
 
-  // Check V1 sizes (future upgraded program)
+  // Check V1 sizes (deployed devnet V1 program — ENGINE_OFF=600, PERC-1094 corrected)
   const v1n = V1_SIZES.get(dataLen);
   if (v1n !== undefined) return buildLayout(1, v1n);
+
+  // Check legacy V1 sizes (pre-PERC-1094 SDK used ENGINE_OFF=640; orphaned on devnet)
+  const v1ln = V1_SIZES_LEGACY.get(dataLen);
+  if (v1ln !== undefined) return buildLayout(1, v1ln);
 
   return null;
 }
