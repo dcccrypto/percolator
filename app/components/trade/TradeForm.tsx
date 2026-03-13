@@ -120,23 +120,31 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const existingPosition = userAccount ? userAccount.account.positionSize : 0n;
   const hasPosition = existingPosition !== 0n;
 
+  // GH#1133: When no trading account exists yet, use wallet ATA balance as the
+  // effective balance for validation (exceedsMargin, %-presets, Max button).
+  // capital=0n from a null userAccount is misleading — the user may have tokens
+  // in their wallet that they'll deposit to create their account.
+  const effectiveBalance = userAccount ? capital : (walletAtaBalance ?? 0n);
+
   const marginNative = marginInput ? parsePercToNative(marginInput, decimals) : 0n;
   // Defensive clamp: positionSize should never be negative, but guard anyway
   const rawPositionSize = marginNative * BigInt(leverage);
   const positionSize = rawPositionSize < 0n ? 0n : rawPositionSize;
   
-  const exceedsMargin = marginNative > 0n && marginNative > capital;
+  // GH#1133: Use effectiveBalance (wallet ATA when no account) so input isn't
+  // immediately flagged as "exceeds balance" before the user creates an account.
+  const exceedsMargin = marginNative > 0n && marginNative > effectiveBalance;
 
   const setMarginPercent = useCallback(
     (pct: number) => {
-      if (capital <= 0n) return;
-      let amount = (capital * BigInt(pct)) / 100n;
+      if (effectiveBalance <= 0n) return;
+      let amount = (effectiveBalance * BigInt(pct)) / 100n;
       // Prevent truncation to 0 for small balances — use at least 1 native unit
       // when the percentage of a non-zero capital would otherwise round to zero
       if (amount === 0n && pct > 0) amount = 1n;
       setMarginInput(formatPerc(amount, decimals));
     },
-    [capital, decimals]
+    [effectiveBalance, decimals]
   );
 
   // BUG FIX: Fetch on-chain decimals AND wallet ATA balance from user's token account.
@@ -333,7 +341,7 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
           />
           <button
             onClick={() => {
-              if (capital > 0n) setMarginInput(formatPerc(capital, decimals));
+              if (effectiveBalance > 0n) setMarginInput(formatPerc(effectiveBalance, decimals));
             }}
             className="absolute right-2 top-1/2 -translate-y-1/2 rounded-none bg-[var(--accent)]/10 px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/20"
           >
@@ -342,7 +350,7 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
         </div>
         {exceedsMargin && (
           <p className="mt-1 text-[10px] text-[var(--short)]" style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-            Exceeds balance ({formatPerc(capital, decimals)} {symbol})
+            Exceeds balance ({formatPerc(effectiveBalance, decimals)} {symbol})
           </p>
         )}
       </div>
