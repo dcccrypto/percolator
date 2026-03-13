@@ -30,14 +30,32 @@ const MAX_SANE_PRICE_USD = 1_000_000; // $1M
 /**
  * Sanitize a price field from the DB (USD float). Returns null for corrupt/garbage values.
  * Logs a Sentry warning when sanitization fires so we can track data quality. (#882)
+ *
+ * Fingerprinted per (field, slab) so repeated sanitizations from the same bad market
+ * collapse into ONE Sentry issue rather than one event per API poll cycle (#PERC-801).
+ *
+ * Known causes of sanitization:
+ *  - Admin-mode markets with on-chain authorityPriceE6 set to garbage/test values
+ *    (e.g. value > MAX_SANE_PRICE_USD × 1e6 on-chain, e.g. GYpukkn94, 2Zta2EPRR)
+ *  - HYPERP markets without oracle_markets entries — oracle-keeper can't crank them,
+ *    stale/uninitialised lastEffectivePriceE6 leaks through StatsCollector
+ *  Fix: seed oracle_markets table (migration 041) for HYPERP markets, or correct the
+ *  admin oracle price via the admin UI (pushPrice action with correct price_e6).
  */
 function sanitizePrice(v: number | null | undefined, field?: string, slabAddress?: string): number | null {
   if (v == null) return null;
   if (!Number.isFinite(v) || v <= 0 || v > MAX_SANE_PRICE_USD) {
-    Sentry.captureMessage(`Price sanitization: ${field ?? "price"} = ${v} nulled for slab ${slabAddress ?? "unknown"}`, {
-      level: "warning",
-      tags: { endpoint: "/api/markets", sanitization: "price" },
-    });
+    Sentry.captureMessage(
+      `Price sanitization: ${field ?? "price"} nulled for slab ${slabAddress ?? "unknown"} (value=${v})`,
+      {
+        level: "warning",
+        tags: { endpoint: "/api/markets", sanitization: "price", field: field ?? "price" },
+        // Fingerprint collapses all events for the same bad (field, slab) pair into a
+        // single Sentry issue instead of one event per poll cycle.
+        fingerprint: ["price-sanitization", field ?? "price", slabAddress ?? "unknown"],
+        extra: { rawValue: v, field, slabAddress, maxSanePriceUsd: MAX_SANE_PRICE_USD },
+      },
+    );
     return null;
   }
   return v;
