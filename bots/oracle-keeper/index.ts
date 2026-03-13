@@ -33,10 +33,11 @@ import {
   ComputeBudgetProgram, sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
-  encodePushOraclePrice, encodeKeeperCrank,
+  encodePushOraclePrice, encodeKeeperCrank, encodeUpdateHyperpMark,
   ACCOUNTS_PUSH_ORACLE_PRICE, ACCOUNTS_KEEPER_CRANK,
   buildAccountMetas, buildIx, WELL_KNOWN,
   parseConfig,
+  detectDexType, parseDexPool,
 } from "@percolator/sdk";
 import * as fs from "fs";
 import * as http from "http";
@@ -129,6 +130,10 @@ interface MarketInfo {
   label: string;
   slab: string;
   priceE6?: string;
+  /** "admin" | "pyth" | "hyperp" — from Supabase oracle_mode column */
+  oracleMode?: string;
+  /** DEX pool address for HYPERP markets — from Supabase dex_pool_address column */
+  dexPoolAddress?: string;
 }
 
 interface MarketStats {
@@ -353,6 +358,19 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   // Skip markets explicitly blocked via ORACLE_KEEPER_BLOCKED_MARKETS env var
   if (ORACLE_KEEPER_BLOCKED_MARKETS.has(market.slab)) return;
 
+  // HYPERP markets use on-chain DEX pool oracle — route to dedicated crank
+  if (market.oracleMode === "hyperp") {
+    try {
+      await updateHyperpMark(market, programId);
+    } catch (e) {
+      const msg = (e as Error).message?.slice(0, 120) ?? String(e);
+      log(`⚠️ ${market.label}: UpdateHyperpMark failed: ${msg}`);
+      s.totalErrors++;
+      s.consecutiveErrors++;
+    }
+    return;
+  }
+
   // Skip markets where we've already confirmed we're not the oracle authority
   if (skippedMarkets.has(market.slab)) return;
 
@@ -456,6 +474,97 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   log(`✅ ${market.label}: $${price.toFixed(2)} [${source}] → ${sig.slice(0, 12)}...`);
 }
 
+// ── HYPERP Oracle Cache ─────────────────────────────────────
+
+interface HyperpPoolMeta {
+  pool: PublicKey;
+  /** Additional accounts required by the DEX (e.g. PumpSwap vaults) */
+  extraAccounts: PublicKey[];
+}
+
+const hyperpPoolCache = new Map<string, HyperpPoolMeta>();
+
+/**
+ * Crank UpdateHyperpMark for a market in HYPERP oracle mode.
+ *
+ * HYPERP markets read their index price from an on-chain DEX pool (PumpSwap,
+ * Raydium CLMM, or Meteora DLMM) instead of a Pyth feed. UpdateHyperpMark
+ * is permissionless — any fee payer works.
+ *
+ * Without regular cranking the mark price goes stale (30–120 s observed
+ * latency): each missed crank extends the EMA staleness window.
+ */
+async function updateHyperpMark(
+  market: MarketInfo,
+  programId: PublicKey,
+): Promise<void> {
+  if (!market.dexPoolAddress) {
+    log(`⚠️ ${market.label}: HYPERP but no dex_pool_address — skipping UpdateHyperpMark`);
+    return;
+  }
+
+  const slab = new PublicKey(market.slab);
+  const effectiveProgramId = slabProgramId.get(market.slab) ?? programId;
+
+  // Resolve (and cache) pool meta + extra accounts
+  let poolMeta = hyperpPoolCache.get(market.slab);
+  if (!poolMeta) {
+    const poolPk = new PublicKey(market.dexPoolAddress);
+    const poolInfo = await conn.getAccountInfo(poolPk);
+    if (!poolInfo) {
+      log(`⚠️ ${market.label}: DEX pool account not found: ${market.dexPoolAddress}`);
+      return;
+    }
+    const extraAccounts: PublicKey[] = [];
+    // PumpSwap pools carry vault addresses in their account data layout
+    const dexType = detectDexType(poolInfo.owner);
+    if (dexType === "pumpswap") {
+      const parsed = parseDexPool(dexType, poolPk, Buffer.from(poolInfo.data));
+      if (parsed?.baseVault) extraAccounts.push(parsed.baseVault);
+      if (parsed?.quoteVault) extraAccounts.push(parsed.quoteVault);
+    }
+    poolMeta = { pool: poolPk, extraAccounts };
+    hyperpPoolCache.set(market.slab, poolMeta);
+    log(`ℹ️ ${market.label}: resolved DEX pool ${market.dexPoolAddress.slice(0, 12)}... (dex=${dexType}, extras=${extraAccounts.length})`);
+  }
+
+  const markData = encodeUpdateHyperpMark();
+  const markKeys = [
+    { pubkey: slab, isSigner: false, isWritable: true },
+    { pubkey: poolMeta.pool, isSigner: false, isWritable: false },
+    { pubkey: WELL_KNOWN.clock, isSigner: false, isWritable: false },
+    ...poolMeta.extraAccounts.map((pk) => ({ pubkey: pk, isSigner: false, isWritable: false })),
+  ];
+
+  const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+  const crankKeys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
+    admin.publicKey, slab, WELL_KNOWN.clock, slab,
+  ]);
+
+  const tx = new Transaction().add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
+    buildIx({ programId: effectiveProgramId, keys: markKeys, data: markData }),
+    buildIx({ programId: effectiveProgramId, keys: crankKeys, data: crankData }),
+  );
+  tx.feePayer = admin.publicKey;
+  const { blockhash } = await conn.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+
+  const sig = await sendAndConfirmTransaction(conn, tx, [admin], {
+    commitment: "confirmed",
+  });
+
+  const s = getOrCreateStats(market);
+  s.lastPushAt = Date.now();
+  s.lastPushSig = sig;
+  s.totalPushes++;
+  s.consecutiveErrors = 0;
+  s.source = "hyperp-dex";
+
+  log(`✅ ${market.label}: UpdateHyperpMark + KeeperCrank → ${sig.slice(0, 12)}...`);
+}
+
 // ── Health Check Server ─────────────────────────────────────
 function startHealthServer() {
   const server = http.createServer((req, res) => {
@@ -524,7 +633,7 @@ async function discoverNewMarkets(): Promise<MarketInfo[]> {
   try {
     const data = await supabaseQuery(
       "markets",
-      "select=slab_address,mint_address,mainnet_ca,symbol,name&mainnet_ca=not.is.null",
+      "select=slab_address,mint_address,mainnet_ca,symbol,name,oracle_mode,dex_pool_address&mainnet_ca=not.is.null",
     );
 
     if (!data) {
@@ -540,10 +649,13 @@ async function discoverNewMarkets(): Promise<MarketInfo[]> {
       // Map mainnet CA to a symbol for price lookup
       // Use the stored symbol, or fall back to the DB name
       const symbol = row.symbol?.toUpperCase() ?? "UNKNOWN";
+      const oracleMode: string = row.oracle_mode ?? "admin";
       newMarkets.push({
         symbol,
         label: `${symbol}-PERP (dynamic)`,
         slab: row.slab_address,
+        oracleMode,
+        dexPoolAddress: row.dex_pool_address ?? undefined,
       });
     }
     return newMarkets;
