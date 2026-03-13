@@ -637,18 +637,45 @@ const knownSlabs = new Set<string>();
  * If the slab is already tracked with a different mode, this function
  * updates it in-place and clears the pool cache so the new pool is resolved.
  */
+// Track which slabs were registered as hyperp via oracle_markets so we can
+// detect when they're disabled and downgrade them back to admin oracle mode.
+const hyperpFromOracleTable = new Set<string>();
+
 async function discoverHyperpFromOracleTable(): Promise<MarketInfo[]> {
   if (!supabaseEnabled) return [];
   try {
+    // Fetch ALL oracle_markets rows (both enabled and disabled) to detect downgrades.
+    // Enabled=true rows: upgrade/register as hyperp.
+    // Enabled=false rows previously registered: downgrade back to admin oracle mode
+    // (PERC-804: prevents "DEX pool account not found" spam when pool is invalid).
     const data = await supabaseQuery(
       "oracle_markets",
-      "select=slab_address,oracle_type,dex_pool_address&oracle_type=eq.hyperp&enabled=eq.true",
+      "select=slab_address,oracle_type,dex_pool_address,enabled&oracle_type=eq.hyperp",
     );
     if (!data) return [];
 
+    // Build set of currently-enabled hyperp slabs from this poll
+    const enabledHyperpSlabs = new Set<string>(
+      data.filter((r: any) => r.enabled && r.slab_address && r.dex_pool_address).map((r: any) => r.slab_address as string)
+    );
+
+    // Downgrade: previously-registered hyperp slabs that are now disabled
+    for (const slab of hyperpFromOracleTable) {
+      if (!enabledHyperpSlabs.has(slab)) {
+        const existing = markets.find(m => m.slab === slab);
+        if (existing && existing.oracleMode === "hyperp") {
+          log(`⬇️ ${existing.label}: oracle_markets disabled → downgrading from hyperp to admin oracle mode`);
+          existing.oracleMode = "admin";
+          existing.dexPoolAddress = undefined;
+          hyperpPoolCache.delete(slab);
+        }
+        hyperpFromOracleTable.delete(slab);
+      }
+    }
+
     const newMarkets: MarketInfo[] = [];
     for (const row of data) {
-      if (!row.slab_address || !row.dex_pool_address) continue;
+      if (!row.enabled || !row.slab_address || !row.dex_pool_address) continue;
 
       if (knownSlabs.has(row.slab_address)) {
         // Upgrade an already-tracked market from admin/pyth → hyperp
@@ -659,10 +686,12 @@ async function discoverHyperpFromOracleTable(): Promise<MarketInfo[]> {
           existing.dexPoolAddress = row.dex_pool_address;
           hyperpPoolCache.delete(row.slab_address); // force re-fetch with new pool
         }
+        hyperpFromOracleTable.add(row.slab_address);
         continue;
       }
 
       knownSlabs.add(row.slab_address);
+      hyperpFromOracleTable.add(row.slab_address);
       newMarkets.push({
         symbol: "HYPERP",
         label: `${row.slab_address.slice(0, 8)}... (oracle_markets)`,
