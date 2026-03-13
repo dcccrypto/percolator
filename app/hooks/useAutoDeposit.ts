@@ -116,14 +116,15 @@ export function useAutoDeposit(slabAddress: string): AutoDepositState {
     // Don't auto-deposit if user already has an account
     if (userAccount) return;
 
-    // Trigger conditions:
-    // 1. Auto-fund just completed (freshly funded wallet)
-    // 2. User connected with existing wallet balance but no Percolator account
+    // GH#1107: only auto-deposit when auto-fund JUST completed.
+    // Without this guard any wallet navigation to a trade page with no Percolator
+    // account would immediately pop the Privy "Confirm transaction" modal.
+    if (!fundResult?.funded) return;
 
-    // Wait a short delay to let auto-fund complete and balances settle
+    // Wait a short delay to let auto-fund balances settle on-chain
     const timer = setTimeout(() => {
       attemptAutoDeposit();
-    }, fundResult?.funded ? 2000 : 3000);
+    }, 2000);
 
     return () => clearTimeout(timer);
   }, [connected, publicKey, userAccount, fundResult, isDevnet, attemptAutoDeposit]);
