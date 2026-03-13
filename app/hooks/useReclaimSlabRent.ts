@@ -57,6 +57,9 @@ export function useReclaimSlabRent(): UseReclaimSlabRentResult {
       const cfg = getConfig();
       const knownProgramIds = new Set<string>([
         process.env.NEXT_PUBLIC_PROGRAM_ID ?? "",
+        // PERC-1095 follow-up: also include cfg.programId (the runtime-resolved program ID for
+        // mainnet-large slabs and any tier without an entry in programsBySlabTier).
+        cfg.programId,
         ...(cfg.programsBySlabTier ? Object.values(cfg.programsBySlabTier) : []),
       ].filter(Boolean));
 

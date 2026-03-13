@@ -85,6 +85,13 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
     if (!mintPk) {
       setMintNetworkStatus("idle");
       setMirrorError(null);
+      // PERC-1093 follow-up: unconditionally clear stale mirror state when input is cleared.
+      // Without this reset, mirrorMeta stays non-null from the previous valid mint and the
+      // propagation guard (tokenMeta !== null || mirrorMeta === null) silently swallows
+      // onTokenResolved(null), leaving wizard.tokenMeta pointing at the old token.
+      setMirrorMeta(null);
+      setIsNativeDevnetMint(false);
+      onTokenResolved(null);
       onMintNetworkValidChange?.(false);
       return;
     }

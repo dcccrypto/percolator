@@ -238,9 +238,9 @@ for (const n of TIERS) {
   V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
 }
 
-function buildLayout(version: 0 | 1, maxAccounts: number): SlabLayout {
+function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: number): SlabLayout {
   const isV0 = version === 0;
-  const engineOff = isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF;
+  const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
   const bitmapOff = isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
   const accountSize = isV0 ? V0_ACCOUNT_SIZE : V1_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
@@ -315,7 +315,10 @@ export function detectSlabLayout(dataLen: number): SlabLayout | null {
 
   // Check legacy V1 sizes (pre-PERC-1094 SDK used ENGINE_OFF=640; orphaned on devnet)
   const v1ln = V1_SIZES_LEGACY.get(dataLen);
-  if (v1ln !== undefined) return buildLayout(1, v1ln);
+  // PERC-1095 follow-up: must pass V1_ENGINE_OFF_LEGACY (640) so the returned SlabLayout
+  // has .engineOff=640 — without the override buildLayout would use V1_ENGINE_OFF=600,
+  // causing all engine reads on legacy slabs to land at the wrong byte offset.
+  if (v1ln !== undefined) return buildLayout(1, v1ln, V1_ENGINE_OFF_LEGACY);
 
   return null;
 }

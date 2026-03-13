@@ -236,15 +236,15 @@ function parseEngineLight(
     };
   }
 
-  // V1 engine struct (future upgrade / V1 slabs): ENGINE_OFF=640
-  // vault(0) + insurance(16,48) + params(64,288) + currentSlot(352) + fundingIndex(360,16)
-  // + lastFundingSlot(376) + fundingRateBps(384) + markPrice(392) + lastCrankSlot(400)
-  // + maxCrankStaleness(408) + totalOI(416,16) + longOi(432,16) + shortOi(448,16)
-  // + cTot(464,16) + pnlPosTot(480,16) + liqCursor(496,2) + gcCursor(498,2)
-  // + lastSweepStart(504) + lastSweepComplete(512) + crankCursor(520,2) + sweepStartIdx(522,2)
-  // + lifetimeLiquidations(528) + lifetimeForceCloses(536)
-  // + netLpPos(544,16) + lpSumAbs(560,16) + lpMaxAbs(576,16) + lpMaxAbsSweep(592,16)
-  // + emergencyOiMode(608,1+7pad) + emergencyStartSlot(616) + lastBreakerSlot(624) + bitmap(656)
+  // V1 engine struct (PERC-1094 corrected): ENGINE_OFF=600 (BPF/SBF, CONFIG_LEN=496)
+  // vault(0,16) + insurance(16,56) + params(72,288) + currentSlot(360) + fundingIndex(368,16)
+  // + lastFundingSlot(384) + fundingRateBps(392) + markPrice(400) + lastCrankSlot(424)
+  // + maxCrankStaleness(432) + totalOI(440,16) + longOi(456,16) + shortOi(472,16)
+  // + cTot(488,16) + pnlPosTot(504,16) + liqCursor(520,2) + gcCursor(522,2)
+  // + lastSweepStart(528) + lastSweepComplete(536) + crankCursor(544,2) + sweepStartIdx(546,2)
+  // + lifetimeLiquidations(552) + lifetimeForceCloses(560)
+  // + netLpPos(568,16) + lpSumAbs(584,16) + lpMaxAbs(600,16) + lpMaxAbsSweep(616,16)
+  // + emergencyOiMode(632,1+7pad) + emergencyStartSlot(640) + lastBreakerSlot(648) + bitmap(656)
   return {
     vault: readU128LE(data, base + 0),
     insuranceFund: {
@@ -253,11 +253,11 @@ function parseEngineLight(
       isolatedBalance: readU128LE(data, base + 48),
       isolationBps: readU16LE(data, base + 64),
     },
-    currentSlot: readU64LE(data, base + 352),
-    fundingIndexQpbE6: readI128LE(data, base + 360),
-    lastFundingSlot: readU64LE(data, base + 376),
-    fundingRateBpsPerSlotLast: readI64LE(data, base + 384),
-    lastCrankSlot: readU64LE(data, base + 400),
+    currentSlot: readU64LE(data, base + 360),     // PERC-1094: params end at 72+288=360 (was 352)
+    fundingIndexQpbE6: readI128LE(data, base + 368),
+    lastFundingSlot: readU64LE(data, base + 384),
+    fundingRateBpsPerSlotLast: readI64LE(data, base + 392),
+    lastCrankSlot: readU64LE(data, base + 424),
     maxCrankStalenessSlots: readU64LE(data, base + 408),
     totalOpenInterest: readU128LE(data, base + 416),
     longOi: readU128LE(data, base + 432),
@@ -279,7 +279,7 @@ function parseEngineLight(
     emergencyOiMode: data[base + 608] !== 0,
     emergencyStartSlot: readU64LE(data, base + 616),
     lastBreakerSlot: readU64LE(data, base + 624),
-    markPriceE6: readU64LE(data, base + 392),
+    markPriceE6: readU64LE(data, base + 400),      // PERC-1094: was 392
     numUsedAccounts: canReadNumUsed ? readU16LE(data, base + numUsedOff) : 0,
     nextAccountId: canReadNextId ? readU64LE(data, base + nextAccountIdOff) : 0n,
   };
