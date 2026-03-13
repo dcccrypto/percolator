@@ -5,16 +5,17 @@
  * Body: { slabAddress: string }
  *
  * Sends an AdvanceOraclePhase transaction signed by the server-side crank
- * keypair (DEVNET_MINT_AUTHORITY_KEYPAIR or CRANK_KEYPAIR) — NOT the user's
- * wallet. This removes the Privy "Confirm transaction" modal that was firing
- * on every trade page load.
+ * keypair (CRANK_KEYPAIR) — NOT the user's wallet. This removes the Privy
+ * "Confirm transaction" modal that was firing on every trade page load.
  *
  * AdvanceOraclePhase is a permissionless instruction (any fee payer works).
  * Only runs on devnet; silently no-ops on mainnet.
  *
- * Requires (at least one):
- *   - CRANK_KEYPAIR — JSON secret key bytes (preferred)
- *   - DEVNET_MINT_AUTHORITY_KEYPAIR — fallback
+ * PERC-799 / GH#1124: Rate limited to 60 req/IP/min (Upstash or in-memory).
+ * PERC-799 / GH#1125: CRANK_KEYPAIR is required — no fallback to mint authority.
+ *
+ * Requires:
+ *   - CRANK_KEYPAIR — JSON secret key bytes array (dedicated low-privilege keypair)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -33,12 +34,22 @@ import {
   ACCOUNTS_ADVANCE_ORACLE_PHASE,
 } from "@percolator/sdk";
 import { getConfig } from "@/lib/config";
+import {
+  checkAdvancePhaseRateLimit,
+  ADVANCE_PHASE_RATE_LIMIT,
+} from "@/lib/advance-phase-rate-limit";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * GH#1125: Load the dedicated crank keypair from CRANK_KEYPAIR only.
+ * The DEVNET_MINT_AUTHORITY_KEYPAIR fallback has been removed — the mint
+ * authority key must not double as a crank key. If CRANK_KEYPAIR is not set,
+ * return null so the caller can skip gracefully (the endpoint is non-critical).
+ */
 function loadCrankKeypair(): Keypair | null {
-  const raw = process.env.CRANK_KEYPAIR ?? process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
+  const raw = process.env.CRANK_KEYPAIR;
   if (!raw) return null;
   try {
     return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
@@ -51,11 +62,38 @@ function isValidBase58(s: string): boolean {
   return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
 }
 
+/** Extract best-effort IP from request headers (Next.js edge / Node runtime). */
+function getClientIp(req: NextRequest): string {
+  return (
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    req.headers.get("x-real-ip") ??
+    "unknown"
+  );
+}
+
 export async function POST(req: NextRequest) {
   // Only active on devnet — on mainnet/mainnet-fork this is a no-op
   const network = process.env.NEXT_PUBLIC_SOLANA_NETWORK?.trim() ?? "mainnet";
   if (network !== "devnet") {
     return NextResponse.json({ skipped: true, reason: "not devnet" });
+  }
+
+  // ── GH#1124: Rate limit — 60 req/IP/min ───────────────────────────────
+  const clientIp = getClientIp(req);
+  const rl = await checkAdvancePhaseRateLimit(clientIp);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Rate limit exceeded — max 60 advance-phase requests per minute" },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(rl.retryAfterSecs),
+          "X-RateLimit-Limit": String(ADVANCE_PHASE_RATE_LIMIT),
+          "X-RateLimit-Remaining": "0",
+          "X-RateLimit-Reset": String(Math.max(0, rl.retryAfterSecs)),
+        },
+      },
+    );
   }
 
   let slabAddress: string;
@@ -72,7 +110,9 @@ export async function POST(req: NextRequest) {
 
   const crankKp = loadCrankKeypair();
   if (!crankKp) {
-    // Silently skip — CRANK_KEYPAIR not configured on this deployment
+    // CRANK_KEYPAIR not configured on this deployment — skip gracefully.
+    // This is not an error state; the keeper bot handles cranking when the
+    // env var is absent (e.g. preview deployments).
     return NextResponse.json({ skipped: true, reason: "no crank keypair configured" });
   }
 
