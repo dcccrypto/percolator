@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   SLAB_TIERS,
+  SLAB_TIERS_V0,
   slabDataSize,
+  slabDataSizeV1,
   type SlabTierKey,
 } from "../src/solana/discovery.js";
 
@@ -52,16 +54,17 @@ describe("SLAB_TIERS", () => {
 // ============================================================================
 
 describe("slabDataSize", () => {
-  it("returns known data size for small tier (256 accounts)", () => {
-    expect(slabDataSize(256)).toBe(SLAB_TIERS.small.dataSize);
+  // slabDataSize() computes V0 layout — compare against SLAB_TIERS_V0 (GH #1109)
+  it("returns V0 data size for small tier (256 accounts)", () => {
+    expect(slabDataSize(256)).toBe(SLAB_TIERS_V0.small.dataSize);
   });
 
-  it("returns known data size for medium tier (1024 accounts)", () => {
-    expect(slabDataSize(1024)).toBe(SLAB_TIERS.medium.dataSize);
+  it("returns V0 data size for medium tier (1024 accounts)", () => {
+    expect(slabDataSize(1024)).toBe(SLAB_TIERS_V0.medium.dataSize);
   });
 
-  it("returns known data size for large tier (4096 accounts)", () => {
-    expect(slabDataSize(4096)).toBe(SLAB_TIERS.large.dataSize);
+  it("returns V0 data size for large tier (4096 accounts)", () => {
+    expect(slabDataSize(4096)).toBe(SLAB_TIERS_V0.large.dataSize);
   });
 
   it("is monotonically increasing with account count", () => {
@@ -93,5 +96,42 @@ describe("slabDataSize", () => {
     // accountsOff = ceil(882/8)*8 = 888
     // total = 480 + 888 + 256*240 = 480 + 888 + 61440 = 62808
     expect(slabDataSize(256)).toBe(62808);
+  });
+});
+
+// ============================================================================
+// slabDataSizeV1 calculation — V1 layout (ENGINE_OFF=640, ACCOUNT_SIZE=248)
+// Values match SLAB_TIERS (empirically verified on-chain, GH #1109)
+// ============================================================================
+
+describe("slabDataSizeV1", () => {
+  it("matches V1 SLAB_TIERS.small for 256 accounts", () => {
+    expect(slabDataSizeV1(256)).toBe(SLAB_TIERS.small.dataSize); // 65_352
+  });
+
+  it("matches V1 SLAB_TIERS.medium for 1024 accounts", () => {
+    expect(slabDataSizeV1(1024)).toBe(SLAB_TIERS.medium.dataSize); // 257_448
+  });
+
+  it("is smaller than empirical SLAB_TIERS.large for 4096 accounts (known 16-byte formula gap)", () => {
+    // The formula underestimates large by 16 bytes due to an on-chain struct detail.
+    // Empirical value = 1_025_848; formula = 1_025_832.
+    const formula = slabDataSizeV1(4096);
+    expect(formula).toBe(1_025_832);
+    expect(SLAB_TIERS.large.dataSize).toBe(1_025_848);
+    expect(SLAB_TIERS.large.dataSize - formula).toBe(16);
+  });
+
+  it("is monotonically increasing with account count", () => {
+    const sizes = [64, 128, 256, 512, 1024, 2048, 4096].map(slabDataSizeV1);
+    for (let i = 1; i < sizes.length; i++) {
+      expect(sizes[i]).toBeGreaterThan(sizes[i - 1]);
+    }
+  });
+
+  it("produces larger values than V0 slabDataSize for same account count", () => {
+    for (const n of [256, 1024, 4096]) {
+      expect(slabDataSizeV1(n)).toBeGreaterThan(slabDataSize(n));
+    }
   });
 });
