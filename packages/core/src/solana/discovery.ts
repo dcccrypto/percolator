@@ -33,29 +33,30 @@ export interface DiscoveredMarket {
 const MAGIC_BYTES = new Uint8Array([0x54, 0x41, 0x4c, 0x4f, 0x43, 0x52, 0x45, 0x50]);
 
 /**
- * Slab tier definitions.
+ * Slab tier definitions — V1 layout (all tiers upgraded as of 2026-03-13).
  * IMPORTANT: dataSize must match the compiled program's SLAB_LEN for that MAX_ACCOUNTS.
  * The on-chain program has a hardcoded SLAB_LEN — slab account data.len() must equal it exactly.
  *
- * Layout: HEADER(104) + CONFIG(496) + RiskEngine(variable by tier)
- *   ENGINE_OFF = align_up(104 + 496, 8) = 600  (SBF: u128 align = 8)
+ * Layout: HEADER(104) + CONFIG(536) + RiskEngine(variable by tier)
+ *   ENGINE_OFF = 640  (HEADER=104 + CONFIG=536, padded to 8-byte align on SBF)
  *   RiskEngine = fixed(656) + bitmap(BW*8) + post_bitmap(18) + next_free(N*2) + pad + accounts(N*248)
  *
- * NOTE: CONFIG_LEN on BPF (SBF target) is 496 because u128 uses 8-byte alignment on BPF.
- *       The native/test build assertion shows 512 (u128 align=16 on x86-64).
- *       Previous SLAB_TIERS used CONFIG_LEN=536 (wrong — that's a stale comment from pre-PERC-328
- *       when an extra _reserved field existed in the native layout). The deployed programs use 496.
- *       ENGINE_OFF = align_up(104 + 496, 8) = 600 (not 640 — 40-byte discrepancy fixed in PERC-1094).
- *       NOTE: The deployed devnet Small-tier program binary was compiled with the V0 layout
- *       (ENGINE_OFF=480, ACCOUNT_SIZE=240) → SLAB_LEN=62_808. On-chain query (GH #1104) confirms
- *       127 accounts at 62_808 bytes; 0 at 65_312. PR #1096 incorrectly set Small to the V1 value.
- *       Medium and Large tiers are compiled with V1 layout and retain their V1 sizes.
+ * Values are empirically verified against on-chain initialized accounts (GH #1109):
+ *   small  = 65,352  (256-acct program, verified on-chain post-V1 upgrade)
+ *   medium = 257,448 (1024-acct program g9msRSV3, verified on-chain)
+ *   large  = 1,025,848 (4096-acct program, post-PERC-118 redeploy, +16 vs formula)
+ *
+ * NOTE: small program (FwfBKZXb) may still be compiled with wrong features (4096-acct).
+ *       DevOps must redeploy with --features small,devnet. These SDK values are correct
+ *       for a properly compiled V1 small binary. See GH #1109.
+ *
+ * History: Small was V0 (62_808) until 2026-03-13 program upgrade. V0 values preserved
+ *          in SLAB_TIERS_V0 for discovery of legacy on-chain accounts.
  */
-// Deployed devnet program: Small uses V0 layout (62_808); Medium/Large use V1 layout.
 export const SLAB_TIERS = {
-  small:  { maxAccounts: 256,  dataSize: 62_808,    label: "Small",  description: "256 slots · ~0.44 SOL" },
-  medium: { maxAccounts: 1024, dataSize: 257_408,   label: "Medium", description: "1,024 slots · ~1.79 SOL" },
-  large:  { maxAccounts: 4096, dataSize: 1_025_792, label: "Large",  description: "4,096 slots · ~7.14 SOL" },
+  small:  { maxAccounts: 256,  dataSize: 65_352,    label: "Small",  description: "256 slots · ~0.45 SOL" },
+  medium: { maxAccounts: 1024, dataSize: 257_448,   label: "Medium", description: "1,024 slots · ~1.79 SOL" },
+  large:  { maxAccounts: 4096, dataSize: 1_025_848, label: "Large",  description: "4,096 slots · ~7.14 SOL" },
 } as const;
 
 /** @deprecated V0 slab sizes — kept for backward compatibility with old on-chain slabs */
@@ -96,9 +97,17 @@ export function slabDataSize(maxAccounts: number): number {
   return ENGINE_OFF_V0 + accountsOff + maxAccounts * ACCOUNT_SIZE_V0;
 }
 
-/** Calculate slab data size for deployed V1 layout (CONFIG_LEN=496 on BPF → ENGINE_OFF=600). */
+/**
+ * Calculate slab data size for V1 layout (ENGINE_OFF=640).
+ *
+ * NOTE: This formula is accurate for small (256) and medium (1024) tiers but
+ * underestimates large (4096) by 16 bytes — likely due to a padding/alignment
+ * difference at high account counts or a post-PERC-118 struct addition in the
+ * deployed binary. Always prefer the hardcoded SLAB_TIERS values (empirically
+ * verified on-chain) over this formula for production use.
+ */
 export function slabDataSizeV1(maxAccounts: number): number {
-  const ENGINE_OFF_V1 = 600;  // align_up(HEADER=104 + CONFIG=496, 8) = 600 on BPF (PERC-1094)
+  const ENGINE_OFF_V1 = 640;  // HEADER(104) + CONFIG(536) aligned to 8 on SBF = 640
   const ENGINE_BITMAP_OFF_V1 = 656;
   const ACCOUNT_SIZE_V1 = 248;
   const bitmapBytes = Math.ceil(maxAccounts / 64) * 8;
