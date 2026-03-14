@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { discoverMarkets } from "@percolator/sdk";
 
-const RPC = process.env.RPC_URL ?? "https://devnet.helius-rpc.com/?api-key=***REDACTED-HELIUS-KEY***";
+const RPC = process.env.RPC_URL ?? "https://devnet.helius-rpc.com/?api-key=<your-helius-api-key>";
 const SMALL_PROGRAM = "FwfBKZXbYr4vTK23bMFkbgKq3npJ3MSDxEaKmq9Aj4Qn";
 
 const KNOWN_FEEDS: Record<string, string> = {
