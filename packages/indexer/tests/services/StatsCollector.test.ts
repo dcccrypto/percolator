@@ -315,6 +315,71 @@ describe('StatsCollector', () => {
     });
   });
 
+  describe('dust vault OI guard (PERC-817)', () => {
+    it('should zero OI when vault=0n (old strict guard missed this — vault > 0n skipped the check)', async () => {
+      const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
+      vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
+      mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
+
+      // vault=0 but engine.totalOpenInterest is non-zero (stale counter not decremented
+      // on force-close/reclaim). Stale numUsedAccounts > 0 so hasNoAccounts is false.
+      vi.mocked(core.parseEngine).mockReturnValue(
+        makeEngineState({ vault: 0n, totalOpenInterest: 1_000_000_000n, numUsedAccounts: 5 })
+      );
+      vi.mocked(core.parseConfig).mockReturnValue(makeConfig());
+      vi.mocked(core.parseParams).mockReturnValue(makeParams());
+      // parseAllAccounts returns stale positions (e.g. accounts not yet reclaimed)
+      vi.mocked(core.parseAllAccounts).mockReturnValue([
+        { account: { positionSize: 500_000_000n } },
+      ] as any);
+
+      statsCollector.start();
+      await vi.advanceTimersByTimeAsync(10_500);
+
+      // hasDustVault = (0n <= 1_000_000n) = true → OI must be zeroed
+      expect(shared.upsertMarketStats).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slab_address: SLAB1,
+          total_open_interest: 0,
+          open_interest_long: 0,
+          open_interest_short: 0,
+        })
+      );
+    });
+
+    it('should zero OI when vault=1_000_000n exactly (creation-deposit boundary — inclusive guard)', async () => {
+      const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
+      vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
+      mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
+
+      // vault == MIN_VAULT_FOR_OI: on-chain program seeds exactly 1_000_000 micro-units
+      // into vault at market creation (PERC-623). A market with vault at this boundary
+      // received no real LP deposits. Old guard used strict <, so this was missed (PERC-817).
+      vi.mocked(core.parseEngine).mockReturnValue(
+        makeEngineState({ vault: 1_000_000n, totalOpenInterest: 500_000_000n, numUsedAccounts: 3 })
+      );
+      vi.mocked(core.parseConfig).mockReturnValue(makeConfig());
+      vi.mocked(core.parseParams).mockReturnValue(makeParams());
+      vi.mocked(core.parseAllAccounts).mockReturnValue([
+        { account: { positionSize: 250_000_000n } },
+        { account: { positionSize: -250_000_000n } },
+      ] as any);
+
+      statsCollector.start();
+      await vi.advanceTimersByTimeAsync(10_500);
+
+      // hasDustVault = (1_000_000n <= 1_000_000n) = true → OI must be zeroed
+      expect(shared.upsertMarketStats).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slab_address: SLAB1,
+          total_open_interest: 0,
+          open_interest_long: 0,
+          open_interest_short: 0,
+        })
+      );
+    });
+  });
+
   describe('MarketProvider interface', () => {
     it('should accept any MarketProvider implementation', async () => {
       const customProvider: MarketProvider = { getMarkets: vi.fn(() => new Map()) };
@@ -436,7 +501,7 @@ describe('StatsCollector', () => {
       );
     });
 
-    it('should handle values near u64 max gracefully', async () => {
+    it('should treat exact U64_MAX as sentinel 0 and allow upsert (lifetimeForceCloses boundary)', async () => {
       const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
       vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
       mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
