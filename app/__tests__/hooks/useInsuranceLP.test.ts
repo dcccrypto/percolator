@@ -207,8 +207,9 @@ describe("useInsuranceLP", () => {
 
       const { result, unmount } = renderHook(() => useInsuranceLP());
 
+      // Wait for hook to settle — when no mint, balance is 0n (uninitialized guard)
       await waitFor(() => {
-        expect(result.current.state.insuranceBalance).toBe(1000000n);
+        expect(result.current.state.mintExists).toBe(false);
       });
 
       const callsBefore = mockConnection.getAccountInfo.mock.calls.length;
@@ -225,13 +226,46 @@ describe("useInsuranceLP", () => {
   });
 
   describe("Insurance Balance Calculations", () => {
-    it("should read insurance balance from engine state", async () => {
-      mockConnection.getAccountInfo.mockResolvedValue(null); // No mint yet
+    it("should return 0 for insurance balance when LP mint does not exist (no mint = uninitialized)", async () => {
+      // When mintExists=false the on-chain balance field may be garbage (u64::MAX).
+      // The hook must clamp it to 0 so the UI shows the correct pool size.
+      mockConnection.getAccountInfo.mockResolvedValue(null); // No mint
 
       const { result } = renderHook(() => useInsuranceLP());
 
       await waitFor(() => {
-        expect(result.current.state.insuranceBalance).toBe(1000000n);
+        expect(result.current.state.insuranceBalance).toBe(0n);
+      });
+    });
+
+    it("should read insurance balance from engine state when LP mint exists", async () => {
+      // Balance is trusted only when the LP mint is live
+      mockConnection.getAccountInfo.mockResolvedValue({
+        data: Buffer.alloc(82),
+        executable: false,
+        lamports: 1_000_000,
+        owner: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+      });
+      (unpackMint as any).mockReturnValue({ supply: 0n, decimals: 6, isInitialized: true });
+
+      const { result } = renderHook(() => useInsuranceLP());
+
+      await waitFor(() => {
+        expect(result.current.state.insuranceBalance).toBe(1_000_000n);
+      });
+    });
+
+    it("should clamp u64::MAX uninitialized balance to 0 (GH#1278)", async () => {
+      // Simulates the TEST/USD bug: on-chain field is uninitialised → u64::MAX
+      const U64_MAX = 18_446_744_073_709_551_615n;
+      mockSlabState.engine.insuranceFund.balance = U64_MAX - 65n; // ~u64::MAX as observed
+      mockConnection.getAccountInfo.mockResolvedValue(null); // No LP mint
+
+      const { result } = renderHook(() => useInsuranceLP());
+
+      await waitFor(() => {
+        expect(result.current.state.insuranceBalance).toBe(0n);
+        expect(result.current.state.mintExists).toBe(false);
       });
     });
 
@@ -247,10 +281,16 @@ describe("useInsuranceLP", () => {
       });
     });
 
-    it("should handle large insurance balances without overflow", async () => {
-      const largeBalance = 1_000_000_000_000n; // 1 million SOL
+    it("should handle large insurance balances without overflow when mint exists", async () => {
+      const largeBalance = 1_000_000_000_000n; // 1 million SOL equivalent
       mockSlabState.engine.insuranceFund.balance = largeBalance;
-      mockConnection.getAccountInfo.mockResolvedValue(null);
+      mockConnection.getAccountInfo.mockResolvedValue({
+        data: Buffer.alloc(82),
+        executable: false,
+        lamports: 1_000_000,
+        owner: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+      });
+      (unpackMint as any).mockReturnValue({ supply: 0n, decimals: 6, isInitialized: true });
 
       const { result } = renderHook(() => useInsuranceLP());
 
