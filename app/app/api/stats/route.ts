@@ -66,7 +66,8 @@ export async function GET(request: NextRequest) {
   const [statsRes, tradersRes] = await Promise.all([
     // GH#1218: include slab_address so we can filter blocked markets (same as /api/markets)
     // GH#1265: also fetch trade_count_24h so we can sum it directly (replaces buggy trades table count query)
-    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals").limit(500),
+    // GH#1297: include vault_balance + total_accounts to apply phantom OI guard (consistent with /api/markets)
+    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals, vault_balance, total_accounts").limit(500),
     supabase.from("trades").select("trader").limit(5000),
   ]);
 
@@ -108,8 +109,18 @@ export async function GET(request: NextRequest) {
     (sum, m) => sum + toUsd(m.volume_24h ?? 0, m),
     0
   );
+  // GH#1297: Phantom OI guard — mirrors /api/markets isPhantomOI logic.
+  // Markets with accounts_count=0 or vault<1M are stale/orphaned; their raw OI atoms
+  // are not backed by real positions. Without this filter, the $1 fallback (GH#1265)
+  // inflated /api/stats totalOpenInterest to $117K vs /api/markets sum of $64K.
+  const MIN_VAULT_FOR_OI_STATS = 1_000_000;
   const totalOpenInterest = activeData.reduce(
     (sum, m) => {
+      // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
+      const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
+      const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
+      if (accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS) return sum;
+
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
@@ -120,10 +131,12 @@ export async function GET(request: NextRequest) {
       // (admin-mode markets not yet cranked), fall back to $1/token — correct for devnet
       // markets. Without this fallback, only price-cranked markets contributed to OI,
       // causing ~8.57× underreporting (only 3 out of 35+ OI-bearing markets had prices).
+      // GH#1297: The $1 fallback now only applies to non-phantom markets (vault+accounts
+      // guard above), keeping it safe for legitimate admin-oracle devnet markets.
       const d = Math.min(Math.max((m as Record<string, unknown>).decimals as number ?? 6, 0), 18);
       const p = (m.last_price != null && m.last_price > 0 && m.last_price <= MAX_SANE_PRICE_USD)
         ? m.last_price
-        : 1; // $1 fallback for markets without oracle price
+        : 1; // $1 fallback for non-phantom markets without oracle price
       const usd = (rawOi / 10 ** d) * p;
       return sum + (usd > MAX_PER_MARKET_USD ? 0 : usd);
     },
