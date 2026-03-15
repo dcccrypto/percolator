@@ -3,6 +3,7 @@ import {
   SLAB_TIERS,
   SLAB_TIERS_V0,
   SLAB_TIERS_V1D,
+  SLAB_TIERS_V1D_LEGACY,
   slabDataSize,
   slabDataSizeV1,
   type SlabTierKey,
@@ -183,6 +184,68 @@ describe("SLAB_TIERS_V1D (GH#1205)", () => {
 
   it("data sizes are in ascending order", () => {
     const sizes = Object.values(SLAB_TIERS_V1D).map(t => t.dataSize);
+    for (let i = 1; i < sizes.length; i++) {
+      expect(sizes[i]).toBeGreaterThan(sizes[i - 1]);
+    }
+  });
+});
+
+// ============================================================================
+// SLAB_TIERS_V1D_LEGACY — GH#1237: V1D slabs created before GH#1234 used postBitmap=18
+// Top active market 6ZytbpV4 (TEST/USD, 65104 bytes) was broken by PR #1236 regression.
+// These sizes are 16 bytes larger per tier than SLAB_TIERS_V1D.
+// ENGINE_OFF=424, BITMAP_OFF=624, ACCOUNT_SIZE=248, postBitmap=18
+// ============================================================================
+
+describe("SLAB_TIERS_V1D_LEGACY (GH#1237)", () => {
+  it("is exported from discovery.ts", () => {
+    expect(SLAB_TIERS_V1D_LEGACY).toBeDefined();
+  });
+
+  it("has micro, small, medium, large tiers", () => {
+    expect(Object.keys(SLAB_TIERS_V1D_LEGACY)).toEqual(["micro", "small", "medium", "large"]);
+  });
+
+  it("micro tier: 64 accounts, dataSize=17080 (postBitmap=18)", () => {
+    expect(SLAB_TIERS_V1D_LEGACY.micro.maxAccounts).toBe(64);
+    expect(SLAB_TIERS_V1D_LEGACY.micro.dataSize).toBe(17_080);
+  });
+
+  it("small tier: 256 accounts, dataSize=65104 (postBitmap=18) — slab 6ZytbpV4 TEST/USD", () => {
+    expect(SLAB_TIERS_V1D_LEGACY.small.maxAccounts).toBe(256);
+    expect(SLAB_TIERS_V1D_LEGACY.small.dataSize).toBe(65_104);
+  });
+
+  it("medium tier: 1024 accounts, dataSize=257200 (postBitmap=18)", () => {
+    expect(SLAB_TIERS_V1D_LEGACY.medium.maxAccounts).toBe(1024);
+    expect(SLAB_TIERS_V1D_LEGACY.medium.dataSize).toBe(257_200);
+  });
+
+  it("large tier: 4096 accounts, dataSize=1025584 (postBitmap=18)", () => {
+    expect(SLAB_TIERS_V1D_LEGACY.large.maxAccounts).toBe(4096);
+    expect(SLAB_TIERS_V1D_LEGACY.large.dataSize).toBe(1_025_584);
+  });
+
+  it("legacy sizes are exactly 16 bytes larger than V1D sizes per tier", () => {
+    expect(SLAB_TIERS_V1D_LEGACY.micro.dataSize - SLAB_TIERS_V1D.micro.dataSize).toBe(16);
+    expect(SLAB_TIERS_V1D_LEGACY.small.dataSize - SLAB_TIERS_V1D.small.dataSize).toBe(16);
+    expect(SLAB_TIERS_V1D_LEGACY.medium.dataSize - SLAB_TIERS_V1D.medium.dataSize).toBe(16);
+    expect(SLAB_TIERS_V1D_LEGACY.large.dataSize - SLAB_TIERS_V1D.large.dataSize).toBe(16);
+  });
+
+  it("V1D_LEGACY sizes are distinct from all other known tiers (no collision)", () => {
+    const allOther = new Set([
+      ...Object.values(SLAB_TIERS).map(t => t.dataSize),
+      ...Object.values(SLAB_TIERS_V0).map(t => t.dataSize),
+      ...Object.values(SLAB_TIERS_V1D).map(t => t.dataSize),
+    ]);
+    for (const tier of Object.values(SLAB_TIERS_V1D_LEGACY)) {
+      expect(allOther.has(tier.dataSize), `V1D_LEGACY ${tier.dataSize} collides with existing tier`).toBe(false);
+    }
+  });
+
+  it("data sizes are in ascending order", () => {
+    const sizes = Object.values(SLAB_TIERS_V1D_LEGACY).map(t => t.dataSize);
     for (let i = 1; i < sizes.length; i++) {
       expect(sizes[i]).toBeGreaterThan(sizes[i - 1]);
     }

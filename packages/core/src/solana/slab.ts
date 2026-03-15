@@ -280,6 +280,12 @@ const V1_SIZES = new Map<number, number>();
 const V1_SIZES_LEGACY = new Map<number, number>();
 // V1D: actually deployed V1 program (ENGINE_OFF=424, BITMAP_OFF=624)
 const V1D_SIZES = new Map<number, number>();
+// V1D_SIZES_LEGACY: on-chain slabs created before GH#1234 when SDK assumed postBitmap=18.
+// These are 16 bytes larger per tier (micro=17080, small=65104, medium=257200, large=1025584).
+// The top active market (6ZytbpV4, $14k 24h vol) was created with postBitmap=18 and uses 65104.
+// PR #1236 fixed postBitmap for new slabs (→2) but broke recognition of these legacy 65104 slabs.
+// GH#1237: add both size variants so detectSlabLayout handles both old and new V1D on-chain data.
+const V1D_SIZES_LEGACY = new Map<number, number>();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
@@ -287,6 +293,8 @@ for (const n of TIERS) {
   // GH#1234: V1D deployed program omits num_used/pad/next_account_id → postBitmap=2 (free_head only).
   // This yields 65088 (n=256) and 1025568 (n=4096) matching actual devnet account sizes.
   V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 2), n);
+  // GH#1237: also register the legacy postBitmap=18 sizes for slabs created before GH#1234 fix.
+  V1D_SIZES_LEGACY.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 18), n);
 }
 
 function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: number): SlabLayout {
@@ -354,15 +362,18 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
 /**
  * Build layout for V1D (actually deployed V1 program, rev ac18a0e).
  * Uses correct field offsets derived from on-chain probing.
+ *
+ * @param maxAccounts - Number of account slots in the slab
+ * @param postBitmap  - Bytes after the bitmap before next_free array.
+ *   2  = free_head(u16) only — deployed program (GH#1234, default for new slabs)
+ *   18 = num_used(u16)+pad(6)+next_account_id(u64)+free_head(u16) — legacy on-chain slabs (GH#1237)
  */
-function buildLayoutV1D(maxAccounts: number): SlabLayout {
+function buildLayoutV1D(maxAccounts: number, postBitmap = 2): SlabLayout {
   const engineOff = V1D_ENGINE_OFF;
   const bitmapOff = V1D_ENGINE_BITMAP_OFF;
   const accountSize = V1D_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
-  // GH#1234: V1D omits num_used/pad/next_account_id → postBitmap=2 (free_head only).
-  const postBitmap = 2;
   const nextFreeBytes = maxAccounts * 2;
   const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
@@ -428,7 +439,13 @@ export function detectSlabLayout(dataLen: number): SlabLayout | null {
 
   // Check V1D sizes (actually deployed V1 program — ENGINE_OFF=424, correct struct layout)
   const v1dn = V1D_SIZES.get(dataLen);
-  if (v1dn !== undefined) return buildLayoutV1D(v1dn);
+  if (v1dn !== undefined) return buildLayoutV1D(v1dn, 2);
+
+  // Check V1D legacy sizes (postBitmap=18 on-chain slabs created before GH#1234 fix).
+  // e.g. slab 6ZytbpV4 (TEST/USD, top active market) = 65104 bytes, uses postBitmap=18.
+  // PR #1236 broke these by only registering the postBitmap=2 size; GH#1237 restores support.
+  const v1dln = V1D_SIZES_LEGACY.get(dataLen);
+  if (v1dln !== undefined) return buildLayoutV1D(v1dln, 18);
 
   // Check V1 sizes (future V1 program — ENGINE_OFF=600, PERC-1094 corrected)
   const v1n = V1_SIZES.get(dataLen);
@@ -447,16 +464,15 @@ export function detectSlabLayout(dataLen: number): SlabLayout | null {
 /**
  * Legacy detectLayout for backward compat.
  * Returns { bitmapWords, accountsOff, maxAccounts } or null.
+ *
+ * GH#1238: previously recomputed accountsOff with hardcoded postBitmap=18, which gave a value
+ * 16 bytes too large for V1D slabs (which use postBitmap=2). Now delegates directly to the
+ * SlabLayout descriptor so each variant uses its own correct accountsOff.
  */
 export function detectLayout(dataLen: number) {
   const layout = detectSlabLayout(dataLen);
   if (!layout) return null;
-  const bitmapBytes = layout.bitmapWords * 8;
-  const postBitmap = 18;
-  const nextFreeBytes = layout.maxAccounts * 2;
-  const preAccountsLen = layout.engineBitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
-  const accountsOff = Math.ceil(preAccountsLen / 8) * 8;
-  return { bitmapWords: layout.bitmapWords, accountsOff, maxAccounts: layout.maxAccounts };
+  return { bitmapWords: layout.bitmapWords, accountsOff: layout.accountsOff, maxAccounts: layout.maxAccounts };
 }
 
 // =============================================================================

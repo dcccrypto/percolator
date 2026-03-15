@@ -1095,11 +1095,13 @@ var V0_SIZES = /* @__PURE__ */ new Map();
 var V1_SIZES = /* @__PURE__ */ new Map();
 var V1_SIZES_LEGACY = /* @__PURE__ */ new Map();
 var V1D_SIZES = /* @__PURE__ */ new Map();
+var V1D_SIZES_LEGACY = /* @__PURE__ */ new Map();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
   V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
   V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 2), n);
+  V1D_SIZES_LEGACY.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 18), n);
 }
 function buildLayout(version, maxAccounts, engineOffOverride) {
   const isV0 = version === 0;
@@ -1159,13 +1161,12 @@ function buildLayout(version, maxAccounts, engineOffOverride) {
     engineInsuranceIsolationBpsOff: isV0 ? -1 : 64
   };
 }
-function buildLayoutV1D(maxAccounts) {
+function buildLayoutV1D(maxAccounts, postBitmap = 2) {
   const engineOff = V1D_ENGINE_OFF;
   const bitmapOff = V1D_ENGINE_BITMAP_OFF;
   const accountSize = V1D_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
-  const postBitmap = 18;
   const nextFreeBytes = maxAccounts * 2;
   const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
@@ -1227,7 +1228,9 @@ function detectSlabLayout(dataLen) {
   const v0n = V0_SIZES.get(dataLen);
   if (v0n !== void 0) return buildLayout(0, v0n);
   const v1dn = V1D_SIZES.get(dataLen);
-  if (v1dn !== void 0) return buildLayoutV1D(v1dn);
+  if (v1dn !== void 0) return buildLayoutV1D(v1dn, 2);
+  const v1dln = V1D_SIZES_LEGACY.get(dataLen);
+  if (v1dln !== void 0) return buildLayoutV1D(v1dln, 18);
   const v1n = V1_SIZES.get(dataLen);
   if (v1n !== void 0) return buildLayout(1, v1n);
   const v1ln = V1_SIZES_LEGACY.get(dataLen);
@@ -1237,12 +1240,7 @@ function detectSlabLayout(dataLen) {
 function detectLayout(dataLen) {
   const layout = detectSlabLayout(dataLen);
   if (!layout) return null;
-  const bitmapBytes = layout.bitmapWords * 8;
-  const postBitmap = 18;
-  const nextFreeBytes = layout.maxAccounts * 2;
-  const preAccountsLen = layout.engineBitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
-  const accountsOff = Math.ceil(preAccountsLen / 8) * 8;
-  return { bitmapWords: layout.bitmapWords, accountsOff, maxAccounts: layout.maxAccounts };
+  return { bitmapWords: layout.bitmapWords, accountsOff: layout.accountsOff, maxAccounts: layout.maxAccounts };
 }
 var PARAMS_WARMUP_PERIOD_OFF = 0;
 var PARAMS_MAINTENANCE_MARGIN_OFF = 8;
@@ -1747,6 +1745,12 @@ var SLAB_TIERS_V1D = {
   medium: { maxAccounts: 1024, dataSize: 257184, label: "Medium", description: "1,024 slots (V1D devnet)" },
   large: { maxAccounts: 4096, dataSize: 1025568, label: "Large", description: "4,096 slots (V1D devnet)" }
 };
+var SLAB_TIERS_V1D_LEGACY = {
+  micro: { maxAccounts: 64, dataSize: 17080, label: "Micro", description: "64 slots (V1D legacy, postBitmap=18)" },
+  small: { maxAccounts: 256, dataSize: 65104, label: "Small", description: "256 slots (V1D legacy, postBitmap=18)" },
+  medium: { maxAccounts: 1024, dataSize: 257200, label: "Medium", description: "1,024 slots (V1D legacy, postBitmap=18)" },
+  large: { maxAccounts: 4096, dataSize: 1025584, label: "Large", description: "4,096 slots (V1D legacy, postBitmap=18)" }
+};
 var SLAB_TIERS_V1 = SLAB_TIERS;
 function slabDataSize(maxAccounts) {
   const ENGINE_OFF_V0 = 480;
@@ -1776,7 +1780,8 @@ function validateSlabTierMatch(dataSize, programSlabLen) {
 var ALL_SLAB_SIZES = [
   ...Object.values(SLAB_TIERS).map((t) => t.dataSize),
   ...Object.values(SLAB_TIERS_V0).map((t) => t.dataSize),
-  ...Object.values(SLAB_TIERS_V1D).map((t) => t.dataSize)
+  ...Object.values(SLAB_TIERS_V1D).map((t) => t.dataSize),
+  ...Object.values(SLAB_TIERS_V1D_LEGACY).map((t) => t.dataSize)
 ];
 var SLAB_DATA_SIZE = SLAB_TIERS.large.dataSize;
 var HEADER_SLICE_LENGTH = 1940;
@@ -1904,7 +1909,8 @@ async function discoverMarkets(connection, programId) {
   const ALL_TIERS = [
     ...Object.values(SLAB_TIERS),
     ...Object.values(SLAB_TIERS_V0),
-    ...Object.values(SLAB_TIERS_V1D)
+    ...Object.values(SLAB_TIERS_V1D),
+    ...Object.values(SLAB_TIERS_V1D_LEGACY)
   ];
   let rawAccounts = [];
   try {
@@ -3201,6 +3207,7 @@ export {
   SLAB_TIERS_V0,
   SLAB_TIERS_V1,
   SLAB_TIERS_V1D,
+  SLAB_TIERS_V1D_LEGACY,
   STAKE_IX,
   STAKE_POOL_SIZE,
   STAKE_PROGRAM_ID,

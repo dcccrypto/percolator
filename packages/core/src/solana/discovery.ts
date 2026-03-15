@@ -87,6 +87,25 @@ export const SLAB_TIERS_V1D = {
   large:  { maxAccounts: 4096, dataSize: 1_025_568,  label: "Large",  description: "4,096 slots (V1D devnet)" },
 } as const;
 
+/**
+ * V1D legacy slab sizes — on-chain V1D slabs created before GH#1234 when the SDK assumed
+ * postBitmap=18. These are 16 bytes larger per tier than SLAB_TIERS_V1D.
+ * PR #1236 fixed postBitmap for new slabs (→2) but caused slab 6ZytbpV4 (65104 bytes,
+ * top active market ~$15k 24h vol) to be unrecognized → "Failed to load market". GH#1237.
+ *
+ * Sizes computed via computeSlabSize(ENGINE_OFF=424, BITMAP_OFF=624, ACCOUNT_SIZE=248, N, postBitmap=18):
+ *   micro  =  17,080  (64 slots)
+ *   small  =  65,104  (256 slots)  ← slab 6ZytbpV4 TEST/USD
+ *   medium = 257,200  (1,024 slots)
+ *   large  = 1,025,584 (4,096 slots)
+ */
+export const SLAB_TIERS_V1D_LEGACY = {
+  micro:  { maxAccounts: 64,   dataSize: 17_080,     label: "Micro",  description: "64 slots (V1D legacy, postBitmap=18)" },
+  small:  { maxAccounts: 256,  dataSize: 65_104,     label: "Small",  description: "256 slots (V1D legacy, postBitmap=18)" },
+  medium: { maxAccounts: 1024, dataSize: 257_200,    label: "Medium", description: "1,024 slots (V1D legacy, postBitmap=18)" },
+  large:  { maxAccounts: 4096, dataSize: 1_025_584,  label: "Large",  description: "4,096 slots (V1D legacy, postBitmap=18)" },
+} as const;
+
 /** @deprecated Alias — use SLAB_TIERS (already V1) */
 export const SLAB_TIERS_V1 = SLAB_TIERS;
 
@@ -151,11 +170,12 @@ export function validateSlabTierMatch(dataSize: number, programSlabLen: number):
   return dataSize === programSlabLen;
 }
 
-/** All known slab data sizes for discovery (V0 + V1 + V1D tiers) */
+/** All known slab data sizes for discovery (V0 + V1 + V1D + V1D legacy tiers) */
 const ALL_SLAB_SIZES = [
   ...Object.values(SLAB_TIERS).map(t => t.dataSize),
   ...Object.values(SLAB_TIERS_V0).map(t => t.dataSize),
   ...Object.values(SLAB_TIERS_V1D).map(t => t.dataSize),
+  ...Object.values(SLAB_TIERS_V1D_LEGACY).map(t => t.dataSize),
 ];
 
 /** Legacy constant for backward compat */
@@ -326,15 +346,19 @@ export async function discoverMarkets(
   connection: Connection,
   programId: PublicKey,
 ): Promise<DiscoveredMarket[]> {
-  // Query all known slab sizes in parallel — V0, V1D (deployed devnet), and V1 (upgraded) tiers.
+  // Query all known slab sizes in parallel — V0, V1D (deployed devnet), V1D legacy, and V1 (upgraded) tiers.
   // We track the actual dataSize per entry so detectSlabLayout can determine the correct layout,
   // and pass that layout to all parse functions (avoids wrong-version offsets on partial slices).
   // GH#1205: V1D tiers were missing here — V1D slabs fell through to memcmp fallback with wrong
   // dataSize hints → detectSlabLayout returned null → parse failure in discoverMarkets.
+  // GH#1237/GH#1238: SLAB_TIERS_V1D_LEGACY (postBitmap=18, e.g. 65,104-byte slabs created before
+  // GH#1234) must also be included; omitting them causes legacy on-chain slabs to be missed by
+  // dataSize filter queries and fall through to memcmp with wrong maxAccounts hint.
   const ALL_TIERS = [
     ...Object.values(SLAB_TIERS),
     ...Object.values(SLAB_TIERS_V0),
     ...Object.values(SLAB_TIERS_V1D),
+    ...Object.values(SLAB_TIERS_V1D_LEGACY),
   ];
   type RawEntry = { pubkey: PublicKey; account: { data: Buffer | Uint8Array }; maxAccounts: number; dataSize: number };
   let rawAccounts: RawEntry[] = [];
