@@ -1013,6 +1013,9 @@ export function useCreateMarket() {
           loading: false,
           step: 5,
           stepLabel: "Market created!",
+          // GH#1266: Defensively re-set slabAddress from slabPk at completion to guard
+          // against any state-update race where a prior step's address is stale.
+          slabAddress: slabPk.toBase58(),
         }));
       } catch (e) {
         const msg = parseMarketCreationError(e);

@@ -63,14 +63,11 @@ export async function GET(request: NextRequest) {
   }
   const supabase = getServiceClient();
 
-  const [statsRes, tradersRes, recentTradesRes] = await Promise.all([
+  const [statsRes, tradersRes] = await Promise.all([
     // GH#1218: include slab_address so we can filter blocked markets (same as /api/markets)
-    supabase.from("markets_with_stats").select("slab_address, volume_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals").limit(500),
+    // GH#1265: also fetch trade_count_24h so we can sum it directly (replaces buggy trades table count query)
+    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals").limit(500),
     supabase.from("trades").select("trader").limit(5000),
-    supabase
-      .from("trades")
-      .select("id", { count: "exact", head: true })
-      .gte("created_at", new Date(Date.now() - 86400000).toISOString()),
   ]);
 
   // GH#1218: filter blocked slabs before aggregating — mirrors /api/markets behaviour.
@@ -118,14 +115,27 @@ export async function GET(request: NextRequest) {
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
             ? (m.open_interest_long ?? 0) + (m.open_interest_short ?? 0)
             : 0);
-      return sum + toUsd(rawOi, m);
+      if (!isSaneMarketValue(rawOi)) return sum;
+      // GH#1265: OI is tracked in collateral micro-units. When no oracle price is available
+      // (admin-mode markets not yet cranked), fall back to $1/token — correct for devnet
+      // markets. Without this fallback, only price-cranked markets contributed to OI,
+      // causing ~8.57× underreporting (only 3 out of 35+ OI-bearing markets had prices).
+      const d = Math.min(Math.max((m as Record<string, unknown>).decimals as number ?? 6, 0), 18);
+      const p = (m.last_price != null && m.last_price > 0 && m.last_price <= MAX_SANE_PRICE_USD)
+        ? m.last_price
+        : 1; // $1 fallback for markets without oracle price
+      const usd = (rawOi / 10 ** d) * p;
+      return sum + (usd > MAX_PER_MARKET_USD ? 0 : usd);
     },
     0
   );
   const uniqueTraders = new Set(
     (tradersRes.data ?? []).map((r) => r.trader)
   ).size;
-  const trades24h = recentTradesRes.count ?? 0;
+  // GH#1265: trades table count query (head:true) returns 0 — likely a column name mismatch
+  // or supabase HEAD count limitation. Use trade_count_24h from markets_with_stats instead,
+  // which is the same source used by /api/markets and is reliable.
+  const trades24h = activeData.reduce((sum, m) => sum + (m.trade_count_24h ?? 0), 0);
 
   return NextResponse.json({
     totalMarkets,

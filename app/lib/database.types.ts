@@ -795,6 +795,7 @@ export type Database = {
           symbol: string | null
           total_accounts: number | null
           total_open_interest: number | null
+          trade_count_24h: number | null
           trading_fee_bps: number | null
           updated_at: string | null
           vault_balance: number | null

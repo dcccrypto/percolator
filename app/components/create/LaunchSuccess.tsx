@@ -53,7 +53,9 @@ export const LaunchSuccess: FC<LaunchSuccessProps> = ({
   const { publicKey } = useWalletCompat();
   const router = useRouter();
 
-  /** PERC-475: Mint $500 worth of devnet tokens then navigate to the trade page. */
+  /** PERC-475: Mint $500 worth of devnet tokens then navigate to the trade page.
+   *  GH#1266: Always navigate to trade page regardless of auto-mint outcome.
+   *  Mint failure is non-fatal — user can get tokens via the airdrop button on the trade page. */
   const handleMintAndTrade = useCallback(async () => {
     if (!publicKey || !devnetMint || mintLoading) return;
     setMintLoading(true);
@@ -67,16 +69,16 @@ export const LaunchSuccess: FC<LaunchSuccessProps> = ({
           walletAddress: publicKey.toBase58(),
         }),
       });
-      // On 429 (rate limited) still navigate — wallet may already have tokens
+      // GH#1266: On mint failure, show a brief warning but still navigate.
+      // Previously we returned early here, leaving the user stranded with an error banner.
       if (!resp.ok && resp.status !== 429) {
-        const d = await resp.json();
-        setMintError(d.error ?? "Mint failed — try again");
-        setMintLoading(false);
-        return;
+        const d = await resp.json().catch(() => ({}));
+        setMintError(d.error ?? "Auto-mint failed — you can airdrop tokens from the trade page");
       }
     } catch {
       // Network error — still navigate
     }
+    // Always navigate regardless of mint outcome
     router.push(`/trade/${marketAddress}`);
   }, [publicKey, devnetMint, mintLoading, marketAddress, router]);
 
