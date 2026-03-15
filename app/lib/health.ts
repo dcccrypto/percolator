@@ -137,6 +137,7 @@ export function computeMarketHealthFromStats(stats: {
   insurance_fund?: number | null;
   c_tot?: number | null;
   vault_balance?: number | null;
+  total_accounts?: number | null;
 }): MarketHealth {
   const oiRaw = stats.total_open_interest
     ?? ((stats.open_interest_long ?? 0) + (stats.open_interest_short ?? 0));
@@ -146,7 +147,24 @@ export function computeMarketHealthFromStats(stats: {
   // Filter out sentinel-like numeric values (JS number precision of u64::MAX ≈ 1.844e19).
   // GH#1208: Use 5e17 cap — near-sentinel corrupted values like 7.997e17 also slip through.
   const isSentinelNum = (v: number) => v > 5e17;
-  const oi = isSentinelNum(oiRaw) ? 0 : Math.max(0, oiRaw);
+
+  // GH#1290 / PERC-570: Suppress phantom OI for drained markets.
+  // If vault_balance is a dust/zero value (< 1_000_000 micro-units), any reported OI
+  // is stale/phantom (LP fully withdrew; on-chain OI counter not decremented on
+  // force-close/reclaim). Without this guard, computeMarketHealthFromStats returns
+  // "Low Liquidity" instead of "Empty" because it sees OI > 0 with capital = 0.
+  // Mirrors the invariant enforced by StatsCollector.ts, route.ts, and migration 051.
+  //
+  // Guard only fires when vault_balance is explicitly provided (not null/undefined).
+  // Callers that don't have vault data are exempt — this avoids false positives when
+  // the function is called without DB stats.
+  const MIN_VAULT_FOR_OI = 1_000_000;
+  const hasVaultData = stats.vault_balance !== undefined && stats.vault_balance !== null;
+  const vaultBal = stats.vault_balance ?? 0;
+  const accountsCount = stats.total_accounts ?? 0;
+  const isPhantomOI = hasVaultData && vaultBal < MIN_VAULT_FOR_OI;
+
+  const oi = isPhantomOI ? 0 : (isSentinelNum(oiRaw) ? 0 : Math.max(0, oiRaw));
   const insurance = isSentinelNum(insuranceRaw) ? 0 : Math.max(0, insuranceRaw);
   const capital = isSentinelNum(capitalRaw) ? 0 : Math.max(0, capitalRaw);
 

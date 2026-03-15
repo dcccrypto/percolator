@@ -175,7 +175,13 @@ export async function GET() {
       const MIN_VAULT_FOR_OI = 1_000_000; // < 1 USDC at 6 decimals; dust at 9 decimals
       const accountsCount = (m.total_accounts as number) ?? 0;
       const vaultBal = (m.vault_balance as number) ?? 0;
-      const displayOiUsd = (accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI) ? null : total_open_interest_usd;
+      // GH#1290 / PERC-570: Phantom OI guard — suppress all OI fields (USD and raw atoms)
+      // when vault is dust/empty or no accounts exist. Matches StatsCollector invariant
+      // and migration 051. Suppressing only total_open_interest_usd left the raw
+      // total_open_interest atom value in the response, which fed phantom OI into
+      // computeMarketHealthFromStats and the markets page sort/filter.
+      const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI;
+      const displayOiUsd = isPhantomOI ? null : total_open_interest_usd;
 
       // GH#1270: Pre-compute volume_24h in USD so consumers (e.g. Watchlist) don't need
       // to divide by 10^decimals manually. Mirrors the total_open_interest_usd pattern.
@@ -198,10 +204,15 @@ export async function GET() {
         // corruption vector as last_price/mark_price. Inconsistent sanitization
         // means a corrupt index price still reaches consumers.
         index_price: sanitizePrice(m.index_price as number | null, "index_price", m.slab_address as string),
-        // #1160: Pre-converted OI in USD (null when price unavailable or value is a sentinel).
-        // Raw open_interest_long / open_interest_short / total_open_interest remain
-        // in the response for backward compatibility.
-        // GH#1250/1271/PERC-816: Suppressed (null) when total_accounts == 0 or vault_balance < 1_000_000.
+        // #1160 / GH#1290 / PERC-570: OI fields — USD and raw atoms.
+        // Raw atom fields (total_open_interest, open_interest_long, open_interest_short) are
+        // zeroed (not just the USD conversion) when the phantom OI guard fires.
+        // Previously only total_open_interest_usd was suppressed, leaving the raw atom value
+        // in the response and feeding phantom OI into health calculations and sort/filter.
+        // GH#1250/1271/PERC-816/GH#1290: Suppressed when total_accounts == 0 or vault_balance < 1_000_000.
+        total_open_interest: isPhantomOI ? 0 : (m.total_open_interest as number ?? 0),
+        open_interest_long: isPhantomOI ? 0 : (m.open_interest_long as number ?? 0),
+        open_interest_short: isPhantomOI ? 0 : (m.open_interest_short as number ?? 0),
         total_open_interest_usd: displayOiUsd,
         // GH#1270: Pre-converted 24h volume in USD. Null when price unavailable or raw
         // value is a sentinel. Raw volume_24h preserved for backward compatibility.
