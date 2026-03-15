@@ -5,6 +5,7 @@
  * This improves availability during DB outages or network issues.
  */
 import { createLogger } from "@percolator/shared";
+import { truncateErrorMessage } from "@percolator/shared/sanitize.js";
 import { Context } from "hono";
 
 const logger = createLogger("api:db-cache-fallback");
@@ -46,8 +47,8 @@ export async function withDbCacheFallback<T>(
     
     return result;
   } catch (err) {
-    logger.error("DB query failed, checking cache", { 
-      error: err instanceof Error ? err.message : String(err),
+    logger.error("DB query failed, checking cache", {
+      error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120),
       cacheKey,
     });
     

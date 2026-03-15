@@ -161,8 +161,10 @@ app.get("/", (c) => c.json({
 
 // Global error handler
 app.onError((err, c) => {
-  logger.error("Unhandled error", { 
-    error: err.message, 
+  // Truncate error message for logs
+  const { truncateErrorMessage } = await import("@percolator/shared/sanitize.js");
+  logger.error("Unhandled error", {
+    error: truncateErrorMessage(err.message, 120),
     stack: err.stack,
     endpoint: c.req.path,
     method: c.req.method
@@ -180,7 +182,12 @@ app.onError((err, c) => {
     });
   }).catch(() => {});
   
-  return c.json({ error: "Internal server error" }, 500);
+  // Truncate error message for API response (details only in development)
+  const showDetails = process.env.NODE_ENV !== "production";
+  return c.json({
+    error: "Internal server error",
+    ...(showDetails && { details: truncateErrorMessage(err.message, 200) })
+  }, 500);
 });
 
 // Validate NODE_ENV at startup

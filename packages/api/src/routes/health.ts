@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { getConnection, getSupabase, createLogger } from "@percolator/shared";
+import { truncateErrorMessage } from "@percolator/shared/sanitize.js";
 import { getWebSocketMetrics } from "./ws.js";
 
 const logger = createLogger("api:health");
@@ -17,7 +18,7 @@ export function healthRoutes(): Hono {
       await getConnection().getSlot();
       checks.rpc = true;
     } catch (err) {
-      logger.error("RPC check failed", { error: err instanceof Error ? err.message : err });
+      logger.error("RPC check failed", { error: truncateErrorMessage(err instanceof Error ? err.message : err, 120) });
       checks.rpc = false;
     }
     
@@ -30,7 +31,7 @@ export function healthRoutes(): Hono {
       }
       checks.db = true;
     } catch (err) {
-      logger.error("DB check failed", { error: err instanceof Error ? err.message : err });
+      logger.error("DB check failed", { error: truncateErrorMessage(err instanceof Error ? err.message : err, 120) });
       checks.db = false;
     }
     
@@ -55,7 +56,7 @@ export function healthRoutes(): Hono {
       const metrics = getWebSocketMetrics();
       return c.json(metrics);
     } catch (err) {
-      logger.error("Failed to get WebSocket metrics", { error: err instanceof Error ? err.message : err });
+      logger.error("Failed to get WebSocket metrics", { error: truncateErrorMessage(err instanceof Error ? err.message : err, 120) });
       return c.json({ error: "Failed to retrieve metrics" }, 500);
     }
   });
