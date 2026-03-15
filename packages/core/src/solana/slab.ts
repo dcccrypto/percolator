@@ -1069,8 +1069,8 @@ export function parseEngine(data: Uint8Array): EngineState {
     lifetimeForceCloses: readU64LE(data, base + layout.engineLifetimeForceClosesOff),
     netLpPos: readI128LE(data, base + layout.engineNetLpPosOff),
     lpSumAbs: readU128LE(data, base + layout.engineLpSumAbsOff),
-    lpMaxAbs: readU128LE(data, base + layout.engineLpMaxAbsOff),
-    lpMaxAbsSweep: readU128LE(data, base + layout.engineLpMaxAbsSweepOff),
+    lpMaxAbs: layout.engineLpMaxAbsOff >= 0 ? readU128LE(data, base + layout.engineLpMaxAbsOff) : 0n,
+    lpMaxAbsSweep: layout.engineLpMaxAbsSweepOff >= 0 ? readU128LE(data, base + layout.engineLpMaxAbsSweepOff) : 0n,
     emergencyOiMode: layout.engineEmergencyOiModeOff >= 0
       ? data[base + layout.engineEmergencyOiModeOff] !== 0
       : false,
