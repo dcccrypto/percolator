@@ -732,8 +732,14 @@ const DevnetMintContent: FC = () => {
                 </button>
               </div>
 
-              <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <Link href={`/create?mint=${mintAddress}`} className={`${btnPrimary} text-center`}>
+              <p className="mt-4 text-xs text-[var(--text-muted)]">
+                This is a <span className="text-[var(--accent)]">devnet-only</span> token. Market creation requires a{" "}
+                <span className="text-white">mainnet</span> token CA — paste it directly on the{" "}
+                <Link href="/create" className="underline hover:text-[var(--accent)]">Create Market</Link> page.
+              </p>
+
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                <Link href="/create" className={`${btnPrimary} text-center`}>
                   Create Market →
                 </Link>
                 <a href={`https://explorer.solana.com/address/${mintAddress}?cluster=devnet`} target="_blank" rel="noopener noreferrer" className="text-xs text-[var(--text-muted)] hover:text-[var(--accent)] underline">
