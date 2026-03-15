@@ -107,8 +107,21 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       setMintNetworkStatus("loading");
       (async () => {
         try {
-          // Step 1: Check if mint exists on devnet
-          const accountInfo = await connection.getAccountInfo(mintPk);
+          // Step 1: Check if mint exists on devnet.
+          // GH#1255: Retry up to 3 times (1.5s apart) to handle RPC propagation delay
+          // for mints just created via Token Factory. Without retries, getAccountInfo
+          // returns null for a freshly-created mint and the code incorrectly falls
+          // through to the mainnet mirror path, which then fails ("Token may not exist
+          // or have no DEX liquidity") because the token was never on mainnet.
+          let accountInfo = null;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+              await new Promise(r => setTimeout(r, 1500));
+            }
+            if (cancelled) return;
+            accountInfo = await connection.getAccountInfo(mintPk);
+            if (accountInfo) break;
+          }
           if (cancelled) return;
 
           if (accountInfo) {
@@ -146,7 +159,7 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
             }
           }
 
-          // Step 2: Mint doesn't exist on devnet — try mirror from mainnet
+          // Step 2: Mint not found on devnet after retries — try mirror from mainnet
           if (cancelled) return;
           setMintNetworkStatus("mirroring");
           const resp = await fetch("/api/devnet-mirror-mint", {
@@ -229,7 +242,10 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
     }
   }, [tokenMeta, onTokenResolved, mirrorMeta]);
 
-  // Check wallet token balance
+  // Check wallet token balance.
+  // GH#1256: For native devnet mints (freshly created via Token Factory), the ATA may
+  // not be visible on the RPC immediately after the mint transaction confirms. Retry
+  // up to 3 times with 2s delay so balance isn't stuck at 0 for newly-minted tokens.
   useEffect(() => {
     if (!publicKey || !mintValid) {
       setBalance(null);
@@ -239,27 +255,36 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
     let cancelled = false;
     setBalanceLoading(true);
     (async () => {
-      try {
-        const pk = new PublicKey(debounced);
-        const ata = await getAssociatedTokenAddress(pk, publicKey);
-        const account = await getAccount(connection, ata);
-        if (!cancelled) {
-          setBalance(account.amount);
-          onBalanceChange(account.amount);
+      const MAX_ATTEMPTS = isNativeDevnetMint ? 3 : 1;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 2000));
         }
-      } catch {
-        if (!cancelled) {
-          setBalance(0n);
-          onBalanceChange(0n);
+        if (cancelled) return;
+        try {
+          const pk = new PublicKey(debounced);
+          const ata = await getAssociatedTokenAddress(pk, publicKey);
+          const account = await getAccount(connection, ata);
+          if (!cancelled) {
+            const amount = account.amount;
+            setBalance(amount);
+            onBalanceChange(amount);
+            // Got a non-zero balance — no need to retry
+            if (amount > 0n) break;
+          }
+        } catch {
+          if (!cancelled && attempt === MAX_ATTEMPTS - 1) {
+            setBalance(0n);
+            onBalanceChange(0n);
+          }
         }
-      } finally {
-        if (!cancelled) setBalanceLoading(false);
       }
+      if (!cancelled) setBalanceLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [connection, publicKey, debounced, mintValid, onBalanceChange]);
+  }, [connection, publicKey, debounced, mintValid, isNativeDevnetMint, onBalanceChange]);
 
   const showInvalid = debounced.length > 0 && !mintValid;
   const effectiveMeta = tokenMeta ?? mirrorMeta;
