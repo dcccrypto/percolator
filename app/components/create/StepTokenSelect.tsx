@@ -76,14 +76,26 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   const onBalanceChangeRef = useRef(onBalanceChange);
   useEffect(() => { onBalanceChangeRef.current = onBalanceChange; });
 
-  // Debounce mint input
+  // Debounce mint input.
+  // GH#1263: Capture `debounced` at effect-creation time so we can skip calling
+  // `onMintChange` when the value hasn't actually changed. Without this guard, mounting
+  // with a pre-filled mint (e.g. /create?mint=...) fires `onMintChange(sameMint)` after
+  // 400 ms, which resets `mintExistsOnNetwork` to false in the parent even though
+  // validation had already succeeded — permanently disabling the Continue button.
   useEffect(() => {
+    const prevDebounced = debounced; // snapshot at effect-creation (stable for this run)
     const timer = setTimeout(() => {
       const trimmed = inputValue.trim();
+      if (trimmed !== prevDebounced) {
+        // Mint address actually changed — notify parent so it can reset validation state.
+        onMintChange(trimmed);
+      }
       setDebounced(trimmed);
-      onMintChange(trimmed);
     }, 400);
     return () => clearTimeout(timer);
+    // debounced intentionally excluded from deps: we only want the value captured at the
+    // start of each debounce window, not to restart the timer whenever it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputValue, onMintChange]);
 
   const mintIsUrl =
