@@ -1,5 +1,6 @@
 /**
- * Tests for middleware.ts — Upstash Redis distributed rate limiter (GH#1213).
+ * Tests for middleware.ts — Upstash Redis distributed rate limiter (GH#1213)
+ * and off-by-one fix (GH#1245).
  *
  * KEY NOTE: vi.fn().mockImplementation(() => ...) with an arrow function is
  * NOT usable as a constructor (Vitest 4 enforces this). Ratelimit instances
@@ -8,6 +9,8 @@
  * Covers:
  *  - 100 parallel /api/markets requests all return 429 when Redis returns
  *    success:false (the fix for serverless per-instance bypass, GH#1213)
+ *  - GH#1245: Upstash success:true + remaining:0 (last allowed req) → 200 not 429
+ *  - GH#1245: In-memory off-by-one — request #120 must be ALLOWED, #121 blocked
  *  - In-memory fallback (no Redis env) enforces 120/min per-IP limit
  *  - RPC tier uses a separate 600/min limit bucket
  *  - X-RateLimit-* + Retry-After headers present on 429 responses
@@ -119,6 +122,19 @@ describe("middleware — Upstash Redis distributed rate limiter (GH#1213)", () =
     const res = await middleware(makeReq("/some-page"));
     expect(res.status).not.toBe(429);
   });
+
+  it("GH#1245: Upstash success:true + remaining:0 (last allowed request) → 200 not 429", async () => {
+    // Upstash says the request is allowed but the bucket is now exhausted.
+    // Previously `remaining <= 0` incorrectly blocked this request.
+    mockLimitFn.mockResolvedValueOnce({
+      success: true,
+      remaining: 0,
+      reset: Date.now() + 60_000,
+    });
+    const res = await middleware(makeReq("/api/markets", "5.6.7.8"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-RateLimit-Remaining")).toBe("0");
+  });
 });
 
 // ── Suite 2: In-memory fallback (no Upstash env vars) ────────────────────
@@ -131,9 +147,11 @@ describe("middleware — in-memory fallback (no Upstash env)", () => {
     middleware = await freshMiddleware();
   });
 
-  it("allows the first 119 requests under the 120/min in-memory limit", async () => {
+  it("GH#1245: allows exactly 120 requests per IP (off-by-one fix)", async () => {
+    // The old code blocked request #120 (count == max → remaining == 0 → 429).
+    // The fix uses count <= max so request #120 is the LAST allowed request.
     const ip = "10.0.0.1";
-    for (let i = 0; i < 119; i++) {
+    for (let i = 0; i < 120; i++) {
       const res = await middleware(makeReq("/api/markets", ip));
       expect(res.status).not.toBe(429);
     }
