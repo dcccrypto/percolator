@@ -1,6 +1,5 @@
 import { Hono } from "hono";
-import { getConnection, getSupabase, createLogger } from "@percolator/shared";
-import { truncateErrorMessage } from "@percolator/shared/sanitize.js";
+import { getConnection, getSupabase, createLogger, truncateErrorMessage } from "@percolator/shared";
 import { getWebSocketMetrics } from "./ws.js";
 
 const logger = createLogger("api:health");

@@ -3,16 +3,17 @@
  * Default: 120 chars for logs, 200 chars for API responses
  */
 export function truncateErrorMessage(msg: unknown, maxLength = 120): string {
-  if (typeof msg !== "string") msg = String(msg);
-  if (!msg) return "";
+  const str: string = typeof msg === "string" ? msg : String(msg);
+  if (!str) return "";
   // Remove null bytes and control chars
-  let sanitized = sanitizeString(msg, maxLength);
+  let sanitized = sanitizeString(str, maxLength);
   // Truncate to maxLength
   if (sanitized.length > maxLength) {
     sanitized = sanitized.slice(0, maxLength) + "...";
   }
   return sanitized;
 }
+
 /**
  * Input sanitization utilities for API security
  */

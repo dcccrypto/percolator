@@ -4,8 +4,7 @@
  * When Supabase queries fail, serve stale cached data instead of 500 errors.
  * This improves availability during DB outages or network issues.
  */
-import { createLogger } from "@percolator/shared";
-import { truncateErrorMessage } from "@percolator/shared/sanitize.js";
+import { createLogger, truncateErrorMessage } from "@percolator/shared";
 import { Context } from "hono";
 
 const logger = createLogger("api:db-cache-fallback");

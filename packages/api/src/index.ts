@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { serve } from "@hono/node-server";
-import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert } from "@percolator/shared";
+import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert, truncateErrorMessage } from "@percolator/shared";
 import { initSentry, sentryMiddleware, flushSentry } from "./middleware/sentry.js";
 
 // Initialize Sentry before anything else
@@ -162,7 +162,6 @@ app.get("/", (c) => c.json({
 // Global error handler
 app.onError((err, c) => {
   // Truncate error message for logs
-  const { truncateErrorMessage } = await import("@percolator/shared/sanitize.js");
   logger.error("Unhandled error", {
     error: truncateErrorMessage(err.message, 120),
     stack: err.stack,

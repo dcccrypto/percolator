@@ -16,6 +16,7 @@ import {
   getFundingHistorySince,
   getSupabase,
   createLogger,
+  truncateErrorMessage,
 } from "@percolator/shared";
 
 const logger = createLogger("api:funding");
@@ -67,8 +68,7 @@ export function fundingRoutes(): Hono {
         markets,
       });
     } catch (err) {
-      logger.error("Error fetching global funding data", { error: err });
-        logger.error("Error fetching global funding data", { error: truncateErrorMessage(err, 120) });
+      logger.error("Error fetching global funding data", { error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
         return c.json({
           error: "Failed to fetch global funding data",
           ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })
