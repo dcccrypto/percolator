@@ -169,8 +169,19 @@ export async function GET() {
       // misleading solvency signals (OI > 0 with vault = 0 and no accounts).
       // Indexer-level fix (StatsCollector.ts) will clear OI for future syncs; this is a
       // defensive display-layer fallback.
+      // GH#1271: Also suppress when vault_balance = 0 (no LP liquidity → no real positions).
       const accountsCount = (m.total_accounts as number) ?? 0;
-      const displayOiUsd = accountsCount === 0 ? null : total_open_interest_usd;
+      const vaultBal = (m.vault_balance as number) ?? 0;
+      const displayOiUsd = (accountsCount === 0 || vaultBal === 0) ? null : total_open_interest_usd;
+
+      // GH#1270: Pre-compute volume_24h in USD so consumers (e.g. Watchlist) don't need
+      // to divide by 10^decimals manually. Mirrors the total_open_interest_usd pattern.
+      // Raw volume_24h is preserved in the response for backward compatibility.
+      const volume_24h_usd = rawToUsd(
+        m.volume_24h as number | null,
+        m.decimals as number | null,
+        sanitizedPrice,
+      );
 
       return {
         ...m,
@@ -187,8 +198,11 @@ export async function GET() {
         // #1160: Pre-converted OI in USD (null when price unavailable or value is a sentinel).
         // Raw open_interest_long / open_interest_short / total_open_interest remain
         // in the response for backward compatibility.
-        // GH#1250: Suppressed (null) when total_accounts == 0 — stale on-chain OI guard.
+        // GH#1250/1271: Suppressed (null) when total_accounts == 0 or vault_balance == 0.
         total_open_interest_usd: displayOiUsd,
+        // GH#1270: Pre-converted 24h volume in USD. Null when price unavailable or raw
+        // value is a sentinel. Raw volume_24h preserved for backward compatibility.
+        volume_24h_usd,
         // GH#1208: Sanitize c_tot — near-sentinel values (e.g. 7.997e17) pass the
         // isSaneMarketValue 1e18 check but are clearly corrupt LP collateral totals.
         c_tot: sanitizeCtot(m.c_tot as number | null),

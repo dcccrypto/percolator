@@ -43,7 +43,7 @@ function mkMarket(overrides: Record<string, unknown> = {}) {
     net_lp_pos: 0,
     lp_sum_abs: 0,
     c_tot: 0,
-    vault_balance: 0,
+    vault_balance: 10_000,
     created_at: "2026-01-01T00:00:00Z",
     stats_updated_at: "2026-01-01T00:00:00Z",
     oracle_mode: "admin",
