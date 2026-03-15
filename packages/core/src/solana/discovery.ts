@@ -346,15 +346,19 @@ export async function discoverMarkets(
   connection: Connection,
   programId: PublicKey,
 ): Promise<DiscoveredMarket[]> {
-  // Query all known slab sizes in parallel — V0, V1D (deployed devnet), and V1 (upgraded) tiers.
+  // Query all known slab sizes in parallel — V0, V1D (deployed devnet), V1D legacy, and V1 (upgraded) tiers.
   // We track the actual dataSize per entry so detectSlabLayout can determine the correct layout,
   // and pass that layout to all parse functions (avoids wrong-version offsets on partial slices).
   // GH#1205: V1D tiers were missing here — V1D slabs fell through to memcmp fallback with wrong
   // dataSize hints → detectSlabLayout returned null → parse failure in discoverMarkets.
+  // GH#1237/GH#1238: SLAB_TIERS_V1D_LEGACY (postBitmap=18, e.g. 65,104-byte slabs created before
+  // GH#1234) must also be included; omitting them causes legacy on-chain slabs to be missed by
+  // dataSize filter queries and fall through to memcmp with wrong maxAccounts hint.
   const ALL_TIERS = [
     ...Object.values(SLAB_TIERS),
     ...Object.values(SLAB_TIERS_V0),
     ...Object.values(SLAB_TIERS_V1D),
+    ...Object.values(SLAB_TIERS_V1D_LEGACY),
   ];
   type RawEntry = { pubkey: PublicKey; account: { data: Buffer | Uint8Array }; maxAccounts: number; dataSize: number };
   let rawAccounts: RawEntry[] = [];
