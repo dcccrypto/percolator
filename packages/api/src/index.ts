@@ -3,8 +3,9 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { serve } from "@hono/node-server";
-import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert } from "@percolator/shared";
+import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert, truncateErrorMessage } from "@percolator/shared";
 import { initSentry, sentryMiddleware, flushSentry } from "./middleware/sentry.js";
+import * as Sentry from "@sentry/node";
 
 // Initialize Sentry before anything else
 initSentry();
@@ -161,8 +162,9 @@ app.get("/", (c) => c.json({
 
 // Global error handler
 app.onError((err, c) => {
-  logger.error("Unhandled error", { 
-    error: err.message, 
+  // Truncate error message for logs
+  logger.error("Unhandled error", {
+    error: truncateErrorMessage(err.message, 120),
     stack: err.stack,
     endpoint: c.req.path,
     method: c.req.method
@@ -170,7 +172,7 @@ app.onError((err, c) => {
   
   // Report to Sentry (sentryMiddleware may have already captured it,
   // but this ensures errors from middleware chain are also caught)
-  import("@sentry/node").then((Sentry) => {
+  try {
     Sentry.captureException(err, {
       tags: {
         endpoint: c.req.path,
@@ -178,9 +180,14 @@ app.onError((err, c) => {
         handler: "onError",
       },
     });
-  }).catch(() => {});
+  } catch (_sentryErr) {}
   
-  return c.json({ error: "Internal server error" }, 500);
+  // Truncate error message for API response (details only in development)
+  const showDetails = process.env.NODE_ENV !== "production";
+  return c.json({
+    error: "Internal server error",
+    ...(showDetails && { details: truncateErrorMessage(err.message, 200) })
+  }, 500);
 });
 
 // Validate NODE_ENV at startup

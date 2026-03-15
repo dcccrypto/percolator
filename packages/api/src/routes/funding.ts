@@ -16,6 +16,7 @@ import {
   getFundingHistorySince,
   getSupabase,
   createLogger,
+  truncateErrorMessage,
 } from "@percolator/shared";
 
 const logger = createLogger("api:funding");
@@ -67,11 +68,11 @@ export function fundingRoutes(): Hono {
         markets,
       });
     } catch (err) {
-      logger.error("Error fetching global funding data", { error: err });
-      return c.json({ 
-        error: "Failed to fetch global funding data",
-        ...(process.env.NODE_ENV !== "production" && { details: err instanceof Error ? err.message : String(err) })
-      }, 500);
+      logger.error("Error fetching global funding data", { error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
+        return c.json({
+          error: "Failed to fetch global funding data",
+          ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })
+        }, 500);
     }
   });
 
@@ -176,10 +177,10 @@ export function fundingRoutes(): Hono {
         }
       });
     } catch (err) {
-      logger.error("Error fetching funding data", { slab, error: err });
+      logger.error("Error fetching funding data", { slab, error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
       return c.json({ 
         error: "Failed to fetch funding data",
-        ...(process.env.NODE_ENV !== "production" && { details: err instanceof Error ? err.message : String(err) })
+        ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })
       }, 500);
     }
   });
@@ -221,10 +222,10 @@ export function fundingRoutes(): Hono {
         })),
       });
     } catch (err) {
-      logger.error("Error fetching funding history", { slab, error: err });
+      logger.error("Error fetching funding history", { slab, error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
       return c.json({ 
         error: "Failed to fetch funding history",
-        ...(process.env.NODE_ENV !== "production" && { details: err instanceof Error ? err.message : String(err) })
+        ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })
       }, 500);
     }
   });
