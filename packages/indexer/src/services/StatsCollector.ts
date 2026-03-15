@@ -508,7 +508,12 @@ export class StatsCollector {
               volume_24h: volume24h,                           // NUMERIC
               trade_count_24h: tradeCount24h,                  // INT4
               // Hidden features (migration 007)
-              total_open_interest: safeBigNum(engine.totalOpenInterest), // NUMERIC
+              // GH#1250: Use computed oiLong + oiShort (from parsed accounts) rather than
+              // engine.totalOpenInterest. The engine field can be non-zero even when all
+              // accounts are closed (OI counter not decremented on force-close / reclaim),
+              // producing misleading OI with vault=0 and accounts=0.
+              // The computed sum is authoritative: it directly reflects live position sizes.
+              total_open_interest: safeBigNum(oiLong + oiShort), // NUMERIC
               net_lp_pos: engine.netLpPos.toString(),          // NUMERIC
               lp_sum_abs: safeBigNum(engine.lpSumAbs),         // NUMERIC
               lp_max_abs: safeBigNum(engine.lpMaxAbs),         // NUMERIC

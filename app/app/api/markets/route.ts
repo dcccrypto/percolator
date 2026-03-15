@@ -163,6 +163,15 @@ export async function GET() {
           })();
       const total_open_interest_usd = rawToUsd(rawOi, m.decimals as number | null, sanitizedPrice);
 
+      // GH#1250: If total_accounts == 0, OI must be stale/orphaned — suppress from display.
+      // Root cause: the on-chain totalOpenInterest counter is not decremented when positions
+      // are force-closed or accounts are reclaimed (PERC-511 path). This guard prevents
+      // misleading solvency signals (OI > 0 with vault = 0 and no accounts).
+      // Indexer-level fix (StatsCollector.ts) will clear OI for future syncs; this is a
+      // defensive display-layer fallback.
+      const accountsCount = (m.total_accounts as number) ?? 0;
+      const displayOiUsd = accountsCount === 0 ? null : total_open_interest_usd;
+
       return {
         ...m,
         oracle_mode,
@@ -178,7 +187,8 @@ export async function GET() {
         // #1160: Pre-converted OI in USD (null when price unavailable or value is a sentinel).
         // Raw open_interest_long / open_interest_short / total_open_interest remain
         // in the response for backward compatibility.
-        total_open_interest_usd,
+        // GH#1250: Suppressed (null) when total_accounts == 0 — stale on-chain OI guard.
+        total_open_interest_usd: displayOiUsd,
         // GH#1208: Sanitize c_tot — near-sentinel values (e.g. 7.997e17) pass the
         // isSaneMarketValue 1e18 check but are clearly corrupt LP collateral totals.
         c_tot: sanitizeCtot(m.c_tot as number | null),
