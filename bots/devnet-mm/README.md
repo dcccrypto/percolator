@@ -111,7 +111,10 @@ TEST_USDC_MINT       = DvH13uxzTzo1xVFwkbJ6YASkZWs6bm3vFDH4xu7kUYTs
 BOT_MODE             = all
 HELIUS_API_KEY       = <your-helius-api-key>
 MARKETS_FILTER       = SOL,BTC
+MARKET_SYMBOL_OVERRIDES = GGU89iQLmceyXRDK8vgAxVvdi9RJb9JsPhXZ2NoFSENV:SOL,CkcwQtUuPe1MjeVhyMR2zZcLsKEzP2cqGzspwmgTuZRp:BTC
 ```
+
+> ℹ️ **`MARKET_SYMBOL_OVERRIDES`** pins specific slab addresses to symbols on cold start (before the oracle keeper has pushed the first price). Format: `<slabAddress>:<SYMBOL>,…`. The two addresses above are the canonical devnet SOL-PERP and BTC-PERP markets on the Small program. Without this, authority-oracle markets with `authorityPriceE6 = 0` resolve as UNKNOWN and are skipped.
 
 > ⚠️ **Do NOT add `MINT_AUTHORITY_KEYPAIR_JSON` to the Railway service.** It is only needed for the one-off `npx tsx src/fund-devnet-bots.ts` funding script run locally. Exposing it in a long-running service unnecessarily widens blast radius.
 
@@ -188,7 +191,8 @@ The maker creates the appearance of an active, liquid market:
 | `SKEW_MAX_MULTIPLIER` | `3.0` | Spread multiplier at max exposure |
 | `SPREAD_NOISE_BPS` | `4` | Random spread noise |
 | `SIZE_JITTER` | `0.25` | Size randomization factor |
-| `MARKETS_FILTER` | all | Comma-separated symbols (e.g. `SOL,BTC`) |
+| `MARKETS_FILTER` | all | Comma-separated symbols (e.g. `SOL,BTC`) — **required** for production |
+| `MARKET_SYMBOL_OVERRIDES` | — | `<slabAddr>:<SYMBOL>,...` pins authority-oracle markets on cold start |
 
 ## Monitoring
 

@@ -406,9 +406,18 @@ export async function discoverAllMarkets(
 
   const filtered = discovered.filter((m) => {
     if (m.header.resolved || m.header.paused) return false;
+    const sym = inferSymbol(m);
     if (config.marketsFilter) {
-      const sym = inferSymbol(m);
       return config.marketsFilter.includes(sym);
+    }
+    // When no MARKETS_FILTER is set, still skip UNKNOWN markets to prevent
+    // LP/User setup failures on cold start (hyperp markets with price=0 resolve
+    // as UNKNOWN before the oracle keeper has pushed a price).
+    // Operators: set MARKET_SYMBOL_OVERRIDES=<slab>:BTC,<slab>:SOL to include
+    // specific authority-oracle markets on cold start.
+    if (sym === "UNKNOWN") {
+      log("discovery", `Skipping UNKNOWN market ${m.slabAddress.toBase58().slice(0, 16)}... — set MARKET_SYMBOL_OVERRIDES to include it`);
+      return false;
     }
     return true;
   });
