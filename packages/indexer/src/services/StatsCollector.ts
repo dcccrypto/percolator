@@ -411,14 +411,17 @@ export class StatsCollector {
               oiShort = oiLong;
             }
 
-            // PERC-816: Dust vault guard — enforce the invariant that OI must be 0
+            // PERC-816/817: Dust vault guard — enforce the invariant that OI must be 0
             // when the vault has no meaningful liquidity. This prevents phantom OI from
             // being re-written by the indexer for markets that were created but never
             // received real LP deposits (e.g. creation-deposit splits leave dust in vault).
-            // Threshold: 1,000,000 micro-units (< 1 USDC at 6 decimals, dust at 9 decimals).
+            // Threshold: 1,000,000 micro-units (≤ 1 USDC at 6 decimals, dust at 9 decimals).
+            // Uses inclusive (<=) to catch vault == 1_000_000 — the exact creation-deposit
+            // seed amount the program writes at market creation. A market with vault at
+            // the creation boundary has received no real LP deposits.
             // Also enforces: total_accounts = 0 → OI must be 0 (no open positions).
             const MIN_VAULT_FOR_OI = 1_000_000n;
-            const hasDustVault = engine.vault > 0n && engine.vault < MIN_VAULT_FOR_OI;
+            const hasDustVault = engine.vault <= MIN_VAULT_FOR_OI;
             const hasNoAccounts = engine.numUsedAccounts === 0;
             if (hasDustVault || hasNoAccounts) {
               oiLong = 0n;
