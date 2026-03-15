@@ -55,10 +55,13 @@ function getUpstashLimiters(): { general: Ratelimit | null; rpc: Ratelimit | nul
 
 // ── In-memory fallback (per-instance) ────────────────────────────────────────
 // Used when Upstash is unconfigured (local dev / CI) or if Redis throws.
+// NOTE: This is per-isolate only — it does NOT share state across Vercel Edge
+// instances.  For reliable distributed enforcement, configure Upstash Redis
+// via UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN env vars.
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const rpcRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
-function _getInMemoryRateLimit(ip: string, isRpc: boolean): { remaining: number; reset: number } {
+function _getInMemoryRateLimit(ip: string, isRpc: boolean): { allowed: boolean; remaining: number; reset: number } {
   const now = Date.now();
   const map = isRpc ? rpcRateLimitMap : rateLimitMap;
   const max = isRpc ? RPC_RATE_LIMIT_MAX : RATE_LIMIT_MAX;
@@ -77,7 +80,13 @@ function _getInMemoryRateLimit(ip: string, isRpc: boolean): { remaining: number;
     }
   }
 
+  // FIX(GH#1245): use strict inequality so request #max is the last ALLOWED
+  // one (not the first blocked one).  Previously `remaining = max - count`
+  // meant count=max → remaining=0 → `remaining <= 0` blocked that request,
+  // allowing only max-1 requests through instead of max.
+  const allowed = entry.count <= max;
   return {
+    allowed,
     remaining: Math.max(0, max - entry.count),
     reset: Math.ceil((entry.resetAt - now) / 1000),
   };
@@ -86,15 +95,20 @@ function _getInMemoryRateLimit(ip: string, isRpc: boolean): { remaining: number;
 async function getRateLimit(
   ip: string,
   isRpc: boolean = false,
-): Promise<{ remaining: number; reset: number }> {
+): Promise<{ allowed: boolean; remaining: number; reset: number }> {
   const { general, rpc } = getUpstashLimiters();
   const limiter = isRpc ? rpc : general;
 
   if (limiter) {
     try {
       const { success, remaining, reset } = await limiter.limit(ip);
+      // FIX(GH#1245): use `success` (the boolean Upstash provides) to drive
+      // the allow/block decision — NOT `remaining`.  When success=true and
+      // remaining=0 (the last allowed request), the old code returned
+      // remaining=0 and the `remaining <= 0` guard incorrectly blocked it.
       return {
-        remaining: success ? remaining : 0,
+        allowed: success,
+        remaining: Math.max(0, remaining),
         reset: Math.max(0, Math.ceil((reset - Date.now()) / 1000)),
       };
     } catch {
@@ -249,10 +263,15 @@ export async function middleware(request: NextRequest) {
 
   if (isApi) {
     const isRpc = request.nextUrl.pathname === "/api/rpc";
-    const { remaining, reset } = await getRateLimit(ip, isRpc);
+    const { allowed, remaining, reset } = await getRateLimit(ip, isRpc);
     const limit = isRpc ? RPC_RATE_LIMIT_MAX : RATE_LIMIT_MAX;
 
-    if (remaining <= 0) {
+    // FIX(GH#1245): gate on `allowed` (the authoritative boolean) rather than
+    // `remaining <= 0`.  The old guard blocked the last *allowed* request
+    // whenever remaining hit 0 — an off-by-one that manifested as "rate limit
+    // fires one request too early" in single-instance envs and "never fires"
+    // in distributed Edge (each isolate has its own in-memory counter at 0).
+    if (!allowed) {
       return new NextResponse(
         JSON.stringify({ error: "Too many requests. Please try again later." }),
         {
