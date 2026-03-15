@@ -6,8 +6,11 @@ import Link from "next/link";
 interface MarketEntry {
   slab_address: string;
   symbol?: string;
-  volume_24h?: number | null;
-  total_open_interest?: number | null;
+  // GH#1270: Use pre-computed USD fields from /api/markets so we don't display
+  // raw token micro-units (which produce "$2000.0B" instead of "$2.0K").
+  // The API computes these via rawToUsd(raw, decimals, price) in the GET handler.
+  volume_24h_usd?: number | null;
+  total_open_interest_usd?: number | null;
 }
 
 function formatCompact(val: number): string {
@@ -65,10 +68,10 @@ export function Watchlist() {
               </span>
               <div className="flex-1 text-right">
                 <p className="text-[9px] text-[var(--text-muted)]">
-                  Vol: {m.volume_24h ? formatCompact(m.volume_24h) : "--"}
+                  Vol: {m.volume_24h_usd != null && m.volume_24h_usd > 0 ? formatCompact(m.volume_24h_usd) : "--"}
                 </p>
                 <p className="text-[9px] text-[var(--text-dim)]">
-                  OI: {m.total_open_interest ? formatCompact(m.total_open_interest) : "--"}
+                  OI: {m.total_open_interest_usd != null && m.total_open_interest_usd > 0 ? formatCompact(m.total_open_interest_usd) : "--"}
                 </p>
               </div>
             </Link>

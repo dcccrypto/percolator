@@ -78,6 +78,13 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const vaultBalance = engine?.vault ?? 0n;
   const riskGateActive = riskThreshold > 0n && vaultBalance <= riskThreshold;
 
+  // GH#1272: Vault-empty guard — when engine is loaded but vault = 0, no trades can
+  // execute on-chain (no LP counterparty). Without this guard the button appears
+  // clickable but the transaction fails silently with no user feedback.
+  // Only active once engine is loaded (engine !== null) to avoid false positives
+  // during the initial loading phase where vault defaults to 0n.
+  const vaultEmpty = engine !== null && vaultBalance === 0n && !mockMode;
+
   const [direction, setDirection] = useState<"long" | "short">("long");
   const [marginInput, setMarginInput] = useState("");
   const [leverage, setLeverage] = useState(1);
@@ -251,8 +258,19 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   return (
     <div className="relative rounded-none bg-[var(--bg)]/80 border border-[var(--border)]/50 p-3">
 
+      {/* GH#1272: Vault-empty warning — shown when no LP has deposited. Prevents
+          silent button failures by surfacing the real reason trading is blocked. */}
+      {vaultEmpty && (
+        <div className="mb-3 rounded-none border border-[var(--warning)]/30 bg-[var(--warning)]/5 p-2.5">
+          <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--warning)]">No Vault Liquidity</p>
+          <p className="mt-1 text-[9px] text-[var(--text-secondary)] leading-relaxed">
+            This market has no LP deposits. Trading will be enabled once liquidity is added to the vault.
+          </p>
+        </div>
+      )}
+
       {/* LP underfunded warning */}
-      {lpUnderfunded && (
+      {lpUnderfunded && !vaultEmpty && (
         <div className="mb-3 rounded-none border border-[var(--warning)]/30 bg-[var(--warning)]/5 p-2.5">
           <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--warning)]">Liquidity Unavailable</p>
           <p className="mt-1 text-[9px] text-[var(--text-secondary)] leading-relaxed">
@@ -460,7 +478,7 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
             if (!marginInput || !userAccount || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || tradePhase !== "idle" || loading || (!priceUsd && !mockMode)) return;
             setShowConfirmModal(true);
           }}
-          disabled={tradePhase !== "idle" || loading || !marginInput || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || lpUnderfunded || (!priceUsd && !mockMode)}
+          disabled={tradePhase !== "idle" || loading || !marginInput || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || lpUnderfunded || vaultEmpty || (!priceUsd && !mockMode)}
           className={`w-full rounded-none py-2.5 text-[11px] font-medium uppercase tracking-[0.1em] text-white transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100 focus-visible:ring-1 focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--bg)] ${
             direction === "long"
               ? "bg-[var(--long)] hover:brightness-110 focus-visible:ring-[var(--long)]"
