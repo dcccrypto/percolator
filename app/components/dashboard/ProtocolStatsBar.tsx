@@ -76,9 +76,11 @@ export function ProtocolStatsBar() {
         if (!row.slab_address || isBlockedSlab(row.slab_address)) continue;
 
         const dec = Math.pow(10, Math.min(Math.max(row.decimals ?? 6, 0), 18));
+        // Use $1 fallback when last_price is missing/invalid — matches api/stats route logic
+        // so admin-mode markets (no oracle price) are still counted at face value (GH#1274)
         const price = (row.last_price != null && row.last_price > 0 && row.last_price <= MAX_SANE_PRICE_USD)
           ? row.last_price
-          : 0;
+          : 1;
 
         const toUsd = (raw: number): number => {
           if (!isSaneMarketValue(raw) || price <= 0) return 0;
