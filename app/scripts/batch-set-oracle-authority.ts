@@ -42,6 +42,7 @@ import {
   buildIx,
   getProgramId,
 } from "../../packages/core/dist/index.js";
+import { maskApiKeys } from "../../packages/shared/src/index.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -81,7 +82,7 @@ async function main() {
   console.log("=".repeat(60));
   console.log(`  Deployer:      ${deployerPubkey.toBase58()}`);
   console.log(`  New authority: ${newAuthority.toBase58()}`);
-  console.log(`  RPC:           ${RPC_URL}`);
+  console.log(`  RPC:           ${maskApiKeys(RPC_URL)}`);
   console.log(`  Dry run:       ${DRY_RUN}`);
   console.log(`  Batch size:    ${BATCH_SIZE}`);
   console.log(`  Start index:   ${START_INDEX}`);

@@ -34,6 +34,7 @@ import {
 } from "../packages/core/src/index.js";
 import { getSealedSigner, getCrankPublicKey } from "../packages/shared/src/signer.js";
 import { ensureNetworkConfigValid, validateNetworkConfig } from "../packages/shared/src/networkValidation.js";
+import { maskApiKeys } from "../packages/shared/src/sanitize.js";
 
 // ---------------------------------------------------------------------------
 // Validation & Config
@@ -136,7 +137,7 @@ async function main() {
   console.log("🔄 Percolator Auto-Crank Service");
   console.log(`   Program:  ${PROGRAM_ID.toBase58()}`);
   console.log(`   Payer:    ${crankPublicKey.toBase58()}`);
-  console.log(`   RPC:      ${RPC_URL.slice(0, 50)}…`);
+  console.log(`   RPC:      ${maskApiKeys(RPC_URL)}`);
   console.log(`   Interval: ${CRANK_INTERVAL_MS / 1000}s\n`);
 
   const balance = await connection.getBalance(crankPublicKey);

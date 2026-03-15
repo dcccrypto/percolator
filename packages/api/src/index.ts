@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "hono/compress";
 import { serve } from "@hono/node-server";
-import { createLogger, sendInfoAlert } from "@percolator/shared";
+import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert } from "@percolator/shared";
 import { initSentry, sentryMiddleware, flushSentry } from "./middleware/sentry.js";
 
 // Initialize Sentry before anything else
@@ -194,6 +194,47 @@ if (process.env.NODE_ENV && !validNodeEnvs.includes(process.env.NODE_ENV)) {
 }
 
 const port = Number(process.env.API_PORT ?? 3001);
+
+// Database connectivity pre-flight check
+async function verifyDatabaseConnection(): Promise<void> {
+  try {
+    logger.info("Verifying database connectivity...");
+    
+    // Query markets table to verify connection
+    const { count, error } = await getSupabase()
+      .from("markets")
+      .select("id", { count: "exact", head: true });
+    
+    if (error) {
+      throw error;
+    }
+    
+    logger.info("✓ Database connection verified", { marketCount: count });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    logger.error("✗ Database connection failed", {
+      error: errorMsg,
+      supabaseUrl: process.env.SUPABASE_URL ? "configured" : "not configured",
+      supabaseKey: process.env.SUPABASE_KEY ? "configured" : "not configured"
+    });
+    
+    // Send critical alert
+    try {
+      await sendCriticalAlert("API startup failed: Database connection failed", [
+        { name: "Error", value: errorMsg.slice(0, 200), inline: false },
+        { name: "Reason", value: "API cannot start without database connectivity", inline: false },
+      ]);
+    } catch (alertErr) {
+      logger.error("Failed to send critical alert", { error: alertErr });
+    }
+    
+    process.exit(1);
+  }
+}
+
+// Verify database before starting server
+await verifyDatabaseConnection();
+
 const server = serve({ fetch: app.fetch, port }, async (info) => {
   logger.info("Percolator API started", { port: info.port });
   

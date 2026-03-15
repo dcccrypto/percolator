@@ -41,6 +41,7 @@ import {
   ACCOUNTS_PAUSE_MARKET,
   ACCOUNTS_UNPAUSE_MARKET,
 } from "../packages/core/src/index.js";
+import { maskApiKeys } from "../packages/shared/src/index.js";
 
 // ---------------------------------------------------------------------------
 // Args
@@ -132,7 +133,7 @@ async function main() {
   const slabPubkey = new PublicKey(args.market!);
   console.log(`\nSlab    : ${slabPubkey.toBase58()}`);
   console.log(`Admin   : ${admin.publicKey.toBase58()}`);
-  console.log(`RPC     : ${RPC_URL}`);
+  console.log(`RPC     : ${maskApiKeys(RPC_URL)}`);
   console.log(`Action  : ${ACTION.toUpperCase()}\n`);
 
   // Resolve owning program

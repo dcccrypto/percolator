@@ -30,6 +30,7 @@ import {
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { maskApiKeys } from "../../../packages/shared/src/index.js";
 
 // ═══════════════════════════════════════════════════════════════
 // Config
@@ -186,7 +187,7 @@ async function main() {
 ╚══════════════════════════════════════════════════════╝
 `);
 
-  console.log(`RPC:         ${new URL(RPC_URL).hostname}`);
+  console.log(`RPC:         ${maskApiKeys(RPC_URL)}`);
   console.log(`USDC mint:   ${USDC_MINT.toBase58()}`);
   console.log(`Wallets dir: ${WALLETS_DIR}\n`);
 

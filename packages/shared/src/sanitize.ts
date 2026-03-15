@@ -172,3 +172,23 @@ export function sanitizeNumber(input: unknown, min?: number, max?: number): numb
   
   return num;
 }
+
+/**
+ * Mask API keys in URLs and connection strings before logging
+ * Prevents accidental exposure of secrets in logs, error messages, and console output
+ *
+ * Handles patterns like:
+ *  - https://devnet.helius-rpc.com/?api-key=YOUR_KEY
+ *  - http://localhost:8899?api_key=SECRET
+ *  - rpc_url=secret_key_here
+ */
+export function maskApiKeys(input: string): string {
+  if (typeof input !== "string") {
+    return "";
+  }
+  
+  // Replace all variations of api_key, api-key, apiKey with masked value
+  // Matches: api-key=xxx, api_key=xxx, apiKey=xxx (case-insensitive)
+  // Stops at &, space, quote, or end of string (non-greedy)
+  return input.replace(/api[_-]?key\s*=\s*[^\s&"'`;,)]*(?=[&\s"'`;,)\n]|$)/gi, "api-key=***");
+}
