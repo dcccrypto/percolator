@@ -107,7 +107,27 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
     }
     return { ...DEFAULT_STATE, mintAddress: initialMint ?? "" };
   });
-  const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set());
+  // GH#1280: Restore completedSteps based on the persisted wizard step.
+  // If the previous session reached step N, steps 1..N-1 were completed.
+  // This ensures WizardProgress shows correct state after a reload and allows
+  // the user to click back to previous steps during resume.
+  const [completedSteps, setCompletedSteps] = useState<Set<number>>(() => {
+    try {
+      const persisted = typeof window !== "undefined" ? localStorage.getItem(WIZARD_STORAGE_KEY) : null;
+      if (persisted) {
+        const parsed = JSON.parse(persisted);
+        const step = Number(parsed.step ?? 1);
+        if (step > 1) {
+          const steps = new Set<number>();
+          for (let i = 1; i < step; i++) steps.add(i);
+          return steps;
+        }
+      }
+    } catch {
+      // Corrupted data — ignore
+    }
+    return new Set<number>();
+  });
   /**
    * PERC-513: Track which step to resume from when recovering a stuck slab.
    * Set by onResume from RecoverSolBanner; null = fresh creation (step 0).
@@ -135,7 +155,21 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
   const quickLaunch = useQuickLaunch(quickMintForHook);
 
   // On-chain mint network validation (set by StepTokenSelect)
-  const [mintExistsOnNetwork, setMintExistsOnNetwork] = useState(false);
+  // GH#1280: Initialize to true when restoring from localStorage with a valid tokenMeta.
+  // The token was already validated in the previous session — re-validating is unnecessary
+  // and would block Step 4 Review during resume since StepTokenSelect hasn't rendered.
+  const [mintExistsOnNetwork, setMintExistsOnNetwork] = useState<boolean>(() => {
+    try {
+      const persisted = typeof window !== "undefined" ? localStorage.getItem(WIZARD_STORAGE_KEY) : null;
+      if (persisted) {
+        const parsed = JSON.parse(persisted);
+        return !!(parsed.tokenMeta && parsed.mintAddress && (parsed.mintAddress as string).length >= 32);
+      }
+    } catch {
+      // Corrupted data — ignore
+    }
+    return false;
+  });
   // Devnet mirror mint address (different from mainnet CA entered by user)
   const [devnetMintAddress, setDevnetMintAddress] = useState<string | null>(null);
 
