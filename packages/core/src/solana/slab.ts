@@ -361,7 +361,8 @@ function buildLayoutV1D(maxAccounts: number): SlabLayout {
   const accountSize = V1D_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
-  const postBitmap = 18;
+  // GH#1234: V1D omits num_used/pad/next_account_id → postBitmap=2 (free_head only).
+  const postBitmap = 2;
   const nextFreeBytes = maxAccounts * 2;
   const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
