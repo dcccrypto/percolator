@@ -261,6 +261,75 @@ describe("computeMarketHealthFromStats", () => {
     });
     expect(result.level).toBe("caution");
   });
+
+  // GH#1290 / PERC-570: Phantom OI suppression for drained markets (vault=0, accounts=0)
+  describe("GH#1290 — phantom OI suppression for vault=0 / dust markets", () => {
+    it('returns "empty" when vault=0 and accounts=0 with phantom OI (LOBSTAR case)', () => {
+      // Mirrors LOBSTAR/USD: vault drained by LP withdrawal, stale on-chain OI counter
+      const result = computeMarketHealthFromStats({
+        total_open_interest: 4_000_018_000_000,  // phantom stale value from DB
+        open_interest_long: 2_000_009_000_000,
+        open_interest_short: 2_000_009_000_000,
+        insurance_balance: 0,
+        c_tot: 0,
+        vault_balance: 0,
+        total_accounts: 0,
+      });
+      expect(result.level).toBe("empty");
+      expect(result.label).toBe("Empty");
+    });
+
+    it('returns "empty" when vault is dust (< 1_000_000) with accounts=0 and phantom OI', () => {
+      const result = computeMarketHealthFromStats({
+        total_open_interest: 1_000_000_000,
+        insurance_balance: 0,
+        c_tot: 0,
+        vault_balance: 999_999,
+        total_accounts: 0,
+      });
+      expect(result.level).toBe("empty");
+    });
+
+    it('returns "healthy" when vault > dust and accounts=0 but c_tot is real (no suppression)', () => {
+      // vault=500M → not dust; OI not suppressed by vault guard.
+      // With OI and capital but no insurance, result depends on capital ratio.
+      // accounts=0 guard alone does NOT suppress (only vault guard fires here).
+      const result = computeMarketHealthFromStats({
+        total_open_interest: 5_000_000_000,
+        insurance_balance: 0,
+        c_tot: 5_000_000_000,
+        vault_balance: 500_000_000,
+        total_accounts: 0,
+      });
+      // vault >= MIN_VAULT_FOR_OI → no phantom suppression; OI is real.
+      // capital = 5B, insurance = 0, capitalRatio = 1.0 ≥ 0.5; but insuranceRatio = 0 < 0.02 → warning
+      expect(result.level).toBe("warning");
+    });
+
+    it('does NOT suppress OI when vault >= 1_000_000 and accounts > 0 (real market)', () => {
+      const result = computeMarketHealthFromStats({
+        total_open_interest: 1_000_000_000,
+        insurance_balance: 50_000_000,
+        c_tot: 1_000_000_000,
+        vault_balance: 10_000_000,
+        total_accounts: 5,
+      });
+      expect(result.level).not.toBe("empty");
+    });
+
+    it('returns "empty" when vault=0 and accounts=1 — vault=0 is dust, OI suppressed', () => {
+      // vault=0 < MIN_VAULT_FOR_OI → phantom OI suppressed regardless of accounts count.
+      // c_tot=0, insurance=0, oi=0 (suppressed) → "empty".
+      const result = computeMarketHealthFromStats({
+        total_open_interest: 1_000_000_000,
+        insurance_balance: 0,
+        c_tot: 0,
+        vault_balance: 0,
+        total_accounts: 1,
+      });
+      expect(result.level).toBe("empty");
+    });
+  });
 });
 
 describe("sanitizeAccountCount", () => {
