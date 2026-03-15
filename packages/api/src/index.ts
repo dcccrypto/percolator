@@ -183,6 +183,16 @@ app.onError((err, c) => {
   return c.json({ error: "Internal server error" }, 500);
 });
 
+// Validate NODE_ENV at startup
+const validNodeEnvs = ["production", "development", "test"];
+if (process.env.NODE_ENV && !validNodeEnvs.includes(process.env.NODE_ENV)) {
+  logger.error("Invalid NODE_ENV configuration", {
+    nodeEnv: process.env.NODE_ENV,
+    validOptions: validNodeEnvs.join(", ")
+  });
+  throw new Error(`Invalid NODE_ENV: ${process.env.NODE_ENV}. Must be one of: ${validNodeEnvs.join(", ")}`);
+}
+
 const port = Number(process.env.API_PORT ?? 3001);
 const server = serve({ fetch: app.fetch, port }, async (info) => {
   logger.info("Percolator API started", { port: info.port });
