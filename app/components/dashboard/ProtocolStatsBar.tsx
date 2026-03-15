@@ -10,7 +10,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
-import { isActiveMarket } from "@/lib/activeMarketFilter";
+import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
 import { isBlockedSlab } from "@/lib/blocklist";
 
 interface ProtocolStats {
@@ -65,7 +65,8 @@ export function ProtocolStatsBar() {
         return;
       }
 
-      const scaleFactor = (decimals: number | null) => Math.pow(10, decimals ?? 6);
+      // GH#1268: Match /api/stats conversion logic — cap price at $10K, fallback OI to long+short
+      const MAX_SANE_PRICE_USD = 10_000;
 
       let vol24h = 0;
       let oi = 0;
@@ -74,20 +75,27 @@ export function ProtocolStatsBar() {
       for (const row of data) {
         if (!row.slab_address || isBlockedSlab(row.slab_address)) continue;
 
-        const price = row.last_price ?? 0;
-        const dec = scaleFactor(row.decimals);
+        const dec = Math.pow(10, Math.min(Math.max(row.decimals ?? 6, 0), 18));
+        const price = (row.last_price != null && row.last_price > 0 && row.last_price <= MAX_SANE_PRICE_USD)
+          ? row.last_price
+          : 0;
+
+        const toUsd = (raw: number): number => {
+          if (!isSaneMarketValue(raw) || price <= 0) return 0;
+          const usd = (raw / dec) * price;
+          return usd > MAX_USD_PER_MARKET ? 0 : usd;
+        };
 
         // Volume: stored in token units, convert to USD
-        const rawVol = Number(row.volume_24h ?? 0);
-        const volUsd = rawVol > 0 ? (rawVol / dec) * price : 0;
+        const capVol = toUsd(Number(row.volume_24h ?? 0));
 
-        // OI: stored in token units, convert to USD
-        const rawOi = Number(row.total_open_interest ?? 0);
-        const oiUsd = rawOi > 0 ? (rawOi / dec) * price : 0;
-
-        // Sanity cap: skip markets with absurdly high values (corrupted data)
-        const capVol = volUsd > MAX_USD_PER_MARKET ? 0 : volUsd;
-        const capOi = oiUsd > MAX_USD_PER_MARKET ? 0 : oiUsd;
+        // OI: fallback to long+short if total_open_interest is missing (GH#1268)
+        const rawOi = isSaneMarketValue(row.total_open_interest)
+          ? row.total_open_interest!
+          : (isSaneMarketValue((row.open_interest_long ?? 0) + (row.open_interest_short ?? 0))
+              ? (row.open_interest_long ?? 0) + (row.open_interest_short ?? 0)
+              : 0);
+        const capOi = toUsd(rawOi);
 
         if (isActiveMarket({ volume_24h: capVol, total_open_interest: capOi })) {
           activeCount++;
