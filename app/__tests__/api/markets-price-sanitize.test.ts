@@ -43,7 +43,7 @@ function mkMarket(overrides: Record<string, unknown> = {}) {
     net_lp_pos: 0,
     lp_sum_abs: 0,
     c_tot: 0,
-    vault_balance: 10_000,
+    vault_balance: 500_000_000,  // 500 USDC at 6dp — realistic LP deposit above dust threshold
     created_at: "2026-01-01T00:00:00Z",
     stats_updated_at: "2026-01-01T00:00:00Z",
     oracle_mode: "admin",
@@ -280,5 +280,65 @@ describe("GET /api/markets — price sanitization (#856)", () => {
     expect(a?.index_price).toBeNull();   // corrupt value nulled
     expect(b?.index_price).toBe(42_500); // legit value preserved
     expect(c?.index_price).toBeNull();   // already-null preserved
+  });
+
+  // PERC-816: Dust vault guard — phantom OI suppression for markets with dust vault_balance.
+  describe("PERC-816 — phantom OI suppression for dust vault_balance", () => {
+    it("suppresses total_open_interest_usd when vault_balance is zero", async () => {
+      mockMarkets = [
+        mkMarket({ symbol: "ZERO_VAULT", vault_balance: 0, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+      ];
+      vi.resetModules();
+      const { GET } = await import("@/app/api/markets/route");
+      const res = await GET();
+      const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
+      const m = body.markets.find((m) => m.symbol === "ZERO_VAULT");
+      expect(m?.total_open_interest_usd).toBeNull();
+    });
+
+    it("suppresses total_open_interest_usd when vault_balance is dust (< 1,000,000)", async () => {
+      mockMarkets = [
+        mkMarket({ symbol: "DUST_1", vault_balance: 1, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        mkMarket({ symbol: "DUST_100", vault_balance: 100, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        mkMarket({ symbol: "DUST_999999", vault_balance: 999_999, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+      ];
+      vi.resetModules();
+      const { GET } = await import("@/app/api/markets/route");
+      const res = await GET();
+      const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
+      for (const sym of ["DUST_1", "DUST_100", "DUST_999999"]) {
+        const m = body.markets.find((m) => m.symbol === sym);
+        expect(m?.total_open_interest_usd).toBeNull(); // dust vault → phantom OI suppressed
+      }
+    });
+
+    it("passes through total_open_interest_usd when vault_balance >= 1,000,000 (real liquidity)", async () => {
+      mockMarkets = [
+        // exactly at threshold boundary — real liquidity starts here
+        mkMarket({ symbol: "AT_THRESHOLD", vault_balance: 1_000_000, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
+        // well above threshold — typical LP deposit
+        mkMarket({ symbol: "REAL_VAULT", vault_balance: 500_000_000, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
+      ];
+      vi.resetModules();
+      const { GET } = await import("@/app/api/markets/route");
+      const res = await GET();
+      const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
+      const atThreshold = body.markets.find((m) => m.symbol === "AT_THRESHOLD");
+      const realVault = body.markets.find((m) => m.symbol === "REAL_VAULT");
+      expect(atThreshold?.total_open_interest_usd).toBeCloseTo(0.001, 6); // 1000 / 1e6 * 1.0
+      expect(realVault?.total_open_interest_usd).toBeCloseTo(0.001, 6);
+    });
+
+    it("suppresses total_open_interest_usd when total_accounts = 0 regardless of vault_balance", async () => {
+      mockMarkets = [
+        mkMarket({ symbol: "NO_ACCOUNTS", total_accounts: 0, vault_balance: 500_000_000, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+      ];
+      vi.resetModules();
+      const { GET } = await import("@/app/api/markets/route");
+      const res = await GET();
+      const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
+      const m = body.markets.find((m) => m.symbol === "NO_ACCOUNTS");
+      expect(m?.total_open_interest_usd).toBeNull();
+    });
   });
 });

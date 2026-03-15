@@ -170,9 +170,12 @@ export async function GET() {
       // Indexer-level fix (StatsCollector.ts) will clear OI for future syncs; this is a
       // defensive display-layer fallback.
       // GH#1271: Also suppress when vault_balance = 0 (no LP liquidity → no real positions).
+      // PERC-816: Extend to suppress for dust vault_balance (0 < vault < 1,000,000 micro-units).
+      // Mirrors the invariant enforced by StatsCollector and migration 049.
+      const MIN_VAULT_FOR_OI = 1_000_000; // < 1 USDC at 6 decimals; dust at 9 decimals
       const accountsCount = (m.total_accounts as number) ?? 0;
       const vaultBal = (m.vault_balance as number) ?? 0;
-      const displayOiUsd = (accountsCount === 0 || vaultBal === 0) ? null : total_open_interest_usd;
+      const displayOiUsd = (accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI) ? null : total_open_interest_usd;
 
       // GH#1270: Pre-compute volume_24h in USD so consumers (e.g. Watchlist) don't need
       // to divide by 10^decimals manually. Mirrors the total_open_interest_usd pattern.
@@ -198,7 +201,7 @@ export async function GET() {
         // #1160: Pre-converted OI in USD (null when price unavailable or value is a sentinel).
         // Raw open_interest_long / open_interest_short / total_open_interest remain
         // in the response for backward compatibility.
-        // GH#1250/1271: Suppressed (null) when total_accounts == 0 or vault_balance == 0.
+        // GH#1250/1271/PERC-816: Suppressed (null) when total_accounts == 0 or vault_balance < 1_000_000.
         total_open_interest_usd: displayOiUsd,
         // GH#1270: Pre-converted 24h volume in USD. Null when price unavailable or raw
         // value is a sentinel. Raw volume_24h preserved for backward compatibility.
