@@ -346,6 +346,96 @@ describe('StatsCollector', () => {
       expect(shared.upsertMarketStats).not.toHaveBeenCalled();
     });
 
+    // PERC-816: Dust vault guard — OI must be zeroed when vault is below meaningful threshold
+    it('should zero OI when vault_balance is dust (0 < vault < 1_000_000)', async () => {
+      const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
+      vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
+      mockGetAccountInfo.mockResolvedValue({ data: new Uint8Array(2048) });
+      mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
+
+      // Dust vault: 500 micro-units (< 1_000_000 threshold)
+      vi.mocked(core.parseEngine).mockReturnValue(
+        makeEngineState({ vault: 500n, numUsedAccounts: 3 })
+      );
+      vi.mocked(core.parseConfig).mockReturnValue(makeConfig());
+      vi.mocked(core.parseParams).mockReturnValue(makeParams());
+      // Accounts have positions — but vault is dust so OI should be zeroed
+      vi.mocked(core.parseAllAccounts).mockReturnValue([
+        { account: { positionSize: 600_000_000n } },
+        { account: { positionSize: -400_000_000n } },
+      ] as any);
+
+      statsCollector.start();
+      await vi.advanceTimersByTimeAsync(10_500);
+
+      expect(shared.upsertMarketStats).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slab_address: SLAB1,
+          open_interest_long: 0,   // zeroed: dust vault
+          open_interest_short: 0,  // zeroed: dust vault
+          total_open_interest: 0,  // zeroed: dust vault
+          vault_balance: 500,      // vault_balance still written as-is (for observability)
+        })
+      );
+    });
+
+    it('should zero OI when numUsedAccounts = 0 regardless of vault_balance', async () => {
+      const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
+      vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
+      mockGetAccountInfo.mockResolvedValue({ data: new Uint8Array(2048) });
+      mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
+
+      // No accounts but vault has real liquidity — still phantom OI
+      vi.mocked(core.parseEngine).mockReturnValue(
+        makeEngineState({ vault: 500_000_000n, numUsedAccounts: 0, totalOpenInterest: 2_000_000_000_000n })
+      );
+      vi.mocked(core.parseConfig).mockReturnValue(makeConfig());
+      vi.mocked(core.parseParams).mockReturnValue(makeParams());
+      vi.mocked(core.parseAllAccounts).mockReturnValue([] as any);
+
+      statsCollector.start();
+      await vi.advanceTimersByTimeAsync(10_500);
+
+      expect(shared.upsertMarketStats).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slab_address: SLAB1,
+          open_interest_long: 0,
+          open_interest_short: 0,
+          total_open_interest: 0,
+        })
+      );
+    });
+
+    it('should NOT zero OI when vault_balance >= 1_000_000 (real liquidity)', async () => {
+      const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
+      vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
+      mockGetAccountInfo.mockResolvedValue({ data: new Uint8Array(2048) });
+      mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
+
+      // Real vault: 500M micro-units, 10 accounts, OI computed from accounts
+      vi.mocked(core.parseEngine).mockReturnValue(
+        makeEngineState({ vault: 500_000_000n, numUsedAccounts: 10 })
+      );
+      vi.mocked(core.parseConfig).mockReturnValue(makeConfig());
+      vi.mocked(core.parseParams).mockReturnValue(makeParams());
+      vi.mocked(core.parseAllAccounts).mockReturnValue([
+        { account: { positionSize: 600_000_000n } },
+        { account: { positionSize: -400_000_000n } },
+      ] as any);
+
+      statsCollector.start();
+      await vi.advanceTimersByTimeAsync(10_500);
+
+      expect(shared.upsertMarketStats).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slab_address: SLAB1,
+          open_interest_long: 600_000_000,   // preserved: real vault
+          open_interest_short: 400_000_000,  // preserved: real vault
+          total_open_interest: 1_000_000_000,
+        })
+      );
+    });
+
     it('should handle values near u64 max gracefully', async () => {
       const markets = new Map([[SLAB1, makeMockMarket(SLAB1)]]);
       vi.mocked(mockMarketProvider.getMarkets).mockReturnValue(markets);
