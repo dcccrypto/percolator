@@ -1225,34 +1225,36 @@ declare const SLAB_TIERS_V0: {
  * these sizes, causing V1D slabs to fall through to the memcmp fallback with wrong dataSize
  * hints → detectSlabLayout returning null → parse failure (GH#1205).
  *
- * Sizes computed via computeSlabSize(ENGINE_OFF=424, BITMAP_OFF=624, ACCOUNT_SIZE=248, N):
- *   micro  =  17,080  (64 slots)
- *   small  =  65,104  (256 slots)
- *   medium = 257,200  (1,024 slots)
- *   large  = 1,025,584 (4,096 slots)
+ * Sizes computed via computeSlabSize(ENGINE_OFF=424, BITMAP_OFF=624, ACCOUNT_SIZE=248, N, postBitmap=2):
+ *   The V1D deployed program uses postBitmap=2 (free_head u16 only — no num_used/pad/next_account_id).
+ *   This is 16 bytes smaller per tier than the SDK default (postBitmap=18). GH#1234.
+ *   micro  =  17,064  (64 slots)
+ *   small  =  65,088  (256 slots)
+ *   medium = 257,184  (1,024 slots)
+ *   large  = 1,025,568 (4,096 slots)
  */
 declare const SLAB_TIERS_V1D: {
     readonly micro: {
         readonly maxAccounts: 64;
-        readonly dataSize: 17080;
+        readonly dataSize: 17064;
         readonly label: "Micro";
         readonly description: "64 slots (V1D devnet)";
     };
     readonly small: {
         readonly maxAccounts: 256;
-        readonly dataSize: 65104;
+        readonly dataSize: 65088;
         readonly label: "Small";
         readonly description: "256 slots (V1D devnet)";
     };
     readonly medium: {
         readonly maxAccounts: 1024;
-        readonly dataSize: 257200;
+        readonly dataSize: 257184;
         readonly label: "Medium";
         readonly description: "1,024 slots (V1D devnet)";
     };
     readonly large: {
         readonly maxAccounts: 4096;
-        readonly dataSize: 1025584;
+        readonly dataSize: 1025568;
         readonly label: "Large";
         readonly description: "4,096 slots (V1D devnet)";
     };

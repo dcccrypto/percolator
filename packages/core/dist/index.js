@@ -1082,10 +1082,9 @@ var V1D_ENGINE_LP_SUM_ABS_OFF = 608;
 var V1D_ENGINE_BITMAP_OFF = 624;
 var ENGINE_OFF = V1_ENGINE_OFF;
 var ENGINE_MARK_PRICE_OFF = V1_ENGINE_MARK_PRICE_OFF;
-function computeSlabSize(engineOff, bitmapOff, accountSize, maxAccounts) {
+function computeSlabSize(engineOff, bitmapOff, accountSize, maxAccounts, postBitmap = 18) {
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
-  const postBitmap = 18;
   const nextFreeBytes = maxAccounts * 2;
   const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOff = Math.ceil(preAccountsLen / 8) * 8;
@@ -1100,7 +1099,7 @@ for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
   V1_SIZES.set(computeSlabSize(V1_ENGINE_OFF, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
   V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
-  V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n), n);
+  V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 2), n);
 }
 function buildLayout(version, maxAccounts, engineOffOverride) {
   const isV0 = version === 0;
@@ -1743,10 +1742,10 @@ var SLAB_TIERS_V0 = {
   large: { maxAccounts: 4096, dataSize: 992568, label: "Large", description: "4,096 slots \xB7 ~6.90 SOL" }
 };
 var SLAB_TIERS_V1D = {
-  micro: { maxAccounts: 64, dataSize: 17080, label: "Micro", description: "64 slots (V1D devnet)" },
-  small: { maxAccounts: 256, dataSize: 65104, label: "Small", description: "256 slots (V1D devnet)" },
-  medium: { maxAccounts: 1024, dataSize: 257200, label: "Medium", description: "1,024 slots (V1D devnet)" },
-  large: { maxAccounts: 4096, dataSize: 1025584, label: "Large", description: "4,096 slots (V1D devnet)" }
+  micro: { maxAccounts: 64, dataSize: 17064, label: "Micro", description: "64 slots (V1D devnet)" },
+  small: { maxAccounts: 256, dataSize: 65088, label: "Small", description: "256 slots (V1D devnet)" },
+  medium: { maxAccounts: 1024, dataSize: 257184, label: "Medium", description: "1,024 slots (V1D devnet)" },
+  large: { maxAccounts: 4096, dataSize: 1025568, label: "Large", description: "4,096 slots (V1D devnet)" }
 };
 var SLAB_TIERS_V1 = SLAB_TIERS;
 function slabDataSize(maxAccounts) {
