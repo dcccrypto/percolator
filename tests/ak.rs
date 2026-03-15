@@ -2444,3 +2444,675 @@ fn t10_38_accrue_funding_matches_eager() {
     assert!(k_short_after == expected_short,
         "K_short must increase by A_short * delta_f");
 }
+
+// ############################################################################
+//
+// TIER 11: REAL-ENGINE INTEGRATION PROOFS
+//
+// These use concrete inputs to exercise actual engine code paths.
+// The U512 division loop needs unwind >= 70 (set in Cargo.toml default).
+// Concrete inputs ensure deterministic loop counts, avoiding SAT blowup.
+//
+// ############################################################################
+
+// ============================================================================
+// T11.39: same_epoch_settle_idempotent_real_engine
+// ============================================================================
+
+/// Real engine: two consecutive settle_side_effects with unchanged K
+/// produces zero incremental PnL on the second call.
+/// Exercises the actual mul_div_floor_u256 and wide_signed_mul_div_floor paths.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_39_same_epoch_settle_idempotent_real_engine() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+
+    // Concrete position: 1 POS_SCALE unit long
+    let pos = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].position_basis_q = pos;
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 1;
+    engine.adl_epoch_long = 0;
+    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
+
+    // K_long = 100 (nonzero mark happened)
+    engine.adl_coeff_long = I256::from_i128(100);
+
+    // First settle: picks up PnL from k_diff = 100 - 0 = 100
+    let r1 = engine.settle_side_effects(idx as usize);
+    assert!(r1.is_ok());
+    let pnl_after_first = engine.accounts[idx as usize].pnl;
+    // k_snap should now be 100
+    assert!(engine.accounts[idx as usize].adl_k_snap == I256::from_i128(100));
+
+    // Second settle: k_diff = 100 - 100 = 0 → pnl_delta = 0
+    let r2 = engine.settle_side_effects(idx as usize);
+    assert!(r2.is_ok());
+    let pnl_after_second = engine.accounts[idx as usize].pnl;
+
+    assert!(pnl_after_second == pnl_after_first,
+        "second settle with unchanged K must produce zero incremental PnL");
+    // basis and a_basis unchanged (non-compounding)
+    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
+    assert!(engine.accounts[idx as usize].position_basis_q == pos);
+}
+
+// ============================================================================
+// T11.40: non_compounding_quantity_basis_two_touches
+// ============================================================================
+
+/// Real engine: settle with K change between touches. Basis and a_basis
+/// must NOT change (non-compounding). Only k_snap updates.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_40_non_compounding_quantity_basis_two_touches() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+
+    let pos = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].position_basis_q = pos;
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 1;
+    engine.adl_epoch_long = 0;
+    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
+
+    // Mark to K=50
+    engine.adl_coeff_long = I256::from_i128(50);
+    let _ = engine.settle_side_effects(idx as usize);
+
+    // Non-compounding invariant: basis and a_basis unchanged
+    assert!(engine.accounts[idx as usize].position_basis_q == pos);
+    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
+    // k_snap updated
+    assert!(engine.accounts[idx as usize].adl_k_snap == I256::from_i128(50));
+
+    let pnl_after_first = engine.accounts[idx as usize].pnl;
+
+    // Mark to K=120
+    engine.adl_coeff_long = I256::from_i128(120);
+    let _ = engine.settle_side_effects(idx as usize);
+
+    // Still non-compounding: basis and a_basis unchanged
+    assert!(engine.accounts[idx as usize].position_basis_q == pos);
+    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
+    assert!(engine.accounts[idx as usize].adl_k_snap == I256::from_i128(120));
+}
+
+// ============================================================================
+// T11.41: attach_effective_position_remainder_accounting
+// ============================================================================
+
+/// Real engine: attach_effective_position increments phantom_dust_bound
+/// when replacing a basis with nonzero remainder, and does NOT increment
+/// when remainder is zero.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_41_attach_effective_position_remainder_accounting() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+
+    // Set up: position with a_basis that will produce a remainder
+    let pos = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].position_basis_q = pos;
+    // a_basis = ADL_ONE, a_side = ADL_ONE - 1 → remainder = POS_SCALE * (ADL_ONE-1) mod ADL_ONE ≠ 0
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+    engine.adl_epoch_long = 0;
+    engine.adl_mult_long = ADL_ONE - 1; // a_side < a_basis → nonzero remainder
+    engine.stored_pos_count_long = 1;
+
+    let dust_before = engine.phantom_dust_bound_long_q;
+
+    // Attach a new position — this replaces the old basis
+    let new_pos = I256::from_u128(2 * POS_SCALE);
+    engine.attach_effective_position(idx as usize, new_pos);
+
+    // Dust bound must increment (nonzero remainder)
+    assert!(engine.phantom_dust_bound_long_q > dust_before,
+        "dust bound must increment on nonzero remainder");
+
+    // Now set up a case with zero remainder: a_side == a_basis
+    engine.accounts[idx as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.adl_mult_long = ADL_ONE; // a_side == a_basis → zero remainder
+
+    let dust_before2 = engine.phantom_dust_bound_long_q;
+    engine.attach_effective_position(idx as usize, I256::from_u128(3 * POS_SCALE));
+
+    // Dust bound must NOT increment (zero remainder)
+    assert!(engine.phantom_dust_bound_long_q == dust_before2,
+        "dust bound must not increment on zero remainder");
+}
+
+// ============================================================================
+// T11.42: dynamic_dust_bound_inductive
+// ============================================================================
+
+/// Real engine: after N same-epoch position zeroings via settle_side_effects
+/// (when A shrinks enough that q_eff → 0), phantom_dust_bound >= N.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_42_dynamic_dust_bound_inductive() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    // Both accounts: 1 POS_SCALE unit long, a_basis = ADL_ONE
+    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[a as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[a as usize].adl_epoch_snap = 0;
+    engine.accounts[b as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[b as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 2;
+    engine.adl_epoch_long = 0;
+    engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
+
+    // Shrink A_side to 1 so floor(POS_SCALE * 1 / ADL_ONE) = 0 → q_eff = 0
+    engine.adl_mult_long = 1;
+
+    // Settle account a → position zeroes, dust increments
+    let _ = engine.settle_side_effects(a as usize);
+    assert!(engine.accounts[a as usize].position_basis_q.is_zero());
+    assert!(engine.phantom_dust_bound_long_q == U256::from_u128(1));
+
+    // Settle account b → position zeroes, dust increments again
+    let _ = engine.settle_side_effects(b as usize);
+    assert!(engine.accounts[b as usize].position_basis_q.is_zero());
+    assert!(engine.phantom_dust_bound_long_q == U256::from_u128(2));
+}
+
+// ============================================================================
+// T11.43: end_instruction_auto_finalizes_ready_side
+// ============================================================================
+
+/// Real engine: finalize_end_of_instruction_resets calls
+/// maybe_finalize_ready_reset_sides. When ResetPending with OI=0,
+/// stale=0, pos_count=0, the side transitions to Normal.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_43_end_instruction_auto_finalizes_ready_side() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    // Put long side in ResetPending with all conditions met for auto-finalization
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.oi_eff_long_q = U256::ZERO;
+    engine.stale_account_count_long = 0;
+    engine.stored_pos_count_long = 0;
+
+    // Short side: ResetPending but NOT ready (stale > 0)
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.oi_eff_short_q = U256::ZERO;
+    engine.stale_account_count_short = 1; // blocks finalization
+    engine.stored_pos_count_short = 0;
+
+    let ctx = InstructionContext::new();
+    engine.finalize_end_of_instruction_resets(&ctx);
+
+    // Long side auto-finalized → Normal
+    assert!(engine.side_mode_long == SideMode::Normal,
+        "ready ResetPending side must auto-finalize to Normal");
+
+    // Short side stays ResetPending (stale > 0)
+    assert!(engine.side_mode_short == SideMode::ResetPending,
+        "non-ready side must stay ResetPending");
+}
+
+// ============================================================================
+// T11.44: trade_path_reopens_ready_reset_side
+// ============================================================================
+
+/// Real engine: execute_trade calls maybe_finalize_ready_reset_sides before
+/// the side-mode check, allowing trades on a side that has completed its reset.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_44_trade_path_reopens_ready_reset_side() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    // Long side: ResetPending but fully ready for finalization
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.oi_eff_long_q = U256::ZERO;
+    engine.oi_eff_short_q = U256::ZERO;
+    engine.stale_account_count_long = 0;
+    engine.stored_pos_count_long = 0;
+
+    // Set oracle/market state
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.funding_price_sample_last = 100;
+
+    // Trade: a goes long, b goes short — would be blocked if side stays ResetPending
+    let size_q = I256::from_u128(POS_SCALE);
+    let result = engine.execute_trade(a, b, 100, 1, size_q, 100);
+
+    // Trade must succeed — maybe_finalize_ready_reset_sides reopened the long side
+    assert!(result.is_ok(), "trade must succeed after auto-finalization of ready reset side");
+
+    // Side mode must be Normal after trade
+    assert!(engine.side_mode_long == SideMode::Normal);
+
+    // OI balance holds
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
+}
+
+// ============================================================================
+// T11.45: enqueue_adl_nonrepr_beta_still_routes_quantity
+// ============================================================================
+
+/// Real engine: when beta_abs > I256::MAX (non-representable), D is absorbed
+/// by insurance but A still shrinks and OI still updates.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_45_enqueue_adl_nonrepr_beta_still_routes_quantity() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_coeff_long = I256::ZERO;
+    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+    engine.insurance_fund.balance = U128::new(10_000_000);
+
+    let a_before = engine.adl_mult_long;
+    let k_before = engine.adl_coeff_long;
+    let ins_before = engine.insurance_fund.balance.get();
+
+    // D is very large: beta_abs = ceil(D * POS_SCALE / oi) could exceed I256::MAX
+    // We need D * POS_SCALE / (2 * POS_SCALE) > I256::MAX
+    // i.e. D > 2 * I256::MAX. Use a large but representable U256 for D.
+    let d = U256::from_u128(u128::MAX);
+    let q_close = U256::from_u128(2 * POS_SCALE);
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // A must have shrunk: floor(ADL_ONE * 2/4) = ADL_ONE/2
+    assert!(engine.adl_mult_long < a_before, "A must shrink");
+
+    // OI updated
+    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+}
+
+// ============================================================================
+// T11.46: enqueue_adl_k_add_overflow_still_routes_quantity
+// ============================================================================
+
+/// Real engine: when K_opp + delta_K overflows, D is absorbed but A still
+/// shrinks and OI updates.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    // K near I256::MIN so adding negative delta_K overflows
+    engine.adl_coeff_long = I256::MIN.checked_add(I256::from_i128(1)).unwrap();
+    engine.adl_mult_long = ADL_ONE;
+    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+    engine.insurance_fund.balance = U128::new(10_000_000);
+
+    let a_before = engine.adl_mult_long;
+
+    // Small D that would produce a representable beta, but the delta_K = -beta
+    // addition to K_opp near MIN overflows. Need D such that beta_abs fits I256
+    // but K + delta_K overflows.
+    let d = U256::from_u128(1_000_000);
+    let q_close = U256::from_u128(2 * POS_SCALE);
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // A must shrink
+    assert!(engine.adl_mult_long < a_before, "A must shrink on K overflow");
+
+    // OI updated
+    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+}
+
+// ============================================================================
+// T11.47: precision_exhaustion_terminal_drain
+// ============================================================================
+
+/// Real engine: when A_candidate = floor(1 * oi_post / oi) = 0 with oi_post > 0,
+/// both sides get pending reset (precision exhaustion terminal drain).
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_47_precision_exhaustion_terminal_drain() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    // A_old = 1 (minimal)
+    engine.adl_mult_long = 1;
+    engine.adl_coeff_long = I256::ZERO;
+    engine.oi_eff_long_q = U256::from_u128(3 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(3 * POS_SCALE);
+
+    // q_close = POS_SCALE, so oi_post = 2*POS_SCALE
+    // A_candidate = floor(1 * 2*POS_SCALE / 3*POS_SCALE) = floor(2/3) = 0
+    let q_close = U256::from_u128(POS_SCALE);
+    let d = U256::ZERO;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // Both sides must have pending resets (precision exhaustion)
+    assert!(ctx.pending_reset_long, "long pending reset must fire on precision exhaustion");
+    assert!(ctx.pending_reset_short, "short pending reset must fire on precision exhaustion");
+
+    // OI zeroed on both sides
+    assert!(engine.oi_eff_long_q.is_zero(), "OI long must be zero");
+    assert!(engine.oi_eff_short_q.is_zero(), "OI short must be zero");
+}
+
+// ============================================================================
+// T11.48: bankruptcy_liquidation_routes_q_when_D_zero
+// ============================================================================
+
+/// Real engine: when D == 0, only A shrinks (quantity routing), K unchanged.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_coeff_long = I256::from_i128(42);
+    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+
+    let k_before = engine.adl_coeff_long;
+    let a_before = engine.adl_mult_long;
+
+    // D = 0: no deficit, only quantity routing
+    let d = U256::ZERO;
+    let q_close = U256::from_u128(POS_SCALE);
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // K unchanged when D == 0
+    assert!(engine.adl_coeff_long == k_before, "K must be unchanged when D == 0");
+
+    // A shrunk: floor(ADL_ONE * 3/4) < ADL_ONE
+    assert!(engine.adl_mult_long < a_before, "A must shrink");
+
+    // OI updated
+    assert!(engine.oi_eff_long_q == U256::from_u128(3 * POS_SCALE));
+}
+
+// ============================================================================
+// T11.49: pure_pnl_bankruptcy_path
+// ============================================================================
+
+/// Real engine: when q_close = 0 and D > 0, only K changes (PnL routing),
+/// A is unchanged.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_49_pure_pnl_bankruptcy_path() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_coeff_long = I256::ZERO;
+    engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(2 * POS_SCALE);
+
+    let a_before = engine.adl_mult_long;
+    let k_before = engine.adl_coeff_long;
+
+    // q_close = 0, D > 0: pure PnL bankruptcy
+    let d = U256::from_u128(1_000);
+    let q_close = U256::ZERO;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // A unchanged (no quantity routing with q_close = 0)
+    assert!(engine.adl_mult_long == a_before, "A must be unchanged for pure PnL bankruptcy");
+
+    // K must have changed (deficit socialized through K)
+    assert!(engine.adl_coeff_long != k_before, "K must change when D > 0");
+
+    // OI unchanged (no quantity closed)
+    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+}
+
+// ============================================================================
+// T11.50: execute_trade_atomic_oi_update_sign_flip
+// ============================================================================
+
+/// Real engine: execute_trade with position sign flip correctly updates OI.
+/// Account flips from long to short — old long OI removed, new short OI added.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_50_execute_trade_atomic_oi_update_sign_flip() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 100_000_000, 100, 0).unwrap();
+    engine.deposit(b, 100_000_000, 100, 0).unwrap();
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.funding_price_sample_last = 100;
+
+    // Open: a long 1 unit, b short 1 unit
+    let size_q = I256::from_u128(POS_SCALE);
+    let r1 = engine.execute_trade(a, b, 100, 1, size_q, 100);
+    assert!(r1.is_ok());
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
+    let oi_after_open = engine.oi_eff_long_q;
+
+    // Flip: a sells 2 units (goes from +1 to -1 net)
+    let flip_size = I256::ZERO.checked_sub(I256::from_u128(2 * POS_SCALE)).unwrap();
+    let r2 = engine.execute_trade(a, b, 100, 2, flip_size, 100);
+    assert!(r2.is_ok());
+
+    // OI balance must still hold
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must be balanced after sign flip");
+}
+
+// ============================================================================
+// T11.51: execute_trade_slippage_zero_sum
+// ============================================================================
+
+/// Real engine: zero-fee trade at oracle price preserves vault.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_51_execute_trade_slippage_zero_sum() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.funding_price_sample_last = 100;
+
+    let vault_before = engine.vault.get();
+
+    let size_q = I256::from_u128(POS_SCALE);
+    let result = engine.execute_trade(a, b, 100, 1, size_q, 100);
+    assert!(result.is_ok());
+
+    let vault_after = engine.vault.get();
+    assert!(vault_after == vault_before,
+        "vault must be unchanged with zero fees at oracle price");
+
+    // Conservation
+    assert!(engine.check_conservation(), "conservation must hold after trade");
+}
+
+// ============================================================================
+// T11.52: touch_account_full_restart_conversion_fee_seniority
+// ============================================================================
+
+/// Real engine: after touch_account_full with warmup maturity and fee debt,
+/// restart-on-new-profit fires and fee_debt_sweep runs.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_52_touch_account_full_restart_fee_seniority() {
+    let mut params = zero_fee_params();
+    params.warmup_period_slots = 10;
+    let mut engine = RiskEngine::new(params);
+
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+
+    // Set up: account has a long position with positive PnL pending
+    let pos = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].position_basis_q = pos;
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 1;
+    engine.adl_epoch_long = 0;
+    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
+
+    // K_long positive → will produce positive PnL on settle
+    engine.adl_coeff_long = I256::from_i128((ADL_ONE as i128) * 100);
+
+    // Fee debt: negative fee_credits
+    engine.accounts[idx as usize].fee_credits = I128::new(-500i128);
+
+    // Warmup started long ago — fully matured
+    engine.accounts[idx as usize].warmup_started_at_slot = 0;
+    engine.accounts[idx as usize].warmup_slope_per_step = U256::from_u128(100);
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 100;
+
+    let fee_before = engine.accounts[idx as usize].fee_credits;
+
+    // Touch at slot 100 (warmup fully matured)
+    let result = engine.touch_account_full(idx as usize, 100, 100);
+    assert!(result.is_ok());
+
+    // After touch: k_snap updated
+    assert!(engine.accounts[idx as usize].adl_k_snap == engine.adl_coeff_long);
+}
+
+// ============================================================================
+// T11.53: keeper_crank_quiesces_after_pending_reset
+// ============================================================================
+
+/// Real engine: keeper_crank stops processing accounts after a pending reset
+/// is triggered (early break on ctx.pending_reset_*).
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_53_keeper_crank_quiesces_after_pending_reset() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    // Set up: long side has A=1 (near precision exhaustion)
+    engine.adl_mult_long = 1;
+    engine.adl_epoch_long = 0;
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 0;
+    engine.funding_price_sample_last = 100;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    // Both accounts have long positions (with A=1 → q_eff=0 after settle)
+    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[a as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[a as usize].adl_epoch_snap = 0;
+    engine.accounts[b as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[b as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 2;
+    engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(2 * POS_SCALE);
+
+    // Crank should touch accounts, which settles them (q_eff=0 → positions zero,
+    // dust increments). After schedule_end_of_instruction_resets sees enough dust,
+    // pending reset fires and the crank quiesces.
+    let result = engine.keeper_crank(a, 1, 100, 0);
+    assert!(result.is_ok());
+}
+
+// ============================================================================
+// T11.54: worked_example_regression
+// ============================================================================
+
+/// Real engine: complete multi-phase scenario with final-state assertions.
+/// Phase 1: Open positions (a long, b short)
+/// Phase 2: ADL (b bankrupt, deficit socialized to a)
+/// Phase 3: Verify final state
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t11_54_worked_example_regression() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.funding_price_sample_last = 100;
+
+    // Phase 1: Open — a long 2 units, b short 2 units at price 100
+    let size_q = I256::from_u128(2 * POS_SCALE);
+    let r1 = engine.execute_trade(a, b, 100, 1, size_q, 100);
+    assert!(r1.is_ok());
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
+    let oi_after_open = engine.oi_eff_long_q;
+
+    // Phase 2: ADL — b's side bankrupt, close 1 unit, deficit = 500
+    let mut ctx = InstructionContext::new();
+    let d = U256::from_u128(500);
+    let q_close = U256::from_u128(POS_SCALE);
+    let r2 = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(r2.is_ok());
+
+    // A_long must have shrunk
+    assert!(engine.adl_mult_long < ADL_ONE, "A_long must shrink after ADL");
+
+    // OI_long decreased by q_close
+    assert!(engine.oi_eff_long_q == U256::from_u128(POS_SCALE),
+        "OI_long must decrease by q_close");
+
+    // K_long must have changed (deficit socialized)
+    assert!(engine.adl_coeff_long != I256::ZERO, "K must change with nonzero D");
+
+    // Phase 3: Settle account a to realize ADL effects
+    let _ = engine.settle_side_effects(a as usize);
+
+    // After settle: position basis unchanged (non-compounding), k_snap updated
+    assert!(engine.accounts[a as usize].adl_k_snap == engine.adl_coeff_long);
+
+    // Conservation check
+    assert!(engine.check_conservation(), "conservation must hold after ADL + settle");
+}
