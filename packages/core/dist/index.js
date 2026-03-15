@@ -1909,7 +1909,8 @@ async function discoverMarkets(connection, programId) {
   const ALL_TIERS = [
     ...Object.values(SLAB_TIERS),
     ...Object.values(SLAB_TIERS_V0),
-    ...Object.values(SLAB_TIERS_V1D)
+    ...Object.values(SLAB_TIERS_V1D),
+    ...Object.values(SLAB_TIERS_V1D_LEGACY)
   ];
   let rawAccounts = [];
   try {
