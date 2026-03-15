@@ -309,10 +309,24 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
     []
   );
 
+  // Keep a stable ref to the current mint address so setMintAddress (which has no
+  // deps and therefore no closure over wizard) can detect same-value calls.
+  // GH#1263: belt-and-suspenders guard — see comment on setMintAddress below.
+  const currentMintRef = useRef(wizard.mintAddress);
+  currentMintRef.current = wizard.mintAddress; // updated on every render (safe)
+
   // Updaters (memoized to avoid unnecessary re-renders in children)
+  //
+  // GH#1263 (secondary guard): Only reset mintExistsOnNetwork / devnetMintAddress when
+  // the mint address *actually* changed.  The primary fix is in StepTokenSelect's
+  // debounce (it no longer calls onMintChange when the value is the same), but this
+  // guard provides an extra safety net in case any other code path calls us with the
+  // same value.  Without it, a spurious call resets mintExistsOnNetwork to false even
+  // though on-chain validation already succeeded — permanently disabling Continue.
   const setMintAddress = useCallback((mint: string) => {
+    if (currentMintRef.current === mint) return; // no-op if address unchanged
     setWizard((prev) => ({ ...prev, mintAddress: mint }));
-    // Reset network validation and devnet mirror when mint changes
+    // Reset network validation and devnet mirror only on a genuine address change.
     setMintExistsOnNetwork(false);
     setDevnetMintAddress(null);
   }, []);
