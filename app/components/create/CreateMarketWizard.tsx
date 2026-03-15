@@ -86,10 +86,21 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
       const persisted = typeof window !== "undefined" ? localStorage.getItem(WIZARD_STORAGE_KEY) : null;
       if (persisted) {
         const parsed = JSON.parse(persisted);
+        // GH#1298: Don't restore directly to the Review page (step 4) — require the user to
+        // navigate there explicitly in the current session. Restoring to step 4 with all fields
+        // pre-populated (PERC-1219) leaves the LAUNCH MARKET button enabled on first render,
+        // risking accidental market creation (0.46 SOL lost in QA). Clamp to the last
+        // navigable form step so the user must click CONTINUE once more before launching.
+        const restoredStep = Number(parsed.step ?? 1);
+        const safeStep: WizardStep = restoredStep >= 4
+          ? (parsed.mode === "quick" ? 2 : 3)
+          : restoredStep as WizardStep;
         // Restore serializable fields only — bigint and complex objects need special handling
         return {
           ...DEFAULT_STATE,
           ...parsed,
+          // GH#1298: Never restore to Review directly
+          step: safeStep,
           // bigint fields can't survive JSON — restore as bigint or null
           walletBalance: parsed.walletBalance != null ? BigInt(parsed.walletBalance) : null,
           // DexPoolResult is a plain object, survives JSON
@@ -111,15 +122,19 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
   // If the previous session reached step N, steps 1..N-1 were completed.
   // This ensures WizardProgress shows correct state after a reload and allows
   // the user to click back to previous steps during resume.
+  // GH#1298: Use safeStep (same clamping as wizard state above) so completedSteps
+  // doesn't mark step 3 as complete when we've rewound to step 2/3.
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(() => {
     try {
       const persisted = typeof window !== "undefined" ? localStorage.getItem(WIZARD_STORAGE_KEY) : null;
       if (persisted) {
         const parsed = JSON.parse(persisted);
         const step = Number(parsed.step ?? 1);
-        if (step > 1) {
+        // GH#1298: Apply same safe-step clamping as wizard state above
+        const safeStep = step >= 4 ? (parsed.mode === "quick" ? 2 : 3) : step;
+        if (safeStep > 1) {
           const steps = new Set<number>();
-          for (let i = 1; i < step; i++) steps.add(i);
+          for (let i = 1; i < safeStep; i++) steps.add(i);
           return steps;
         }
       }
