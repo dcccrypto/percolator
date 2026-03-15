@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createBrowserClient } from "@supabase/ssr";
 import type { User } from "@supabase/supabase-js";
 import { OracleAdminSection } from "@/components/admin/OracleAdminSection";
+import { OracleFreshnessSection } from "@/components/admin/OracleFreshnessSection";
 
 function getAuthClient() {
   return createBrowserClient(
@@ -719,6 +720,11 @@ export default function AdminDashboard() {
           )}
         </div>
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          ORACLE FRESHNESS CHECK
+      ══════════════════════════════════════════════════════════════════════ */}
+      <OracleFreshnessSection />
 
       {/* ══════════════════════════════════════════════════════════════════════
           ORACLE AUTHORITY ADMIN
