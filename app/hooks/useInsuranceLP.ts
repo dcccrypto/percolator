@@ -92,12 +92,17 @@ export function useInsuranceLP() {
     if (!slabState || !lpMintInfo || !connection) return;
 
     try {
-      // Get insurance balance from engine state
-      const insuranceBalance = slabState.engine?.insuranceFund?.balance ?? 0n;
-
-      // Check if LP mint exists on-chain
+      // Check if LP mint exists on-chain first — needed to sanitize insuranceBalance
       const mintInfo = await connection.getAccountInfo(lpMintInfo.mintPda);
       const mintExists = mintInfo !== null && mintInfo.data.length > 0;
+
+      // Get insurance balance from engine state.
+      // Guard: Solana uninitialised u64 fields read as u64::MAX (2^64-1).
+      // Only trust the value when the LP mint is live; otherwise clamp to 0.
+      const U64_MAX = 18_446_744_073_709_551_615n;
+      const rawBalance = slabState.engine?.insuranceFund?.balance ?? 0n;
+      const insuranceBalance =
+        mintExists && rawBalance <= U64_MAX / 2n ? rawBalance : 0n;
 
       let lpSupply = 0n;
       let userLpBalance = 0n;
