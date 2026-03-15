@@ -210,6 +210,12 @@ describe('StatsCollector', () => {
       mockGetAccountInfo.mockResolvedValue({ data: new Uint8Array(2048) });
       mockGetMultipleAccountsInfo.mockResolvedValue([{ data: new Uint8Array(2048) }]);
       setupParseMocks();
+      // GH#1250: OI is now computed from parsed accounts (not engine.totalOpenInterest).
+      // Return accounts summing to 1_000_000_000n so total_open_interest matches expectation.
+      vi.mocked(core.parseAllAccounts).mockReturnValue([
+        { account: { positionSize: 600_000_000n } },
+        { account: { positionSize: -400_000_000n } },
+      ] as any);
 
       statsCollector.start();
       await vi.advanceTimersByTimeAsync(10_500);
