@@ -55,6 +55,11 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   // True when the mint is a devnet-native token (not a mainnet mirror). Used to suppress
   // the "🪞 Devnet mirror" label for tokens created directly on devnet (PERC-1093).
   const [isNativeDevnetMint, setIsNativeDevnetMint] = useState(false);
+  // Token program ID resolved from on-chain account owner.
+  // TOKEN_PROGRAM_ID for standard SPL mints, TOKEN_2022_PROGRAM_ID for Token-2022 mints.
+  // Used by the balance effect so getAssociatedTokenAddress/getAccount target the right
+  // program and don't silently return zero for Token-2022 mints. GH#1261.
+  const [tokenProgramId, setTokenProgramId] = useState<PublicKey>(TOKEN_PROGRAM_ID);
   // Use live RPC endpoint to detect devnet (not build-time env var which may be wrong in prod).
   const isDevnet = isDevnetEndpoint(connection.rpcEndpoint) || getNetwork() === "devnet";
 
@@ -111,6 +116,7 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       setIsNativeDevnetMint(false);
       onTokenResolvedRef.current(null);
       onMintNetworkValidChangeRef.current?.(false);
+      setTokenProgramId(TOKEN_PROGRAM_ID);
       return;
     }
     // Capture the mint address string at effect start so fetch bodies are consistent
@@ -139,7 +145,14 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
               await new Promise(r => setTimeout(r, 2000));
             }
             if (cancelled) return;
-            accountInfo = await connection.getAccountInfo(mintPk);
+            try {
+              // GH#1258 follow-up: wrap in try/catch so transient RPC throws also
+              // retry instead of escaping to the outer catch and skipping remaining attempts.
+              accountInfo = await connection.getAccountInfo(mintPk);
+            } catch (e) {
+              if (attempt === 4) throw e;
+              continue;
+            }
             if (accountInfo) break;
           }
           if (cancelled) return;
@@ -152,6 +165,8 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
             if (isTokenMint) {
               // Mint already exists on devnet — use it directly, no mirror needed.
               // Mark as native so we don't show the "mainnet mirror" label (PERC-1093).
+              // GH#1261: record resolved program ID so balance fetch targets the right program.
+              setTokenProgramId(accountInfo.owner);
               const devnetMeta = {
                 name: tokenMeta?.name ?? `Token ${mintAddr.slice(0, 6)}`,
                 symbol: tokenMeta?.symbol ?? mintAddr.slice(0, 4).toUpperCase(),
@@ -234,6 +249,8 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
             onMintNetworkValidChangeRef.current?.(false);
             return;
           }
+          // GH#1261: record resolved program ID so balance fetch targets the right program.
+          setTokenProgramId(accountInfo.owner);
           setMintNetworkStatus("valid");
           onMintNetworkValidChangeRef.current?.(true);
           return;
@@ -275,13 +292,19 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   // mid-retry. Only restart on genuine address/wallet/network changes.
   useEffect(() => {
     if (!publicKey || !mintValid) {
+      // GH#1260: clear loading flag so spinner doesn't get stuck when wallet disconnects
+      // or mint is cleared while an ATA retry loop is in-flight.
+      setBalanceLoading(false);
       setBalance(null);
       onBalanceChangeRef.current(null);
       return;
     }
-    // Capture mint pubkey at effect start to avoid stale closure issues.
+    // Capture mint pubkey and resolved token program ID at effect start.
+    // GH#1261: tokenProgramId is set by the validation effect from accountInfo.owner so
+    // Token-2022 mints derive/query against TOKEN_2022_PROGRAM_ID instead of TOKEN_PROGRAM_ID.
     const mintPkForBalance = mintPk;
     if (!mintPkForBalance) return;
+    const capturedTokenProgramId = tokenProgramId;
     let cancelled = false;
     setBalanceLoading(true);
     (async () => {
@@ -293,8 +316,8 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
         }
         if (cancelled) return;
         try {
-          const ata = await getAssociatedTokenAddress(mintPkForBalance, publicKey);
-          const account = await getAccount(connection, ata);
+          const ata = await getAssociatedTokenAddress(mintPkForBalance, publicKey, false, capturedTokenProgramId);
+          const account = await getAccount(connection, ata, undefined, capturedTokenProgramId);
           if (!cancelled) {
             const amount = account.amount;
             setBalance(amount);
@@ -315,8 +338,9 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       cancelled = true;
     };
     // GH#1258: onBalanceChange excluded — accessed via stable ref.
+    // GH#1261: tokenProgramId added so effect re-runs when validation resolves Token-2022 owner.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, publicKey, mintPk, mintValid, isNativeDevnetMint]);
+  }, [connection, publicKey, mintPk, mintValid, isNativeDevnetMint, tokenProgramId]);
 
   const showInvalid = debounced.length > 0 && !mintValid;
   const effectiveMeta = tokenMeta ?? mirrorMeta;
