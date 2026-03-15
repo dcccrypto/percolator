@@ -1,6 +1,6 @@
 "use client";
 
-import { FC, useState, useEffect, useMemo } from "react";
+import { FC, useState, useEffect, useMemo, useRef } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { useWalletCompat, useConnectionCompat } from "@/hooks/useWalletCompat";
 import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
@@ -58,6 +58,19 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
   // Use live RPC endpoint to detect devnet (not build-time env var which may be wrong in prod).
   const isDevnet = isDevnetEndpoint(connection.rpcEndpoint) || getNetwork() === "devnet";
 
+  // Stable refs for all callback props so that parent re-renders (e.g. wallet connection
+  // events firing immediately on ?mint= navigation) don't cancel and restart the async
+  // retry loops inside validation/balance effects. GH#1258: this was the root cause —
+  // unstable function references in effect deps kept resetting the 3-attempt retry from 0.
+  const onTokenResolvedRef = useRef(onTokenResolved);
+  useEffect(() => { onTokenResolvedRef.current = onTokenResolved; });
+  const onMintNetworkValidChangeRef = useRef(onMintNetworkValidChange);
+  useEffect(() => { onMintNetworkValidChangeRef.current = onMintNetworkValidChange; });
+  const onDevnetMintResolvedRef = useRef(onDevnetMintResolved);
+  useEffect(() => { onDevnetMintResolvedRef.current = onDevnetMintResolved; });
+  const onBalanceChangeRef = useRef(onBalanceChange);
+  useEffect(() => { onBalanceChangeRef.current = onBalanceChange; });
+
   // Debounce mint input
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -81,6 +94,11 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
 
   // On-chain mint existence validation — ensures the CA exists on the current network.
   // On devnet: if mint doesn't exist, auto-mirror the mainnet CA to devnet.
+  //
+  // GH#1258 fix: dependency array contains ONLY stable values (mintPk, connection, isDevnet).
+  // Callbacks are accessed via refs so parent re-renders (e.g. wallet connect events on
+  // ?mint= navigation) don't cancel and restart the async retry loop mid-flight.
+  // Retries increased to 5×2s (up to 10s) for devnet RPC propagation under load.
   useEffect(() => {
     if (!mintPk) {
       setMintNetworkStatus("idle");
@@ -91,10 +109,13 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       // onTokenResolved(null), leaving wizard.tokenMeta pointing at the old token.
       setMirrorMeta(null);
       setIsNativeDevnetMint(false);
-      onTokenResolved(null);
-      onMintNetworkValidChange?.(false);
+      onTokenResolvedRef.current(null);
+      onMintNetworkValidChangeRef.current?.(false);
       return;
     }
+    // Capture the mint address string at effect start so fetch bodies are consistent
+    // even if debounced state changes (and so we can drop debounced from deps).
+    const mintAddr = mintPk.toBase58();
     let cancelled = false;
     setMirrorError(null);
     setMirrorMeta(null);
@@ -108,15 +129,14 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
       (async () => {
         try {
           // Step 1: Check if mint exists on devnet.
-          // GH#1255: Retry up to 3 times (1.5s apart) to handle RPC propagation delay
-          // for mints just created via Token Factory. Without retries, getAccountInfo
-          // returns null for a freshly-created mint and the code incorrectly falls
-          // through to the mainnet mirror path, which then fails ("Token may not exist
-          // or have no DEX liquidity") because the token was never on mainnet.
+          // GH#1255 / GH#1258: Retry up to 5 times (2s apart, 10s total) to handle RPC
+          // propagation delay for mints just created via Token Factory. Original 3×1.5s
+          // was insufficient under devnet load; also the loop was being cancelled by
+          // parent re-renders when callbacks were in the dep array (GH#1258).
           let accountInfo = null;
-          for (let attempt = 0; attempt < 3; attempt++) {
+          for (let attempt = 0; attempt < 5; attempt++) {
             if (attempt > 0) {
-              await new Promise(r => setTimeout(r, 1500));
+              await new Promise(r => setTimeout(r, 2000));
             }
             if (cancelled) return;
             accountInfo = await connection.getAccountInfo(mintPk);
@@ -133,23 +153,23 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
               // Mint already exists on devnet — use it directly, no mirror needed.
               // Mark as native so we don't show the "mainnet mirror" label (PERC-1093).
               const devnetMeta = {
-                name: tokenMeta?.name ?? `Token ${debounced.slice(0, 6)}`,
-                symbol: tokenMeta?.symbol ?? debounced.slice(0, 4).toUpperCase(),
+                name: tokenMeta?.name ?? `Token ${mintAddr.slice(0, 6)}`,
+                symbol: tokenMeta?.symbol ?? mintAddr.slice(0, 4).toUpperCase(),
                 decimals: tokenMeta?.decimals ?? 6,
               };
               setMirrorMeta(devnetMeta);
               setIsNativeDevnetMint(true);
-              onDevnetMintResolved?.(debounced, devnetMeta);
-              onTokenResolved(devnetMeta);
+              onDevnetMintResolvedRef.current?.(mintAddr, devnetMeta);
+              onTokenResolvedRef.current(devnetMeta);
               setMintNetworkStatus("valid");
-              onMintNetworkValidChange?.(true);
+              onMintNetworkValidChangeRef.current?.(true);
 
               // Best-effort: register in devnet_mints for airdrop endpoint lookup
               fetch("/api/devnet-register-mint", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                  mintAddress: debounced,
+                  mintAddress: mintAddr,
                   name: devnetMeta.name,
                   symbol: devnetMeta.symbol,
                   decimals: devnetMeta.decimals,
@@ -165,32 +185,32 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
           const resp = await fetch("/api/devnet-mirror-mint", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mainnetCA: debounced }),
+            body: JSON.stringify({ mainnetCA: mintAddr }),
           });
           if (cancelled) return;
           const data = await resp.json();
           if (!resp.ok) {
             setMintNetworkStatus("mirror-failed");
             setMirrorError(data.error ?? `Mirror failed (HTTP ${resp.status})`);
-            onMintNetworkValidChange?.(false);
+            onMintNetworkValidChangeRef.current?.(false);
             return;
           }
           // Mirror succeeded — notify parent with the devnet mint + metadata
           const resolvedMirrorMeta = {
-            name: data.name ?? `Token ${debounced.slice(0, 6)}`,
-            symbol: data.symbol ?? debounced.slice(0, 4).toUpperCase(),
+            name: data.name ?? `Token ${mintAddr.slice(0, 6)}`,
+            symbol: data.symbol ?? mintAddr.slice(0, 4).toUpperCase(),
             decimals: data.decimals ?? 6,
           };
           setMirrorMeta(resolvedMirrorMeta);
-          onDevnetMintResolved?.(data.devnetMint, resolvedMirrorMeta);
-          onTokenResolved(resolvedMirrorMeta);
+          onDevnetMintResolvedRef.current?.(data.devnetMint, resolvedMirrorMeta);
+          onTokenResolvedRef.current(resolvedMirrorMeta);
           setMintNetworkStatus("valid");
-          onMintNetworkValidChange?.(true);
+          onMintNetworkValidChangeRef.current?.(true);
         } catch {
           if (!cancelled) {
             setMintNetworkStatus("mirror-failed");
             setMirrorError("Network error — could not validate mint");
-            onMintNetworkValidChange?.(false);
+            onMintNetworkValidChangeRef.current?.(false);
           }
         }
       })();
@@ -211,71 +231,81 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
             ownerKey === TOKEN_2022_PROGRAM_ID.toBase58();
           if (!isTokenMint) {
             setMintNetworkStatus("invalid");
-            onMintNetworkValidChange?.(false);
+            onMintNetworkValidChangeRef.current?.(false);
             return;
           }
           setMintNetworkStatus("valid");
-          onMintNetworkValidChange?.(true);
+          onMintNetworkValidChangeRef.current?.(true);
           return;
         }
         // Account does not exist on mainnet — block
         setMintNetworkStatus("invalid");
-        onMintNetworkValidChange?.(false);
+        onMintNetworkValidChangeRef.current?.(false);
       } catch {
         if (!cancelled) {
           setMintNetworkStatus("invalid");
-          onMintNetworkValidChange?.(false);
+          onMintNetworkValidChangeRef.current?.(false);
         }
       }
     })();
     return () => { cancelled = true; };
-  }, [mintPk, connection, onMintNetworkValidChange, onDevnetMintResolved, isDevnet, debounced]);
+    // GH#1258: intentionally exclude callback props — accessed via stable refs above.
+    // Only restart on genuine mint/network changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mintPk, connection, isDevnet]);
 
   // Propagate token meta changes.
   // PERC-1093: Don't override an already-resolved devnet/mirror meta with null mainnet metadata.
   // The mainnet metadata API returns null for devnet-native tokens (no mainnet listing).
   // Overwriting wizard.tokenMeta with null blocks step1Valid even when mintNetworkStatus="valid".
   // Only propagate null when mirrorMeta is also null (i.e., nothing resolved yet / input cleared).
+  // GH#1258: use ref for onTokenResolved so parent re-renders don't re-fire this unnecessarily.
   useEffect(() => {
     if (tokenMeta !== null || mirrorMeta === null) {
-      onTokenResolved(tokenMeta);
+      onTokenResolvedRef.current(tokenMeta);
     }
-  }, [tokenMeta, onTokenResolved, mirrorMeta]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokenMeta, mirrorMeta]);
 
   // Check wallet token balance.
   // GH#1256: For native devnet mints (freshly created via Token Factory), the ATA may
   // not be visible on the RPC immediately after the mint transaction confirms. Retry
-  // up to 3 times with 2s delay so balance isn't stuck at 0 for newly-minted tokens.
+  // up to 5 times with 3s delay (15s total) so balance isn't stuck at 0.
+  // GH#1258: use ref for onBalanceChange to prevent parent re-renders from cancelling
+  // mid-retry. Only restart on genuine address/wallet/network changes.
   useEffect(() => {
     if (!publicKey || !mintValid) {
       setBalance(null);
-      onBalanceChange(null);
+      onBalanceChangeRef.current(null);
       return;
     }
+    // Capture mint pubkey at effect start to avoid stale closure issues.
+    const mintPkForBalance = mintPk;
+    if (!mintPkForBalance) return;
     let cancelled = false;
     setBalanceLoading(true);
     (async () => {
-      const MAX_ATTEMPTS = isNativeDevnetMint ? 3 : 1;
+      // GH#1258: increased from 3 to 5 attempts, delay 2s→3s, for devnet RPC lag.
+      const MAX_ATTEMPTS = isNativeDevnetMint ? 5 : 1;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         if (attempt > 0) {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 3000));
         }
         if (cancelled) return;
         try {
-          const pk = new PublicKey(debounced);
-          const ata = await getAssociatedTokenAddress(pk, publicKey);
+          const ata = await getAssociatedTokenAddress(mintPkForBalance, publicKey);
           const account = await getAccount(connection, ata);
           if (!cancelled) {
             const amount = account.amount;
             setBalance(amount);
-            onBalanceChange(amount);
+            onBalanceChangeRef.current(amount);
             // Got a non-zero balance — no need to retry
             if (amount > 0n) break;
           }
         } catch {
           if (!cancelled && attempt === MAX_ATTEMPTS - 1) {
             setBalance(0n);
-            onBalanceChange(0n);
+            onBalanceChangeRef.current(0n);
           }
         }
       }
@@ -284,7 +314,9 @@ export const StepTokenSelect: FC<StepTokenSelectProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [connection, publicKey, debounced, mintValid, isNativeDevnetMint, onBalanceChange]);
+    // GH#1258: onBalanceChange excluded — accessed via stable ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection, publicKey, mintPk, mintValid, isNativeDevnetMint]);
 
   const showInvalid = debounced.length > 0 && !mintValid;
   const effectiveMeta = tokenMeta ?? mirrorMeta;
