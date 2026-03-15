@@ -1,4 +1,4 @@
-//! Formal verification with Kani — v9.4 Risk Engine
+//! Formal verification with Kani — v10.0 Risk Engine
 //!
 //! These proofs verify critical safety properties of the percolator risk engine.
 //! Run with: cargo kani --harness <name> (individual proofs)
@@ -1042,7 +1042,7 @@ fn proof_finalize_side_reset_requires_conditions() {
 
 /// DrainOnly and ResetPending modes block OI increase.
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(70)]
 #[kani::solver(cadical)]
 fn proof_side_mode_gating() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1061,9 +1061,10 @@ fn proof_side_mode_gating() {
     let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
     assert!(result == Err(RiskError::SideBlocked));
 
-    // Set ResetPending on short side
+    // Set ResetPending on short side (with stale count > 0 to prevent auto-finalization)
     engine.side_mode_long = SideMode::Normal;
     engine.side_mode_short = SideMode::ResetPending;
+    engine.stale_account_count_short = 1;
 
     // Attempt a trade that opens a short position for a -> should be blocked
     let neg_size = I256::from_u128(POS_SCALE).checked_neg().unwrap();

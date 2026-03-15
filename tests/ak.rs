@@ -1,4 +1,4 @@
-//! Layered A/K proof suite for Kani — v9.5 Risk Engine
+//! Layered A/K proof suite for Kani — v10.0 Risk Engine
 //!
 //! Architecture:
 //!   - Tier 0: Arithmetic helper proofs (pure, loop-free)
@@ -8,7 +8,7 @@
 //!   - Tier 4: ADL enqueue proofs
 //!   - Tier 5: Dust / fixed-point proofs
 //!   - Tier 6: Focused scenario proofs (regressions)
-//!   - Tier 7: Non-compounding basis proofs (v9.5)
+//!   - Tier 7: Non-compounding basis proofs (v10.0)
 //!   - Tier 8: Real engine integration proofs
 //!   - Tier 9: Fee / warmup proofs
 //!   - Tier 10: accrue_market_to proofs
@@ -1702,7 +1702,7 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
 
 // ############################################################################
 //
-// TIER 7: NON-COMPOUNDING BASIS PROOFS (v9.5)
+// TIER 7: NON-COMPOUNDING BASIS PROOFS (v10.0)
 //
 // ############################################################################
 
@@ -2779,37 +2779,42 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 // ============================================================================
 
 /// Real engine: when beta_abs > I256::MAX (non-representable), D is absorbed
-/// by insurance but A still shrinks and OI still updates.
+/// try_negate_u256_to_i256 correctly handles zero, representable, 2^255 edge, and
+/// non-representable magnitudes.
 #[kani::proof]
-#[kani::solver(cadical)]
-fn t11_45_enqueue_adl_nonrepr_beta_still_routes_quantity() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let mut ctx = InstructionContext::new();
+#[kani::unwind(34)]
+fn t11_45_try_negate_u256_correctness() {
+    // Zero → Some(I256::ZERO)
+    assert!(try_negate_u256_to_i256(U256::ZERO) == Some(I256::ZERO));
 
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_coeff_long = I256::ZERO;
-    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
-    engine.insurance_fund.balance = U128::new(10_000_000);
+    // Small positive → correct negative
+    assert!(try_negate_u256_to_i256(U256::ONE) == Some(I256::MINUS_ONE));
 
-    let a_before = engine.adl_mult_long;
-    let k_before = engine.adl_coeff_long;
-    let ins_before = engine.insurance_fund.balance.get();
+    // I256::MAX magnitude → representable as -(2^255 - 1)
+    let max_pos_mag = U256::new(u128::MAX, u128::MAX >> 1); // = I256::MAX.abs_u256()
+    let neg_max = try_negate_u256_to_i256(max_pos_mag);
+    assert!(neg_max.is_some());
+    let neg_max_val = neg_max.unwrap();
+    assert!(neg_max_val.is_negative());
 
-    // D is very large: beta_abs = ceil(D * POS_SCALE / oi) could exceed I256::MAX
-    // We need D * POS_SCALE / (2 * POS_SCALE) > I256::MAX
-    // i.e. D > 2 * I256::MAX. Use a large but representable U256 for D.
-    let d = U256::from_u128(u128::MAX);
-    let q_close = U256::from_u128(2 * POS_SCALE);
+    // 2^255 exactly → I256::MIN
+    let two_255 = U256::new(0, 1u128 << 127);
+    assert!(try_negate_u256_to_i256(two_255) == Some(I256::MIN));
 
-    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
-    assert!(result.is_ok());
+    // 2^255 + 1 → NOT representable
+    let too_large = two_255.checked_add(U256::ONE).unwrap();
+    assert!(try_negate_u256_to_i256(too_large).is_none());
 
-    // A must have shrunk: floor(ADL_ONE * 2/4) = ADL_ONE/2
-    assert!(engine.adl_mult_long < a_before, "A must shrink");
+    // U256::MAX → NOT representable
+    assert!(try_negate_u256_to_i256(U256::MAX).is_none());
 
-    // OI updated
-    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+    // BUG REGRESSION: the old code used from_raw_u256_pub(v).checked_neg(),
+    // which falsely returned Some for v > 2^255 when the bit reinterpretation
+    // happened to produce a value whose checked_neg succeeded.
+    // E.g. U256::MAX → from_raw_u256_pub gives I256(-1) → checked_neg gives Some(1).
+    // Our helper must return None for U256::MAX.
+    let regression = U256::new(u128::MAX, u128::MAX); // U256::MAX
+    assert!(try_negate_u256_to_i256(regression).is_none());
 }
 
 // ============================================================================
@@ -2826,7 +2831,9 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
 
     // K near I256::MIN so adding negative delta_K overflows
     engine.adl_coeff_long = I256::MIN.checked_add(I256::from_i128(1)).unwrap();
-    engine.adl_mult_long = ADL_ONE;
+    // Use POS_SCALE (2^64) instead of ADL_ONE (2^96) to keep U512 division
+    // shift within unwind(70): a_old * oi_post = 2^64 * 2^65 → shift = 62.
+    engine.adl_mult_long = POS_SCALE;
     engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
     engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
     engine.insurance_fund.balance = U128::new(10_000_000);
@@ -2895,7 +2902,8 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = ADL_ONE;
+    // Use POS_SCALE instead of ADL_ONE to keep U512 division shift within unwind(70)
+    engine.adl_mult_long = POS_SCALE;
     engine.adl_coeff_long = I256::from_i128(42);
     engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
     engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
@@ -2913,7 +2921,7 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
     // K unchanged when D == 0
     assert!(engine.adl_coeff_long == k_before, "K must be unchanged when D == 0");
 
-    // A shrunk: floor(ADL_ONE * 3/4) < ADL_ONE
+    // A shrunk: floor(POS_SCALE * 3/4) < POS_SCALE
     assert!(engine.adl_mult_long < a_before, "A must shrink");
 
     // OI updated
@@ -2932,7 +2940,8 @@ fn t11_49_pure_pnl_bankruptcy_path() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = ADL_ONE;
+    // Use POS_SCALE instead of ADL_ONE to keep U512 division shift within unwind(70)
+    engine.adl_mult_long = POS_SCALE;
     engine.adl_coeff_long = I256::ZERO;
     engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
     engine.oi_eff_short_q = U256::from_u128(2 * POS_SCALE);

@@ -1,6 +1,6 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v9.5
+//! Formally Verified Risk Engine for Perpetual DEX — v10.0
 //!
-//! Implements the v9.5 spec: Lazy A/K ADL + Non-Compounding Quantity Basis
+//! Implements the v10.0 spec: Lazy A/K ADL + Non-Compounding Quantity Basis
 //! + Exact Wide Arithmetic + Deferred Reset Finalization.
 //!
 //! This module implements a formally verified risk engine that guarantees:
@@ -379,6 +379,27 @@ fn mul_u128(a: u128, b: u128) -> u128 {
 pub enum Side {
     Long,
     Short,
+}
+
+/// Try to negate a U256 magnitude to produce a negative (or zero) I256.
+/// Returns Some(neg_val) if representable, None if the magnitude exceeds 2^255.
+pub fn try_negate_u256_to_i256(v: U256) -> Option<I256> {
+    if v.is_zero() {
+        return Some(I256::ZERO);
+    }
+    // The maximum magnitude of a negative I256 is 2^255 (I256::MIN = -2^255).
+    // v fits as positive I256 iff hi < 2^127 (sign bit clear).
+    if v.hi() < (1u128 << 127) {
+        // v in (0, 2^255-1]: from_raw_u256 gives positive I256, negate it
+        let pos = I256::from_raw_u256(v);
+        return pos.checked_neg(); // guaranteed Some for v <= I256::MAX
+    }
+    // v == 2^255 exactly → result is I256::MIN
+    if v.lo() == 0 && v.hi() == (1u128 << 127) {
+        return Some(I256::MIN);
+    }
+    // v > 2^255: not representable as negative I256
+    None
 }
 
 fn side_of_i256(v: &I256) -> Option<Side> {
@@ -1135,10 +1156,10 @@ impl RiskEngine {
     pub fn enqueue_adl(&mut self, ctx: &mut InstructionContext, liq_side: Side, q_close_q: U256, d: U256) -> Result<()> {
         let opp = opposite_side(liq_side);
 
-        // Step 1: decrease liquidated side OI
+        // Step 1: decrease liquidated side OI (checked — underflow is corrupt state)
         if !q_close_q.is_zero() {
             let old_oi = self.get_oi_eff(liq_side);
-            let new_oi = old_oi.saturating_sub(q_close_q);
+            let new_oi = old_oi.checked_sub(q_close_q).ok_or(RiskError::CorruptState)?;
             self.set_oi_eff(liq_side, new_oi);
         }
 
@@ -1165,29 +1186,16 @@ impl RiskEngine {
         if !d.is_zero() {
             // beta_abs = ceil(D * POS_SCALE / OI)
             let beta_abs = mul_div_ceil_u256(d, pos_scale_u256(), oi);
-            // beta = -(beta_abs as i256) — check representability
-            let beta_neg = I256::from_raw_u256_pub(beta_abs);
-            match beta_neg.checked_neg() {
-                Some(_beta) => {
-                    // delta_K_exact = A_old * beta (negative)
-                    let a_old_u256 = U256::from_u128(a_old);
-                    // A_old * beta_abs (unsigned product)
-                    match a_old_u256.checked_mul(beta_abs) {
-                        Some(product) => {
-                            // delta_K_exact = -(product as i256)
-                            let delta_k_pos = I256::from_raw_u256_pub(product);
-                            match delta_k_pos.checked_neg() {
-                                Some(delta_k) => {
-                                    // Check if K_opp + delta_K_exact fits
-                                    let k_opp = self.get_k_side(opp);
-                                    match k_opp.checked_add(delta_k) {
-                                        Some(new_k) => {
-                                            self.set_k_side(opp, new_k);
-                                        }
-                                        None => {
-                                            self.absorb_protocol_loss(d);
-                                        }
-                                    }
+            // delta_K_exact = -(A_old * beta_abs) — check representability via magnitude
+            let a_old_u256 = U256::from_u128(a_old);
+            match a_old_u256.checked_mul(beta_abs) {
+                Some(product) => {
+                    match try_negate_u256_to_i256(product) {
+                        Some(delta_k) => {
+                            let k_opp = self.get_k_side(opp);
+                            match k_opp.checked_add(delta_k) {
+                                Some(new_k) => {
+                                    self.set_k_side(opp, new_k);
                                 }
                                 None => {
                                     self.absorb_protocol_loss(d);
@@ -1629,10 +1637,10 @@ impl RiskEngine {
         let pay = core::cmp::min(debt, cap);
         if pay > 0 {
             self.set_capital(idx, cap - pay);
+            // pay <= debt = |fee_credits|, so fee_credits + pay <= 0: no overflow
             let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
             self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
-                .checked_add(pay_i128)
-                .unwrap_or(I128::new(0)); // repaying debt: result should be <= 0, no overflow
+                .saturating_add(pay_i128);
             self.insurance_fund.balance = self.insurance_fund.balance + pay;
         }
     }
@@ -1702,11 +1710,10 @@ impl RiskEngine {
         };
         self.accounts[idx].last_fee_slot = now_slot;
 
-        // Deduct from fee_credits — checked
+        // Deduct from fee_credits — saturating toward i128::MIN (debt floor)
         let due_i128 = core::cmp::min(due, i128::MAX as u128) as i128;
         self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
-            .checked_sub(due_i128)
-            .unwrap_or(I128::new(i128::MIN + 1)); // floor at MIN+1 to avoid I128::MIN sentinel
+            .saturating_sub(due_i128);
 
         // Pay from capital if negative
         if self.accounts[idx].fee_credits.is_negative() {
@@ -1718,10 +1725,10 @@ impl RiskEngine {
                 self.set_capital(idx, cap - pay);
                 self.insurance_fund.balance = self.insurance_fund.balance + pay;
                 self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + pay;
+                // pay <= owed = |fee_credits|, so fee_credits + pay <= 0: no overflow
                 let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
                 self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
-                    .checked_add(pay_i128)
-                    .unwrap_or(I128::new(0)); // should not overflow since we're repaying debt
+                    .saturating_add(pay_i128);
             }
         }
     }
@@ -1993,8 +2000,7 @@ impl RiskEngine {
         self.maybe_finalize_ready_reset_sides();
 
         // Step 5: reject if trade would increase OI on a blocked side
-        self.check_side_mode_for_trade(&old_eff_a, &new_eff_a)?;
-        self.check_side_mode_for_trade(&old_eff_b, &new_eff_b)?;
+        self.check_side_mode_for_trade(&old_eff_a, &new_eff_a, &old_eff_b, &new_eff_b)?;
 
         // Step 7: trade PnL alignment
         // trade_pnl_a = floor_div_signed_conservative(size_q * (oracle - exec), POS_SCALE)
@@ -2150,26 +2156,27 @@ impl RiskEngine {
         }
     }
 
-    /// Check side-mode gating for a position change (spec §9.6)
-    fn check_side_mode_for_trade(&self, old_eff: &I256, new_eff: &I256) -> Result<()> {
-        // Check if new position would increase OI on a blocked side
-        if let Some(new_side) = side_of_i256(new_eff) {
-            let new_abs = new_eff.abs_u256();
-            let old_abs = if let Some(old_side) = side_of_i256(old_eff) {
-                if old_side == new_side {
-                    old_eff.abs_u256()
-                } else {
-                    U256::ZERO
+    /// Check side-mode gating: reject trade if net OI increases on a blocked side (spec §9.6)
+    fn check_side_mode_for_trade(
+        &self,
+        old_a: &I256, new_a: &I256,
+        old_b: &I256, new_b: &I256,
+    ) -> Result<()> {
+        for &side in &[Side::Long, Side::Short] {
+            let mode = self.get_side_mode(side);
+            if mode != SideMode::DrainOnly && mode != SideMode::ResetPending {
+                continue;
+            }
+            let oi_contrib = |pos: &I256| -> U256 {
+                match side_of_i256(pos) {
+                    Some(s) if s == side => pos.abs_u256(),
+                    _ => U256::ZERO,
                 }
-            } else {
-                U256::ZERO
             };
-
-            if new_abs > old_abs {
-                let mode = self.get_side_mode(new_side);
-                if mode == SideMode::DrainOnly || mode == SideMode::ResetPending {
-                    return Err(RiskError::SideBlocked);
-                }
+            let old_total = oi_contrib(old_a).checked_add(oi_contrib(old_b)).unwrap_or(U256::MAX);
+            let new_total = oi_contrib(new_a).checked_add(oi_contrib(new_b)).unwrap_or(U256::MAX);
+            if new_total > old_total {
+                return Err(RiskError::SideBlocked);
             }
         }
         Ok(())
@@ -2215,7 +2222,7 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // liquidate_at_oracle (spec §10.5 + §9.5)
+    // liquidate_at_oracle (spec §10.5 + §10.0)
     // ========================================================================
 
     /// Top-level liquidation: creates its own InstructionContext and finalizes resets.
@@ -2274,7 +2281,7 @@ impl RiskEngine {
         let liq_side = side_of_i256(&old_eff).unwrap();
         let abs_old_eff = old_eff.abs_u256();
 
-        // Close entire position at oracle (bankruptcy liquidation per §9.5)
+        // Close entire position at oracle (bankruptcy liquidation per §10.0)
         let q_close_q = abs_old_eff;
 
         // Step 4: new effective position = 0
@@ -2608,6 +2615,9 @@ impl RiskEngine {
     pub fn deposit_fee_credits(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
+        }
+        if amount > i128::MAX as u128 {
+            return Err(RiskError::Overflow);
         }
         self.current_slot = now_slot;
         self.vault = self.vault + amount;
