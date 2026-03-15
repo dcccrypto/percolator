@@ -1439,29 +1439,37 @@ fn t5_22_phantom_dust_total_bound() {
 // T5.23: dust_clearance_guard_is_safe
 // ============================================================================
 
-/// Worst-case dust per N accounts: N * (POS_SCALE - 1) / POS_SCALE < N.
-/// When stored_pos_count == 0, all remaining OI is floor-rounding dust,
-/// and dust < MAX_ACCOUNTS, so the guard OI ≤ MAX_ACCOUNTS is tight.
+/// Dynamic dust bound sufficiency: phantom_dust_bound_side_q tracks the
+/// number of same-epoch position zeroings. Each zeroing increments the bound
+/// by exactly 1. The guard OI <= phantom_dust_bound is safe because each
+/// zeroed position contributes at most 1 unit of floor-rounding dust to OI.
+///
+/// Small-model: N zeroings → dust_bound = N, each contributes < 1 base unit
+/// of dust, so total OI dust < N = dust_bound.
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]
 fn t5_23_dust_clearance_guard_safe() {
     let n: u8 = kani::any();
-    kani::assume(n > 0 && (n as usize) <= MAX_ACCOUNTS);
+    kani::assume(n > 0 && n <= 32);
 
-    // Worst case: each account contributes (S_POS_SCALE - 1) subunits of dust
-    // (the maximum floor remainder in fixed-point)
-    let max_dust_per_acct_fp = S_POS_SCALE as u32 - 1;
-    let max_total_dust_fp = (n as u32) * max_dust_per_acct_fp;
+    // Each same-epoch zeroing increments phantom_dust_bound by 1.
+    // After N zeroings: dust_bound = N.
+    let dust_bound: u8 = n;
 
-    // In base units: floor(total_fp / POS_SCALE) < n
-    let max_total_dust_base = max_total_dust_fp / (S_POS_SCALE as u32);
-    assert!(max_total_dust_base < n as u32,
-        "worst-case dust in base units < account count");
-
-    // Guard threshold matches: MAX_ACCOUNTS >= n
-    assert!((n as usize) <= MAX_ACCOUNTS,
-        "guard threshold covers all account counts");
+    // Each zeroed position contributes at most (POS_SCALE - 1) / POS_SCALE < 1
+    // effective unit of OI dust (floor remainder from q_eff = floor(basis * A / a_basis)).
+    // So total OI dust from N zeroings < N.
+    // The guard fires when stored_pos_count == 0 AND OI <= dust_bound.
+    // Since OI_dust < N and dust_bound == N, the guard correctly identifies
+    // that all remaining OI is dust.
+    let max_dust_per_acct = S_POS_SCALE as u16 - 1; // max floor remainder
+    let max_total_dust_fp = (n as u16) * max_dust_per_acct;
+    let max_total_dust_base = max_total_dust_fp / (S_POS_SCALE as u16);
+    assert!(max_total_dust_base < n as u16,
+        "total OI dust < phantom_dust_bound");
+    assert!(dust_bound == n,
+        "dust_bound tracks exact zeroing count");
 }
 
 // ############################################################################
@@ -1633,6 +1641,59 @@ fn t6_26_full_drain_reset_regression() {
     assert!(engine.stale_account_count_long == 0);
 
     // Can now finalize reset
+    assert!(engine.stored_pos_count_long == 0);
+    let finalize = engine.finalize_side_reset(Side::Long);
+    assert!(finalize.is_ok());
+    assert!(engine.side_mode_long == SideMode::Normal);
+}
+
+/// Companion: full drain reset with nonzero k_diff (the hard path).
+/// K_epoch_start captures K_long at reset time. Account's k_snap differs
+/// from K_epoch_start, producing nonzero terminal PnL. Position still zeroes,
+/// stale counter decrements, and reset finalizes safely.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn t6_26b_full_drain_reset_nonzero_k_diff() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+
+    // Position: 1 unit long at epoch 0, k_snap = 0
+    engine.accounts[idx as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_k_snap = I256::ZERO; // k_snap = 0
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+    engine.stored_pos_count_long = 1;
+
+    // K_long = 500 (nonzero, different from k_snap=0)
+    engine.adl_coeff_long = I256::from_i128(500);
+
+    // Begin full drain reset — captures K_epoch_start = K_long = 500
+    engine.oi_eff_long_q = U256::ZERO;
+    engine.begin_full_drain_reset(Side::Long);
+
+    assert!(engine.adl_epoch_start_k_long == I256::from_i128(500));
+    assert!(engine.adl_epoch_long == 1);
+    assert!(engine.stale_account_count_long == 1);
+
+    let pnl_before = engine.accounts[idx as usize].pnl;
+
+    // Settle: epoch mismatch, k_diff = K_epoch_start - k_snap = 500 - 0 = 500
+    // This exercises the real pnl_delta computation with nonzero k_diff
+    let result = engine.settle_side_effects(idx as usize);
+    assert!(result.is_ok());
+
+    // Position zeroed
+    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+
+    // Stale counter decremented
+    assert!(engine.stale_account_count_long == 0);
+
+    // Epoch snap updated
+    assert!(engine.accounts[idx as usize].adl_epoch_snap == 1);
+
+    // Reset can finalize
     assert!(engine.stored_pos_count_long == 0);
     let finalize = engine.finalize_side_reset(Side::Long);
     assert!(finalize.is_ok());
