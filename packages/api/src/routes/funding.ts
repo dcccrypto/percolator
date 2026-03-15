@@ -177,7 +177,7 @@ export function fundingRoutes(): Hono {
         }
       });
     } catch (err) {
-      logger.error("Error fetching funding data", { slab, error: err });
+      logger.error("Error fetching funding data", { slab, error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
       return c.json({ 
         error: "Failed to fetch funding data",
         ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })
@@ -222,7 +222,7 @@ export function fundingRoutes(): Hono {
         })),
       });
     } catch (err) {
-      logger.error("Error fetching funding history", { slab, error: err });
+      logger.error("Error fetching funding history", { slab, error: truncateErrorMessage(err instanceof Error ? err.message : String(err), 120) });
       return c.json({ 
         error: "Failed to fetch funding history",
         ...(process.env.NODE_ENV !== "production" && { details: truncateErrorMessage(err instanceof Error ? err.message : String(err), 200) })

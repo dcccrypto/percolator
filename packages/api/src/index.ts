@@ -5,6 +5,7 @@ import { compress } from "hono/compress";
 import { serve } from "@hono/node-server";
 import { createLogger, sendInfoAlert, getSupabase, sendCriticalAlert, truncateErrorMessage } from "@percolator/shared";
 import { initSentry, sentryMiddleware, flushSentry } from "./middleware/sentry.js";
+import * as Sentry from "@sentry/node";
 
 // Initialize Sentry before anything else
 initSentry();
@@ -171,7 +172,7 @@ app.onError((err, c) => {
   
   // Report to Sentry (sentryMiddleware may have already captured it,
   // but this ensures errors from middleware chain are also caught)
-  import("@sentry/node").then((Sentry) => {
+  try {
     Sentry.captureException(err, {
       tags: {
         endpoint: c.req.path,
@@ -179,7 +180,7 @@ app.onError((err, c) => {
         handler: "onError",
       },
     });
-  }).catch(() => {});
+  } catch (_sentryErr) {}
   
   // Truncate error message for API response (details only in development)
   const showDetails = process.env.NODE_ENV !== "production";
