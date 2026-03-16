@@ -6,6 +6,27 @@ const logger = createLogger("indexer:market-discovery");
 
 const INITIAL_RETRY_DELAYS = [5_000, 15_000, 30_000, 60_000]; // escalating backoff
 
+/**
+ * Exponential backoff delays for Helius 429 rate-limit responses during discovery.
+ * Helius free/starter plans cap getProgramAccounts at ~40 req/s. When discovery
+ * iterates multiple programs in quick succession each call internally batches
+ * several RPC calls and can exhaust the limit. These delays give the rate limiter
+ * time to recover before the next program is attempted.
+ */
+const HELIUS_429_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000]; // per-program retry
+
+/** Jitter: add up to 25% random delay to avoid thundering-herd on retry. */
+function withJitter(delayMs: number): number {
+  return delayMs + Math.floor(Math.random() * delayMs * 0.25);
+}
+
+/** Return true if the error looks like an HTTP 429 / rate-limit response. */
+function isRateLimitError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("429") || msg.toLowerCase().includes("rate limit") || msg.toLowerCase().includes("too many requests");
+}
+
 export class MarketDiscovery {
   private markets = new Map<string, { market: DiscoveredMarket }>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -18,13 +39,31 @@ export class MarketDiscovery {
     let failedPrograms = 0;
     
     for (const id of programIds) {
-      try {
-        const found = await discoverMarkets(conn, new PublicKey(id));
-        all.push(...found);
-      } catch (e) {
-        failedPrograms++;
-        logger.warn("Failed to discover on program", { programId: id, error: e });
+      let discovered = false;
+      for (let attempt = 0; attempt <= HELIUS_429_BACKOFF_MS.length; attempt++) {
+        try {
+          const found = await discoverMarkets(conn, new PublicKey(id));
+          all.push(...found);
+          discovered = true;
+          break;
+        } catch (e) {
+          if (isRateLimitError(e) && attempt < HELIUS_429_BACKOFF_MS.length) {
+            const delay = withJitter(HELIUS_429_BACKOFF_MS[attempt]);
+            logger.warn("Helius 429 on discoverMarkets — backing off", {
+              programId: id,
+              attempt: attempt + 1,
+              delayMs: delay,
+            });
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          // Non-429 error or exhausted retries
+          failedPrograms++;
+          logger.warn("Failed to discover on program", { programId: id, error: e, attempt: attempt + 1 });
+          break;
+        }
       }
+      // Inter-program spacing: 2s base, helps avoid consecutive 429s on multi-program configs
       await new Promise(r => setTimeout(r, 2000));
     }
     
