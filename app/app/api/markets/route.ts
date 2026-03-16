@@ -230,7 +230,7 @@ export async function GET(request: NextRequest) {
     const activeTotal = sanitized.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
 
     // GH#1348: Respect ?limit= query param to avoid returning 100+ markets
-    const limitParam = request.nextUrl.searchParams.get("limit");
+    const limitParam = request?.nextUrl?.searchParams?.get("limit") ?? null;
     const limitNum = limitParam ? parseInt(limitParam, 10) : 0;
     const limited = limitNum > 0 ? sanitized.slice(0, limitNum) : sanitized;
 
