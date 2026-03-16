@@ -47,17 +47,45 @@ const PUSH_INTERVAL_MS = Number(process.env.PUSH_INTERVAL_MS ?? "3000");
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? "18810");
 const MAX_PRICE_MOVE_PCT = Number(process.env.MAX_PRICE_MOVE_PCT ?? "10");
 const STALE_THRESHOLD_S = Number(process.env.STALE_THRESHOLD_S ?? "30");
-// Hardcoded slab addresses that can never be fixed (different slab_admin — not our keypair).
-// PERCOLATOR-PERP: user-created markets with slab_admin=3ee9...b55 (not FF7KFfU5...)
-// oracle_authority on-chain = DJKjmSbWjhx925kuk1fS1BENCBnqXCfwUJjb9EKwSEnV ≠ keeper key.
-// Confirmed 2026-03-10: SetOracleAuthority fails with 0xf (admin check).
+/**
+ * Blocked Markets - Markets that cannot be serviced by this oracle-keeper
+ *
+ * These markets are permanently blocked because their oracle_authority is not controlled
+ * by this keeper's private key. Attempting to crank them fails with admin check error (0xf).
+ *
+ * WHY BLOCKED:
+ * - Slab admin mismatch: User-created markets use different admin keypair (3ee9...b55)
+ * - Our keeper controls oracle_authority: DJKjmSbWjhx925kuk1fS1BENCBnqXCfwUJjb9EKwSEnV
+ * - On-chain check: SetOracleAuthority instruction rejects mismatched admin
+ * - Last verified: 2026-03-10 (confirmed: instruction fails with error code 0xf)
+ *
+ * ADDING MARKETS:
+ * 1. Hardcoded: Add address to HARDCODED_BLOCKED_MARKETS below
+ * 2. Temporary: Set ORACLE_KEEPER_BLOCKED_MARKETS env var:
+ *    $ export ORACLE_KEEPER_BLOCKED_MARKETS="addr1,addr2,addr3"
+ * 3. Permanent: Update hardcoded list and redeploy
+ * 
+ * DO NOT attempt to include marketplace-created markets without fixing oracle_authority.
+ * This will cause repeated failed transactions and wasted transaction fees.
+ *
+ * @see SetOracleAuthority on-chain instruction for admin check logic
+ */
 const HARDCODED_BLOCKED_MARKETS = new Set<string>([
   "HjBePQZnoZVftg9B52gyeuHGjBvt2f8FNCVP4FeoP3YT", // PERCOLATOR-PERP-1 (Small)
   "484DG6KQi5eVXuaXzWxaWMWeXDp9LFXyshNi33UnWfxV", // PERCOLATOR-PERP-2 (Small)
   "GDyHCzpiuEsWDkLuji3NEFYJfqbDTzMCKn9ugUzTZqAW", // PERCOLATOR-PERP-3 (Large)
 ]);
 
-// Comma-separated list of slab addresses to permanently skip (wrong oracle_authority, etc.)
+/**
+ * Combined list of blocked markets (hardcoded + environment-based)
+ *
+ * Supports two configuration methods:
+ * - Hardcoded: HARDCODED_BLOCKED_MARKETS (permanent)
+ * - Environment: ORACLE_KEEPER_BLOCKED_MARKETS (temporary/operational)
+ *
+ * Both are merged at startup. Use environment variable for emergency blocks
+ * without redeploying. Use hardcoded for permanent blocks.
+ */
 const ORACLE_KEEPER_BLOCKED_MARKETS = new Set<string>([
   ...HARDCODED_BLOCKED_MARKETS,
   ...(process.env.ORACLE_KEEPER_BLOCKED_MARKETS ?? "").split(",").map(s => s.trim()).filter(Boolean),
