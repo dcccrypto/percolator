@@ -37,7 +37,30 @@ export const OracleFreshnessIndicator: FC = () => {
     setPanelOpen(true);
   }, []);
 
-  if (!ready) return null;
+  // GH#1341: If no oracle mode detected at all, nothing to show
+  if (!mode) return null;
+
+  // GH#1341: Oracle mode detected but price never cranked — show unavailable banner
+  if (!ready) {
+    return (
+      <>
+        <div
+          className="flex items-center gap-1.5 px-2 py-1 text-[10px]"
+          style={{
+            backgroundColor: "rgba(239,68,68,0.10)",
+            color: "#ef4444",
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          <span>⚠</span>
+          <span>Oracle unavailable — market not yet cranked</span>
+        </div>
+        {panelOpen && (
+          <OracleDetailsPanel onClose={() => setPanelOpen(false)} />
+        )}
+      </>
+    );
+  }
 
   const elapsedText =
     elapsedSecs < 60
