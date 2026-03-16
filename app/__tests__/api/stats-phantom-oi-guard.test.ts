@@ -1,5 +1,5 @@
 /**
- * GH#1314 / GH#1318: /api/stats phantom OI vault boundary + price fallback tests.
+ * GH#1314 / GH#1318 / GH#1321: /api/stats phantom OI vault boundary + price fallback tests.
  *
  * History:
  * - PR#1299 (GH#1297): first vault guard, strict < 1M. Correct, but also fixed $1 fallback.
@@ -11,12 +11,16 @@
  * - PR#1315 (GH#1314): revert to strict < 1M, mirroring /api/markets exactly. Still had
  *   $42K phantom OI because 33 vault=1M uncranked markets had stale non-zero OI and no
  *   oracle price — the $1 fallback gave them each ~$2K USD OI.
- * - PR#this (GH#1318): remove $1 fallback — markets without a valid oracle price have
+ * - PR#1319 (GH#1318): remove $1 fallback — markets without a valid oracle price have
  *   indeterminate USD value and must not contribute to totalOpenInterest.
+ *   BUT: used MAX_SANE_PRICE_USD=$10K — too tight. MOLTBOT last_price ~$210K was
+ *   rejected → OI silently dropped → $59,994 instead of $64,614 (GH#1321).
+ * - PR#this (GH#1321): raise MAX_SANE_PRICE_USD from $10K → $1M, matching
+ *   /api/markets sanitizePrice cap. Admin-set devnet prices up to ~$999K are valid.
  *
  * Rules:
  *   isPhantomOI = accountsCount === 0 || vaultBal < 1_000_000  (strict <, unchanged)
- *   price = last_price if valid, else 0 (no $1 fallback) → skip if p <= 0
+ *   price = last_price if 0 < p <= 1_000_000, else 0 (no $1 fallback) → skip if p <= 0
  *
  * Coverage:
  * - vault=0         → phantom (no vault at all)
@@ -25,15 +29,16 @@
  * - vault=1_000_001 → NOT phantom (real LP above threshold)
  * - accounts=0      → phantom regardless of vault
  * - GH#1314 regression: vault < 1M + rawOi > 0 → phantom (excluded)
- * - GH#1318 regression: vault=1M + rawOi > 0 + NO PRICE → NOT phantom by vault, but
- *   skipped by price guard (p=0 → return sum). No $1 fallback.
+ * - GH#1318 regression: vault=1M + rawOi > 0 + NO PRICE → skipped (p=0). No $1 fallback.
+ * - GH#1321 regression: vault=1M + valid price $210K → correctly counted (was dropped by $10K cap)
  */
 
 import { describe, it, expect } from "vitest";
 
 /** Mirrors the vault boundary constant in app/app/api/stats/route.ts */
 const MIN_VAULT_FOR_OI_STATS = 1_000_000;
-const MAX_SANE_PRICE_USD = 10_000;
+/** GH#1321: raised from $10K → $1M to match /api/markets sanitizePrice cap */
+const MAX_SANE_PRICE_USD = 1_000_000;
 const MAX_PER_MARKET_USD = 10_000_000_000;
 
 /** GH#1314: strict < mirroring /api/markets isPhantomOI exactly */
@@ -167,19 +172,37 @@ describe("GH#1318: /api/stats no $1 fallback — markets without oracle price sk
     expect(result).toBeCloseTo(59_994 + 4_620, 0); // ≈ $64,614 (no phantom OI)
   });
 
-  it("excludes markets with corrupt/garbage price (> MAX_SANE_PRICE_USD)", () => {
-    // Admin-mode markets with garbage authorityPriceE6 written as raw u64
+  it("excludes markets with corrupt/garbage price (> MAX_SANE_PRICE_USD = $1M)", () => {
+    // Admin-mode markets with garbage authorityPriceE6 written as raw u64 (e.g. $7.9T)
+    // GH#1321: cap raised from $10K → $1M. Values above $1M (e.g. $1.5M, $7.9T) are still rejected.
     const markets = [
-      { vault_balance: 2_000_000, total_accounts: 5, total_open_interest: 5_000_000_000, last_price: 100_000, decimals: 6 }, // > $10K cap → p=0
+      { vault_balance: 2_000_000, total_accounts: 5, total_open_interest: 5_000_000_000, last_price: 1_500_000, decimals: 6 }, // > $1M cap → p=0
     ];
     expect(simulateOISum(markets)).toBe(0);
   });
 
-  it("includes markets with price at exactly MAX_SANE_PRICE_USD boundary ($10K)", () => {
+  it("includes markets with price at exactly MAX_SANE_PRICE_USD boundary ($1M)", () => {
+    // GH#1321: boundary raised from $10K to $1M to match /api/markets
     const markets = [
-      { vault_balance: 2_000_000, total_accounts: 3, total_open_interest: 1_000_000, last_price: 10_000, decimals: 6 },
+      { vault_balance: 2_000_000, total_accounts: 3, total_open_interest: 1_000_000, last_price: 1_000_000, decimals: 6 },
     ];
-    // 1_000_000 / 1e6 * 10_000 = 1 * 10_000 = $10,000
-    expect(simulateOISum(markets)).toBeCloseTo(10_000, 0);
+    // 1_000_000 / 1e6 * 1_000_000 = 1 * 1_000_000 = $1,000,000
+    expect(simulateOISum(markets)).toBeCloseTo(1_000_000, 0);
+  });
+
+  it("GH#1321 regression: counts vault=1M market with price $210K (MOLTBOT-pattern — was dropped by old $10K cap)", () => {
+    // MOLTBOT last_price ~$210,011. Old $10K cap → p=0 → OI silently dropped.
+    // New $1M cap → price valid → OI correctly counted.
+    // raw_oi=22_000 micro-units at decimals=6 → 22_000/1e6 * 210_011 ≈ $4,620
+    const markets = [
+      // usdEkK5G: last_price $1.0, raw_oi=59_994_000_000 → 59_994 tokens * $1 = $59,994
+      { vault_balance: 1_000_000, total_accounts: 2, total_open_interest: 59_994_000_000, last_price: 1.0, decimals: 6 },
+      // MOLTBOT: last_price $210,011 (above old $10K cap, below new $1M cap)
+      // 22_000 / 1e6 * 210_011 = 0.022 tokens * $210,011 ≈ $4,620
+      { vault_balance: 1_000_000, total_accounts: 2, total_open_interest: 22_000, last_price: 210_011, decimals: 6 },
+    ];
+    const result = simulateOISum(markets);
+    expect(result).toBeGreaterThan(59_994); // MOLTBOT now contributes
+    expect(result).toBeCloseTo(59_994 + 4_620, -1); // ≈ $64,614 (within $10)
   });
 });
