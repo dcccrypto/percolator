@@ -138,19 +138,21 @@ export const OracleFreshnessIndicator: FC = () => {
         </span>
       </button>
 
-      {/* Stale warning banner */}
-      {level === "stale" && (
+      {/* Stale / unavailable warning banner (GH#1338) */}
+      {(level === "stale" || level === "unavailable") && (
         <div
           className="flex items-center gap-1.5 px-2 py-1 text-[10px]"
           style={{
-            backgroundColor: "rgba(234,179,8,0.10)",
-            color: "#eab308",
+            backgroundColor: level === "unavailable" ? "rgba(239,68,68,0.10)" : "rgba(234,179,8,0.10)",
+            color: level === "unavailable" ? "#ef4444" : "#eab308",
             fontFamily: "var(--font-mono)",
           }}
         >
           <span>⚠</span>
           <span>
-            Oracle price is {elapsedText} stale — trading may be paused
+            {level === "unavailable"
+              ? "Oracle unavailable — no price feed for this market"
+              : `Oracle price is ${elapsedText} stale — trading may be paused`}
           </span>
         </div>
       )}

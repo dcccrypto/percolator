@@ -4,7 +4,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useSlabState } from "@/components/providers/SlabProvider";
 import { detectOracleMode, type OracleMode } from "@/lib/oraclePrice";
 
-export type FreshnessLevel = "fresh" | "aging" | "stale";
+// GH#1338: "unavailable" = oracle has never been cranked (no valid price exists on-chain).
+// Distinct from "stale" (had a price, but it's old). Unavailable → hard block on trading.
+export type FreshnessLevel = "fresh" | "aging" | "stale" | "unavailable";
 
 export interface OracleFreshnessState {
   /** Oracle mode for this market */
@@ -44,6 +46,8 @@ function getFreshnessColor(level: FreshnessLevel): string {
     case "aging":
       return "#eab308";
     case "stale":
+      return "#ef4444";
+    case "unavailable":
       return "#ef4444";
   }
 }
@@ -115,6 +119,16 @@ export function useOracleFreshness(): OracleFreshnessState {
       const currentPrice = currentMode === "hyperp"
         ? config.authorityPriceE6
         : config.lastEffectivePriceE6;
+
+      // GH#1338: For hyperp mode, also check lastEffectivePriceE6 (index price from
+      // on-chain crank). If it's 0, the oracle-keeper has never cranked this market —
+      // the oracle is genuinely unavailable, not just stale. Don't assume "first load = fresh".
+      if (currentMode === "hyperp" && config.lastEffectivePriceE6 === 0n) {
+        // Oracle has never been cranked — mark as unavailable (lastUpdateMs stays null)
+        prevPriceRef.current = currentPrice;
+        return;
+      }
+
       if (prevPriceRef.current !== null && currentPrice !== prevPriceRef.current) {
         setLastUpdateMs(Date.now());
       } else if (prevPriceRef.current === null && currentPrice > 0n) {
@@ -138,7 +152,10 @@ export function useOracleFreshness(): OracleFreshnessState {
     return () => clearInterval(tickRef.current);
   }, [lastUpdateMs]);
 
-  const level = getFreshnessLevel(elapsedSecs);
+  // GH#1338: If mode is detected but we never got a lastUpdateMs, the oracle is unavailable
+  // (e.g. hyperp market never cranked). This is distinct from stale (had a price but it's old).
+  const isUnavailable = mode !== null && lastUpdateMs === null;
+  const level = isUnavailable ? "unavailable" as FreshnessLevel : getFreshnessLevel(elapsedSecs);
 
   return {
     mode,
