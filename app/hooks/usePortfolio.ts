@@ -224,7 +224,10 @@ export function usePortfolio(): PortfolioData {
                   leverage,
                   maintenanceMarginBps,
                 });
-                pnlSum += account.pnl;
+                // Guard account.pnl against u64::MAX sentinel values before accumulating.
+                // Uninitialized / flat positions store u64::MAX as a sentinel — summing them
+                // raw produces septillion-dollar phantom totals (GH#1352 regression).
+                pnlSum += isSentinelValue(account.pnl) ? 0n : account.pnl;
                 depositSum += account.capital;
                 unrealizedPnlSum += unrealizedPnl;
               }

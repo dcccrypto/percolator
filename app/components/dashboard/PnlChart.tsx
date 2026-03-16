@@ -13,9 +13,12 @@ const ranges = ["24H", "7D", "30D", "ALL"] as const;
 
 export function PnlChart() {
   const [range, setRange] = useState<typeof ranges[number]>("7D");
-  const { totalPnl, positions, loading } = usePortfolio();
+  const { totalUnrealizedPnl, positions, loading } = usePortfolio();
 
-  const pnlFloat = Number(totalPnl) / 1e6;
+  // Use totalUnrealizedPnl (mark-to-market, already guarded against u64::MAX sentinels)
+  // rather than totalPnl (raw account.pnl sum) which can contain uninitialized sentinel
+  // values producing septillion-dollar overflow display (GH#1352).
+  const pnlFloat = Number(totalUnrealizedPnl) / 1e6;
   const isPositive = pnlFloat >= 0;
   const hasData = positions.length > 0;
 
