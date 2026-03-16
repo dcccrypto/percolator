@@ -60,11 +60,13 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const tokenMeta = useTokenMeta(mktConfig?.collateralMint ?? null);
   const { priceUsd } = useLivePrice();
   // GH#1330: Detect stale oracle to block trade submission before tx failure.
-  // Admin-oracle and Hyperp markets can have stale on-chain prices the frontend
-  // otherwise shows as valid. We treat stale+ready as a hard block — same UX as
-  // no-price — to avoid the silent "Oracle is invalid" on-chain rejection.
+  // GH#1330/1338: Detect stale or unavailable oracle to block trade submission.
+  // "stale" = price exists but hasn't updated recently (>30s).
+  // "unavailable" = oracle has never been cranked (no valid price on-chain).
+  // Both are hard blocks — same UX as no-price — to prevent "Oracle is invalid" on-chain rejection.
   const { level: oracleLevel, mode: oracleMode, ready: oracleReady } = useOracleFreshness();
-  const oracleStale = oracleReady && oracleLevel === "stale" && (oracleMode === "admin" || oracleMode === "hyperp");
+  const oracleUnavailable = oracleLevel === "unavailable";
+  const oracleStale = oracleUnavailable || (oracleReady && oracleLevel === "stale" && (oracleMode === "admin" || oracleMode === "hyperp"));
   const openWalletModal = usePrivyLogin();
   const mintAddress = mktConfig?.collateralMint?.toBase58() ?? "";
   const symbol = sanitizeSymbol(tokenMeta?.symbol, mintAddress);
@@ -329,14 +331,18 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
         </div>
       )}
 
-      {/* GH#1330: Stale oracle warning — admin/hyperp markets can show a valid price
-          in the UI while the on-chain oracle timestamp is expired. Block the trade
-          button to prevent silent tx failure with "Oracle is invalid". */}
-      {oracleStale && priceUsd && !mockMode && (
+      {/* GH#1330/1338: Oracle warning — stale or unavailable oracle blocks trading.
+          "unavailable" = oracle never cranked (no price on-chain, e.g. test tokens without a feed).
+          "stale" = price exists but hasn't updated recently. Both prevent "Oracle is invalid" tx failure. */}
+      {oracleStale && !mockMode && (
         <div className="mb-3 rounded-none border border-[var(--short)]/30 bg-[var(--short)]/5 p-2.5">
-          <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--short)]">Oracle Stale</p>
+          <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--short)]">
+            {oracleUnavailable ? "⚠️ Oracle Unavailable" : "Oracle Stale"}
+          </p>
           <p className="mt-1 text-[9px] text-[var(--text-secondary)] leading-relaxed">
-            The oracle price for this market has not been updated recently. Trading is temporarily disabled to prevent failed transactions.
+            {oracleUnavailable
+              ? "No oracle price feed is available for this market. Trading is disabled until the oracle is activated."
+              : "The oracle price for this market has not been updated recently. Trading is temporarily disabled to prevent failed transactions."}
           </p>
         </div>
       )}
