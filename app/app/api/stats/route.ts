@@ -85,8 +85,27 @@ export async function GET(request: NextRequest) {
     (m) => !BLOCKED_MARKET_ADDRESSES.has((m as Record<string, unknown>).slab_address as string ?? ""),
   );
 
-  // Count only active markets using shared filter (consistent with homepage & markets page)
-  const activeData = statsData.filter(isActiveMarket);
+  // GH#1337: Suppress phantom OI before counting active markets.
+  // Previously isActiveMarket() was applied to raw data where phantom markets
+  // (vault < 1M or accounts == 0) still had stale non-zero OI, causing them to
+  // count as "active" here but not in /api/markets (which zeros OI post-sanitization).
+  // This produced a 172 vs 135 mismatch. Now we zero phantom OI first, so both
+  // endpoints agree on what counts as "active".
+  const MIN_VAULT_FOR_ACTIVE = 1_000_000;
+  const phantomAwareData = statsData.map((m) => {
+    const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
+    const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
+    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+    if (!isPhantom) return m;
+    // Zero out OI fields so isActiveMarket won't consider stale phantom OI as "active"
+    return {
+      ...m,
+      total_open_interest: 0,
+      open_interest_long: 0,
+      open_interest_short: 0,
+    };
+  });
+  const activeData = phantomAwareData.filter(isActiveMarket);
   const totalMarkets = activeData.length;
 
   // Convert raw on-chain token micro-units to USD using decimals + price

@@ -197,27 +197,32 @@ function MarketsPageInner() {
 
   // Filter out empty/abandoned markets and flag bogus prices
   // A market is "empty" if it has no meaningful data: no price, no volume, no OI
+  // GH#1337: Unified active market counting — use the same isActiveMarket() filter
+  // as /api/stats and /api/markets, with phantom OI suppression, so all three agree.
+  // Previously this used a broader custom filter that included on-chain-only markets
+  // and markets with phantom OI, inflating the count vs the API endpoints.
+  const MIN_VAULT_FOR_ACTIVE = 1_000_000;
   const activeMarkets = useMemo(() => {
-    // Helper: treat sentinel-like Supabase numbers (u64::MAX ≈ 1.844e19) as zero
-    const isSaneNum = (v: number) => v > 0 && v < 1e18 && Number.isFinite(v);
     return effectiveMarkets.filter((m) => {
-      // Check on-chain price
-      const hasOnChainPrice = m.onChain?.config
-        ? resolveMarketPriceE6(m.onChain.config) > 0n
-        : false;
-      // Check Supabase price (with sentinel guard)
-      const hasSupabasePrice = isSaneNum(m.supabase?.last_price ?? 0);
-      // Check volume (with sentinel guard)
-      const hasVolume = isSaneNum(m.supabase?.volume_24h ?? 0);
-      // Check OI (with sentinel guard for both on-chain bigint and Supabase number)
-      const hasOI = m.onChain
-        ? sanitizeOnChainValue(m.onChain.engine?.totalOpenInterest ?? 0n) > 0n
-        : (isSaneNum(m.supabase?.total_open_interest ?? 0) ||
-           isSaneNum((m.supabase?.open_interest_long ?? 0) + (m.supabase?.open_interest_short ?? 0)));
+      // Build a phantom-OI-aware stats object for isActiveMarket()
+      const accountsCount = m.supabase?.total_accounts ?? 0;
+      const vaultBal = m.supabase?.vault_balance ?? 0;
+      const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
 
-      // Keep market if it has data OR if it's marked active in Supabase
-      const isActive = m.supabase ? isActiveMarket(m.supabase) : false;
-      return isActive || hasOnChainPrice || hasSupabasePrice || hasVolume || hasOI;
+      // If we have Supabase stats, use isActiveMarket with phantom OI suppression
+      if (m.supabase) {
+        const effectiveStats = isPhantom
+          ? { ...m.supabase, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 }
+          : m.supabase;
+        return isActiveMarket(effectiveStats);
+      }
+
+      // On-chain-only markets: active if they have a valid on-chain price
+      if (m.onChain?.config) {
+        return resolveMarketPriceE6(m.onChain.config) > 0n;
+      }
+
+      return false;
     });
   }, [effectiveMarkets]);
 
