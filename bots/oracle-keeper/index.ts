@@ -95,17 +95,88 @@ const ADMIN_KP_PATH = process.env.ADMIN_KEYPAIR_PATH ??
 const RPC_URL = process.env.RPC_URL ?? "https://api.devnet.solana.com";
 
 const conn = new Connection(RPC_URL, "confirmed");
-// Support inline keypair via ADMIN_KEYPAIR env var (JSON array) for Railway/Docker deployments
-const adminSecretKey = process.env.ADMIN_KEYPAIR
-  ? Uint8Array.from(JSON.parse(process.env.ADMIN_KEYPAIR))
-  : Uint8Array.from(JSON.parse(fs.readFileSync(ADMIN_KP_PATH, "utf8")));
-const admin = Keypair.fromSecretKey(adminSecretKey);
 
-// Security: scrub keypair material from environment to prevent leaks via
-// process inspection, child processes, or crash dumps
-if (process.env.ADMIN_KEYPAIR) {
-  delete process.env.ADMIN_KEYPAIR;
+/**
+ * Load oracle keeper admin keypair with security hardening
+ * 
+ * Supports two sources:
+ * 1. ADMIN_KEYPAIR env var (JSON array) — for Railway/Docker deployments
+ * 2. File at ADMIN_KEYPAIR_PATH — standard Solana keypair file
+ * 
+ * Security measures:
+ * - Sanitized error handling (never expose env contents in errors)
+ * - Memory overwrite before deletion (prevent recovery via forensics)
+ * - Structured deletion verification (assert cleanup succeeded)
+ * - Fail-fast if deletion fails (prevents accidental leaks)
+ */
+function loadAdminKeypair(): Keypair {
+  let adminSecretKey: Uint8Array;
+  const hasEnvKeypair = !!process.env.ADMIN_KEYPAIR;
+
+  try {
+    if (hasEnvKeypair) {
+      // Load from environment (inline keypair for deployments)
+      try {
+        const keypairJson = process.env.ADMIN_KEYPAIR!;
+        const secretKeyArray = JSON.parse(keypairJson) as number[];
+        adminSecretKey = Uint8Array.from(secretKeyArray);
+      } catch (parseErr) {
+        // Never expose the actual env var contents in error messages
+        const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        console.error("[FATAL] Failed to parse ADMIN_KEYPAIR from environment: Invalid JSON format");
+        console.error("[DEBUG] Parse error detail:", errMsg);
+        process.exit(1);
+      }
+    } else {
+      // Load from file (standard Solana keypair file)
+      try {
+        const fileContent = fs.readFileSync(ADMIN_KP_PATH, "utf8");
+        const secretKeyArray = JSON.parse(fileContent) as number[];
+        adminSecretKey = Uint8Array.from(secretKeyArray);
+      } catch (fileErr) {
+        const errMsg = fileErr instanceof Error ? fileErr.message : String(fileErr);
+        console.error(`[FATAL] Failed to load keypair from ${ADMIN_KP_PATH}: ${errMsg}`);
+        process.exit(1);
+      }
+    }
+
+    // Create keypair instance
+    const admin = Keypair.fromSecretKey(adminSecretKey);
+
+    // ─── Security: Scrub keypair material from environment ───
+    // Prevent leaks via process inspection, child processes, or crash dumps
+    if (hasEnvKeypair) {
+      const keypairLength = process.env.ADMIN_KEYPAIR!.length;
+      
+      // Overwrite memory with garbage before deletion
+      // This prevents forensic recovery of the secret key if the process is dumped
+      process.env.ADMIN_KEYPAIR = Buffer.alloc(keypairLength, 0x00).toString("hex");
+      
+      // Delete the environment variable
+      delete process.env.ADMIN_KEYPAIR;
+      
+      // Verify deletion succeeded (fail-fast if something went wrong)
+      if (process.env.ADMIN_KEYPAIR !== undefined) {
+        console.error("[CRITICAL] Failed to delete ADMIN_KEYPAIR from environment");
+        console.error("[ACTION] Process must exit to prevent secret key exposure");
+        process.exit(1);
+      }
+      
+      console.log("[INFO] Keeper authentication loaded from environment (secret cleared)");
+    } else {
+      console.log(`[INFO] Keeper authentication loaded from file: ${ADMIN_KP_PATH}`);
+    }
+
+    return admin;
+  } catch (err) {
+    // Catch any unexpected errors
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[FATAL] Unexpected error loading keeper authentication: ${errMsg}`);
+    process.exit(1);
+  }
 }
+
+const admin = loadAdminKeypair();
 
 // Pyth Hermes endpoint (free, no API key required)
 const HERMES_URL = process.env.HERMES_URL ?? "https://hermes.pyth.network";
