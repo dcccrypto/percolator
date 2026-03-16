@@ -119,17 +119,17 @@ export async function GET(request: NextRequest) {
       // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
       const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
       const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-      // GH#1300: Use inclusive boundary (<= 1M) to match StatsCollector in percolator-indexer.
-      // PR#1299 used strict < 1M — markets at exactly vault=1_000_000 (creation-deposit only,
-      // vault=LP seed amount) slipped through and added phantom OI. Inclusive guard closes it.
-      if (accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_OI_STATS) return sum;
-
+      // GH#1304: Compute rawOi first so we can distinguish phantom markets (vault=1M, no OI)
+      // from real markets (vault=1M, actual positions). Previous inclusive guard (<= 1M)
+      // incorrectly filtered out usdEkK5G and MOLTBOT which have vault=1M + real OI.
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
             ? (m.open_interest_long ?? 0) + (m.open_interest_short ?? 0)
             : 0);
       if (!isSaneMarketValue(rawOi)) return sum;
+      // Skip phantom markets: no accounts, OR low/seed vault with zero actual OI
+      if (accountsCount === 0 || (vaultBal <= MIN_VAULT_FOR_OI_STATS && rawOi === 0)) return sum;
       // GH#1265: OI is tracked in collateral micro-units. When no oracle price is available
       // (admin-mode markets not yet cranked), fall back to $1/token — correct for devnet
       // markets. Without this fallback, only price-cranked markets contributed to OI,
