@@ -78,8 +78,9 @@ export function FundingRates() {
           </p>
         </div>
       ) : (
+        <div className="max-h-[280px] overflow-y-auto">
         <ul className="divide-y divide-[rgba(255,255,255,0.04)]">
-          {active.map((m) => {
+          {active.slice(0, 15).map((m) => {
             const isPositive = m.rateBpsPerSlot > 0;
             const rateStr =
               (isPositive ? "+" : "") +
@@ -118,6 +119,7 @@ export function FundingRates() {
             );
           })}
         </ul>
+        </div>
       )}
     </div>
   );
