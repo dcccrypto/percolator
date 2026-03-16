@@ -884,6 +884,7 @@ interface SlabLayout {
     engineEmergencyStartSlotOff: number;
     engineLastBreakerSlotOff: number;
     engineBitmapOff: number;
+    acctOwnerOff: number;
     hasInsuranceIsolation: boolean;
     engineInsuranceIsolatedOff: number;
     engineInsuranceIsolationBpsOff: number;

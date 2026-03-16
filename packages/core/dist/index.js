@@ -1051,6 +1051,8 @@ var V1_ENGINE_EMERGENCY_OI_MODE_OFF = 632;
 var V1_ENGINE_EMERGENCY_START_SLOT_OFF = 640;
 var V1_ENGINE_LAST_BREAKER_SLOT_OFF = 648;
 var V1_ENGINE_BITMAP_OFF = 656;
+var V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL = 672;
+var V1_LEGACY_ACCT_OWNER_OFF = 200;
 var V1D_CONFIG_LEN = 320;
 var V1D_ENGINE_OFF = 424;
 var V1D_ACCOUNT_SIZE = 248;
@@ -1106,7 +1108,9 @@ for (const n of TIERS) {
 function buildLayout(version, maxAccounts, engineOffOverride) {
   const isV0 = version === 0;
   const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
+  const isV1Legacy = !isV0 && engineOffOverride === V1_ENGINE_OFF_LEGACY;
   const bitmapOff = isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
+  const actualBitmapOff = isV1Legacy ? V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL : isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
   const accountSize = isV0 ? V0_ACCOUNT_SIZE : V1_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
@@ -1155,7 +1159,8 @@ function buildLayout(version, maxAccounts, engineOffOverride) {
     engineEmergencyOiModeOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_OI_MODE_OFF,
     engineEmergencyStartSlotOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_START_SLOT_OFF,
     engineLastBreakerSlotOff: isV0 ? -1 : V1_ENGINE_LAST_BREAKER_SLOT_OFF,
-    engineBitmapOff: isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF,
+    engineBitmapOff: actualBitmapOff,
+    acctOwnerOff: isV1Legacy ? V1_LEGACY_ACCT_OWNER_OFF : ACCT_OWNER_OFF,
     hasInsuranceIsolation: !isV0,
     engineInsuranceIsolatedOff: isV0 ? -1 : 48,
     engineInsuranceIsolationBpsOff: isV0 ? -1 : 64
@@ -1217,6 +1222,7 @@ function buildLayoutV1D(maxAccounts, postBitmap = 2) {
     engineLastBreakerSlotOff: -1,
     // not present in deployed V1
     engineBitmapOff: V1D_ENGINE_BITMAP_OFF,
+    acctOwnerOff: ACCT_OWNER_OFF,
     hasInsuranceIsolation: true,
     engineInsuranceIsolatedOff: 48,
     // same within InsuranceFund
@@ -1641,7 +1647,7 @@ function parseAccount(data, idx) {
     fundingIndex: readI128LE(data, base + ACCT_FUNDING_INDEX_OFF),
     matcherProgram: new PublicKey3(data.subarray(base + ACCT_MATCHER_PROGRAM_OFF, base + ACCT_MATCHER_PROGRAM_OFF + 32)),
     matcherContext: new PublicKey3(data.subarray(base + ACCT_MATCHER_CONTEXT_OFF, base + ACCT_MATCHER_CONTEXT_OFF + 32)),
-    owner: new PublicKey3(data.subarray(base + ACCT_OWNER_OFF, base + ACCT_OWNER_OFF + 32)),
+    owner: new PublicKey3(data.subarray(base + layout.acctOwnerOff, base + layout.acctOwnerOff + 32)),
     feeCredits: readI128LE(data, base + ACCT_FEE_CREDITS_OFF),
     lastFeeSlot: readU64LE(data, base + ACCT_LAST_FEE_SLOT_OFF)
   };
