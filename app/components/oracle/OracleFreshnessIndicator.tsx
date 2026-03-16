@@ -37,7 +37,8 @@ export const OracleFreshnessIndicator: FC = () => {
     setPanelOpen(true);
   }, []);
 
-  if (!ready) return null;
+  // GH#1338: Still render for unavailable markets (mode detected, no price)
+  if (!ready && level !== 'unavailable') return null;
 
   const elapsedText =
     elapsedSecs < 60
