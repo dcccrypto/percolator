@@ -116,6 +116,7 @@ export interface SlabLayout {
   engineEmergencyStartSlotOff: number;  // -1 if not present (V0)
   engineLastBreakerSlotOff: number;     // -1 if not present (V0)
   engineBitmapOff: number;              // relative to engineOff
+  acctOwnerOff: number;                 // byte offset of owner pubkey within an account slot
 
   // Insurance fund layout
   hasInsuranceIsolation: boolean;
@@ -202,6 +203,12 @@ const V1_ENGINE_EMERGENCY_OI_MODE_OFF = 632;
 const V1_ENGINE_EMERGENCY_START_SLOT_OFF = 640;
 const V1_ENGINE_LAST_BREAKER_SLOT_OFF = 648;
 const V1_ENGINE_BITMAP_OFF = 656;
+// On-chain V1_LEGACY slabs (65352 bytes) place the bitmap 16 bytes later than
+// computeSlabSize predicts (formula bitmapOff=656 gives size=65352 correctly, but
+// the deployed program stores the bitmap at rel=672 and the owner field at +200).
+// These corrected values must be used for actual byte-level parsing.
+const V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL = 672;  // relative to engineOff (abs = 640+672 = 1312)
+const V1_LEGACY_ACCT_OWNER_OFF = 200;            // vs the usual ACCT_OWNER_OFF=184
 
 // ---- V1D layout constants (actually deployed devnet V1 program, rev ac18a0e) ----
 // The deployed V1 program has a DIFFERENT struct layout than the V1 constants above.
@@ -300,7 +307,11 @@ for (const n of TIERS) {
 function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: number): SlabLayout {
   const isV0 = version === 0;
   const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
+  const isV1Legacy = !isV0 && engineOffOverride === V1_ENGINE_OFF_LEGACY;
+  // Use formula bitmapOff (656) for size calculation but actual bitmapOff (672) for layout
   const bitmapOff = isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
+  const actualBitmapOff = isV1Legacy ? V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL
+    : (isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF);
   const accountSize = isV0 ? V0_ACCOUNT_SIZE : V1_ACCOUNT_SIZE;
   const bitmapWords = Math.ceil(maxAccounts / 64);
   const bitmapBytes = bitmapWords * 8;
@@ -351,7 +362,8 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
     engineEmergencyOiModeOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_OI_MODE_OFF,
     engineEmergencyStartSlotOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_START_SLOT_OFF,
     engineLastBreakerSlotOff: isV0 ? -1 : V1_ENGINE_LAST_BREAKER_SLOT_OFF,
-    engineBitmapOff: isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF,
+    engineBitmapOff: actualBitmapOff,
+    acctOwnerOff: isV1Legacy ? V1_LEGACY_ACCT_OWNER_OFF : ACCT_OWNER_OFF,
 
     hasInsuranceIsolation: !isV0,
     engineInsuranceIsolatedOff: isV0 ? -1 : 48,
@@ -421,6 +433,7 @@ function buildLayoutV1D(maxAccounts: number, postBitmap = 2): SlabLayout {
     engineEmergencyStartSlotOff: -1,    // not present in deployed V1
     engineLastBreakerSlotOff: -1,       // not present in deployed V1
     engineBitmapOff: V1D_ENGINE_BITMAP_OFF,
+    acctOwnerOff: ACCT_OWNER_OFF,
 
     hasInsuranceIsolation: true,
     engineInsuranceIsolatedOff: 48,     // same within InsuranceFund
@@ -1178,7 +1191,7 @@ export function parseAccount(data: Uint8Array, idx: number): Account {
     fundingIndex: readI128LE(data, base + ACCT_FUNDING_INDEX_OFF),
     matcherProgram: new PublicKey(data.subarray(base + ACCT_MATCHER_PROGRAM_OFF, base + ACCT_MATCHER_PROGRAM_OFF + 32)),
     matcherContext: new PublicKey(data.subarray(base + ACCT_MATCHER_CONTEXT_OFF, base + ACCT_MATCHER_CONTEXT_OFF + 32)),
-    owner: new PublicKey(data.subarray(base + ACCT_OWNER_OFF, base + ACCT_OWNER_OFF + 32)),
+    owner: new PublicKey(data.subarray(base + layout.acctOwnerOff, base + layout.acctOwnerOff + 32)),
     feeCredits: readI128LE(data, base + ACCT_FEE_CREDITS_OFF),
     lastFeeSlot: readU64LE(data, base + ACCT_LAST_FEE_SLOT_OFF),
   };
