@@ -19,6 +19,7 @@ import {
   type Account,
   type RiskParams,
 } from "@percolator/sdk";
+import { isSentinelValue } from "@/lib/health";
 import { getConfig } from "@/lib/config";
 
 export interface PortfolioPosition {
@@ -168,10 +169,13 @@ export function usePortfolio(): PortfolioData {
                   maintenanceMarginBps,
                 );
 
-                // Compute unrealized PnL using oracle price
+                // Compute unrealized PnL using oracle price.
+                // GH#1331: account.pnl can be u64::MAX sentinel for uninitialized/flat
+                // positions. Guard it with isSentinelValue to prevent billion-dollar
+                // phantom PnL on the dashboard when oracle price is unavailable.
                 const unrealizedPnl = oraclePriceE6 > 0n
                   ? computeMarkPnl(account.positionSize, account.entryPrice, oraclePriceE6)
-                  : account.pnl;
+                  : (isSentinelValue(account.pnl) ? 0n : account.pnl);
 
                 // PnL percentage
                 const pnlPercent = computePnlPercent(unrealizedPnl, account.capital);

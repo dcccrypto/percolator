@@ -12,6 +12,7 @@ import { useEngineState } from "@/hooks/useEngineState";
 import { useSlabState } from "@/components/providers/SlabProvider";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { useLivePrice } from "@/hooks/useLivePrice";
+import { useOracleFreshness } from "@/hooks/useOracleFreshness";
 import { AccountKind, computePreTradeLiqPrice } from "@percolator/sdk";
 import { PreTradeSummary } from "@/components/trade/PreTradeSummary";
 import { TradeConfirmationModal } from "@/components/trade/TradeConfirmationModal";
@@ -58,6 +59,12 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const { accounts, config: mktConfig, header } = useSlabState();
   const tokenMeta = useTokenMeta(mktConfig?.collateralMint ?? null);
   const { priceUsd } = useLivePrice();
+  // GH#1330: Detect stale oracle to block trade submission before tx failure.
+  // Admin-oracle and Hyperp markets can have stale on-chain prices the frontend
+  // otherwise shows as valid. We treat stale+ready as a hard block — same UX as
+  // no-price — to avoid the silent "Oracle is invalid" on-chain rejection.
+  const { level: oracleLevel, mode: oracleMode, ready: oracleReady } = useOracleFreshness();
+  const oracleStale = oracleReady && oracleLevel === "stale" && (oracleMode === "admin" || oracleMode === "hyperp");
   const openWalletModal = usePrivyLogin();
   const mintAddress = mktConfig?.collateralMint?.toBase58() ?? "";
   const symbol = sanitizeSymbol(tokenMeta?.symbol, mintAddress);
@@ -322,6 +329,18 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
         </div>
       )}
 
+      {/* GH#1330: Stale oracle warning — admin/hyperp markets can show a valid price
+          in the UI while the on-chain oracle timestamp is expired. Block the trade
+          button to prevent silent tx failure with "Oracle is invalid". */}
+      {oracleStale && priceUsd && !mockMode && (
+        <div className="mb-3 rounded-none border border-[var(--short)]/30 bg-[var(--short)]/5 p-2.5">
+          <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[var(--short)]">Oracle Stale</p>
+          <p className="mt-1 text-[9px] text-[var(--text-secondary)] leading-relaxed">
+            The oracle price for this market has not been updated recently. Trading is temporarily disabled to prevent failed transactions.
+          </p>
+        </div>
+      )}
+
       {/* Direction toggle */}
       <div className="mb-3 flex gap-1">
         <button
@@ -475,10 +494,10 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
       ) : (
         <button
           onClick={() => {
-            if (!marginInput || !userAccount || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || tradePhase !== "idle" || loading || (!priceUsd && !mockMode)) return;
+            if (!marginInput || !userAccount || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || tradePhase !== "idle" || loading || (!priceUsd && !mockMode) || (oracleStale && !mockMode)) return;
             setShowConfirmModal(true);
           }}
-          disabled={tradePhase !== "idle" || loading || !marginInput || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || lpUnderfunded || vaultEmpty || (!priceUsd && !mockMode)}
+          disabled={tradePhase !== "idle" || loading || !marginInput || positionSize <= 0n || exceedsMargin || riskGateActive || header?.paused || lpUnderfunded || vaultEmpty || (!priceUsd && !mockMode) || (oracleStale && !mockMode)}
           className={`w-full rounded-none py-2.5 text-[11px] font-medium uppercase tracking-[0.1em] text-white transition-all duration-150 hover:scale-[1.01] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100 focus-visible:ring-1 focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--bg)] ${
             direction === "long"
               ? "bg-[var(--long)] hover:brightness-110 focus-visible:ring-[var(--long)]"

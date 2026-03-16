@@ -72,13 +72,16 @@ export function useOracleFreshness(): OracleFreshnessState {
   const prevPriceRef = useRef<bigint | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
-  const mode = config
+  // Guard: detectOracleMode requires both PublicKey fields — skip if either is missing
+  // (e.g. partial mock configs in test environments).
+  const hasOracleKeys = config?.oracleAuthority != null && config?.indexFeedId != null;
+  const mode = (config && hasOracleKeys)
     ? detectOracleMode(config)
     : null;
 
   // Track price changes to detect updates
   useEffect(() => {
-    if (!config) return;
+    if (!config || !hasOracleKeys) return;
     const currentMode = detectOracleMode(config);
 
     if (currentMode === "admin") {

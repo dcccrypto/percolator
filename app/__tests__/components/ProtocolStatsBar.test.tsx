@@ -1,8 +1,9 @@
 /**
- * GH#1274 — ProtocolStatsBar OI underreport regression tests.
+ * ProtocolStatsBar — OI calculation tests.
  *
- * Root cause: price fallback was `0`, making toUsd() short-circuit to 0 for
- * every market without an oracle price. Fix: fallback to $1 (matches api/stats).
+ * GH#1274: $1 price fallback for volume (admin markets counted at face value).
+ * GH#1332: No $1 fallback for OI — markets with no valid oracle price report $0 OI.
+ *          Phantom OI guard: vault < 1M or total_accounts = 0 → OI = 0.
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -12,8 +13,6 @@ import "@testing-library/jest-dom";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-// The query chain is: getSupabase().from().select().returns()
-// We need to mock the full chain correctly.
 const mockReturns = vi.fn();
 const mockSelect = vi.fn(() => ({ returns: mockReturns }));
 const mockFrom = vi.fn(() => ({ select: mockSelect }));
@@ -37,6 +36,8 @@ type MarketRow = {
   total_open_interest: number | null;
   open_interest_long: number | null;
   open_interest_short: number | null;
+  vault_balance: number | null;
+  total_accounts: number | null;
 };
 
 function makeRow(overrides: Partial<MarketRow> = {}): MarketRow {
@@ -49,6 +50,9 @@ function makeRow(overrides: Partial<MarketRow> = {}): MarketRow {
     total_open_interest: null,
     open_interest_long: null,
     open_interest_short: null,
+    // Default: real market with vault + accounts so phantom guard passes
+    vault_balance: 1_000_000,
+    total_accounts: 2,
     ...overrides,
   };
 }
@@ -77,24 +81,28 @@ describe("ProtocolStatsBar — GH#1274 price fallback", () => {
     });
   });
 
-  it("shows non-zero OI when last_price is null — GH#1274 regression", async () => {
-    // Simulates the actual GH#1274 scenario: $53.8K OI across admin-mode markets
-    // 53,800 tokens at $1 fallback = $53.8K; raw = 53800 × 10^6 = 53_800_000_000
+  it("GH#1332: shows $0 OI when last_price is null (no $1 fallback for OI)", async () => {
+    // GH#1332: Admin-mode markets without a valid oracle price must not contribute
+    // to OI (their USD value is indeterminate). Previously the $1 fallback inflated
+    // global OI from $64K to $117K.
     const rawOi = 53_800 * 1_000_000;
     mockSupabase([
       makeRow({
         slab_address: "slab-admin-1",
-        last_price: null,  // no oracle price — must fall back to $1
+        last_price: null,  // no oracle price → OI = $0
         total_open_interest: rawOi,
         decimals: 6,
+        vault_balance: 5_000_000,
+        total_accounts: 3,
       }),
     ]);
 
     render(<ProtocolStatsBar />);
 
     await waitFor(() => {
-      // $53,800 → "$53.8K"
-      expect(screen.getByText("$53.8K")).toBeInTheDocument();
+      // No valid price → OI should be $0 (not $53.8K)
+      expect(screen.queryByText("$53.8K")).not.toBeInTheDocument();
+      expect(screen.getAllByText("$0").length).toBeGreaterThan(0);
     });
   });
 
@@ -107,6 +115,8 @@ describe("ProtocolStatsBar — GH#1274 price fallback", () => {
         last_price: 2.0,
         total_open_interest: rawOi,
         decimals: 6,
+        vault_balance: 1_000_000,
+        total_accounts: 2,
       }),
     ]);
 
@@ -117,8 +127,9 @@ describe("ProtocolStatsBar — GH#1274 price fallback", () => {
     });
   });
 
-  it("OI must not be $0 when raw OI is sane and last_price is null", async () => {
-    // 100K tokens × 10^6 = 10^11 raw → $100K at $1 fallback
+  it("GH#1332: OI is $0 when raw OI is sane but last_price is null", async () => {
+    // GH#1332 regression: even with sane raw OI, if price is unknown the USD value
+    // is indeterminate — should NOT use $1 fallback.
     const rawOi = 100_000 * 1_000_000;
     mockSupabase([
       makeRow({
@@ -126,22 +137,89 @@ describe("ProtocolStatsBar — GH#1274 price fallback", () => {
         last_price: null,
         total_open_interest: rawOi,
         decimals: 6,
+        vault_balance: 2_000_000,
+        total_accounts: 1,
       }),
     ]);
 
     render(<ProtocolStatsBar />);
 
     await waitFor(() => {
-      expect(screen.getByText("$100.0K")).toBeInTheDocument();
+      // Should be $0 — no $1 fallback for OI
+      expect(screen.queryByText("$100.0K")).not.toBeInTheDocument();
+      expect(screen.getAllByText("$0").length).toBeGreaterThan(0);
     });
   });
 
-  it("counts active markets when last_price is null but OI is sane", async () => {
+  it("GH#1297: phantom market (total_accounts=0) contributes $0 OI even with valid price", async () => {
+    const rawOi = 50_000 * 1_000_000;
+    mockSupabase([
+      makeRow({
+        slab_address: "slab-phantom",
+        last_price: 1.0,
+        total_open_interest: rawOi,
+        decimals: 6,
+        vault_balance: 1_000_000,
+        total_accounts: 0,  // phantom — no real positions
+      }),
+    ]);
+
+    render(<ProtocolStatsBar />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("$50.0K")).not.toBeInTheDocument();
+      expect(screen.getAllByText("$0").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("GH#1297: phantom market (vault < 1M) contributes $0 OI", async () => {
+    const rawOi = 50_000 * 1_000_000;
+    mockSupabase([
+      makeRow({
+        slab_address: "slab-dust-vault",
+        last_price: 1.0,
+        total_open_interest: rawOi,
+        decimals: 6,
+        vault_balance: 999_999,  // strictly < 1M → phantom
+        total_accounts: 5,
+      }),
+    ]);
+
+    render(<ProtocolStatsBar />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("$50.0K")).not.toBeInTheDocument();
+      expect(screen.getAllByText("$0").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("vault=1M (creation-deposit) is NOT phantom — contributes OI correctly", async () => {
+    // Strict < 1M guard: vault=1M is NOT phantom (usdEkK5G, MOLTBOT case).
+    const rawOi = 1000 * 1_000_000;
+    mockSupabase([
+      makeRow({
+        slab_address: "slab-creation-vault",
+        last_price: 3.0,
+        total_open_interest: rawOi,
+        decimals: 6,
+        vault_balance: 1_000_000,  // exactly 1M — NOT phantom
+        total_accounts: 1,
+      }),
+    ]);
+
+    render(<ProtocolStatsBar />);
+
+    await waitFor(() => {
+      expect(screen.getByText("$3.0K")).toBeInTheDocument();
+    });
+  });
+
+  it("counts active markets with valid price and real vault", async () => {
     const rawOi = 1_000_000 * 1_000_000;
     mockSupabase([
-      makeRow({ slab_address: "s1", last_price: null, total_open_interest: rawOi }),
-      makeRow({ slab_address: "s2", last_price: null, total_open_interest: rawOi }),
-      makeRow({ slab_address: "s3", last_price: null, total_open_interest: rawOi }),
+      makeRow({ slab_address: "s1", last_price: 1.0, total_open_interest: rawOi, vault_balance: 2_000_000, total_accounts: 3 }),
+      makeRow({ slab_address: "s2", last_price: 1.0, total_open_interest: rawOi, vault_balance: 2_000_000, total_accounts: 3 }),
+      makeRow({ slab_address: "s3", last_price: 1.0, total_open_interest: rawOi, vault_balance: 2_000_000, total_accounts: 3 }),
     ]);
 
     render(<ProtocolStatsBar />);
@@ -160,8 +238,8 @@ describe("ProtocolStatsBar — GH#1274 price fallback", () => {
 
     const rawOi = 50_000 * 1_000_000;
     mockSupabase([
-      makeRow({ slab_address: "slab-blocked", last_price: null, total_open_interest: rawOi }),
-      makeRow({ slab_address: "slab-ok", last_price: null, total_open_interest: rawOi }),
+      makeRow({ slab_address: "slab-blocked", last_price: 1.0, total_open_interest: rawOi, vault_balance: 2_000_000, total_accounts: 3 }),
+      makeRow({ slab_address: "slab-ok", last_price: 1.0, total_open_interest: rawOi, vault_balance: 2_000_000, total_accounts: 3 }),
     ]);
 
     render(<ProtocolStatsBar />);
