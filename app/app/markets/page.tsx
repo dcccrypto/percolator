@@ -220,7 +220,7 @@ function MarketsPageInner() {
       // GH#1346: On-chain-only markets (no Supabase stats) are NOT counted as
       // "active" for the header total. /api/stats only sees Supabase data, so
       // counting on-chain-only markets here causes a 2-market mismatch.
-      // These markets still appear in the full list via effectiveMarkets.
+      // These markets are not displayed (filtered from the active list).
       return false;
     });
   }, [effectiveMarkets]);
