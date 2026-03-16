@@ -26,10 +26,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   Connection,
-  Keypair,
   PublicKey,
   Transaction,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
@@ -39,6 +37,7 @@ import {
 } from "@solana/spl-token";
 import { getConfig } from "@/lib/config";
 import { getServiceClient } from "@/lib/supabase";
+import { getDevnetMintSigner } from "@/lib/devnet-signer";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -298,20 +297,15 @@ export async function POST(req: NextRequest) {
       if (rawAmount < MIN_RAW) rawAmount = MIN_RAW;
       if (rawAmount > MAX_RAW) rawAmount = MAX_RAW;
 
-      // 4. Load mint authority
-      const mintAuthKeyJson = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
-      if (!mintAuthKeyJson) {
+      // 4. Load mint authority using sealed signer factory
+      const mintSigner = getDevnetMintSigner();
+      if (!mintSigner) {
         return NextResponse.json(
           { error: "Server not configured for devnet minting (DEVNET_MINT_AUTHORITY_KEYPAIR missing)" },
           { status: 500 },
         );
       }
-      let mintAuthority: Keypair;
-      try {
-        mintAuthority = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(mintAuthKeyJson)));
-      } catch {
-        return NextResponse.json({ error: "Server keypair configuration is invalid" }, { status: 500 });
-      }
+      const mintAuthPk = new PublicKey(mintSigner.publicKey());
 
       const cfg = getConfig();
       const connection = new Connection(cfg.rpcUrl, "confirmed");
@@ -334,7 +328,7 @@ export async function POST(req: NextRequest) {
           const hasAuthority = new DataView(mintData.buffer, mintData.byteOffset).getUint32(0, true) === 1;
           if (hasAuthority) {
             const onChainAuthority = new PublicKey(mintData.slice(4, 36));
-            if (!onChainAuthority.equals(mintAuthority.publicKey)) {
+            if (!onChainAuthority.equals(mintAuthPk)) {
               return NextResponse.json(
                 {
                   error: `Cannot mint tokens: this mint's authority is ${onChainAuthority.toBase58().slice(0, 8)}…, not our devnet mint authority. This token was not created by the Percolator mirror system. You need to obtain tokens from the original source.`,
@@ -370,17 +364,28 @@ export async function POST(req: NextRequest) {
       if (!ataExists) {
         tx.add(
           createAssociatedTokenAccountInstruction(
-            mintAuthority.publicKey, // payer
+            mintAuthPk, // payer
             ata,
             walletPk,
             mintPk,
           ),
         );
       }
-      tx.add(createMintToInstruction(mintPk, ata, mintAuthority.publicKey, rawAmount));
+      tx.add(createMintToInstruction(mintPk, ata, mintAuthPk, rawAmount));
 
+      // Sign using sealed signer and send raw.
+      // sendAndConfirmTransaction() calls tx.sign(signers) internally which wipes all existing
+      // signatures — including the one the sealed signer just applied. Use sendRawTransaction +
+      // confirmTransaction instead (same pattern as auto-fund and devnet-mirror-mint).
+      const signedTx = mintSigner.signTransaction(tx);
       sig = await withTimeout(
-        sendAndConfirmTransaction(connection, tx, [mintAuthority], { commitment: "confirmed" }),
+        (async () => {
+          const txSig = await connection.sendRawTransaction(
+            (signedTx as Transaction).serialize(),
+          );
+          await connection.confirmTransaction(txSig, "confirmed");
+          return txSig;
+        })(),
         30_000,
       );
       mintSucceeded = true;

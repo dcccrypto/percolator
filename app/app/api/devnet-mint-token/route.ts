@@ -16,8 +16,8 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  VersionedTransaction,
   SystemProgram,
-  sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import {
@@ -31,6 +31,7 @@ import {
 } from "@solana/spl-token";
 import { getConfig } from "@/lib/config";
 import { getServiceClient } from "@/lib/supabase";
+import { getDevnetMintSigner } from "@/lib/devnet-signer";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -149,8 +150,8 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     // Load mint authority (needed for both already_exists airdrop and new mint creation)
-    const mintAuthKeyJson = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
-    if (!mintAuthKeyJson) {
+    const mintSigner = getDevnetMintSigner();
+    if (!mintSigner) {
       // If mint authority not configured and an existing mint is found, return it without airdrop
       if (existing?.devnet_mint) {
         return NextResponse.json({
@@ -163,9 +164,7 @@ export async function POST(req: NextRequest) {
         { status: 500 },
       );
     }
-    const mintAuthority = Keypair.fromSecretKey(
-      Uint8Array.from(JSON.parse(mintAuthKeyJson)),
-    );
+    const mintAuthPk = new PublicKey(mintSigner.publicKey());
 
     // Fetch token info from DexScreener
     const tokenInfo = await fetchTokenInfo(mainnetCA);
@@ -204,7 +203,7 @@ export async function POST(req: NextRequest) {
         if (!ataInfo) {
           airdropTx.add(
             createAssociatedTokenAccountInstruction(
-              mintAuthority.publicKey,
+              mintAuthPk,
               creatorAta,
               creatorPk,
               existingMintPk,
@@ -216,14 +215,18 @@ export async function POST(req: NextRequest) {
           createMintToInstruction(
             existingMintPk,
             creatorAta,
-            mintAuthority.publicKey,
+            mintAuthPk,
             airdropAmount,
           ),
         );
 
-        await sendAndConfirmTransaction(connection, airdropTx, [mintAuthority], {
-          commitment: "confirmed",
-        });
+        // Sign and send raw — sendAndConfirmTransaction wipes the sealed signer's signature
+        // by calling tx.sign(signers) internally. Use sendRawTransaction instead.
+        const signedAirdropTx = mintSigner.signTransaction(airdropTx);
+        const airdropTxSig = await connection.sendRawTransaction(
+          (signedAirdropTx as Transaction).serialize(),
+        );
+        await connection.confirmTransaction(airdropTxSig, "confirmed");
 
         return NextResponse.json({
           status: "already_exists",
@@ -250,12 +253,17 @@ export async function POST(req: NextRequest) {
     const decimals = tokenInfo.decimals;
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
-    const tx = new Transaction();
+    let tx: Transaction | VersionedTransaction = new Transaction();
+
+    // Set recentBlockhash and feePayer before partial signing
+    const { blockhash } = await connection.getLatestBlockhash();
+    (tx as Transaction).recentBlockhash = blockhash;
+    (tx as Transaction).feePayer = new PublicKey(mintSigner.publicKey());
 
     // Create mint account
     tx.add(
       SystemProgram.createAccount({
-        fromPubkey: mintAuthority.publicKey,
+        fromPubkey: mintAuthPk,
         newAccountPubkey: mintKeypair.publicKey,
         lamports,
         space: MINT_SIZE,
@@ -268,8 +276,8 @@ export async function POST(req: NextRequest) {
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         decimals,
-        mintAuthority.publicKey, // mint authority
-        mintAuthority.publicKey, // freeze authority
+        mintAuthPk, // mint authority
+        mintAuthPk, // freeze authority
       ),
     );
 
@@ -277,7 +285,7 @@ export async function POST(req: NextRequest) {
     const creatorAta = await getAssociatedTokenAddress(mintKeypair.publicKey, creatorPk);
     tx.add(
       createAssociatedTokenAccountInstruction(
-        mintAuthority.publicKey,
+        mintAuthPk,
         creatorAta,
         creatorPk,
         mintKeypair.publicKey,
@@ -293,17 +301,19 @@ export async function POST(req: NextRequest) {
       createMintToInstruction(
         mintKeypair.publicKey,
         creatorAta,
-        mintAuthority.publicKey,
+        mintAuthPk,
         airdropAmount,
       ),
     );
 
-    const sig = await sendAndConfirmTransaction(
-      connection,
-      tx,
-      [mintAuthority, mintKeypair],
-      { commitment: "confirmed" },
-    );
+    // Multi-signer: partialSign mintKeypair FIRST so its signature is in the array,
+    // then let the sealed signer add mintAuthority's sig via partialSign.
+    // sendAndConfirmTransaction wipes all existing sigs (calls tx.sign(signers) internally)
+    // so we use sendRawTransaction + confirmTransaction instead.
+    (tx as Transaction).partialSign(mintKeypair);
+    tx = mintSigner.signTransaction(tx);
+    const sig = await connection.sendRawTransaction((tx as Transaction).serialize());
+    await connection.confirmTransaction(sig, "confirmed");
 
     const devnetMint = mintKeypair.publicKey.toBase58();
 

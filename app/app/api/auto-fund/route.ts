@@ -11,7 +11,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { Connection, PublicKey, LAMPORTS_PER_SOL, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
@@ -20,6 +20,7 @@ import {
 } from "@solana/spl-token";
 import { getConfig } from "@/lib/config";
 import { getServiceClient } from "@/lib/supabase";
+import { getDevnetMintSigner } from "@/lib/devnet-signer";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -126,16 +127,11 @@ export async function POST(req: NextRequest) {
         }
 
         if (needsMint) {
-          // For minting, we need the mint authority keypair (server-side only)
-          // This is configured via DEVNET_MINT_AUTHORITY_KEYPAIR env var
-          const mintAuthKey = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
-          if (mintAuthKey) {
-            const { Keypair, Transaction, sendAndConfirmTransaction } = await import("@solana/web3.js");
-            const mintAuthority = Keypair.fromSecretKey(
-              Uint8Array.from(JSON.parse(mintAuthKey)),
-            );
-
+          // For minting, use the sealed devnet mint authority signer (server-side only)
+          const mintSigner = getDevnetMintSigner();
+          if (mintSigner) {
             const tx = new Transaction();
+            const mintAuthPk = new PublicKey(mintSigner.publicKey());
 
             // Create ATA if needed
             try {
@@ -143,7 +139,7 @@ export async function POST(req: NextRequest) {
             } catch {
               tx.add(
                 createAssociatedTokenAccountInstruction(
-                  mintAuthority.publicKey,
+                  mintAuthPk,
                   ata,
                   walletPk,
                   usdcMint,
@@ -156,14 +152,15 @@ export async function POST(req: NextRequest) {
               createMintToInstruction(
                 usdcMint,
                 ata,
-                mintAuthority.publicKey,
+                mintAuthPk,
                 USDC_MINT_AMOUNT,
               ),
             );
 
-            await sendAndConfirmTransaction(connection, tx, [mintAuthority], {
-              commitment: "confirmed",
-            });
+            // Sign and send transaction using sealed signer
+            const signed = mintSigner.signTransaction(tx);
+            const sig = await connection.sendRawTransaction((signed as Transaction).serialize());
+            await connection.confirmTransaction(sig, "confirmed");
 
             results.usdc_minted = true;
             results.usdc_amount = USDC_MINT_AMOUNT / 1_000_000;
