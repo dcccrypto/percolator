@@ -265,6 +265,18 @@ function MarketsPageInner() {
         ?? ((m.supabase?.open_interest_long ?? 0) + (m.supabase?.open_interest_short ?? 0));
       return BigInt(isSentinelNum(supaOI) ? 0 : Math.max(0, supaOI));
     };
+    // USD-aware OI sort key: converts raw token OI → USD using market price.
+    // Markets with no valid price return 0 so they sort to the bottom in USD mode.
+    // Fixes #1327: no-price markets with huge raw token OI were floating above real USD markets.
+    const getOIUsdSortKey = (m: MergedMarket): number => {
+      const onChainPriceE6 = m.onChain ? resolveMarketPriceE6(m.onChain.config) : 0n;
+      const rawPrice = m.supabase?.last_price ?? priceE6ToUsd(onChainPriceE6);
+      const price = rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_USD ? rawPrice : null;
+      if (price == null) return 0; // no price → sort to bottom
+      const rawDecimals = tokenMetaMap.get(m.mintAddress)?.decimals ?? (m.supabase?.decimals ?? 6);
+      const mintDecimals = Math.min(Math.max(rawDecimals, 0), 18);
+      return (Number(getOI(m)) / 10 ** mintDecimals) * price;
+    };
     list = [...list].sort((a, b) => {
       switch (sortBy) {
         case "volume": {
@@ -274,6 +286,11 @@ function MarketsPageInner() {
           return volB > volA ? 1 : volB < volA ? -1 : 0;
         }
         case "oi": {
+          // In USD mode: sort by USD-equivalent OI; no-price markets → 0 → bottom (fix #1327)
+          // In token mode: sort by raw token amount as before
+          if (showUsd) {
+            return getOIUsdSortKey(b) - getOIUsdSortKey(a);
+          }
           const oiA = getOI(a);
           const oiB = getOI(b);
           return oiB > oiA ? 1 : oiB < oiA ? -1 : 0;
@@ -295,7 +312,7 @@ function MarketsPageInner() {
       }
     });
     return list;
-  }, [effectiveMarkets, debouncedSearch, sortBy, leverageFilter, oracleFilter, tokenMetaMap]);
+  }, [effectiveMarkets, debouncedSearch, sortBy, leverageFilter, oracleFilter, showUsd, tokenMetaMap]);
 
   // P-MED-3: Progressive reveal + intersection observer backup
   // Auto-load items in batches via requestAnimationFrame for instant display.
