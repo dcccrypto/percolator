@@ -248,6 +248,12 @@ export async function POST(req: NextRequest) {
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
     let tx: Transaction | VersionedTransaction = new Transaction();
+
+    // Set recentBlockhash and feePayer before signing
+    const { blockhash } = await connection.getLatestBlockhash();
+    (tx as Transaction).recentBlockhash = blockhash;
+    (tx as Transaction).feePayer = new PublicKey(mintSigner.publicKey());
+
     tx.add(
       SystemProgram.createAccount({
         fromPubkey: mintAuthPk,

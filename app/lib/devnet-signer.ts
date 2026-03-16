@@ -76,8 +76,7 @@ function loadDevnetSealedKeypair(env: NodeJS.ProcessEnv): DevnetSealedSigner | n
         "❌ Invalid DEVNET_MINT_AUTHORITY_KEYPAIR format.\n" +
         "Must be either:\n" +
         "  1. JSON array of 64 bytes: [1, 2, 3, ..., 64]\n" +
-        "  2. Base58-encoded secret key (44-88 characters)\n" +
-        "Got: " + (rawKey.length > 50 ? rawKey.substring(0, 50) + "..." : rawKey),
+        "  2. Base58-encoded secret key (44-88 characters)",
       );
     }
   }

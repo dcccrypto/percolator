@@ -255,6 +255,11 @@ export async function POST(req: NextRequest) {
 
     let tx: Transaction | VersionedTransaction = new Transaction();
 
+    // Set recentBlockhash and feePayer before partial signing
+    const { blockhash } = await connection.getLatestBlockhash();
+    (tx as Transaction).recentBlockhash = blockhash;
+    (tx as Transaction).feePayer = new PublicKey(mintSigner.publicKey());
+
     // Create mint account
     tx.add(
       SystemProgram.createAccount({
