@@ -93,9 +93,11 @@ export async function GET(request: NextRequest) {
   // Without this, sentinel-like values (2e12) leak through as $2T (#1154)
   const MAX_PER_MARKET_USD = 10_000_000_000; // $10B cap — no single market should exceed this
   // GH#1191: corrupt devnet last_price values (e.g. $7.9T/token) multiply small but
-  // legitimate token amounts into billions. Cap price at $10K/token — no Percolator
-  // collateral token should legitimately exceed this. Same fix applied to page.tsx in PR #1190 (GH#1187).
-  const MAX_SANE_PRICE_USD = 10_000; // $10K — reject as corrupt above this
+  // legitimate token amounts into billions. Cap price at $1M/token — matches /api/markets
+  // sanitizePrice cap. Previous $10K cap was too tight: admin-set prices (e.g. MOLTBOT
+  // $210K devnet price) are valid and must not be rejected. $1M is the display-layer guard;
+  // Rust MAX_ORACLE_PRICE enforces $1B on-chain. GH#1321.
+  const MAX_SANE_PRICE_USD = 1_000_000; // $1M — matches /api/markets sanitizePrice cap
   const toUsd = (raw: number, m: { decimals?: number | null; last_price?: number | null }): number => {
     if (!isSaneMarketValue(raw)) return 0;
     const d = Math.min(Math.max((m as Record<string, unknown>).decimals as number ?? 6, 0), 18);
@@ -144,6 +146,9 @@ export async function GET(request: NextRequest) {
       // them), so their raw OI is stale and their USD value is indeterminate.
       // usdEkK5G and MOLTBOT (vault=1M, real positions, valid prices) are unaffected —
       // they have valid last_price values and continue to contribute correctly.
+      // GH#1321: MAX_SANE_PRICE_USD raised from $10K → $1M (matches /api/markets).
+      // MOLTBOT last_price ~$210K was rejected by the old $10K cap, causing its OI to
+      // be silently dropped (p=0 branch). $1M is the correct display-layer guard.
       const d = Math.min(Math.max((m as Record<string, unknown>).decimals as number ?? 6, 0), 18);
       const p = (m.last_price != null && m.last_price > 0 && m.last_price <= MAX_SANE_PRICE_USD)
         ? m.last_price
