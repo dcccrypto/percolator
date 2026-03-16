@@ -895,6 +895,11 @@ declare const ENGINE_MARK_PRICE_OFF = 400;
  * Detect slab layout version from data length.
  * Returns a full SlabLayout descriptor or null if unrecognized.
  */
+/**
+ * Detect the slab layout version from the raw account data length.
+ * Returns the full SlabLayout descriptor, or null if the size is unrecognised.
+ * Checks V0, V1D, V1D-legacy, V1, and V1-legacy (pre-PERC-1094) sizes in priority order.
+ */
 declare function detectSlabLayout(dataLen: number): SlabLayout | null;
 /**
  * Legacy detectLayout for backward compat.
@@ -1076,6 +1081,10 @@ declare function parseParams(data: Uint8Array, layoutHint?: SlabLayout | null): 
 declare function parseEngine(data: Uint8Array): EngineState;
 /**
  * Read bitmap to get list of used account indices.
+ */
+/**
+ * Return all account indices whose bitmap bit is set (i.e. slot is in use).
+ * Uses the layout-aware bitmap offset so V1_LEGACY slabs (bitmap at rel+672) are handled correctly.
  */
 declare function parseUsedIndices(data: Uint8Array): number[];
 /**

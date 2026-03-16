@@ -4,21 +4,28 @@ import { Connection, PublicKey } from "@solana/web3.js";
 // Browser-compatible read helpers using DataView
 // (the npm 'buffer' polyfill lacks readBigUInt64LE / readBigInt64LE)
 // =============================================================================
+
+/** Wrap a Uint8Array in a DataView sharing the same underlying buffer. */
 function dv(data: Uint8Array): DataView {
   return new DataView(data.buffer, data.byteOffset, data.byteLength);
 }
+/** Read a single unsigned byte at `off`. */
 function readU8(data: Uint8Array, off: number): number {
   return data[off];
 }
+/** Read a little-endian u16 at `off`. */
 function readU16LE(data: Uint8Array, off: number): number {
   return dv(data).getUint16(off, true);
 }
+/** Read a little-endian u32 at `off`. */
 function readU32LE(data: Uint8Array, off: number): number {
   return dv(data).getUint32(off, true);
 }
+/** Read a little-endian u64 at `off` as a BigInt. */
 function readU64LE(data: Uint8Array, off: number): bigint {
   return dv(data).getBigUint64(off, true);
 }
+/** Read a little-endian signed i64 at `off` as a BigInt. */
 function readI64LE(data: Uint8Array, off: number): bigint {
   return dv(data).getBigInt64(off, true);
 }
@@ -26,6 +33,11 @@ function readI64LE(data: Uint8Array, off: number): bigint {
 // =============================================================================
 // Helper: read signed/unsigned i128 from buffer
 // =============================================================================
+
+/**
+ * Read a little-endian signed i128 at `offset`.
+ * Composed from two u64 halves; sign-extends if the high bit is set.
+ */
 function readI128LE(buf: Uint8Array, offset: number): bigint {
   const lo = readU64LE(buf, offset);
   const hi = readU64LE(buf, offset + 8);
@@ -37,6 +49,7 @@ function readI128LE(buf: Uint8Array, offset: number): bigint {
   return unsigned;
 }
 
+/** Read a little-endian unsigned u128 at `offset` as a BigInt. */
 function readU128LE(buf: Uint8Array, offset: number): bigint {
   const lo = readU64LE(buf, offset);
   const hi = readU64LE(buf, offset + 8);
@@ -260,6 +273,10 @@ export const ENGINE_MARK_PRICE_OFF = V1_ENGINE_MARK_PRICE_OFF;
 
 // ---- Known slab sizes per version and tier ----
 
+/**
+ * Compute the total byte size of a slab given its layout parameters.
+ * Used to pre-populate the known-size lookup maps at module load time.
+ */
 function computeSlabSize(
   engineOff: number,
   bitmapOff: number,
@@ -304,6 +321,10 @@ for (const n of TIERS) {
   V1D_SIZES_LEGACY.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 18), n);
 }
 
+/**
+ * Build a complete SlabLayout descriptor for V0 or V1 (including V1-legacy) slabs.
+ * Pass `engineOffOverride` to handle orphaned pre-PERC-1094 slabs that used ENGINE_OFF=640.
+ */
 function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: number): SlabLayout {
   const isV0 = version === 0;
   const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
@@ -380,6 +401,11 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
  *   2  = free_head(u16) only — deployed program (GH#1234, default for new slabs)
  *   18 = num_used(u16)+pad(6)+next_account_id(u64)+free_head(u16) — legacy on-chain slabs (GH#1237)
  */
+/**
+ * Build a SlabLayout for the actually-deployed V1D program (ENGINE_OFF=424).
+ * `postBitmap` is 2 for new slabs (free_head only) and 18 for legacy on-chain slabs
+ * created before the GH#1234 fix that removed num_used/pad/next_account_id.
+ */
 function buildLayoutV1D(maxAccounts: number, postBitmap = 2): SlabLayout {
   const engineOff = V1D_ENGINE_OFF;
   const bitmapOff = V1D_ENGINE_BITMAP_OFF;
@@ -444,6 +470,11 @@ function buildLayoutV1D(maxAccounts: number, postBitmap = 2): SlabLayout {
 /**
  * Detect slab layout version from data length.
  * Returns a full SlabLayout descriptor or null if unrecognized.
+ */
+/**
+ * Detect the slab layout version from the raw account data length.
+ * Returns the full SlabLayout descriptor, or null if the size is unrecognised.
+ * Checks V0, V1D, V1D-legacy, V1, and V1-legacy (pre-PERC-1094) sizes in priority order.
  */
 export function detectSlabLayout(dataLen: number): SlabLayout | null {
   // Check V0 sizes first (deployed devnet V0 program)
@@ -1110,6 +1141,10 @@ export function parseEngine(data: Uint8Array): EngineState {
 
 /**
  * Read bitmap to get list of used account indices.
+ */
+/**
+ * Return all account indices whose bitmap bit is set (i.e. slot is in use).
+ * Uses the layout-aware bitmap offset so V1_LEGACY slabs (bitmap at rel+672) are handled correctly.
  */
 export function parseUsedIndices(data: Uint8Array): number[] {
   const layout = detectSlabLayout(data.length);
