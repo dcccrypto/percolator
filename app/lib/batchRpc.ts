@@ -17,6 +17,17 @@
  * - Transparent to callers — each gets their own Response object
  */
 
+/**
+ * Methods that mutate on-chain state and must NOT be batched or deduplicated.
+ * These are sent directly to the RPC endpoint, bypassing the batch queue entirely.
+ * This prevents "Missing response from batch" errors when the upstream RPC returns
+ * a response with a null/mismatched id for write operations.
+ */
+const UNBATCHABLE_METHODS = new Set([
+  "sendTransaction",
+  "simulateTransaction",
+]);
+
 /** Pending request waiting to be batched */
 interface PendingRequest {
   id: number;
@@ -192,16 +203,22 @@ export function createBatchRpc(config: BatchRpcConfig) {
    * Returns a Promise that resolves with the JSON string of the response.
    */
   function enqueue(method: string, params: unknown): Promise<string> {
+    const canDedupe = !UNBATCHABLE_METHODS.has(method);
     const key = dedupeKey(method, params);
-    const existing = dedupeCache.get(key);
-    if (existing) return existing;
+
+    if (canDedupe) {
+      const existing = dedupeCache.get(key);
+      if (existing) return existing;
+    }
 
     const id = nextId++;
     const promise = new Promise<string>((resolve, reject) => {
       queue.push({ id, method, params, resolve, reject });
     });
 
-    dedupeCache.set(key, promise);
+    if (canDedupe) {
+      dedupeCache.set(key, promise);
+    }
 
     // Schedule flush, or flush immediately if batch is full
     if (queue.length >= maxBatchSize) {
@@ -287,6 +304,13 @@ export function createBatchRpc(config: BatchRpcConfig) {
     }
 
     if (!parsed.method || Array.isArray(parsed)) {
+      return globalThis.fetch(input, init);
+    }
+
+    // Bypass batching for mutating methods — send directly to avoid id-mismatch
+    // errors ("Missing response from batch") when the upstream RPC returns a
+    // response with a null or unexpected id for write operations.
+    if (UNBATCHABLE_METHODS.has(parsed.method)) {
       return globalThis.fetch(input, init);
     }
 
