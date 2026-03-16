@@ -18,14 +18,23 @@
  */
 
 /**
- * Methods that mutate on-chain state and must NOT be batched or deduplicated.
- * These are sent directly to the RPC endpoint, bypassing the batch queue entirely.
- * This prevents "Missing response from batch" errors when the upstream RPC returns
- * a response with a null/mismatched id for write operations.
+ * Methods that must NOT be batched or deduplicated.
+ *
+ * Mutating methods (sendTransaction, simulateTransaction) are excluded to prevent
+ * "Missing response from batch" errors when the upstream RPC returns a response with
+ * a null/mismatched id for write operations.
+ *
+ * Confirmation/status polling methods (getSignatureStatuses) are also excluded because
+ * the superstruct validator in @solana/web3.js v1 rejects responses with wrong id types
+ * when they pass through the batch layer — causing "Expected the value to satisfy a
+ * union of type | type, but received: [object Object]" errors in the Token Factory
+ * confirmation flow (GH#1310).
  */
 const UNBATCHABLE_METHODS = new Set([
   "sendTransaction",
   "simulateTransaction",
+  // Confirmation polling — must bypass batch to avoid superstruct id-type validation errors
+  "getSignatureStatuses",
 ]);
 
 /** Pending request waiting to be batched */
