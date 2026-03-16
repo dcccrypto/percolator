@@ -68,6 +68,7 @@ const { values: args } = parseArgs({
     slab: { type: "string" },
     force: { type: "boolean", default: false },
     "dry-run": { type: "boolean", default: false },
+    "skip-close": { type: "boolean", default: false }, // skip CloseSlab (e.g. vault non-zero); create fresh slab only
     tier: { type: "string" },  // optional override; auto-detected from size if omitted
   },
   strict: true,
@@ -77,6 +78,7 @@ if (!args.slab) throw new Error("--slab <PUBKEY> is required");
 
 const DRY_RUN = args["dry-run"] ?? false;
 const FORCE = args["force"] ?? false;
+const SKIP_CLOSE = args["skip-close"] ?? false;
 
 // ENGINE_OFF is imported from packages/core/src/solana/slab.ts — single source of truth.
 // Do NOT hardcode ENGINE_OFF or ENGINE_MARK_PRICE_OFF here; use parseEngine() instead.
@@ -135,15 +137,30 @@ const PRIORITY_FEE = 50_000;
  * Allows auto-detecting the intended tier from the program owner even when
  * the slab has a wrong/legacy size (which breaks size-based detection).
  *
- * Source of truth: app/scripts/deploy-all-tiers.ts
- *   Small  (256 slots,  62_808 bytes): FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD
- *   Medium (1024 slots, 248_760 bytes): FwfBKZXbYr4vTK23bMFkbgKq3npJ3MSDxEaKmq9Aj4Qn
- *   Large  (4096 slots, 992_568 bytes): g9msRSV3sJmmE3r5Twn9HuBsxzuuRGTjKCVTKudm9in
+ * Source of truth: smoke-init-user.ts (PERC-509) + on-chain verification (PERC-579)
+ *
+ * PERC-509 / PERC-579 FIX: FwfBKZX was originally mislabeled as "medium" here but
+ * smoke-init-user.ts (written after the PERC-408 small-program redeploy) confirms it is
+ * the SMALL program. Using "medium" would allocate a 257,448-byte slab for a program that
+ * expects 65,352 bytes → InitMarket would return 0x4 (InvalidSlabLen) on the new slab.
+ *
+ * Verified: CloseSlab on CkcwQtUu (65,352 bytes, FwfBKZX owner) returns 0xd
+ * (EngineInsufficientBalance), NOT 0x4 (InvalidSlabLen) — proving slab_guard passes
+ * for 65,352-byte slabs under FwfBKZX. This is only possible if FwfBKZX's SLAB_LEN
+ * is 65,352 (exact match) or 65,368 (PRE_118 compat: SLAB_LEN-16 = 65,352).
+ *
+ * Updated program ID → tier mapping (all V1 tiers after PERC-508/PERC-509 redeploy):
+ *   Small  (256 slots,  65_352 bytes): FwfBKZXbYr4vTK23bMFkbgKq3npJ3MSDxEaKmq9Aj4Qn
+ *   Medium (1024 slots, 257_448 bytes): g9msRSV3sJmmE3r5Twn9HuBsxzuuRGTjKCVTKudm9in
+ *   Large  (4096 slots, 1_025_832 bytes): (not yet assigned on devnet)
+ *
+ * NOTE: FxfD37s1 (original small slot, 62_808 V0 bytes) is the old SOL-market program.
+ * It remains in the map for backward compat but its slabs predate PERC-118 TWAP fields.
  */
 const PROGRAM_TO_TIER: Record<string, keyof typeof SLAB_TIERS> = {
-  "FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD": "small",   // 256 slots  (~0.44 SOL)
-  "FwfBKZXbYr4vTK23bMFkbgKq3npJ3MSDxEaKmq9Aj4Qn": "medium",  // 1024 slots (~1.73 SOL)
-  "g9msRSV3sJmmE3r5Twn9HuBsxzuuRGTjKCVTKudm9in":  "large",   // 4096 slots (~6.90 SOL)
+  "FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD": "small",   // original small (V0, 256 slots, 62_808 bytes)
+  "FwfBKZXbYr4vTK23bMFkbgKq3npJ3MSDxEaKmq9Aj4Qn": "small",   // redeployed small (V1, 256 slots, 65_352 bytes) — PERC-509
+  "g9msRSV3sJmmE3r5Twn9HuBsxzuuRGTjKCVTKudm9in":  "medium",  // medium (1024 slots, ~1.79 SOL)
 };
 
 // ============================================================================
@@ -339,7 +356,11 @@ async function main() {
   if (DRY_RUN) {
     console.log("\n🔍 DRY RUN — would execute the following:");
     console.log("  0. Generate new slab keypair and save to ./new-slab-keypair-<timestamp>.json");
-    console.log("  1. CloseSlab on", slabPubkey.toBase58());
+    if (SKIP_CLOSE) {
+      console.log("  1. [SKIP] CloseSlab skipped (--skip-close). Old slab lamports NOT reclaimed.");
+    } else {
+      console.log("  1. CloseSlab on", slabPubkey.toBase58());
+    }
     console.log("  2. SystemProgram.createAccount (new keypair, size =", tier.dataSize, "bytes)");
     console.log("  3. InitMarket with extracted config");
     console.log("\n  ⚠️  New slab will have a DIFFERENT address from the old one.");
@@ -348,29 +369,34 @@ async function main() {
   }
 
   // ========================================================================
-  // Step 3: Close the broken slab
+  // Step 3: Close the broken slab (skip if --skip-close)
   // ========================================================================
   console.log("\n--- Step 3: Close broken slab ---");
 
-  const closeTx = new Transaction();
-  closeTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE }));
-  closeTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }));
-  closeTx.add(
-    buildIx({
-      programId: PROGRAM_ID,
-      data: encodeCloseSlab(),
-      keys: buildAccountMetas(ACCOUNTS_CLOSE_SLAB, [
-        payer.publicKey,   // admin
-        slabPubkey,        // slab
-      ]),
-    }),
-  );
+  if (SKIP_CLOSE) {
+    console.log("  ⚠️  --skip-close: skipping CloseSlab (old slab lamports NOT reclaimed).");
+    console.log(`     Old slab (${slabPubkey.toBase58()}) will remain on-chain.`);
+  } else {
+    const closeTx = new Transaction();
+    closeTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE }));
+    closeTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 50_000 }));
+    closeTx.add(
+      buildIx({
+        programId: PROGRAM_ID,
+        data: encodeCloseSlab(),
+        keys: buildAccountMetas(ACCOUNTS_CLOSE_SLAB, [
+          payer.publicKey,   // admin
+          slabPubkey,        // slab
+        ]),
+      }),
+    );
 
-  const closeSig = await sendAndConfirmTransaction(connection, closeTx, [payer], {
-    commitment: "confirmed",
-  });
-  console.log(`  ✅ CloseSlab confirmed: ${closeSig}`);
-  console.log(`     Explorer: https://explorer.solana.com/tx/${closeSig}?cluster=devnet`);
+    const closeSig = await sendAndConfirmTransaction(connection, closeTx, [payer], {
+      commitment: "confirmed",
+    });
+    console.log(`  ✅ CloseSlab confirmed: ${closeSig}`);
+    console.log(`     Explorer: https://explorer.solana.com/tx/${closeSig}?cluster=devnet`);
+  }
 
   // ========================================================================
   // Step 4: Create new slab account with correct size
