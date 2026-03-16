@@ -135,16 +135,20 @@ export async function GET(request: NextRequest) {
       // Strict < mirrors /api/markets isPhantomOI exactly (vault=1M is NOT phantom).
       const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS;
       if (isPhantomOI) return sum;
-      // GH#1265: OI is tracked in collateral micro-units. When no oracle price is available
-      // (admin-mode markets not yet cranked), fall back to $1/token — correct for devnet
-      // markets. Without this fallback, only price-cranked markets contributed to OI,
-      // causing ~8.57× underreporting (only 3 out of 35+ OI-bearing markets had prices).
-      // GH#1297: The $1 fallback now only applies to non-phantom markets (vault+accounts
-      // guard above), keeping it safe for legitimate admin-oracle devnet markets.
+      // GH#1318: No $1 fallback — markets without a valid oracle price have indeterminate
+      // USD OI and must NOT contribute to totalOpenInterest.
+      // Previously (GH#1265) a $1/token fallback was used for admin-mode devnet markets
+      // not yet cranked. This caused 33 vault=1M creation-deposit markets with stale
+      // non-zero OI and no oracle price to each contribute ~$2K phantom OI (~$47K total).
+      // Those markets are not being actively cranked (StatsCollector no longer processes
+      // them), so their raw OI is stale and their USD value is indeterminate.
+      // usdEkK5G and MOLTBOT (vault=1M, real positions, valid prices) are unaffected —
+      // they have valid last_price values and continue to contribute correctly.
       const d = Math.min(Math.max((m as Record<string, unknown>).decimals as number ?? 6, 0), 18);
       const p = (m.last_price != null && m.last_price > 0 && m.last_price <= MAX_SANE_PRICE_USD)
         ? m.last_price
-        : 1; // $1 fallback for non-phantom markets without oracle price
+        : 0;
+      if (p <= 0) return sum; // no valid price → unknown USD value → skip
       const usd = (rawOi / 10 ** d) * p;
       return sum + (usd > MAX_PER_MARKET_USD ? 0 : usd);
     },
