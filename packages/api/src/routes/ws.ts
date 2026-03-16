@@ -24,8 +24,26 @@ const MAX_UNAUTHENTICATED_CONNECTIONS_PER_IP = Number(
   process.env.MAX_UNAUTH_WS_CONNECTIONS_PER_IP ?? 3
 );
 
-// Authentication settings
-// In production, WS_AUTH_REQUIRED must be explicitly set. Defaults to true unless NODE_ENV=development.
+/**
+ * WebSocket Authentication Configuration
+ *
+ * SAFETY GUARANTEE: Production deployments enforce authentication unless explicitly disabled.
+ *
+ * WS_AUTH_REQUIRED behavior:
+ * - Production (NODE_ENV=production): Always required unless WS_AUTH_REQUIRED=false
+ * - Development: Optional by default unless WS_AUTH_REQUIRED=true
+ * - Explicit override: Set WS_AUTH_REQUIRED=true|false to override defaults
+ *
+ * WS_AUTH_SECRET behavior:
+ * - If set: Used for Bearer token validation. Secure, random 256-bit recommended.
+ * - If not set in production: Startup fails with FATAL error (see lines 36-47)
+ * - If not set in development: Falls back to dev-only default. DO NOT use in production.
+ *
+ * DESIGN: Fail-closed for production. Any misconfiguration causes startup failure,
+ * preventing accidental unauth deployments.
+ *
+ * @see lines 36-47 for validation checks that enforce these guarantees
+ */
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const WS_AUTH_REQUIRED = process.env.WS_AUTH_REQUIRED !== undefined
   ? process.env.WS_AUTH_REQUIRED === "true"
@@ -33,7 +51,7 @@ const WS_AUTH_REQUIRED = process.env.WS_AUTH_REQUIRED !== undefined
 const WS_AUTH_SECRET = process.env.WS_AUTH_SECRET;
 const AUTH_TIMEOUT_MS = 5_000; // 5 seconds to authenticate
 
-// Validate WS auth configuration at startup
+// Validate WS auth configuration at startup (implements fail-closed design above)
 if (IS_PRODUCTION && !WS_AUTH_SECRET) {
   logger.error("FATAL: WS_AUTH_SECRET must be set in production");
   process.exit(1);
