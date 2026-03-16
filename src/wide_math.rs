@@ -1194,26 +1194,33 @@ impl U512 {
     /// Divide U512 by U256, returning (quotient as U256, remainder as U256).
     /// Panics if divisor is zero or quotient doesn't fit in U256.
     fn div_rem_by_u256(self, den: U256) -> (U256, U256) {
+        match self.checked_div_rem_by_u256(den) {
+            Some(result) => result,
+            None => panic!("mul_div quotient must fit U256"),
+        }
+    }
+
+    /// Checked variant: returns None if quotient doesn't fit in U256.
+    fn checked_div_rem_by_u256(self, den: U256) -> Option<(U256, U256)> {
         assert!(!den.is_zero(), "U512 division by zero");
 
         if self.is_zero() {
-            return (U256::ZERO, U256::ZERO);
+            return Some((U256::ZERO, U256::ZERO));
         }
 
         let den_512 = U512::from_u256(den);
 
         if self.cmp_u512(&den_512) == Ordering::Less {
-            // quotient = 0, remainder = self (must fit in U256)
-            return (U256::ZERO, self.try_into_u256().expect("remainder must fit U256"));
+            let r = self.try_into_u256().expect("remainder must fit U256");
+            return Some((U256::ZERO, r));
         }
 
-        // Binary long division
         let num_lz = self.leading_zeros();
         let den_lz = den_512.leading_zeros();
 
         if den_lz < num_lz {
-            // den > num, already handled above
-            return (U256::ZERO, self.try_into_u256().expect("remainder must fit U256"));
+            let r = self.try_into_u256().expect("remainder must fit U256");
+            return Some((U256::ZERO, r));
         }
 
         let shift = den_lz - num_lz;
@@ -1231,9 +1238,9 @@ impl U512 {
             i -= 1;
         }
 
-        let q = quotient.try_into_u256().expect("mul_div quotient must fit U256");
+        let q = quotient.try_into_u256()?;
         let r = remainder.try_into_u256().expect("remainder must fit U256");
-        (q, r)
+        Some((q, r))
     }
 }
 
@@ -1335,6 +1342,21 @@ pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
         q
     } else {
         q.checked_add(U256::ONE).expect("mul_div_ceil overflow")
+    }
+}
+
+/// Checked variant of mul_div_ceil_u256.
+/// Returns None if the quotient doesn't fit in U256.
+pub fn checked_mul_div_ceil_u256(a: U256, b: U256, d: U256) -> Option<U256> {
+    if d.is_zero() {
+        return None;
+    }
+    let product = U512::mul_u256(a, b);
+    let (q, r) = product.checked_div_rem_by_u256(d)?;
+    if r.is_zero() {
+        Some(q)
+    } else {
+        q.checked_add(U256::ONE)
     }
 }
 

@@ -67,7 +67,7 @@ pub mod wide_math;
 use wide_math::{
     U256, I256,
     mul_div_floor_u256, mul_div_floor_u256_with_rem,
-    mul_div_ceil_u256,
+    mul_div_ceil_u256, checked_mul_div_ceil_u256,
     wide_signed_mul_div_floor,
     saturating_mul_u256_u64,
     fee_debt_u128_checked,
@@ -1251,16 +1251,24 @@ impl RiskEngine {
 
         // Step 6: handle D > 0 (quote deficit)
         // v10.5: fused delta_K_abs = ceil(D * A_old * POS_SCALE / OI)
+        // Per §1.5 Rule 14: if the quotient doesn't fit in U256, route to
+        // absorb_protocol_loss instead of panicking.
         if !d.is_zero() {
             let a_ps = a_old_u256.checked_mul(pos_scale_u256())
                 .ok_or(RiskError::Overflow)?;
-            let delta_k_abs = mul_div_ceil_u256(d, a_ps, oi);
-            match try_negate_u256_to_i256(delta_k_abs) {
-                Some(delta_k) => {
-                    let k_opp = self.get_k_side(opp);
-                    match k_opp.checked_add(delta_k) {
-                        Some(new_k) => {
-                            self.set_k_side(opp, new_k);
+            match checked_mul_div_ceil_u256(d, a_ps, oi) {
+                Some(delta_k_abs) => {
+                    match try_negate_u256_to_i256(delta_k_abs) {
+                        Some(delta_k) => {
+                            let k_opp = self.get_k_side(opp);
+                            match k_opp.checked_add(delta_k) {
+                                Some(new_k) => {
+                                    self.set_k_side(opp, new_k);
+                                }
+                                None => {
+                                    self.absorb_protocol_loss(d);
+                                }
+                            }
                         }
                         None => {
                             self.absorb_protocol_loss(d);
@@ -1268,6 +1276,7 @@ impl RiskEngine {
                     }
                 }
                 None => {
+                    // Quotient overflow: deficit too large to represent in K-space
                     self.absorb_protocol_loss(d);
                 }
             }
@@ -1817,10 +1826,17 @@ impl RiskEngine {
         };
         self.accounts[idx].last_fee_slot = now_slot;
 
-        // Deduct from fee_credits — saturating toward i128::MIN (debt floor)
+        // Deduct from fee_credits — clamp to -(i128::MAX) (not i128::MIN).
+        // i128::MIN is reserved as a sentinel/invalid value that could cause
+        // negation panics in downstream code.
         let due_i128 = core::cmp::min(due, i128::MAX as u128) as i128;
-        self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
-            .saturating_sub(due_i128);
+        let new_fc = self.accounts[idx].fee_credits.saturating_sub(due_i128);
+        // Clamp: never let fee_credits reach i128::MIN
+        self.accounts[idx].fee_credits = if new_fc.get() == i128::MIN {
+            I128::new(i128::MIN + 1)
+        } else {
+            new_fc
+        };
 
         // Pay from capital if negative
         if self.accounts[idx].fee_credits.is_negative() {
@@ -2266,9 +2282,13 @@ impl RiskEngine {
         if fee_shortfall > 0 {
             let shortfall_i256 = I256::from_u128(fee_shortfall);
             let old_pnl = self.accounts[idx].pnl;
-            let new_pnl = old_pnl.checked_sub(shortfall_i256)
-                .expect("charge_fee_safe: PnL underflow");
-            assert!(new_pnl != I256::MIN, "charge_fee_safe: PnL == I256::MIN");
+            // Clamp on underflow instead of panicking — a panic here would
+            // brick liquidations for heavily underwater accounts (§1.5 Rule 16).
+            let new_pnl = match old_pnl.checked_sub(shortfall_i256) {
+                Some(v) if v == I256::MIN => I256::MIN.checked_add(I256::ONE).unwrap(),
+                Some(v) => v,
+                None => I256::MIN.checked_add(I256::ONE).unwrap(),
+            };
             self.set_pnl(idx, new_pnl);
         }
     }
@@ -2493,7 +2513,7 @@ impl RiskEngine {
 
         // Process up to ACCOUNTS_PER_CRANK accounts
         let mut num_liquidations: u32 = 0;
-        let mut num_liq_errors: u16 = 0;
+        let num_liq_errors: u16 = 0;
         let mut sweep_complete = false;
         let mut accounts_processed: u16 = 0;
         let mut liq_budget = LIQ_BUDGET_PER_CRANK;
@@ -2517,10 +2537,14 @@ impl RiskEngine {
             if is_occupied {
                 accounts_processed += 1;
 
-                // Touch account (best-effort)
-                let _ = self.touch_account_full(idx, oracle_price, now_slot);
+                // Touch account — propagate errors to trigger transaction rollback
+                // rather than committing half-mutated state.
+                self.touch_account_full(idx, oracle_price, now_slot)?;
 
-                // Liquidation — uses internal routine sharing crank's ctx
+                // Liquidation — uses internal routine sharing crank's ctx.
+                // Errors must propagate: liquidate_at_oracle_internal mutates
+                // state before downstream calls, so swallowing an error would
+                // commit corrupted state (broken OI invariant).
                 if liq_budget > 0 && !ctx.pending_reset_long && !ctx.pending_reset_short {
                     let eff = self.effective_pos_q(idx);
                     if !eff.is_zero() {
@@ -2531,8 +2555,8 @@ impl RiskEngine {
                                     liq_budget = liq_budget.saturating_sub(1);
                                 }
                                 Ok(false) => {}
-                                Err(_) => {
-                                    num_liq_errors += 1;
+                                Err(e) => {
+                                    return Err(e);
                                 }
                             }
                         }
@@ -2830,13 +2854,11 @@ fn checked_u256_mul_i256(a: U256, b: I256) -> Result<I256> {
         }
         Ok(I256::from_raw_u256_pub(product))
     } else {
-        // For negative: product can be up to |I256::MIN| = MAX+1
-        let max_neg = max_pos.checked_add(U256::ONE).ok_or(RiskError::Overflow)?;
-        if product > max_neg {
-            return Err(RiskError::Overflow);
-        }
-        let pos_i = I256::from_raw_u256_pub(product);
-        pos_i.checked_neg().ok_or(RiskError::Overflow)
+        // For negative: product can be up to |I256::MIN| = 2^255.
+        // Use try_negate_u256_to_i256 which correctly handles the 2^255 boundary
+        // (from_raw_u256_pub would misinterpret 2^255 as I256::MIN, and
+        // checked_neg on I256::MIN returns None — a false overflow).
+        try_negate_u256_to_i256(product).ok_or(RiskError::Overflow)
     }
 }
 

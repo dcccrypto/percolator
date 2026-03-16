@@ -1189,3 +1189,98 @@ fn test_fee_seniority_after_restart_on_new_profit_in_trade() {
     // verify conservation holds
     assert!(engine.check_conservation());
 }
+
+// ============================================================================
+// Issue #4: Maintenance fee settle must not clamp fee_credits to i128::MIN
+// ============================================================================
+
+#[test]
+fn test_maintenance_fee_does_not_reach_i128_min() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::new(i128::MAX as u128);
+    let mut engine = RiskEngine::new(params);
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let idx = engine.add_user(1000).expect("add user");
+    engine.deposit(idx, 100_000, 1000, slot).expect("deposit");
+
+    // Set fee_credits very negative, close to i128::MIN
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN + 2);
+    engine.accounts[idx as usize].last_fee_slot = 0;
+
+    // Touch should not panic — fee_credits must be clamped above i128::MIN
+    engine.last_oracle_price = 1000;
+    engine.last_market_slot = 100;
+    let result = engine.touch_account_full(idx as usize, 1000, 100);
+    assert!(result.is_ok(), "touch must not panic on extreme fee debt");
+
+    // fee_credits must never be exactly i128::MIN
+    assert!(engine.accounts[idx as usize].fee_credits.get() != i128::MIN,
+        "fee_credits must not reach i128::MIN");
+}
+
+// ============================================================================
+// Issue #5: charge_fee_safe must not panic on PnL underflow
+// ============================================================================
+
+#[test]
+fn test_charge_fee_safe_does_not_panic_on_extreme_pnl() {
+    let mut params = default_params();
+    params.trading_fee_bps = 100; // 1% fee
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).expect("add a");
+    let b = engine.add_user(1000).expect("add b");
+
+    // Give a zero capital (so fee shortfall goes to PnL),
+    // and b large capital for margin
+    engine.deposit(a, 1, oracle, slot).expect("dep a");
+    engine.deposit(b, 10_000_000, oracle, slot).expect("dep b");
+
+    engine.keeper_crank(a, slot, oracle, 0).expect("crank");
+
+    // Set account a's PnL to near I256::MIN so fee subtraction would overflow.
+    // The charge_fee_safe path: if capital < fee, shortfall = fee - capital,
+    // then PnL -= shortfall. If PnL is near I256::MIN, this could overflow.
+    let near_min = I256::MIN.checked_add(I256::from_u128(1)).unwrap();
+    engine.set_pnl(a as usize, near_min);
+
+    // Executing a trade charges a fee. If capital is 0, fee goes to PnL.
+    // With PnL near I256::MIN, subtracting the fee must not panic.
+    // (The trade will likely fail for margin reasons, but must not panic.)
+    let size_q = make_size_q(1);
+    let _result = engine.execute_trade(a, b, oracle, slot, size_q, oracle);
+    // We don't care if it succeeds or returns Err — just that it doesn't panic.
+}
+
+// ============================================================================
+// Issue #1: keeper_crank must propagate errors from state-mutating functions
+// ============================================================================
+
+#[test]
+fn test_keeper_crank_propagates_corruption() {
+    let mut engine = RiskEngine::new(default_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).expect("add a");
+    engine.deposit(a, 100_000, oracle, slot).expect("dep a");
+    engine.keeper_crank(a, slot, oracle, 0).expect("crank");
+
+    // Set up a corrupt state: a_basis = 0 triggers CorruptState error
+    // in settle_side_effects (called by touch_account_full)
+    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].adl_a_basis = 0; // CORRUPT: a_basis must be > 0
+    engine.stored_pos_count_long = 1;
+    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+
+    // keeper_crank must propagate the CorruptState error, not swallow it
+    let result = engine.keeper_crank(a, 2, oracle, 0);
+    assert!(result.is_err(), "keeper_crank must propagate corruption errors");
+}
