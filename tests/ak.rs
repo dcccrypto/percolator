@@ -625,8 +625,9 @@ fn t1_8_adl_deficit_only_lazy_equals_eager() {
     // Total loss per account = floor(q_base * D / OI)
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    // Lazy (v10.5): delta_K_abs = ceil(D * A * POS_SCALE / OI) (fused)
-    let delta_k_abs = ((d as u32) * (a_side as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // Lazy (v10.5 fused): delta_K_abs = ceil(D * A / OI)
+    // (POS_SCALE cancels: real OI_eff = OI_base * POS_SCALE)
+    let delta_k_abs = ((d as u32) * (a_side as u32) + (oi as u32) - 1) / (oi as u32);
     let delta_k = -(delta_k_abs as i32);
     let k_after = k_init + delta_k;
     let k_diff = k_after - k_init;
@@ -675,8 +676,8 @@ fn t1_9_adl_quantity_plus_deficit_lazy_conservative() {
     assert!(lazy_q <= eager_q, "lazy must not exceed eager quantity");
     assert!(eager_q - lazy_q <= 1, "lazy error bounded by 1 base unit");
 
-    // PnL: deficit is socialized via K (v10.5 fused)
-    let delta_k_abs = ((d as u32) * (a_old as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // PnL: deficit is socialized via K (v10.5 fused, POS_SCALE cancels)
+    let delta_k_abs = ((d as u32) * (a_old as u32) + (oi as u32) - 1) / (oi as u32);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss = -lazy_pnl(basis_q, delta_k, a_old);
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
@@ -1289,8 +1290,9 @@ fn t4_19_full_drain_terminal_k_includes_deficit() {
     let a_opp = S_ADL_ONE;
     let k_before: i32 = 0;
 
-    // Step 1 (v10.5 fused): delta_K_abs = ceil(D * A * POS_SCALE / OI)
-    let delta_k_abs = ((d as u32) * (a_opp as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // Step 1 (v10.5 fused): delta_K_abs = ceil(D * A / OI)
+    // (POS_SCALE cancels: real OI_eff = OI_base * POS_SCALE)
+    let delta_k_abs = ((d as u32) * (a_opp as u32) + (oi as u32) - 1) / (oi as u32);
     let delta_k = -(delta_k_abs as i32);
     let k_after = k_before + delta_k;
 
@@ -1519,29 +1521,30 @@ fn t6_24_worked_example_regression() {
     let oi_post = oi - q_close; // 3
     assert!(oi_post > 0, "partial ADL: oi_post must be > 0");
 
-    // Deficit routing (v10.5 fused): delta_K_abs = ceil(D * A * POS_SCALE / OI)
-    // = ceil(2 * 256 * 4 / 8) = ceil(256) = 256
-    let delta_k_abs = ((d as u32) * (a_long as u32) * (pos_scale as u32) + (oi as u32) - 1) / (oi as u32);
-    assert!(delta_k_abs == 256);
+    // Deficit routing (v10.5 fused): delta_K_abs = ceil(D * A / OI)
+    // (POS_SCALE cancels: real OI_eff = OI_base * POS_SCALE)
+    // = ceil(2 * 256 / 8) = ceil(64) = 64
+    let delta_k_abs = ((d as u32) * (a_long as u32) + (oi as u32) - 1) / (oi as u32);
+    assert!(delta_k_abs == 64);
     let delta_k = -(delta_k_abs as i32);
     k_long = k_long + delta_k;
-    // K_long = 2560 - 256 = 2304
+    // K_long = 2560 - 64 = 2496
 
     // A shrink: A_new = floor(256 * 3 / 8) = floor(96) = 96
     let a_long_new = a_after_adl(a_long, oi_post, oi);
     assert!(a_long_new == 96);
 
     // Step 4: L1 settles with new state
-    // k_diff = K_long_new - k_snap_l1 = 2304 - 0 = 2304
+    // k_diff = K_long_new - k_snap_l1 = 2496 - 0 = 2496
     let k_diff = k_long - k_snap_l1;
     // q_eff = floor(basis_l1 * a_long_new / a_basis_l1) = floor(32 * 96 / 256) = floor(12) = 12
     let q_eff = lazy_eff_q(basis_l1, a_long_new, a_basis_l1);
     assert!(q_eff == 12, "L1 effective quantity after ADL");
-    // PnL = floor(32 * 2304 / (256 * 4)) = floor(73728 / 1024) = 72
+    // PnL = floor(32 * 2496 / (256 * 4)) = floor(79872 / 1024) = 78
     let l1_pnl_post = lazy_pnl(basis_l1, k_diff, a_basis_l1);
-    assert!(l1_pnl_post == 72, "L1 post-ADL PnL includes deficit");
+    assert!(l1_pnl_post == 78, "L1 post-ADL PnL includes deficit");
 
-    // The deficit reduced PnL from 80 to 72 (lost 8 = floor(8*2/8)*4/4 ≈ 2 per unit * ~4 eff units)
+    // The deficit reduced PnL from 80 to 78 (lost 2 = floor(8*2/8))
     assert!(l1_pnl_post < l1_pnl_pre, "deficit must reduce PnL");
     assert!(l1_pnl_post > 0, "PnL still positive from mark gain");
 }
@@ -1566,8 +1569,9 @@ fn t6_25_pure_pnl_bankruptcy_regression() {
     let a_opp = S_ADL_ONE;
     let basis_q = (q_base as u16) * S_POS_SCALE;
 
-    // v10.5 fused: delta_K_abs = ceil(D * A * POS_SCALE / OI)
-    let delta_k_abs = ((d as u32) * (a_opp as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // v10.5 fused: delta_K_abs = ceil(D * A / OI)
+    // (POS_SCALE cancels: real OI_eff = OI_base * POS_SCALE)
+    let delta_k_abs = ((d as u32) * (a_opp as u32) + (oi as u32) - 1) / (oi as u32);
     assert!(delta_k_abs > 0, "delta_K_abs must be positive for D > 0");
 
     let delta_k = -(delta_k_abs as i32);
@@ -1935,8 +1939,9 @@ fn t1_8b_adl_deficit_lazy_conservative_symbolic_a_basis() {
     // Eager loss per account: floor(q_base * D / OI)
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    // Lazy (v10.5 fused): delta_K_abs = ceil(D * a_basis * POS_SCALE / OI)
-    let delta_k_abs = ((d as u32) * (a_basis as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // Lazy (v10.5 fused): delta_K_abs = ceil(D * a_basis / OI)
+    // (POS_SCALE cancels: real OI_eff = OI_base * POS_SCALE)
+    let delta_k_abs = ((d as u32) * (a_basis as u32) + (oi as u32) - 1) / (oi as u32);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss_raw = lazy_pnl(basis_q, delta_k, a_basis);
 
@@ -2186,169 +2191,11 @@ fn t4_23_d_zero_routes_quantity_only() {
 
 // ############################################################################
 //
-// TIER 8: REAL ENGINE INTEGRATION PROOFS
+// TIER 8: (removed — t8_30 through t8_34 were tautological small-model proofs
+// that proved algebraic identities about local variables without exercising
+// any engine code, e.g. `let vault_after = vault_before; assert!(vault_after == vault_before)`)
 //
 // ############################################################################
-
-// ============================================================================
-// T8.30: trade_oi_long_equals_short
-// ============================================================================
-
-/// Small-model proof: trade OI updates are symmetric — when account a goes
-/// long by `size` and b goes short by `size`, OI_long and OI_short both
-/// increase by the same amount. Models update_single_oi symmetry.
-#[kani::proof]
-#[kani::unwind(1)]
-#[kani::solver(cadical)]
-fn t8_30_trade_oi_long_equals_short() {
-    // Model: both sides start at same OI
-    let oi_before: u8 = kani::any();
-    let size: u8 = kani::any();
-    kani::assume(size > 0 && size <= 10);
-    // OI doesn't overflow
-    kani::assume((oi_before as u16 + size as u16) <= 255);
-
-    // Account a: was flat → goes long by size
-    // new_pos_a = 0 + size, old_pos_a = 0
-    // oi_long += |new| - |old| = size - 0 = size
-    let oi_long_after = oi_before as u16 + size as u16;
-
-    // Account b: was flat → goes short by size
-    // new_pos_b = 0 - size, old_pos_b = 0
-    // oi_short += |new| - |old| = size - 0 = size
-    let oi_short_after = oi_before as u16 + size as u16;
-
-    assert!(oi_long_after == oi_short_after,
-        "OI long must equal OI short after symmetric trade");
-}
-
-// ============================================================================
-// T8.31: trade_slippage_zero_sum
-// ============================================================================
-
-/// Small-model proof: for a zero-fee trade at execution price, no capital
-/// is created or destroyed. When fee=0, the vault (sum of all capital) is
-/// unchanged because trade only moves position between accounts.
-#[kani::proof]
-#[kani::unwind(1)]
-#[kani::solver(cadical)]
-fn t8_31_trade_zero_sum() {
-    let cap_a: u8 = kani::any();
-    let cap_b: u8 = kani::any();
-    kani::assume(cap_a >= 10 && cap_b >= 10);
-    let size: u8 = kani::any();
-    kani::assume(size > 0 && size <= 5);
-    let fee_bps: u8 = 0; // zero fee
-
-    let vault_before = cap_a as u16 + cap_b as u16;
-
-    // Trade at oracle price with zero fee:
-    // notional = size * price / POS_SCALE (at model scale this is just size*price)
-    // fee = notional * fee_bps / 10000 = 0
-    // No capital transfer at trade time; only positions change
-    // PnL is zero at trade time (trade at oracle = no mark-to-market gain)
-    let fee = 0u16; // zero fee
-    let vault_after = vault_before; // no fees extracted
-
-    assert!(vault_after == vault_before,
-        "vault must be unchanged with zero fees");
-}
-
-// ============================================================================
-// T8.32: conservation_across_trade
-// ============================================================================
-
-/// Small-model proof: conservation invariant (vault >= c_tot + insurance)
-/// is maintained across a trade. Trade with zero fees moves no capital,
-/// and trade fees only transfer from vault to protocol, never creating value.
-#[kani::proof]
-#[kani::unwind(1)]
-#[kani::solver(cadical)]
-fn t8_32_conservation_across_trade() {
-    let cap_a: u8 = kani::any();
-    let cap_b: u8 = kani::any();
-    kani::assume(cap_a >= 10 && cap_b >= 10);
-    let insurance: u8 = kani::any();
-
-    let vault = cap_a as u16 + cap_b as u16 + insurance as u16;
-    let c_tot = cap_a as u16 + cap_b as u16;
-
-    // Conservation before: vault >= c_tot + insurance
-    assert!(vault >= c_tot + insurance as u16, "conservation before");
-
-    // Trade with fee: fee is subtracted from trader capital and added to insurance
-    let fee: u8 = kani::any();
-    kani::assume(fee <= cap_a); // fee can't exceed capital
-
-    let c_tot_after = c_tot - fee as u16; // capital decreases by fee
-    let insurance_after = insurance as u16 + fee as u16; // insurance increases by fee
-    // vault is unchanged (it's the total deposit, which doesn't change)
-
-    // Conservation after: vault >= c_tot_after + insurance_after
-    // c_tot_after + insurance_after = c_tot - fee + insurance + fee = c_tot + insurance = vault
-    assert!(vault >= c_tot_after + insurance_after, "conservation after trade");
-}
-
-// ============================================================================
-// T8.33: organic_close_no_bankruptcy
-// ============================================================================
-
-/// Small-model proof: closing a position at oracle price with zero fees
-/// results in zero PnL for the closer (no bankruptcy). When open_price ==
-/// close_price and fee == 0, the account's capital is unchanged.
-#[kani::proof]
-#[kani::unwind(1)]
-#[kani::solver(cadical)]
-fn t8_33_organic_close_no_bankruptcy() {
-    let capital: u8 = kani::any();
-    kani::assume(capital >= 10);
-    let size: u8 = kani::any();
-    kani::assume(size > 0 && size <= 10);
-    let price: u8 = kani::any();
-    kani::assume(price > 0);
-
-    // Open at price, close at same price, zero fee:
-    // PnL = size * (close_price - open_price) = size * 0 = 0
-    let pnl: i16 = (size as i16) * ((price as i16) - (price as i16));
-    assert!(pnl == 0, "PnL must be zero when closing at open price");
-
-    // Capital after close = capital + pnl = capital >= 0
-    let capital_after = capital as i16 + pnl;
-    assert!(capital_after >= 0, "no bankruptcy on organic close at same price");
-
-    // Position after close = open - close = size - size = 0
-    let pos_after = size as i16 - size as i16;
-    assert!(pos_after == 0, "account must be flat after close");
-}
-
-// ============================================================================
-// T8.34: liquidation_no_oi_leak
-// ============================================================================
-
-/// Small-model proof: liquidation closes a position, so OI decreases by
-/// exactly the liquidated amount on both sides (through ADL or direct close).
-/// OI_long and OI_short remain equal after liquidation.
-#[kani::proof]
-#[kani::unwind(1)]
-#[kani::solver(cadical)]
-fn t8_34_liquidation_no_oi_leak() {
-    let oi_before: u8 = kani::any();
-    kani::assume(oi_before >= 2);
-    let liq_size: u8 = kani::any();
-    kani::assume(liq_size > 0 && liq_size <= oi_before);
-
-    // Before liquidation: OI_long == OI_short (invariant)
-    let oi_long_before = oi_before;
-    let oi_short_before = oi_before;
-
-    // Liquidation removes `liq_size` from the liquidated account's side
-    // and the same amount from the opposing side (via ADL or position close)
-    let oi_long_after = oi_long_before - liq_size;
-    let oi_short_after = oi_short_before - liq_size;
-
-    assert!(oi_long_after == oi_short_after,
-        "OI long must equal OI short after liquidation");
-}
 
 // ############################################################################
 //
@@ -3186,38 +3033,49 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
 fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    // Set up: long side has A=1 (near precision exhaustion)
-    engine.adl_mult_long = 1;
-    engine.adl_epoch_long = 0;
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
     engine.funding_price_sample_last = 100;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.adl_epoch_long = 0;
+    engine.adl_epoch_short = 0;
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
     let c = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
-    engine.deposit(c, 10_000_000, 100, 0).unwrap();
 
-    // Three accounts with long positions (with A=1 → q_eff=0 after settle)
-    // When crank touches a, it zeroes → dust. When it touches b, it zeroes → more dust.
-    // That should trigger pending reset. Account c must NOT be touched after that.
+    // a: long 1 unit, bankrupt (capital=1, K_long is deeply negative → PnL ≈ -1000)
+    engine.deposit(a, 1, 100, 0).unwrap();
     engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
     engine.accounts[a as usize].adl_k_snap = I256::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = I256::from_u128(POS_SCALE);
+
+    // b: short 1 unit (counterparty to a, same size)
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.accounts[b as usize].position_basis_q = I256::from_i128(-(POS_SCALE as i128));
     engine.accounts[b as usize].adl_a_basis = ADL_ONE;
     engine.accounts[b as usize].adl_k_snap = I256::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
+
+    // c: long 1 unit (should NOT be touched after pending reset)
+    engine.deposit(c, 10_000_000, 100, 0).unwrap();
     engine.accounts[c as usize].position_basis_q = I256::from_u128(POS_SCALE);
     engine.accounts[c as usize].adl_a_basis = ADL_ONE;
     engine.accounts[c as usize].adl_k_snap = I256::ZERO;
     engine.accounts[c as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 3;
-    engine.oi_eff_long_q = U256::from_u128(3 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(3 * POS_SCALE);
+
+    // OI: long = 2*POS_SCALE (a + c), short = POS_SCALE (b only)
+    engine.stored_pos_count_long = 2;
+    engine.stored_pos_count_short = 1;
+    engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
+    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+
+    // K_long deeply negative so a is bankrupt after settle.
+    // PnL = floor(POS_SCALE * K_long / (ADL_ONE * POS_SCALE)) = floor(K_long / ADL_ONE)
+    // With K_long = -(ADL_ONE * 1000), PnL = -1000, equity = 1 + (-1000) < 0.
+    engine.adl_coeff_long = I256::from_i128(-((ADL_ONE as i128) * 1000));
 
     // Capture c's pre-crank state
     let c_cap_before = engine.accounts[c as usize].capital.get();
@@ -3225,9 +3083,15 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let c_k_snap_before = engine.accounts[c as usize].adl_k_snap;
     let c_basis_before = engine.accounts[c as usize].position_basis_q;
 
-    // Crank should touch accounts a and b, which settle (q_eff=0 → positions zero,
-    // dust increments). After schedule_end_of_instruction_resets sees enough dust,
-    // pending reset fires and the crank quiesces — c must NOT be processed.
+    // Crank processes a (idx 0):
+    //   1. touch_account_full(a): settles PnL = -1000, equity < 0
+    //   2. Below maintenance → liquidate_at_oracle_internal(a)
+    //   3. Liquidation: closes a's long, deficit D = 999
+    //   4. enqueue_adl(Long, POS_SCALE, D):
+    //      - OI_long -= POS_SCALE
+    //      - opp = Short, oi_post = POS_SCALE - POS_SCALE = 0
+    //      - set_pending_reset(ctx, Short) ← triggers mid-loop quiescence
+    //   5. Loop breaks → b and c NOT processed
     let result = engine.keeper_crank(a, 1, 100, 0);
     assert!(result.is_ok());
 
@@ -3436,12 +3300,19 @@ fn t13_54_funding_no_mint_asymmetric_a() {
     let dk_long = k_long_after.checked_sub(k_long_before).unwrap();
     let dk_short = k_short_after.checked_sub(k_short_before).unwrap();
 
-    // Sum of K-space changes must be <= 0 (no minting)
-    // Payer loses more (or equal) than receiver gains
-    let total = dk_long.checked_add(dk_short).unwrap();
-    // total <= 0: the rounding destroyed value or was exact, never created it
-    assert!(!total.is_positive(),
-        "funding must not mint: sum of K changes must be <= 0");
+    // Cross-multiplied no-mint invariant (spec §5.4):
+    // Raw dk_long + dk_short can be positive when A_long != A_short.
+    // The correct invariant accounts for the different multiplier magnitudes:
+    //   (dk_long * A_short) + (dk_short * A_long) <= 0
+    // This is because total PnL = OI * (dk/A), so the cross-product
+    // normalizes both sides to comparable units.
+    let a_short_i = I256::from_u128(a_short as u128);
+    let a_long_i = I256::from_u128(a_long as u128);
+    let term_long = dk_long.checked_mul(a_short_i).unwrap();
+    let term_short = dk_short.checked_mul(a_long_i).unwrap();
+    let cross_total = term_long.checked_add(term_short).unwrap();
+    assert!(!cross_total.is_positive(),
+        "funding must not mint: cross-multiplied K changes must be <= 0");
 }
 
 // ============================================================================
@@ -3583,9 +3454,9 @@ fn t13_58_unilateral_empty_short_side() {
 // T13.59: fused_delta_k_no_double_rounding
 // ============================================================================
 
-/// v10.5: the fused delta_K_abs = ceil(D * A * POS_SCALE / OI) produces a
-/// result <= the old two-step ceil(D*POS_SCALE/OI)*A. This means the new
-/// formula is tighter (less over-socialization).
+/// v10.5: the fused delta_K_abs = ceil(D * A / OI) produces a result <=
+/// the old two-step ceil(D/OI)*A. This means the new formula is tighter
+/// (less over-socialization). POS_SCALE cancels (OI_eff = OI_base * POS_SCALE).
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]
@@ -3597,19 +3468,19 @@ fn t13_59_fused_delta_k_no_double_rounding() {
     let a: u8 = kani::any();
     kani::assume(a > 0);
 
-    // Old two-step: beta_abs = ceil(D*P/OI), delta_K = A * beta_abs
-    let beta_abs = ((d as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // Old two-step: beta_abs = ceil(D/OI), delta_K = A * beta_abs
+    let beta_abs = ((d as u32) + (oi as u32) - 1) / (oi as u32);
     let old_delta_k = (a as u32) * beta_abs;
 
-    // New fused: delta_K_abs = ceil(D*A*P/OI)
-    let new_delta_k = ((d as u32) * (a as u32) * (S_POS_SCALE as u32) + (oi as u32) - 1) / (oi as u32);
+    // New fused: delta_K_abs = ceil(D*A/OI)
+    let new_delta_k = ((d as u32) * (a as u32) + (oi as u32) - 1) / (oi as u32);
 
     // Fused is <= old (tighter, less over-socialization)
     assert!(new_delta_k <= old_delta_k,
         "fused formula must not exceed old two-step formula");
 
-    // Both are >= the exact value D*A*POS_SCALE/OI (both are ceilings)
-    let exact_times_oi = (d as u32) * (a as u32) * (S_POS_SCALE as u32);
+    // Both are >= the exact value D*A/OI (both are ceilings)
+    let exact_times_oi = (d as u32) * (a as u32);
     assert!(new_delta_k * (oi as u32) >= exact_times_oi,
         "fused ceiling must be >= exact value");
 }
