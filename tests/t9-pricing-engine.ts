@@ -28,7 +28,6 @@ import {
   mintTo,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import * as fs from "fs";
 
 import {
   encodeInitMarket,
@@ -59,6 +58,7 @@ import {
   parseAllAccounts,
   fetchSlab,
 } from "../packages/core/src/index.js";
+import { loadTestKeypair } from "./setup";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -307,8 +307,7 @@ async function initUserWithDeposit(
 async function main() {
   console.log("=== T9: Pricing Engine Integration Tests ===\n");
 
-  const payerData = JSON.parse(fs.readFileSync(DEPLOYER_KP_PATH, "utf8"));
-  const payer = Keypair.fromSecretKey(new Uint8Array(payerData));
+  const payer = loadTestKeypair(DEPLOYER_KP_PATH);
   const conn = new Connection(RPC_URL, "confirmed");
 
   const balance = await conn.getBalance(payer.publicKey);

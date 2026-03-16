@@ -23,7 +23,6 @@ import {
   getOrCreateAssociatedTokenAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import * as fs from "fs";
 
 import {
   encodeInitMarket,
@@ -58,6 +57,7 @@ import {
   deriveLpPda,
   fetchSlab,
 } from "@percolator/sdk";
+import { loadTestKeypair } from "./setup";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -89,8 +89,7 @@ async function main() {
   console.log(`  Slab size: ${SLAB_SIZE} bytes\n`);
 
   const connection = new Connection(RPC_URL, "confirmed");
-  const payerData = JSON.parse(fs.readFileSync(process.env.SOLANA_KEYPAIR ?? "/root/.config/solana/id.json", "utf8"));
-  const payer = Keypair.fromSecretKey(new Uint8Array(payerData));
+  const payer = loadTestKeypair(process.env.SOLANA_KEYPAIR ?? "/root/.config/solana/id.json");
   console.log(`  Payer: ${payer.publicKey.toBase58()}`);
 
   const balance = await connection.getBalance(payer.publicKey);

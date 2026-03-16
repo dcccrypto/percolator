@@ -31,7 +31,7 @@ import {
   parseEngine,
   parseAllAccounts,
 } from "../packages/core/src/index.js";
-import * as fs from "fs";
+import { loadTestKeypair } from "./setup";
 
 // Config
 const RPC_URL = `https://devnet.helius-rpc.com/?api-key=${process.env.HELIUS_DEVNET_API_KEY ?? process.env.HELIUS_API_KEY ?? ""}`;
@@ -41,7 +41,7 @@ const PROGRAM_ID = getProgramId("devnet");
 const MATCHER_ID = new PublicKey("GTRgyTDfrMvBubALAqtHuQwT8tbGyXid7svXZKtWfC9k");
 const CRANK_WALLET = new PublicKey("2JaSzRYrf44fPpQBtRJfnCEgThwCmvpFd3FCXi45VXxm");
 const MINT = new PublicKey("DvH13uxzTzo1xVFwkbJ6YASkZWs6bm3vFDH4xu7kUYTs");
-const DEPLOYER_KP = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync("/tmp/deployer.json", "utf8"))));
+const DEPLOYER_KP = loadTestKeypair("/tmp/deployer.json");
 
 const connection = new Connection(RPC_URL, "confirmed");
 
