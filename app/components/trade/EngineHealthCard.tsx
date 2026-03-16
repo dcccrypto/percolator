@@ -6,7 +6,7 @@ import { useSlabState } from "@/components/providers/SlabProvider";
 import { useTokenMeta } from "@/hooks/useTokenMeta";
 import { useUsdToggle } from "@/components/providers/UsdToggleProvider";
 import { useLivePrice } from "@/hooks/useLivePrice";
-import { computeMarketHealth } from "@/lib/health";
+import { computeMarketHealth, sanitizeOnChainValue } from "@/lib/health";
 import { formatTokenAmount, formatSlotAge } from "@/lib/format";
 
 function formatNum(n: number): string {
@@ -40,10 +40,12 @@ export const EngineHealthCard: FC = () => {
 
   const health = computeMarketHealth(engine);
 
-  const cTot = engine.cTot ?? 0n;
-  const pnlPosTot = engine.pnlPosTot ?? 0n;
-  const netLpPos = engine.netLpPos ?? 0n;
-  const lpSumAbs = engine.lpSumAbs ?? 0n;
+  // Sanitize sentinel / corrupted on-chain values (u64::MAX or near-MAX garbage)
+  // before converting to display values. Matches the guard in SystemCapitalCard.tsx.
+  const cTot = sanitizeOnChainValue(engine.cTot ?? 0n);
+  const pnlPosTot = sanitizeOnChainValue(engine.pnlPosTot ?? 0n);
+  const netLpPos = sanitizeOnChainValue(engine.netLpPos ?? 0n);
+  const lpSumAbs = sanitizeOnChainValue(engine.lpSumAbs ?? 0n);
 
   const haircutDenom = cTot + pnlPosTot;
   const haircutPct = haircutDenom > 0n
