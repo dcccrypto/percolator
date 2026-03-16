@@ -272,6 +272,13 @@ export async function POST(req: NextRequest) {
       ),
     );
 
+    // Multi-signer: partialSign mintKeypair FIRST so its signature is in the array,
+    // then let the sealed signer add mintAuthority's sig via signTransaction.
+    // SystemProgram.createAccount requires the new account keypair to sign —
+    // without this, every mirror mint fails with signature verification failure.
+    // sendAndConfirmTransaction cannot be used here because it would re-sign and
+    // overwrite the sealed signer's signature, so we use sendRawTransaction instead.
+    (tx as Transaction).partialSign(mintKeypair);
     tx = mintSigner.signTransaction(tx);
     const sig = await connection.sendRawTransaction(tx.serialize());
     await connection.confirmTransaction(sig, "confirmed");
