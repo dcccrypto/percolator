@@ -26,6 +26,7 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  VersionedTransaction,
   SystemProgram,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
@@ -37,6 +38,7 @@ import {
 } from "@solana/spl-token";
 import { getConfig } from "@/lib/config";
 import { getServiceClient } from "@/lib/supabase";
+import { getDevnetMintSigner } from "@/lib/devnet-signer";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -230,16 +232,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 3. Create devnet mint
-    const mintAuthKeyJson = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
-    if (!mintAuthKeyJson) {
+    const mintSigner = getDevnetMintSigner();
+    if (!mintSigner) {
       return NextResponse.json(
         { error: "Server not configured for minting (DEVNET_MINT_AUTHORITY_KEYPAIR missing)" },
         { status: 500 },
       );
     }
-    const mintAuthority = Keypair.fromSecretKey(
-      Uint8Array.from(JSON.parse(mintAuthKeyJson)),
-    );
+    const mintAuthPk = new PublicKey(mintSigner.publicKey());
 
     const cfg = getConfig();
     const connection = new Connection(cfg.rpcUrl, "confirmed");
@@ -247,10 +247,10 @@ export async function POST(req: NextRequest) {
     const mintKeypair = Keypair.generate();
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
-    const tx = new Transaction();
+    let tx: Transaction | VersionedTransaction = new Transaction();
     tx.add(
       SystemProgram.createAccount({
-        fromPubkey: mintAuthority.publicKey,
+        fromPubkey: mintAuthPk,
         newAccountPubkey: mintKeypair.publicKey,
         lamports,
         space: MINT_SIZE,
@@ -261,17 +261,14 @@ export async function POST(req: NextRequest) {
       createInitializeMintInstruction(
         mintKeypair.publicKey,
         tokenInfo.decimals,
-        mintAuthority.publicKey, // mint authority
-        mintAuthority.publicKey, // freeze authority
+        mintAuthPk, // mint authority
+        mintAuthPk, // freeze authority
       ),
     );
 
-    const sig = await sendAndConfirmTransaction(
-      connection,
-      tx,
-      [mintAuthority, mintKeypair],
-      { commitment: "confirmed" },
-    );
+    tx = mintSigner.signTransaction(tx);
+    const sig = await connection.sendRawTransaction(tx.serialize());
+    await connection.confirmTransaction(sig, "confirmed");
 
     const devnetMint = mintKeypair.publicKey.toBase58();
 
