@@ -31,7 +31,7 @@ export function useDeposit(slabAddress: string) {
   const inflightRef = useRef(false);
 
   const deposit = useCallback(
-    async (params: { userIdx: number; amount: bigint }) => {
+    async (params: { userIdx: number; amount: bigint; accountExists?: boolean }) => {
       if (inflightRef.current) throw new Error("Deposit already in progress");
       inflightRef.current = true;
       setLoading(true);
@@ -53,6 +53,14 @@ export function useDeposit(slabAddress: string) {
         //      If not, prepend InitUser (tag 1) before DepositCollateral (tag 3).
         //      This prevents the silent on-chain failure that occurs when
         //      deposit is called for a user who has never traded this market.
+        //
+        // RACE CONDITION GUARD: If the caller sets accountExists=true (meaning
+        // useUserAccount() confirmed the account in SlabProvider's state), we
+        // skip the auto-init path entirely. This prevents a stale RPC response
+        // from incorrectly treating an existing account as absent and prepending
+        // a duplicate InitUser — which would fail on-chain and block all deposits
+        // made immediately after account creation. See GH P0 bug: "Account created
+        // but deposit fails after creation."
         //
         // If the RPC call itself throws (timeout, 429 etc.), we fall through
         // best-effort and let the chain surface any error naturally.
@@ -76,7 +84,11 @@ export function useDeposit(slabAddress: string) {
         let resolvedUserIdx = params.userIdx;
         const instructions: TransactionInstruction[] = [];
 
-        if (slabData) {
+        // Only run auto-init check if the caller hasn't confirmed the account exists.
+        // When accountExists=true, the caller (DepositWithdrawCard) already verified
+        // the account via useUserAccount() — skip the stale-slab re-check that would
+        // incorrectly try to InitUser a second time.
+        if (slabData && !params.accountExists) {
           try {
             const slabAccounts = parseAllAccounts(slabData);
             const pkStr = wallet.publicKey.toBase58();

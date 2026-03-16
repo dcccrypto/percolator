@@ -176,7 +176,10 @@ export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress,
       if (amtNative <= 0n) return;
       let sig: string | undefined;
       if (mode === "deposit") {
-        sig = await deposit({ userIdx: userAccount.idx, amount: amtNative });
+        // accountExists=true: DepositWithdrawCard only renders when userAccount !== null,
+        // so the account is confirmed by SlabProvider. Skips the stale-slab re-check in
+        // useDeposit that would incorrectly prepend a duplicate InitUser. (P0 race fix)
+        sig = await deposit({ userIdx: userAccount.idx, amount: amtNative, accountExists: true });
       } else {
         sig = await withdraw({ userIdx: userAccount.idx, amount: amtNative });
       }
