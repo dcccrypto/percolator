@@ -112,7 +112,7 @@ const BLOCKED_MARKET_ADDRESSES: ReadonlySet<string> = new Set([
 export const dynamic = "force-dynamic";
 
 // GET /api/markets — list all active markets with stats
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const supabase = getServiceClient();
     const { data, error } = await supabase
@@ -228,7 +228,13 @@ export async function GET() {
     // #1172: Add activeTotal — markets with at least one sane stat (price/volume/OI).
     // This matches the count shown by /api/stats totalMarkets.
     const activeTotal = sanitized.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
-    return NextResponse.json({ total: sanitized.length, activeTotal, markets: sanitized }, {
+
+    // GH#1348: Respect ?limit= query param to avoid returning 100+ markets
+    const limitParam = request.nextUrl.searchParams.get("limit");
+    const limitNum = limitParam ? parseInt(limitParam, 10) : 0;
+    const limited = limitNum > 0 ? sanitized.slice(0, limitNum) : sanitized;
+
+    return NextResponse.json({ total: sanitized.length, activeTotal, markets: limited }, {
       headers: {
         "Cache-Control": "public, s-maxage=10, stale-while-revalidate=30",
       },

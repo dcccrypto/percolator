@@ -51,13 +51,13 @@ export function Watchlist() {
         </Link>
       </div>
 
-      <div>
+      <div className="max-h-[280px] overflow-y-auto">
         {loading ? (
           <div className="px-4 py-6 text-center text-[10px] text-[var(--text-muted)]">Loading markets...</div>
         ) : markets.length === 0 ? (
           <div className="px-4 py-6 text-center text-[10px] text-[var(--text-muted)]">No markets found</div>
         ) : (
-          markets.map((m) => (
+          markets.slice(0, 10).map((m) => (
             <Link
               key={m.slab_address}
               href={`/trade/${m.slab_address}`}
