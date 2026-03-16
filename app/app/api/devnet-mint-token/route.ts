@@ -18,7 +18,6 @@ import {
   Transaction,
   VersionedTransaction,
   SystemProgram,
-  sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import {
@@ -221,11 +220,13 @@ export async function POST(req: NextRequest) {
           ),
         );
 
-        // Sign and send using sealed signer
+        // Sign and send raw — sendAndConfirmTransaction wipes the sealed signer's signature
+        // by calling tx.sign(signers) internally. Use sendRawTransaction instead.
         const signedAirdropTx = mintSigner.signTransaction(airdropTx);
-        await sendAndConfirmTransaction(connection, signedAirdropTx as Transaction, [], {
-          commitment: "confirmed",
-        });
+        const airdropTxSig = await connection.sendRawTransaction(
+          (signedAirdropTx as Transaction).serialize(),
+        );
+        await connection.confirmTransaction(airdropTxSig, "confirmed");
 
         return NextResponse.json({
           status: "already_exists",
@@ -300,14 +301,14 @@ export async function POST(req: NextRequest) {
       ),
     );
 
-    // Sign using sealed signer + newly generated mint keypair
+    // Multi-signer: partialSign mintKeypair FIRST so its signature is in the array,
+    // then let the sealed signer add mintAuthority's sig via partialSign.
+    // sendAndConfirmTransaction wipes all existing sigs (calls tx.sign(signers) internally)
+    // so we use sendRawTransaction + confirmTransaction instead.
+    (tx as Transaction).partialSign(mintKeypair);
     tx = mintSigner.signTransaction(tx);
-    const sig = await sendAndConfirmTransaction(
-      connection,
-      tx as Transaction,
-      [mintKeypair],
-      { commitment: "confirmed" },
-    );
+    const sig = await connection.sendRawTransaction((tx as Transaction).serialize());
+    await connection.confirmTransaction(sig, "confirmed");
 
     const devnetMint = mintKeypair.publicKey.toBase58();
 

@@ -28,7 +28,6 @@ import {
   Connection,
   PublicKey,
   Transaction,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
@@ -374,10 +373,19 @@ export async function POST(req: NextRequest) {
       }
       tx.add(createMintToInstruction(mintPk, ata, mintAuthPk, rawAmount));
 
-      // Sign using sealed signer and send
+      // Sign using sealed signer and send raw.
+      // sendAndConfirmTransaction() calls tx.sign(signers) internally which wipes all existing
+      // signatures — including the one the sealed signer just applied. Use sendRawTransaction +
+      // confirmTransaction instead (same pattern as auto-fund and devnet-mirror-mint).
       const signedTx = mintSigner.signTransaction(tx);
       sig = await withTimeout(
-        sendAndConfirmTransaction(connection, signedTx as Transaction, [], { commitment: "confirmed" }),
+        (async () => {
+          const txSig = await connection.sendRawTransaction(
+            (signedTx as Transaction).serialize(),
+          );
+          await connection.confirmTransaction(txSig, "confirmed");
+          return txSig;
+        })(),
         30_000,
       );
       mintSucceeded = true;
