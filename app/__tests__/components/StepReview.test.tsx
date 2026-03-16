@@ -180,3 +180,82 @@ describe("StepReview — SOL balance display", () => {
     expect(screen.getByText(/need ~0\.4600 SOL/)).toBeDefined();
   });
 });
+
+/**
+ * GH#1301: Token balance check — the Launch button must be disabled when the wallet
+ * does not have enough tokens to cover the full market creation cost (seed + LP
+ * collateral + insurance), not just the MIN_INIT_MARKET_SEED (500 tokens).
+ *
+ * The devnet bypass (`isPercolatorMirror=true`) skips this check because tokens are
+ * auto-airdropped after creation. For non-mirror tokens (custom tokens, native SOL
+ * collateral), the check must remain active even on devnet.
+ */
+describe("StepReview — GH#1301: token balance checks (PERC-1222)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("disables Launch and shows 'Insufficient Tokens' for custom devnet token with low wallet balance", () => {
+    // devnet, NOT a Percolator mirror (e.g. SOL-PERP — user has 5 SOL, needs 1100 SOL tokens)
+    render(
+      <StepReview
+        {...baseProps}
+        isPercolatorMirror={false}
+        hasTokens={true}
+        hasSufficientTokensForSeed={false}
+        canLaunch={false}
+      />
+    );
+    const btn = screen.getByRole("button", { name: /Insufficient Tokens/i });
+    expect(btn).toBeDefined();
+    expect(btn.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("enables Launch for Percolator mirror token even when hasSufficientTokensForSeed=false (auto-airdrop)", () => {
+    // devnet, IS a Percolator mirror token — tokens will be airdropped after creation
+    render(
+      <StepReview
+        {...baseProps}
+        isPercolatorMirror={true}
+        hasTokens={false}
+        hasSufficientTokensForSeed={false}
+        canLaunch={true}          // CreateMarketWizard sets skipTokenBalanceCheck=true here
+      />
+    );
+    const btn = screen.getByRole("button", { name: /LAUNCH & MINT TOKENS/i });
+    expect(btn).toBeDefined();
+    expect(btn.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("disables Launch on mainnet when hasSufficientTokensForSeed=false", async () => {
+    const { getNetwork } = await import("@/lib/config");
+    (getNetwork as ReturnType<typeof vi.fn>).mockReturnValue("mainnet-beta");
+
+    render(
+      <StepReview
+        {...baseProps}
+        isPercolatorMirror={false}
+        hasTokens={true}
+        hasSufficientTokensForSeed={false}
+        canLaunch={false}
+      />
+    );
+    const btn = screen.getByRole("button", { name: /Insufficient Tokens/i });
+    expect(btn.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("enables Launch when both token and SOL balance are sufficient (happy path)", () => {
+    render(
+      <StepReview
+        {...baseProps}
+        isPercolatorMirror={false}
+        hasTokens={true}
+        hasSufficientTokensForSeed={true}
+        hasSufficientBalance={true}
+        canLaunch={true}
+      />
+    );
+    const btn = screen.getByRole("button", { name: /LAUNCH MARKET/i });
+    expect(btn.hasAttribute("disabled")).toBe(false);
+  });
+});

@@ -217,8 +217,16 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
   const maxLeverage = Math.floor(10000 / wizard.initialMarginBps);
   const feeConflict = wizard.tradingFeeBps >= wizard.initialMarginBps;
   const hasTokens = wizard.walletBalance !== null && wizard.walletBalance > 0n;
-  const hasSufficientTokensForSeed = wizard.walletBalance !== null && wizard.walletBalance >= MIN_INIT_MARKET_SEED;
   const decimals = wizard.tokenMeta?.decimals ?? 6;
+  // GH#1301: Check against the full token requirement (seed + LP collateral + insurance),
+  // not just MIN_INIT_MARKET_SEED (500 tokens). A user with 600 tokens but 1100 LP
+  // collateral entered would previously pass the check and reach a failed on-chain tx.
+  const totalTokensRequired = useMemo((): bigint => {
+    const lpRaw = parseHumanAmount(wizard.lpCollateral || "0", decimals);
+    const insRaw = parseHumanAmount(wizard.insuranceAmount, decimals);
+    return MIN_INIT_MARKET_SEED + lpRaw + insRaw;
+  }, [wizard.lpCollateral, wizard.insuranceAmount, decimals]);
+  const hasSufficientTokensForSeed = wizard.walletBalance !== null && wizard.walletBalance >= totalTokensRequired;
   const symbol = wizard.tokenMeta?.symbol ?? "Token";
 
   // Step validation
@@ -248,13 +256,18 @@ export const CreateMarketWizard: FC<{ initialMint?: string }> = ({ initialMint }
     return slabRentSol + tokenAccountRentSol + TX_FEE_ESTIMATE_SOL;
   }, [wizard.slabTier]);
   const hasSufficientSol = solBalance !== null && solBalance >= requiredSol;
-  // On devnet, tokens are auto-airdropped after market creation — skip token balance checks
   const isDevnet = getNetwork() === "devnet";
   // GH#1117: True only when the selected token is a Percolator mirror mint
   // (devnetMintAddress differs from the user's input = mirror flow ran).
   // False for custom tokens entered directly (user = mint authority; no auto-airdrop).
   const isPercolatorMirror = devnetMintAddress !== null && devnetMintAddress !== wizard.mintAddress;
-  const allValid = step1Valid && step2Valid && step3Valid && (isDevnet || (hasTokens && hasSufficientTokensForSeed)) && hasSufficientSol;
+  // GH#1301: On devnet, tokens are auto-airdropped — but ONLY for Percolator-managed mirror mints.
+  // Custom tokens (user = mint authority) and native-SOL collateral markets (e.g., SOL-PERP with
+  // 1100 SOL LP collateral) cannot be auto-funded. Tightening the bypass from `isDevnet` to
+  // `isDevnet && isPercolatorMirror` prevents the Launch button from being enabled when the user
+  // has 5 SOL but entered 1100 SOL as LP collateral.
+  const skipTokenBalanceCheck = isDevnet && isPercolatorMirror;
+  const allValid = step1Valid && step2Valid && step3Valid && (skipTokenBalanceCheck || (hasTokens && hasSufficientTokensForSeed)) && hasSufficientSol;
 
   // Quick Launch auto-advance: step 1 → step 2 when token is resolved and params ready
   const quickAutoAdvancedRef = useRef(false);

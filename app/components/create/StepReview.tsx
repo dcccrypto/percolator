@@ -95,17 +95,23 @@ export const StepReview: FC<StepReviewProps> = ({
 
   const isDevnet = getNetwork() === "devnet";
 
+  // GH#1301: mirrors CreateMarketWizard skipTokenBalanceCheck logic.
+  // Token balance check is skipped only for Percolator-managed mirror mints on devnet
+  // (tokens auto-airdropped post-creation). Custom tokens and native-SOL collateral markets
+  // still require sufficient token balance.
+  const skipTokenBalanceCheck = isDevnet && isPercolatorMirror;
+
   const launchButtonLabel = useMemo(() => {
     if (!walletConnected) return "Connect Wallet to Launch";
     if (!mintValid) return "❌ Invalid Mint Address";
     if (!mintExistsOnNetwork) return "❌ Mint Not Found on Network";
-    if (!isDevnet && !hasTokens) return "No Tokens — Mint First";
-    if (!isDevnet && !hasSufficientTokensForSeed) return "Insufficient Tokens for Vault Seed (500)";
+    if (!skipTokenBalanceCheck && !hasTokens) return "No Tokens — Mint First";
+    if (!skipTokenBalanceCheck && !hasSufficientTokensForSeed) return "Insufficient Tokens — Check Wallet Balance";
     if (feeConflict) return "Fix Parameters to Continue";
     if (!hasSufficientBalance) return "Insufficient SOL";
     if (isDevnet) return isPercolatorMirror ? "LAUNCH & MINT TOKENS →" : "LAUNCH MARKET →";
     return "LAUNCH MARKET →";
-  }, [walletConnected, mintValid, mintExistsOnNetwork, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet, isPercolatorMirror]);
+  }, [walletConnected, mintValid, mintExistsOnNetwork, hasTokens, hasSufficientTokensForSeed, feeConflict, hasSufficientBalance, isDevnet, isPercolatorMirror, skipTokenBalanceCheck]);
 
   return (
     <div className="space-y-5">

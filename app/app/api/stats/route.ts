@@ -119,7 +119,10 @@ export async function GET(request: NextRequest) {
       // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
       const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
       const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-      if (accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS) return sum;
+      // GH#1300: Use inclusive boundary (<= 1M) to match StatsCollector in percolator-indexer.
+      // PR#1299 used strict < 1M — markets at exactly vault=1_000_000 (creation-deposit only,
+      // vault=LP seed amount) slipped through and added phantom OI. Inclusive guard closes it.
+      if (accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_OI_STATS) return sum;
 
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
