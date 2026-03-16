@@ -120,6 +120,7 @@ const DevnetMintContent: FC = () => {
   const [airdropping, setAirdropping] = useState(false);
   const [airdropStatus, setAirdropStatus] = useState<string | null>(null);
   const [airdropFailed, setAirdropFailed] = useState(false);
+  const [airdropTxSig, setAirdropTxSig] = useState<string | null>(null);
   const [createStatus, setCreateStatus] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [tokenName, setTokenName] = useState("Test Token");
@@ -185,8 +186,10 @@ const DevnetMintContent: FC = () => {
     setAirdropping(true);
     setAirdropStatus("Requesting 2 SOL airdrop...");
     setAirdropFailed(false);
+    setAirdropTxSig(null);
     try {
       const sig = await airdropConnection.requestAirdrop(publicKey, 2 * LAMPORTS_PER_SOL);
+      setAirdropTxSig(sig);
       const startTime = Date.now();
       const TIMEOUT_MS = 60_000;
       let confirmed = false;
@@ -258,6 +261,7 @@ const DevnetMintContent: FC = () => {
     setLoading(true);
     setCreateStatus("Creating mint account...");
     setMintAddress(null);
+    setLastTxSig(null);
 
     try {
       // Validate decimals (prevent integer overflow on Solana u64)
@@ -664,9 +668,24 @@ const DevnetMintContent: FC = () => {
                 </button>
               </div>
               {airdropStatus && (
-                <p className={`mt-2 text-[10px] ${airdropStatus.startsWith("Airdrop successful") ? "text-[var(--accent)]" : airdropFailed ? "text-[var(--short)]" : "text-[var(--text-muted)]"}`}>
-                  {airdropStatus}
-                </p>
+                <div className="mt-2">
+                  <p className={`text-[10px] ${airdropStatus.startsWith("Airdrop successful") ? "text-[var(--accent)]" : airdropFailed ? "text-[var(--short)]" : "text-[var(--text-muted)]"}`}>
+                    {airdropStatus}
+                  </p>
+                  {airdropFailed && airdropStatus.includes("timeout") && airdropTxSig && (
+                    <div className="mt-1.5 border border-[var(--warning)]/20 bg-[var(--warning)]/[0.04] px-2 py-1.5">
+                      <p className="text-[10px] text-[var(--warning)]">The airdrop may still arrive. Check before requesting again.</p>
+                      <a
+                        href={`https://explorer.solana.com/tx/${airdropTxSig}?cluster=devnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-0.5 inline-block text-[10px] text-[var(--accent)] underline hover:text-white"
+                      >
+                        Check transaction on Explorer ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </ScrollReveal>
@@ -789,7 +808,22 @@ const DevnetMintContent: FC = () => {
 
               {/* Error inline */}
               {!loading && createStatus?.startsWith("Error") && (
-                <p className="mb-3 text-xs text-[var(--short)]">{createStatus}</p>
+                <div className="mb-3">
+                  <p className="text-xs text-[var(--short)]">{createStatus}</p>
+                  {lastTxSig && createStatus.includes("timeout") && (
+                    <div className="mt-2 border border-[var(--warning)]/20 bg-[var(--warning)]/[0.04] px-3 py-2">
+                      <p className="text-[11px] text-[var(--warning)]">Your transaction may still be processing. Check the explorer before retrying to avoid creating a duplicate token.</p>
+                      <a
+                        href={`https://explorer.solana.com/tx/${lastTxSig}?cluster=devnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-1 inline-block text-[10px] text-[var(--accent)] underline hover:text-white"
+                      >
+                        Check transaction on Explorer ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
               )}
 
               <button className={`${btnPrimary} w-full`} onClick={handleCreateAndMint} disabled={loading || !recipient || lowSol || !walletReady}>
@@ -825,17 +859,32 @@ const DevnetMintContent: FC = () => {
                 </div>
               )}
               {!mintingMore && mintMoreStatus && (
-                <p className={`text-xs ${mintMoreStatus.startsWith("Error") ? "text-[var(--short)]" : "text-[var(--accent)]"}`}>
-                  {mintMoreStatus}
-                  {lastTxSig && !mintMoreStatus.startsWith("Error") && (
-                    <>
-                      {" "}
-                      <a href={`https://explorer.solana.com/tx/${lastTxSig}?cluster=devnet`} target="_blank" rel="noopener noreferrer" className="underline hover:text-white">
-                        View tx →
+                <div>
+                  <p className={`text-xs ${mintMoreStatus.startsWith("Error") ? "text-[var(--short)]" : "text-[var(--accent)]"}`}>
+                    {mintMoreStatus}
+                    {lastTxSig && !mintMoreStatus.startsWith("Error") && (
+                      <>
+                        {" "}
+                        <a href={`https://explorer.solana.com/tx/${lastTxSig}?cluster=devnet`} target="_blank" rel="noopener noreferrer" className="underline hover:text-white">
+                          View tx →
+                        </a>
+                      </>
+                    )}
+                  </p>
+                  {mintMoreStatus.startsWith("Error") && mintMoreStatus.includes("timeout") && lastTxSig && (
+                    <div className="mt-2 border border-[var(--warning)]/20 bg-[var(--warning)]/[0.04] px-3 py-2">
+                      <p className="text-[11px] text-[var(--warning)]">Your transaction may still be processing. Check the explorer before retrying.</p>
+                      <a
+                        href={`https://explorer.solana.com/tx/${lastTxSig}?cluster=devnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-1 inline-block text-[10px] text-[var(--accent)] underline hover:text-white"
+                      >
+                        Check transaction on Explorer ↗
                       </a>
-                    </>
+                    </div>
                   )}
-                </p>
+                </div>
               )}
               {/* P-HIGH-4: Disable button during mint authority check */}
               <button className={`${btnPrimary} w-full`} onClick={handleMintMore} disabled={mintingMore || checkingMintAuth || !existingMint || !mintMoreAmount || !!mintAuthError || !walletReady}>
