@@ -347,14 +347,19 @@ const DevnetMintContent: FC = () => {
 
       const startTime = Date.now();
       const TIMEOUT_MS = 60_000;
+      let confirmed = false;
       while (Date.now() - startTime < TIMEOUT_MS) {
         const { value } = await connection.getSignatureStatuses([sig]);
         const s = value?.[0];
         if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") {
           if (s.err) throw new Error(`Transaction failed: ${JSON.stringify(s.err)}`);
+          confirmed = true;
           break;
         }
         await new Promise(r => setTimeout(r, 2000));
+      }
+      if (!confirmed) {
+        throw new Error("Transaction confirmation timeout after 60s");
       }
 
       const colorHash = mintKeypair.publicKey.toBuffer().slice(0, 3);
@@ -448,14 +453,19 @@ const DevnetMintContent: FC = () => {
       setMintMoreStatus("Confirming...");
 
       const startTime = Date.now();
+      let mintMoreConfirmed = false;
       while (Date.now() - startTime < 60_000) {
         const { value } = await connection.getSignatureStatuses([sig]);
         const s = value?.[0];
         if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") {
           if (s.err) throw new Error(`Transaction failed: ${JSON.stringify(s.err)}`);
+          mintMoreConfirmed = true;
           break;
         }
         await new Promise(r => setTimeout(r, 2000));
+      }
+      if (!mintMoreConfirmed) {
+        throw new Error("Transaction confirmation timeout after 60s");
       }
       setMintMoreStatus(`Minted ${Number(mintMoreAmount).toLocaleString()} tokens!`);
       await refreshBalance();
