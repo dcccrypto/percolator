@@ -119,17 +119,22 @@ export async function GET(request: NextRequest) {
       // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
       const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
       const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-      // GH#1304: Compute rawOi first so we can distinguish phantom markets (vault=1M, no OI)
-      // from real markets (vault=1M, actual positions). Previous inclusive guard (<= 1M)
-      // incorrectly filtered out usdEkK5G and MOLTBOT which have vault=1M + real OI.
+      // GH#1314: Mirror /api/markets phantom guard exactly — strict < 1M (not <=).
+      // vault=1M (creation-deposit only) markets like usdEkK5G and MOLTBOT are NOT
+      // phantom (strict < excludes only vault < 1M). PR #1303 used <= which incorrectly
+      // filtered them; PR #1307 over-corrected with (vaultBal <= 1M && rawOi === 0)
+      // which let through markets with vault < 1M + stale non-zero rawOi, causing the
+      // residual $42K phantom OI. The /api/markets condition is the single source of truth.
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
             ? (m.open_interest_long ?? 0) + (m.open_interest_short ?? 0)
             : 0);
       if (!isSaneMarketValue(rawOi)) return sum;
-      // Skip phantom markets: no accounts, OR low/seed vault with zero actual OI
-      if (accountsCount === 0 || (vaultBal <= MIN_VAULT_FOR_OI_STATS && rawOi === 0)) return sum;
+      // Skip phantom markets: no accounts, OR vault below creation-deposit threshold.
+      // Strict < mirrors /api/markets isPhantomOI exactly (vault=1M is NOT phantom).
+      const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS;
+      if (isPhantomOI) return sum;
       // GH#1265: OI is tracked in collateral micro-units. When no oracle price is available
       // (admin-mode markets not yet cranked), fall back to $1/token — correct for devnet
       // markets. Without this fallback, only price-cranked markets contributed to OI,
