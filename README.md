@@ -167,15 +167,6 @@ Together they guarantee:
 
 ## Formal Verification
 
-147 Kani (CBMC) proofs and 99 unit tests covering:
-
-- **Arithmetic** (18 proofs): helper correctness, rounding direction, no overflow
-- **Invariants** (26 proofs): conservation law, PnL tracking, equity non-negativity
-- **Lazy A/K** (28 proofs): one-event equivalence, composition, epoch settlement
-- **Safety** (30 proofs): conservation under operations, ADL routing, dust bounds
-- **Instructions** (34 proofs): per-instruction correctness, reset mechanics, fee seniority
-- **Liveness** (11 proofs): reset progress, drain completion, no deadlock
-
 ```bash
 cargo install --locked kani-verifier
 cargo kani setup
