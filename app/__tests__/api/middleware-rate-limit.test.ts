@@ -1,6 +1,6 @@
 /**
- * Tests for middleware.ts — Upstash Redis distributed rate limiter (GH#1213)
- * and off-by-one fix (GH#1245).
+ * Tests for middleware.ts — Upstash Redis distributed rate limiter (GH#1213),
+ * off-by-one fix (GH#1245), and funding slab blocklist guard (GH#1363).
  *
  * KEY NOTE: vi.fn().mockImplementation(() => ...) with an arrow function is
  * NOT usable as a constructor (Vitest 4 enforces this). Ratelimit instances
@@ -15,6 +15,7 @@
  *  - RPC tier uses a separate 600/min limit bucket
  *  - X-RateLimit-* + Retry-After headers present on 429 responses
  *  - Graceful Redis error fallback → in-memory, no 500s
+ *  - GH#1363: Funding slab blocklist guard fires in middleware (pre-rewrite)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -196,5 +197,69 @@ describe("middleware — graceful Redis error fallback", () => {
     const res = await middleware(makeReq("/api/markets", "10.0.3.1"));
     expect(res.status).not.toBe(500);
     expect(res.status).not.toBe(429); // fresh IP under in-memory limit
+  });
+});
+
+// ── Suite 4: Funding slab blocklist guard (GH#1363) ───────────────────────
+// next.config.ts rewrites /api/funding/:slab → Railway before route handlers
+// run, so the blocklist check in route.ts is dead code for those paths.
+// The middleware guard must intercept pre-rewrite and return 404.
+describe("middleware — funding slab blocklist guard (GH#1363)", () => {
+  let middleware: MiddlewareFn;
+
+  beforeEach(async () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+    middleware = await freshMiddleware();
+  });
+
+  it("returns 404 for hardcoded blocked slab on /api/funding/:slab", async () => {
+    // BxJPaMaCfEGTBsjZ8wfj3Yfzf4wpasmxKAEvqZZRcGPP is in BLOCKED_SLAB_ADDRESSES
+    const res = await middleware(
+      makeReq("/api/funding/BxJPaMaCfEGTBsjZ8wfj3Yfzf4wpasmxKAEvqZZRcGPP"),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Market not found");
+  });
+
+  it("returns 404 for hardcoded blocked slab on /api/funding/:slab/history", async () => {
+    const res = await middleware(
+      makeReq("/api/funding/HjBePQZnoZVftg9B52gyeuHGjBvt2f8FNCVP4FeoP3YT/history"),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Market not found");
+  });
+
+  it("returns 404 for env-var-injected blocked slab", async () => {
+    process.env.BLOCKED_MARKET_ADDRESSES = "RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX";
+    // Need a fresh middleware so module-level set picks up the new env var
+    const mw = await freshMiddleware();
+    const res = await mw(
+      makeReq("/api/funding/RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX"),
+    );
+    expect(res.status).toBe(404);
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+  });
+
+  it("passes through unblocked slabs (does not return 404)", async () => {
+    const res = await middleware(makeReq("/api/funding/ValidSlabAddressXXXXXXXXXXXXXXXX"));
+    // Should not be 404 (will be proxied to Railway or pass to rate limiter)
+    expect(res.status).not.toBe(404);
+  });
+
+  it("does not affect /api/funding/global (not a slab path)", async () => {
+    const res = await middleware(makeReq("/api/funding/global"));
+    // /api/funding/global is a valid Next.js route, not a slab — should pass through
+    // (regex matches single segment after /api/funding/ so 'global' would match,
+    // but it's not in the blocklist so it passes through)
+    expect(res.status).not.toBe(404);
+  });
+
+  it("does not affect non-funding API routes", async () => {
+    const res = await middleware(makeReq("/api/markets"));
+    expect(res.status).not.toBe(404);
   });
 });

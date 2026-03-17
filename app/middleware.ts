@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { Redis } from "@upstash/redis";
 import { Ratelimit } from "@upstash/ratelimit";
+import { BLOCKED_SLAB_ADDRESSES } from "@/lib/blocklist";
 
 // ── Rate limiter configuration ───────────────────────────────────────────────
 // Two tiers: RPC proxy gets a higher limit since Solana web3.js generates many calls per page load.
@@ -171,6 +172,24 @@ function _isBlocked(clientIp: string): boolean {
   return false;
 }
 
+// ── Funding slab blocklist (GH#1363) ─────────────────────────────────────────
+// next.config.ts rewrites /api/funding/:slab → Railway BEFORE Next.js route
+// handlers run, so the BLOCKED_SLAB_ADDRESSES check in route.ts is dead code
+// for those paths.  This guard lives in middleware (which runs pre-rewrite)
+// and returns 404 early — preventing blocked/corrupt slabs from ever reaching
+// Railway (which returns 500 for them).
+//
+// Evaluated once at module load (Edge Runtime cold start), not per request.
+const _blockedFundingSlabSet: ReadonlySet<string> = new Set([
+  ...BLOCKED_SLAB_ADDRESSES,
+  ...(process.env.BLOCKED_MARKET_ADDRESSES ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+]);
+// Matches /api/funding/<slab> and /api/funding/<slab>/history
+const _fundingSlabRe = /^\/api\/funding\/([^/]+)(\/history)?$/;
+
 export async function middleware(request: NextRequest) {
   // ── IP Blocklist check ─────────────────────────────────────────────────────
   // Resolve client IP using the same proxy-depth logic as the rate limiter.
@@ -191,6 +210,21 @@ export async function middleware(request: NextRequest) {
     if (_isBlocked(_clientIp)) {
       return new NextResponse(JSON.stringify({ error: "Forbidden" }), {
         status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  // ── Funding slab blocklist guard (GH#1363) ────────────────────────────────
+  // next.config.ts rewrites /api/funding/:slab → Railway before route handlers
+  // run, making the route.ts blocklist check unreachable for those paths.
+  // Check here (pre-rewrite) and return 404 for any blocked slab.
+  const _fundingMatch = _fundingSlabRe.exec(request.nextUrl.pathname);
+  if (_fundingMatch) {
+    const slab = _fundingMatch[1]!;
+    if (_blockedFundingSlabSet.has(slab)) {
+      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
+        status: 404,
         headers: { "Content-Type": "application/json" },
       });
     }
