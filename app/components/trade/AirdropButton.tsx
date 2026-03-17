@@ -37,6 +37,7 @@ export function AirdropButton({ mintAddress, symbol, isUserCreated = true, isDev
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
   const [nextClaimAt, setNextClaimAt] = useState<string | null>(null);
+  const [isNonMirrorMint, setIsNonMirrorMint] = useState(false);
 
   const isDevnet = getNetwork() === "devnet";
 
@@ -83,6 +84,9 @@ export function AirdropButton({ mintAddress, symbol, isUserCreated = true, isDev
       if (resp.status === 429) {
         setNextClaimAt(data.nextClaimAt);
         setError(`Next claim in ${Math.floor((data.retryAfterSecs ?? 86400) / 3600)}h`);
+      } else if (resp.status === 400 && data.error?.includes("not a known devnet mirror mint")) {
+        setIsNonMirrorMint(true);
+        setError(null);
       } else if (!resp.ok) {
         setError(data.error ?? "Airdrop failed");
       } else {
@@ -104,7 +108,7 @@ export function AirdropButton({ mintAddress, symbol, isUserCreated = true, isDev
   // endpoint will reject with "not a known devnet mirror mint". Instead of showing
   // the button and a confusing inline error, show a clear message with a link to
   // /devnet-mint where users can mint test tokens for any market.
-  if (!isDevnetMirror) {
+  if (!isDevnetMirror || isNonMirrorMint) {
     return (
       <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-[10px]">
         <span className="text-[var(--text-muted)]">Get {symbol}:</span>
