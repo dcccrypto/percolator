@@ -350,16 +350,19 @@ console.log("\n✅ All account tests passed!");
 console.log("\n✅ All slab tests passed!");
 
 // ─── V1_LEGACY slab tests (65,352 bytes, engineOff=640) ─────────────────────
-// Verify that V1_LEGACY slabs (created by the current deployed program) are
-// parsed with the corrected bitmap offset (672) and owner offset (200).
+// Root cause: buildLayout() used bitmapOff=656 for preAccountsLen, giving accountsOff=1864.
+// Actual accounts start at 1880 (verified empirically on devnet).
+// Fix: use actualBitmapOff=672 in preAccountsLen → accountsOff=1880.
+// With base correct, all standard offsets (owner=+184, capital=+8) work as-is.
 {
   console.log("\nTesting V1_LEGACY slab layout (65,352-byte slabs)...");
 
-  // V1_LEGACY constants (on-chain actual values)
+  // V1_LEGACY constants (on-chain actual values — verified against devnet slab)
   const V1L_ENGINE_OFF = 640;
   const V1L_BITMAP_OFF_REL = 672;    // relative to engineOff → abs 1312
-  const V1L_ACCOUNTS_OFF = 1864;     // accountsOff absolute
-  const V1L_ACCT_OWNER_OFF = 200;    // owner pubkey within each slot
+  const V1L_ACCOUNTS_OFF = 1880;     // accountsOff absolute (empirically confirmed)
+  const V1L_ACCT_OWNER_OFF = 184;    // standard owner offset — correct now that base is right
+  const V1L_ACCT_CAPITAL_OFF = 8;    // standard capital offset
   const V1L_ACCT_SIZE = 248;
   const V1L_SIZE = 65_352;
 
@@ -369,21 +372,30 @@ console.log("\n✅ All slab tests passed!");
   const bitmapAbs = V1L_ENGINE_OFF + V1L_BITMAP_OFF_REL; // 1312
   slab65352.writeBigUInt64LE(0x03n, bitmapAbs);
 
-  // Write two accounts at correct V1_LEGACY positions
+  // Write two accounts at correct V1_LEGACY positions (base=1880)
   const ownerA = Buffer.alloc(32); ownerA[0] = 0xAA;
   const ownerB = Buffer.alloc(32); ownerB[0] = 0xBB;
   ownerA.copy(slab65352, V1L_ACCOUNTS_OFF + 0 * V1L_ACCT_SIZE + V1L_ACCT_OWNER_OFF);
   ownerB.copy(slab65352, V1L_ACCOUNTS_OFF + 1 * V1L_ACCT_SIZE + V1L_ACCT_OWNER_OFF);
 
+  // Write capital values to verify field reads correctly
+  const CAPITAL_A = 2_055_000_000n;
+  const CAPITAL_B = 555_000_000n;
+  slab65352.writeBigUInt64LE(CAPITAL_A, V1L_ACCOUNTS_OFF + 0 * V1L_ACCT_SIZE + V1L_ACCT_CAPITAL_OFF);
+  slab65352.writeBigUInt64LE(CAPITAL_B, V1L_ACCOUNTS_OFF + 1 * V1L_ACCT_SIZE + V1L_ACCT_CAPITAL_OFF);
+
   // detectSlabLayout must recognise 65352
   const layout = detectSlabLayout(V1L_SIZE);
   assert(layout !== null, "detectSlabLayout must handle 65352 bytes");
   assert(layout!.engineOff === V1L_ENGINE_OFF, `engineOff must be 640, got ${layout!.engineOff}`);
+  assert(layout!.accountsOff === V1L_ACCOUNTS_OFF,
+    `accountsOff must be 1880 for V1_LEGACY, got ${layout!.accountsOff}`);
   assert(layout!.acctOwnerOff === V1L_ACCT_OWNER_OFF,
-    `acctOwnerOff must be 200 for V1_LEGACY, got ${layout!.acctOwnerOff}`);
+    `acctOwnerOff must be 184 for V1_LEGACY, got ${layout!.acctOwnerOff}`);
   assert(layout!.engineBitmapOff === V1L_BITMAP_OFF_REL,
     `engineBitmapOff must be 672 for V1_LEGACY, got ${layout!.engineBitmapOff}`);
   console.log("  ✓ detectSlabLayout recognises 65,352-byte V1_LEGACY slab");
+  console.log("  ✓ accountsOff=1880 (root cause fix: actualBitmapOff used in preAccountsLen)");
 
   // parseUsedIndices must return [0, 1]
   const indices = parseUsedIndices(slab65352);
@@ -391,14 +403,18 @@ console.log("\n✅ All slab tests passed!");
     `expected indices [0,1] got [${indices}]`);
   console.log("  ✓ parseUsedIndices returns correct indices (0,1) not (128,129)");
 
-  // parseAccount must read owner from offset +200 not +184
+  // parseAccount must read owner and capital from correct offsets
   const acc0 = parseAccount(slab65352, 0);
   assert(acc0.owner.toBytes()[0] === 0xAA,
     `account 0 owner first byte must be 0xAA (got ${acc0.owner.toBytes()[0]})`);
+  assert(acc0.capital === CAPITAL_A,
+    `account 0 capital must be ${CAPITAL_A} (got ${acc0.capital})`);
   const acc1 = parseAccount(slab65352, 1);
   assert(acc1.owner.toBytes()[0] === 0xBB,
     `account 1 owner first byte must be 0xBB (got ${acc1.owner.toBytes()[0]})`);
-  console.log("  ✓ parseAccount reads owner from correct offset (+200) for V1_LEGACY");
+  assert(acc1.capital === CAPITAL_B,
+    `account 1 capital must be ${CAPITAL_B} (got ${acc1.capital})`);
+  console.log("  ✓ parseAccount reads owner at +184 and capital at +8 correctly for V1_LEGACY");
 
   console.log("✅ V1_LEGACY slab tests passed!");
 }

@@ -329,7 +329,10 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
   const isV0 = version === 0;
   const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
   const isV1Legacy = !isV0 && engineOffOverride === V1_ENGINE_OFF_LEGACY;
-  // Use formula bitmapOff (656) for size calculation but actual bitmapOff (672) for layout
+  // For accountsOff calculation, V1_LEGACY must use its actual bitmap offset (672, not 656).
+  // Using the formula bitmapOff (656) produces accountsOff=1864, but accounts actually
+  // start at 1880 — a 16-byte gap caused by the extra fields in the V1_LEGACY engine.
+  // Non-V1_LEGACY slabs: actualBitmapOff === bitmapOff, so no change.
   const bitmapOff = isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF;
   const actualBitmapOff = isV1Legacy ? V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL
     : (isV0 ? V0_ENGINE_BITMAP_OFF : V1_ENGINE_BITMAP_OFF);
@@ -338,7 +341,8 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
   const bitmapBytes = bitmapWords * 8;
   const postBitmap = 18;
   const nextFreeBytes = maxAccounts * 2;
-  const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
+  // Use actualBitmapOff so V1_LEGACY gets accountsOff=1880 (not 1864).
+  const preAccountsLen = actualBitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
 
   return {
@@ -384,7 +388,8 @@ function buildLayout(version: 0 | 1, maxAccounts: number, engineOffOverride?: nu
     engineEmergencyStartSlotOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_START_SLOT_OFF,
     engineLastBreakerSlotOff: isV0 ? -1 : V1_ENGINE_LAST_BREAKER_SLOT_OFF,
     engineBitmapOff: actualBitmapOff,
-    acctOwnerOff: isV1Legacy ? V1_LEGACY_ACCT_OWNER_OFF : ACCT_OWNER_OFF,
+    // V1_LEGACY: accountsOff is now correctly 1880 (fixed above), so standard +184 applies.
+    acctOwnerOff: ACCT_OWNER_OFF,
 
     hasInsuranceIsolation: !isV0,
     engineInsuranceIsolatedOff: isV0 ? -1 : 48,
