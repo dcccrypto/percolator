@@ -1,7 +1,7 @@
 #![cfg(feature = "test")]
 
 use percolator::*;
-use percolator::wide_math::{U256, I256};
+use percolator::wide_math::U256;
 
 // ============================================================================
 // Helpers
@@ -26,16 +26,14 @@ fn default_params() -> RiskParams {
 
 /// Build a size_q from a quantity in base units.
 /// size_q = quantity * POS_SCALE  (signed)
-fn make_size_q(quantity: i64) -> I256 {
+fn make_size_q(quantity: i64) -> i128 {
     let abs_qty = (quantity as i128).unsigned_abs();
-    let product = U256::from_u128(POS_SCALE)
-        .checked_mul(U256::from_u128(abs_qty))
-        .expect("make_size_q overflow");
-    let positive = I256::from_raw_u256_pub(product);
+    let scaled = abs_qty.checked_mul(POS_SCALE).expect("make_size_q overflow");
+    assert!(scaled <= i128::MAX as u128, "make_size_q: exceeds i128");
     if quantity < 0 {
-        positive.checked_neg().expect("make_size_q neg overflow")
+        -(scaled as i128)
     } else {
-        positive
+        scaled as i128
     }
 }
 
@@ -225,8 +223,8 @@ fn test_basic_trade() {
     // Both should have positions
     let eff_a = engine.effective_pos_q(a as usize);
     let eff_b = engine.effective_pos_q(b as usize);
-    assert!(eff_a.is_positive());
-    assert!(eff_b.is_negative());
+    assert!(eff_a > 0);
+    assert!(eff_b < 0);
     assert!(engine.check_conservation());
 }
 
@@ -319,8 +317,8 @@ fn test_haircut_ratio_no_positive_pnl() {
     let engine = RiskEngine::new(default_params());
     let (h_num, h_den) = engine.haircut_ratio();
     // When pnl_pos_tot == 0, returns (1, 1)
-    assert_eq!(h_num, U256::ONE);
-    assert_eq!(h_den, U256::ONE);
+    assert_eq!(h_num, 1u128);
+    assert_eq!(h_den, 1u128);
 }
 
 #[test]
@@ -373,7 +371,7 @@ fn test_liquidation_eligible_account() {
     assert!(result, "account a should have been liquidated");
     // Position should be closed
     let eff = engine.effective_pos_q(a as usize);
-    assert!(eff.is_zero());
+    assert!(eff == 0);
     assert!(engine.check_conservation());
 }
 
@@ -422,8 +420,8 @@ fn test_warmup_slope_set_on_new_profit() {
     engine.touch_account_full(a as usize, new_oracle, slot2).expect("touch");
 
     // If PnL is positive and warmup_period > 0, slope should be set
-    if engine.accounts[a as usize].pnl.is_positive() {
-        assert!(!engine.accounts[a as usize].warmup_slope_per_step.is_zero(),
+    if engine.accounts[a as usize].pnl > 0 {
+        assert!(engine.accounts[a as usize].warmup_slope_per_step != 0,
             "warmup slope should be nonzero for positive PnL");
     }
 }
@@ -737,7 +735,7 @@ fn test_adl_triggered_by_liquidation() {
 
     // After liquidation, the position is closed. ADL state may have changed.
     let eff_a = engine.effective_pos_q(a as usize);
-    assert!(eff_a.is_zero(), "liquidated position should be zero");
+    assert!(eff_a == 0, "liquidated position should be zero");
 }
 
 #[test]
@@ -746,7 +744,7 @@ fn test_adl_epoch_changes() {
     let epoch_long_before = engine.adl_epoch_long;
 
     // Begin a full drain reset on long side (requires OI=0)
-    assert!(engine.oi_eff_long_q.is_zero());
+    assert!(engine.oi_eff_long_q == 0);
     engine.begin_full_drain_reset(Side::Long);
 
     assert_eq!(engine.adl_epoch_long, epoch_long_before + 1);
@@ -769,7 +767,7 @@ fn test_effective_pos_epoch_mismatch() {
 
     // Effective position should be zero due to epoch mismatch
     let eff = engine.effective_pos_q(a as usize);
-    assert!(eff.is_zero(), "epoch mismatch should zero effective position");
+    assert!(eff == 0, "epoch mismatch should zero effective position");
 }
 
 // ============================================================================
@@ -869,8 +867,8 @@ fn test_trade_then_close_round_trip() {
 
     let eff_a = engine.effective_pos_q(a as usize);
     let eff_b = engine.effective_pos_q(b as usize);
-    assert!(eff_a.is_zero(), "position a should be flat after close");
-    assert!(eff_b.is_zero(), "position b should be flat after close");
+    assert!(eff_a == 0, "position a should be flat after close");
+    assert!(eff_b == 0, "position b should be flat after close");
     assert!(engine.check_conservation());
 }
 
@@ -896,7 +894,7 @@ fn test_zero_size_trade_rejected() {
     let oracle = 1000u64;
     let slot = 1u64;
 
-    let result = engine.execute_trade(a, b, oracle, slot, I256::ZERO, oracle);
+    let result = engine.execute_trade(a, b, oracle, slot, 0i128, oracle);
     assert_eq!(result, Err(RiskError::Overflow));
 }
 
@@ -929,7 +927,7 @@ fn test_close_account_after_trade_and_unwind() {
 
     // PnL should be zero or converted by now
     let pnl = engine.accounts[a as usize].pnl;
-    if pnl.is_zero() {
+    if pnl == 0 {
         let cap = engine.close_account(a, slot2, oracle).expect("close account");
         assert!(cap > 0);
         assert!(!engine.is_used(a as usize));
@@ -1011,17 +1009,17 @@ fn test_keeper_crank_liquidates_underwater_accounts() {
 }
 
 #[test]
-fn test_i256_size_q_construction() {
+fn test_i128_size_q_construction() {
     // Verify our make_size_q helper produces correct values
     let pos = make_size_q(1);
     let neg = make_size_q(-1);
 
-    assert!(pos.is_positive());
-    assert!(neg.is_negative());
+    assert!(pos > 0);
+    assert!(neg < 0);
 
     // |pos| should equal POS_SCALE
-    let abs_pos = pos.abs_u256();
-    assert_eq!(abs_pos, U256::from_u128(POS_SCALE));
+    let abs_pos = pos.unsigned_abs();
+    assert_eq!(abs_pos, POS_SCALE);
 }
 
 #[test]
@@ -1066,7 +1064,7 @@ fn test_account_equity_net_positive() {
 
     let eq = engine.account_equity_net(&engine.accounts[idx as usize], oracle);
     // With only capital and no PnL, equity = capital = 50_000
-    let expected = I256::from_u128(50_000);
+    let expected: i128 = 50_000;
     assert_eq!(eq, expected);
 }
 
@@ -1240,14 +1238,14 @@ fn test_charge_fee_safe_does_not_panic_on_extreme_pnl() {
 
     engine.keeper_crank(a, slot, oracle, 0).expect("crank");
 
-    // Set account a's PnL to near I256::MIN so fee subtraction would overflow.
+    // Set account a's PnL to near i128::MIN so fee subtraction would overflow.
     // The charge_fee_safe path: if capital < fee, shortfall = fee - capital,
-    // then PnL -= shortfall. If PnL is near I256::MIN, this could overflow.
-    let near_min = I256::MIN.checked_add(I256::from_u128(1)).unwrap();
+    // then PnL -= shortfall. If PnL is near i128::MIN, this could overflow.
+    let near_min = i128::MIN.checked_add(1i128).unwrap();
     engine.set_pnl(a as usize, near_min);
 
     // Executing a trade charges a fee. If capital is 0, fee goes to PnL.
-    // With PnL near I256::MIN, subtracting the fee must not panic.
+    // With PnL near i128::MIN, subtracting the fee must not panic.
     // (The trade will likely fail for margin reasons, but must not panic.)
     let size_q = make_size_q(1);
     let _result = engine.execute_trade(a, b, oracle, slot, size_q, oracle);
@@ -1271,11 +1269,11 @@ fn test_keeper_crank_propagates_corruption() {
 
     // Set up a corrupt state: a_basis = 0 triggers CorruptState error
     // in settle_side_effects (called by touch_account_full)
-    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[a as usize].adl_a_basis = 0; // CORRUPT: a_basis must be > 0
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     // keeper_crank must propagate the CorruptState error, not swallow it
     let result = engine.keeper_crank(a, 2, oracle, 0);
@@ -1316,8 +1314,8 @@ fn test_same_slot_price_change_applies_mark() {
     engine.last_market_slot = slot; // same slot
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -1356,8 +1354,8 @@ fn test_schedule_reset_error_propagated_in_withdraw() {
     // This makes schedule_end_of_instruction_resets return CorruptState.
     engine.stored_pos_count_long = 0;
     engine.stored_pos_count_short = 0;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE * 2); // unequal OI
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE * 2; // unequal OI
 
     let result = engine.withdraw(a, 1, oracle, slot);
     assert!(result.is_err(), "withdraw must propagate reset error on corrupt state");
@@ -1369,7 +1367,7 @@ fn test_schedule_reset_error_propagated_in_withdraw() {
 
 #[test]
 fn test_wide_signed_mul_div_floor_large_operands() {
-    use percolator::wide_math::wide_signed_mul_div_floor;
+    use percolator::wide_math::{wide_signed_mul_div_floor, I256};
 
     // Large basis * large positive K_diff
     let abs_basis = U256::from_u128(u128::MAX);
@@ -1396,7 +1394,7 @@ fn test_wide_signed_mul_div_floor_large_operands() {
 
 #[test]
 fn test_wide_signed_mul_div_floor_zero_cases() {
-    use percolator::wide_math::wide_signed_mul_div_floor;
+    use percolator::wide_math::{wide_signed_mul_div_floor, I256};
 
     // Zero basis
     let result = wide_signed_mul_div_floor(U256::ZERO, I256::from_i128(42), U256::from_u128(1));
@@ -1452,8 +1450,8 @@ fn test_accrue_market_to_multi_substep_large_dt() {
     engine.funding_price_sample_last = 1000;
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     // High funding rate, large time gap requiring multiple sub-steps
     engine.funding_rate_bps_per_slot_last = 5000; // 50% bps/slot
@@ -1476,8 +1474,8 @@ fn test_accrue_market_funding_rate_zero_no_funding_applied() {
     engine.funding_price_sample_last = 1000;
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
     engine.funding_rate_bps_per_slot_last = 0;
 
     let k_long_before = engine.adl_coeff_long;
@@ -1499,8 +1497,8 @@ fn test_accrue_market_negative_funding_rate() {
     engine.funding_price_sample_last = 1000;
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     // Negative rate: shorts pay, longs receive
     engine.funding_rate_bps_per_slot_last = -1000;
@@ -1678,7 +1676,7 @@ fn test_maintenance_fee_large_dt_overflow_returns_error() {
 }
 
 // ============================================================================
-// charge_fee_safe: PnL near I256::MIN boundary
+// charge_fee_safe: PnL near i128::MIN boundary
 // ============================================================================
 
 #[test]
@@ -1691,35 +1689,35 @@ fn test_charge_fee_safe_rejects_pnl_at_i256_min() {
     let a = engine.add_user(1000).unwrap();
     engine.deposit(a, 0, oracle, slot).unwrap(); // zero capital so shortfall goes to PnL
 
-    // Set PnL very close to I256::MIN
-    let near_min = I256::MIN.checked_add(I256::from_i128(1)).unwrap();
+    // Set PnL very close to i128::MIN
+    let near_min = i128::MIN.checked_add(1i128).unwrap();
     engine.set_pnl(a as usize, near_min);
 
-    // Liquidation fee would push PnL to exactly I256::MIN — must return Err
+    // Liquidation fee would push PnL to exactly i128::MIN — must return Err
     // We test via the public liquidate path, but first set up the conditions
     // for an underwater account with a position.
-    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
     engine.adl_epoch_long = 0;
     engine.adl_epoch_short = 0;
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[a as usize].adl_k_snap = 0i128;
     engine.accounts[a as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = oracle;
     engine.last_market_slot = slot;
     engine.last_crank_slot = slot;
     engine.funding_price_sample_last = oracle;
 
-    // Liquidation should handle this gracefully (return Err or succeed without I256::MIN)
+    // Liquidation should handle this gracefully (return Err or succeed without i128::MIN)
     let result = engine.liquidate_at_oracle(a, slot, oracle);
-    // Either it errors out or it succeeds but PnL is not I256::MIN
+    // Either it errors out or it succeeds but PnL is not i128::MIN
     if result.is_ok() {
-        assert!(engine.accounts[a as usize].pnl != I256::MIN,
-            "PnL must never reach I256::MIN");
+        assert!(engine.accounts[a as usize].pnl != i128::MIN,
+            "PnL must never reach i128::MIN");
     }
 }
 
@@ -1834,7 +1832,7 @@ fn test_withdraw_simulation_does_not_inflate_haircut() {
     engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
 
     // Give a some positive PnL so haircut matters
-    engine.set_pnl(a as usize, I256::from_u128(5_000_000));
+    engine.set_pnl(a as usize, 5_000_000i128);
 
     // Record haircut before
     let (h_num_before, h_den_before) = engine.haircut_ratio();
@@ -1896,9 +1894,9 @@ fn test_gc_dust_preserves_fee_credits() {
 
     // Set up dust-like state: 0 capital, 0 position, but positive fee_credits
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = I256::ZERO;
-    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
-    engine.set_pnl(a as usize, I256::ZERO);
+    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].reserved_pnl = 0u128;
+    engine.set_pnl(a as usize, 0i128);
     engine.accounts[a as usize].fee_credits = I128::new(5_000);
 
     assert!(engine.is_used(a as usize), "account must exist before GC");
@@ -1932,9 +1930,9 @@ fn test_gc_collects_dead_account_with_negative_fee_credits() {
 
     // Simulate abandoned account: zero everything
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = I256::ZERO;
-    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
-    engine.set_pnl(a as usize, I256::ZERO);
+    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].reserved_pnl = 0u128;
+    engine.set_pnl(a as usize, 0i128);
     engine.accounts[a as usize].fee_credits = I128::new(0);
     engine.accounts[a as usize].last_fee_slot = slot;
 
@@ -1965,9 +1963,9 @@ fn test_gc_still_protects_positive_fee_credits() {
     engine.keeper_crank(a, slot, oracle, 0).unwrap();
 
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = I256::ZERO;
-    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
-    engine.set_pnl(a as usize, I256::ZERO);
+    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].reserved_pnl = 0u128;
+    engine.set_pnl(a as usize, 0i128);
     // Large positive prepaid credits
     engine.accounts[a as usize].fee_credits = I128::new(1_000_000);
 
@@ -2066,7 +2064,7 @@ fn test_min_liquidation_fee_enforced() {
     // Capital ~ 1M (minus trading fee). Set PnL so equity < maint margin.
     // PnL = -(capital - 40) makes equity = 40 < 50 maintenance.
     let cap = engine.accounts[a as usize].capital.get();
-    engine.set_pnl(a as usize, I256::from_i128(-((cap as i128) - 40)));
+    engine.set_pnl(a as usize, -((cap as i128) - 40));
 
     let ins_before = engine.insurance_fund.balance.get();
 

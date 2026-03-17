@@ -65,18 +65,18 @@ fn bounded_trade_conservation() {
 
     let delta: i16 = kani::any();
     kani::assume(delta > i16::MIN);
-    let delta_i256 = I256::from_i128(delta as i128);
+    let delta_i128 = delta as i128;
 
     let pnl_a = engine.accounts[a as usize].pnl;
     let pnl_b = engine.accounts[b as usize].pnl;
 
-    let new_a = pnl_a.checked_add(delta_i256);
-    let neg_delta = delta_i256.checked_neg();
+    let new_a = pnl_a.checked_add(delta_i128);
+    let neg_delta = delta_i128.checked_neg();
 
     if let (Some(na), Some(nd)) = (new_a, neg_delta) {
-        if na != I256::MIN {
+        if na != i128::MIN {
             if let Some(nb) = pnl_b.checked_add(nd) {
-                if nb != I256::MIN {
+                if nb != i128::MIN {
                     engine.set_pnl(a as usize, na);
                     engine.set_pnl(b as usize, nb);
 
@@ -101,12 +101,12 @@ fn bounded_haircut_ratio_bounded() {
     engine.vault = U128::new(vault_val as u128);
     engine.c_tot = U128::new(c_tot_val as u128);
     engine.insurance_fund.balance = U128::new(ins_val as u128);
-    engine.pnl_pos_tot = U256::from_u128(ppt_val as u128);
+    engine.pnl_pos_tot = ppt_val as u128;
 
     let (h_num, h_den) = engine.haircut_ratio();
 
     assert!(h_num <= h_den);
-    assert!(!h_den.is_zero());
+    assert!(h_den != 0);
 }
 
 #[kani::proof]
@@ -136,12 +136,12 @@ fn bounded_equity_nonneg_flat() {
 
     let pnl_val: i16 = kani::any();
     kani::assume(pnl_val > i16::MIN);
-    engine.set_pnl(idx as usize, I256::from_i128(pnl_val as i128));
+    engine.set_pnl(idx as usize, pnl_val as i128);
 
-    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+    assert!(engine.accounts[idx as usize].position_basis_q == 0);
 
     let eq = engine.account_equity_net(&engine.accounts[idx as usize], DEFAULT_ORACLE);
-    assert!(!eq.is_negative(),
+    assert!(eq >= 0,
         "flat account equity must be non-negative even with non-trivial haircut");
 }
 
@@ -159,13 +159,13 @@ fn bounded_liquidation_conservation() {
 
     let loss: u32 = kani::any();
     kani::assume(loss > 0 && loss <= deposit_amt);
-    let pnl = I256::from_i128(-(loss as i128));
+    let pnl = -(loss as i128);
     engine.set_pnl(a as usize, pnl);
 
     let cap = engine.accounts[a as usize].capital.get();
     let pay = core::cmp::min(loss as u128, cap);
     engine.set_capital(a as usize, cap - pay);
-    let new_pnl = pnl.checked_add(I256::from_u128(pay)).unwrap_or(I256::ZERO);
+    let new_pnl = pnl.checked_add(pay as i128).unwrap_or(0i128);
     engine.set_pnl(a as usize, new_pnl);
 
     assert!(engine.check_conservation());
@@ -302,14 +302,14 @@ fn proof_flat_negative_resolves_through_insurance() {
     engine.vault = U128::new(10_000);
     engine.insurance_fund.balance = U128::new(5_000);
 
-    engine.set_pnl(idx as usize, I256::from_i128(-1000));
+    engine.set_pnl(idx as usize, -1000i128);
 
     let ins_before = engine.insurance_fund.balance.get();
 
     let result = engine.touch_account_full(idx as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(result.is_ok());
 
-    assert!(engine.accounts[idx as usize].pnl == I256::ZERO);
+    assert!(engine.accounts[idx as usize].pnl == 0i128);
     assert!(engine.insurance_fund.balance.get() <= ins_before);
 }
 
@@ -357,18 +357,18 @@ fn t4_18_precision_exhaustion_both_sides_reset() {
     // A_mult = 2, OI = 3*PS. Closing 2*PS leaves OI_post = 1*PS.
     // A_candidate = floor(2 * 1 / 3) = 0 → precision exhaustion.
     engine.adl_mult_long = 2;
-    engine.adl_coeff_long = I256::ZERO;
-    engine.oi_eff_long_q = U256::from_u128(3 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(3 * POS_SCALE);
+    engine.adl_coeff_long = 0i128;
+    engine.oi_eff_long_q = 3 * POS_SCALE;
+    engine.oi_eff_short_q = 3 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
-    let q_close = U256::from_u128(2 * POS_SCALE);
-    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, U256::ZERO);
+    let q_close = 2 * POS_SCALE;
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, 0u128);
     assert!(result.is_ok());
 
     // Both sides' OI must be zeroed (precision exhaustion terminal drain)
-    assert!(engine.oi_eff_long_q.is_zero(), "opposing OI must be zeroed");
-    assert!(engine.oi_eff_short_q.is_zero(), "liquidated OI must be zeroed");
+    assert!(engine.oi_eff_long_q == 0, "opposing OI must be zeroed");
+    assert!(engine.oi_eff_short_q == 0, "liquidated OI must be zeroed");
     assert!(ctx.pending_reset_long, "opposing side must be pending reset");
     assert!(ctx.pending_reset_short, "liquidated side must be pending reset");
 }
@@ -424,37 +424,36 @@ fn t4_21_precision_exhaustion_zeroes_both_sides() {
     let mut ctx = InstructionContext::new();
 
     engine.adl_mult_long = 1;
-    engine.oi_eff_long_q = U256::from_u128(3 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(3 * POS_SCALE);
-    engine.adl_coeff_long = I256::ZERO;
+    engine.oi_eff_long_q = 3 * POS_SCALE;
+    engine.oi_eff_short_q = 3 * POS_SCALE;
+    engine.adl_coeff_long = 0i128;
     engine.stored_pos_count_long = 1;
 
-    let q_close = U256::from_u128(POS_SCALE);
-    let d = U256::ZERO;
+    let q_close = POS_SCALE;
+    let d = 0u128;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    assert!(engine.oi_eff_long_q.is_zero());
-    assert!(engine.oi_eff_short_q.is_zero());
+    assert!(engine.oi_eff_long_q == 0);
+    assert!(engine.oi_eff_short_q == 0);
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
 }
 
 /// K-space overflow routes deficit to absorb_protocol_loss, preserving K.
-/// Uses actual engine enqueue_adl with K near I256::MIN to trigger overflow.
-/// No unwind annotation — cadical SAT solver handles the U512 division loop.
+/// Uses actual engine enqueue_adl with K near i128::MIN to trigger overflow.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t4_22_k_overflow_routes_to_absorb() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    // Set K near I256::MIN so delta_K addition underflows
-    engine.adl_coeff_long = I256::MIN.checked_add(I256::from_i128(1)).unwrap();
+    // Set K near i128::MIN so delta_K addition underflows
+    engine.adl_coeff_long = i128::MIN + 1;
     engine.adl_mult_long = POS_SCALE; // Use POS_SCALE (not ADL_ONE) to keep computation manageable
-    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+    engine.oi_eff_long_q = 4 * POS_SCALE;
+    engine.oi_eff_short_q = 4 * POS_SCALE;
     engine.stored_pos_count_long = 1;
     engine.insurance_fund.balance = U128::new(10_000_000);
 
@@ -462,8 +461,8 @@ fn t4_22_k_overflow_routes_to_absorb() {
     let ins_before = engine.insurance_fund.balance.get();
 
     // ADL with deficit — delta_K will be large negative, K_opp + delta_K underflows
-    let q_close = U256::from_u128(POS_SCALE);
-    let d = U256::from_u128(1_000_000);
+    let q_close = POS_SCALE;
+    let d = 1_000_000u128;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
@@ -480,7 +479,6 @@ fn t4_22_k_overflow_routes_to_absorb() {
 
 /// D=0 ADL: K must be unchanged, A must decrease, OI updated.
 /// Uses actual engine enqueue_adl with zero deficit.
-/// No unwind — A computation uses U512 internally.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t4_23_d_zero_routes_quantity_only() {
@@ -488,18 +486,18 @@ fn t4_23_d_zero_routes_quantity_only() {
     let mut ctx = InstructionContext::new();
 
     let k_init: i8 = kani::any();
-    engine.adl_coeff_long = I256::from_i128(k_init as i128);
+    engine.adl_coeff_long = k_init as i128;
     engine.adl_mult_long = ADL_ONE;
-    engine.oi_eff_long_q = U256::from_u128(10 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(10 * POS_SCALE);
+    engine.oi_eff_long_q = 10 * POS_SCALE;
+    engine.oi_eff_short_q = 10 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
     let k_before = engine.adl_coeff_long;
     let a_before = engine.adl_mult_long;
 
     // D=0 quantity-only ADL
-    let q_close = U256::from_u128(POS_SCALE);
-    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, U256::ZERO);
+    let q_close = POS_SCALE;
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, 0u128);
     assert!(result.is_ok());
 
     // K must be unchanged when D == 0
@@ -507,8 +505,8 @@ fn t4_23_d_zero_routes_quantity_only() {
     // A must decrease
     assert!(engine.adl_mult_long < a_before, "A must decrease after quantity ADL");
     // OI must decrease by q_close on both sides
-    assert!(engine.oi_eff_long_q == U256::from_u128(9 * POS_SCALE));
-    assert!(engine.oi_eff_short_q == U256::from_u128(9 * POS_SCALE));
+    assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
+    assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
 }
 
 // ############################################################################
@@ -605,8 +603,8 @@ fn t5_23_dust_clearance_guard_safe() {
 fn t13_54_funding_no_mint_asymmetric_a() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     let a_long: u16 = kani::any();
     kani::assume(a_long >= 1);
@@ -636,11 +634,8 @@ fn t13_54_funding_no_mint_asymmetric_a() {
     let dk_short = k_short_after.checked_sub(k_short_before).unwrap();
 
     // Cross-multiply to check no-mint: dk_long * A_short + dk_short * A_long <= 0
-    // K deltas are bounded by A_side * price * dt which fits i128 for u16 A values.
-    let dk_long_i128 = dk_long.try_into_i128().unwrap();
-    let dk_short_i128 = dk_short.try_into_i128().unwrap();
-    let term_long = dk_long_i128.checked_mul(a_short as i128).unwrap();
-    let term_short = dk_short_i128.checked_mul(a_long as i128).unwrap();
+    let term_long = dk_long.checked_mul(a_short as i128).unwrap();
+    let term_short = dk_short.checked_mul(a_long as i128).unwrap();
     let cross_total = term_long.checked_add(term_short).unwrap();
     assert!(cross_total <= 0,
         "funding must not mint: cross-multiplied K changes must be <= 0");
@@ -671,10 +666,10 @@ fn proof_junior_profit_backing() {
     // Account a has positive PnL, b is flat
     let pnl_val: u16 = kani::any();
     kani::assume(pnl_val > 0 && pnl_val <= 10_000);
-    engine.set_pnl(a as usize, I256::from_u128(pnl_val as u128));
+    engine.set_pnl(a as usize, pnl_val as i128);
 
     // pnl_pos_tot = pnl_val
-    let ppt = engine.pnl_pos_tot.try_into_u128().unwrap();
+    let ppt = engine.pnl_pos_tot;
     assert!(ppt == pnl_val as u128);
 
     // Residual = vault - c_tot - insurance
@@ -691,9 +686,9 @@ fn proof_junior_profit_backing() {
     // haircut_ratio: h_num = min(Residual, pnl_pos_tot), h_den = pnl_pos_tot
     // effective_ppt = floor(pnl_pos_tot * h_num / h_den) ≤ Residual
     let (h_num, h_den) = engine.haircut_ratio();
-    let effective_ppt = mul_div_floor_u256(engine.pnl_pos_tot, h_num, h_den);
+    let effective_ppt = mul_div_floor_u128(engine.pnl_pos_tot, h_num, h_den);
     // Spec §3.5: Σ PNL_eff_pos_i ≤ Residual (the core solvency invariant)
-    assert!(effective_ppt.try_into_u128().unwrap() <= residual,
+    assert!(effective_ppt <= residual,
         "haircutted PnL must be backed by residual alone");
 }
 
@@ -722,7 +717,7 @@ fn proof_protected_principal() {
     let loss: u16 = kani::any();
     kani::assume(loss > 0);
     let loss_val = 500_000u128 + (loss as u128);
-    engine.set_pnl(b as usize, I256::from_i128(-(loss_val as i128)));
+    engine.set_pnl(b as usize, -(loss_val as i128));
 
     // touch_account_full runs the real settlement pipeline:
     // settle_side_effects → settle_losses → resolve_flat_negative
@@ -741,10 +736,6 @@ fn proof_protected_principal() {
 // ============================================================================
 //
 // Issue #1: Withdraw margin simulation must not inflate the haircut ratio.
-// The withdraw() function simulates the post-withdrawal state by calling
-// set_capital(idx, new_cap) which decreases c_tot. If vault is not also
-// temporarily decreased, Residual = Vault - (C_tot + I) is inflated,
-// which inflates the haircut and lets undercollateralized users withdraw.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -762,7 +753,7 @@ fn proof_withdraw_simulation_preserves_residual() {
     engine.funding_price_sample_last = 100;
 
     // Trade so a has a position (exercises the margin-check + haircut path)
-    let size_q = I256::from_u128(POS_SCALE);
+    let size_q = POS_SCALE as i128;
     engine.execute_trade(a, b, 100, 1, size_q, 100).unwrap();
 
     // Record haircut before actual withdraw
@@ -770,8 +761,7 @@ fn proof_withdraw_simulation_preserves_residual() {
     let conservation_before = engine.check_conservation();
     assert!(conservation_before, "conservation must hold before withdraw");
 
-    // Call the real engine.withdraw() — this exercises the actual code path
-    // including the simulate-then-check-margin-then-revert-then-apply logic
+    // Call the real engine.withdraw()
     let result = engine.withdraw(a, 1_000, 100, 1);
     assert!(result.is_ok(), "withdraw of 1000 from 10M capital must succeed");
 
@@ -790,9 +780,6 @@ fn proof_withdraw_simulation_preserves_residual() {
 // ============================================================================
 // proof_funding_rate_validated_before_storage
 // ============================================================================
-//
-// Issue #2: keeper_crank must reject out-of-bounds funding rates before
-// storing them. Otherwise the stored rate bricks all future accrue_market_to.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -811,19 +798,12 @@ fn proof_funding_rate_validated_before_storage() {
     let bad_rate: i64 = MAX_ABS_FUNDING_BPS_PER_SLOT + 1;
     let result = engine.keeper_crank(a, 1, 100, bad_rate);
 
-    // The crank must EITHER:
-    // a) reject the bad rate entirely (Err), OR
-    // b) clamp/sanitize it so the stored rate is within bounds
-    //
-    // It must NOT succeed AND store an out-of-bounds rate.
     if result.is_ok() {
         let stored = engine.funding_rate_bps_per_slot_last;
         assert!(stored.abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT,
             "stored funding rate must be within bounds after successful crank");
     }
 
-    // Regardless of the first crank result, a subsequent operation must NOT brick.
-    // Try a second crank — if accrue_market_to fails due to bad stored rate, protocol is bricked.
     let result2 = engine.keeper_crank(a, 2, 100, 0);
     assert!(result2.is_ok(),
         "protocol must not be bricked by a previous bad funding rate input");
@@ -832,8 +812,6 @@ fn proof_funding_rate_validated_before_storage() {
 // ============================================================================
 // proof_gc_dust_preserves_fee_credits
 // ============================================================================
-//
-// Issue #3: garbage_collect_dust must not delete accounts with non-zero fee_credits.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -850,9 +828,9 @@ fn proof_gc_dust_preserves_fee_credits() {
     // Account has 0 capital, 0 position, but positive fee_credits (prepaid)
     engine.set_capital(a as usize, 0);
     engine.accounts[a as usize].fee_credits = I128::new(5_000);
-    engine.accounts[a as usize].position_basis_q = I256::ZERO;
-    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
-    engine.set_pnl(a as usize, I256::ZERO);
+    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].reserved_pnl = 0u128;
+    engine.set_pnl(a as usize, 0i128);
 
     assert!(engine.is_used(a as usize));
     engine.garbage_collect_dust();
@@ -869,9 +847,9 @@ fn proof_gc_dust_preserves_fee_credits() {
     engine.deposit(b, 10_000, 100, 0).unwrap();
     engine.set_capital(b as usize, 0);
     engine.accounts[b as usize].fee_credits = I128::new(-3_000); // debt
-    engine.accounts[b as usize].position_basis_q = I256::ZERO;
-    engine.accounts[b as usize].reserved_pnl = U256::ZERO;
-    engine.set_pnl(b as usize, I256::ZERO);
+    engine.accounts[b as usize].position_basis_q = 0i128;
+    engine.accounts[b as usize].reserved_pnl = 0u128;
+    engine.set_pnl(b as usize, 0i128);
 
     assert!(engine.is_used(b as usize));
     engine.garbage_collect_dust();
@@ -885,10 +863,6 @@ fn proof_gc_dust_preserves_fee_credits() {
 // min_liquidation_abs does not prevent liquidation of underwater accounts
 // ############################################################################
 
-/// Verify that a nonzero min_liquidation_abs floor does not prevent liquidation
-/// of accounts that are below maintenance margin. The fee may exceed what the
-/// account can pay from capital, but charge_fee_safe handles this by deducting
-/// the shortfall from PnL — it must not revert.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_min_liq_abs_does_not_block_liquidation() {
@@ -906,7 +880,7 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Near-max leverage long for a
-    let size = I256::from_u128(480 * POS_SCALE);
+    let size = (480 * POS_SCALE) as i128;
     let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE);
     assert!(result.is_ok());
 
@@ -923,9 +897,6 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
 // Trading loss seniority: settle_losses before fee_debt_sweep
 // ############################################################################
 
-/// Verify that in touch_account_full, capital goes to trading losses (step 9)
-/// before fee debt (step 12). An account with negative PnL and accrued fee
-/// debt must have its capital applied to losses first.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_trading_loss_seniority() {
@@ -941,29 +912,16 @@ fn proof_trading_loss_seniority() {
     engine.accounts[a as usize].last_fee_slot = DEFAULT_SLOT;
 
     // Give account negative PnL (trading loss)
-    engine.set_pnl(a as usize, I256::from_i128(-8_000));
+    engine.set_pnl(a as usize, -8_000i128);
 
     // Advance 50 slots → fee = 100 * 50 = 5000
     let touch_slot = DEFAULT_SLOT + 50;
     let _ = engine.touch_account_full(a as usize, DEFAULT_ORACLE, touch_slot);
 
-    let cap_after = engine.accounts[a as usize].capital.get();
     let pnl_after = engine.accounts[a as usize].pnl;
 
-    // With 10k capital, 8k trading loss, 5k fee debt:
-    // Step 8: fee_credits = -5000 (debt extended, capital NOT touched)
-    // Step 9: settle_losses pays min(8000, 10000) = 8000 from capital → cap = 2000, PnL = 0
-    // Step 10: resolve_flat_negative — PnL is 0, skip
-    // Step 12: fee_debt_sweep pays min(5000, 2000) = 2000 from capital → cap = 0, fc = -3000
-    //
-    // If seniority was wrong (fee swept first at step 8):
-    // Step 8: cap = 10000 - 5000 = 5000, fc = 0
-    // Step 9: settle_losses pays min(8000, 5000) = 5000 → cap = 0, PnL = -3000
-    // Step 10: PnL still negative, absorb loss → PnL = 0, insurance decremented
-    //
-    // Key difference: with correct seniority, no insurance loss. With wrong seniority, 3k insurance loss.
     // Assert: PnL is zero (trading loss fully settled before fee sweep)
-    assert!(!pnl_after.is_negative(),
+    assert!(pnl_after >= 0,
         "trading loss must be fully settled before fee debt sweep");
 }
 
@@ -971,10 +929,6 @@ fn proof_trading_loss_seniority() {
 // settle_maintenance_fee_internal rejects fee_credits == i128::MIN (spec §2.1)
 // ############################################################################
 
-/// Verify that settle_maintenance_fee_internal enforces the spec §2.1 bound:
-/// fee_credits must never equal i128::MIN. If fee_credits is at -(i128::MAX)
-/// and a 1-unit fee is due, checked_sub produces i128::MIN, which the engine
-/// must reject with Err(Overflow).
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]

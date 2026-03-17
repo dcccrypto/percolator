@@ -4,9 +4,7 @@
 #[cfg(feature = "test")]
 use percolator::*;
 #[cfg(feature = "test")]
-use percolator::i128::{I128, U128};
-#[cfg(feature = "test")]
-use percolator::wide_math::{U256, I256};
+use percolator::i128::U128;
 
 #[cfg(feature = "test")]
 fn default_params() -> RiskParams {
@@ -26,16 +24,15 @@ fn default_params() -> RiskParams {
     }
 }
 
-/// Helper: create I256 position size from base quantity (scaled by POS_SCALE)
+/// Helper: create i128 position size from base quantity (scaled by POS_SCALE)
 #[cfg(feature = "test")]
-fn pos_q(qty: i64) -> I256 {
+fn pos_q(qty: i64) -> i128 {
     let abs_val = (qty as i128).unsigned_abs();
     let scaled = abs_val.checked_mul(POS_SCALE).unwrap();
-    let result = I256::from_u128(scaled);
     if qty < 0 {
-        result.checked_neg().unwrap()
+        -(scaled as i128)
     } else {
-        result
+        scaled as i128
     }
 }
 
@@ -82,8 +79,8 @@ fn test_e2e_complete_user_journey() {
     // Check effective positions
     let alice_eff = engine.effective_pos_q(alice as usize);
     let bob_eff = engine.effective_pos_q(bob as usize);
-    assert!(alice_eff.is_positive(), "Alice should be long");
-    assert!(bob_eff.is_negative(), "Bob should be short");
+    assert!(alice_eff > 0, "Alice should be long");
+    assert!(bob_eff < 0, "Bob should be short");
 
     // Conservation should hold
     assert!(engine.check_conservation(), "Conservation after trade");
@@ -102,7 +99,7 @@ fn test_e2e_complete_user_journey() {
 
     let alice_pnl = engine.accounts[alice as usize].pnl;
     // Long position + price up = positive PnL
-    assert!(alice_pnl.is_positive(), "Alice should have positive PnL after price increase");
+    assert!(alice_pnl > 0, "Alice should have positive PnL after price increase");
 
     // === Phase 3: PNL Warmup ===
 
@@ -129,7 +126,7 @@ fn test_e2e_complete_user_journey() {
 
     // Alice closes her position (sell)
     let alice_pos = engine.effective_pos_q(alice as usize);
-    if !alice_pos.is_zero() {
+    if alice_pos != 0 {
         let neg_pos = alice_pos.checked_neg().unwrap();
         let slot = engine.current_slot;
         engine
@@ -206,7 +203,7 @@ fn test_e2e_funding_complete_cycle() {
     // Bob (short) received funding, so positive PnL
     // (With 50 bps/slot rate * 20 slots, the K coefficients should reflect this)
     // The exact values depend on the A/K mechanism, but the sign should be correct:
-    // funding_rate > 0 means longs pay → K_long decreases, K_short increases
+    // funding_rate > 0 means longs pay -> K_long decreases, K_short increases
 
     // Conservation should still hold
     assert!(engine.check_conservation(), "Conservation after funding");
@@ -224,8 +221,8 @@ fn test_e2e_funding_complete_cycle() {
     // Now Alice is short and Bob is long
     let alice_eff = engine.effective_pos_q(alice as usize);
     let bob_eff = engine.effective_pos_q(bob as usize);
-    assert!(alice_eff.is_negative(), "Alice should now be short");
-    assert!(bob_eff.is_positive(), "Bob should now be long");
+    assert!(alice_eff < 0, "Alice should now be short");
+    assert!(bob_eff > 0, "Bob should now be long");
 
     assert!(engine.check_conservation(), "Conservation after position flip");
 }

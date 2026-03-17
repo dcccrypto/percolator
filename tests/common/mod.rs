@@ -11,6 +11,11 @@ pub use percolator::wide_math::{
     mul_div_ceil_u256,
     wide_signed_mul_div_floor,
     ceil_div_positive_checked,
+    mul_div_floor_u128,
+    mul_div_ceil_u128,
+    wide_mul_div_floor_u128,
+    wide_signed_mul_div_floor_from_k_pair,
+    saturating_mul_u128_u64,
 };
 
 // ============================================================================

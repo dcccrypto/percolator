@@ -1347,6 +1347,7 @@ pub fn mul_div_ceil_u256(a: U256, b: U256, d: U256) -> U256 {
 
 /// Checked variant of mul_div_ceil_u256.
 /// Returns None if the quotient doesn't fit in U256.
+#[allow(dead_code)]
 pub fn checked_mul_div_ceil_u256(a: U256, b: U256, d: U256) -> Option<U256> {
     if d.is_zero() {
         return None;
@@ -1433,6 +1434,91 @@ pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U25
 impl I256 {
     // Ensure the shared free-standing code can use these regardless of cfg.
     // (The methods are already defined in each cfg block.)
+}
+
+// ============================================================================
+// §4.8 v11.5 Native 128-bit Arithmetic Helpers
+// ============================================================================
+
+/// Native multiply-divide floor. Product a*b must not overflow u128. Panics on d==0.
+pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+    assert!(d > 0, "mul_div_floor_u128: division by zero");
+    let p = a.checked_mul(b).expect("mul_div_floor_u128: a*b overflow");
+    p / d
+}
+
+/// Native multiply-divide ceil. Product a*b must not overflow u128. Panics on d==0.
+pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
+    assert!(d > 0, "mul_div_ceil_u128: division by zero");
+    let p = a.checked_mul(b).expect("mul_div_ceil_u128: a*b overflow");
+    let q = p / d;
+    if p % d != 0 { q + 1 } else { q }
+}
+
+/// Exact wide multiply-divide floor using U256 intermediate.
+/// Used for haircut paths where a*b can exceed u128::MAX.
+pub fn wide_mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
+    assert!(d > 0, "wide_mul_div_floor_u128: division by zero");
+    let result = mul_div_floor_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d));
+    result.try_into_u128().expect("wide_mul_div_floor_u128: result exceeds u128")
+}
+
+/// Safe K-difference settlement (spec §4.8 lines 720-732).
+/// Computes K-difference in wide intermediate, then multiplies and divides.
+pub fn wide_signed_mul_div_floor_from_k_pair(abs_basis: u128, k_now: i128, k_then: i128, den: u128) -> i128 {
+    assert!(den > 0, "wide_signed_mul_div_floor_from_k_pair: den == 0");
+    // Compute d = k_now - k_then in wide signed to avoid i128 overflow
+    let k_now_wide = I256::from_i128(k_now);
+    let k_then_wide = I256::from_i128(k_then);
+    let d = k_now_wide.checked_sub(k_then_wide).expect("K-diff overflow in wide");
+    if d.is_zero() || abs_basis == 0 {
+        return 0i128;
+    }
+    let abs_d = d.abs_u256();
+    let abs_basis_u256 = U256::from_u128(abs_basis);
+    let den_u256 = U256::from_u128(den);
+    // p = abs_basis * abs(d), exact wide product
+    let p = abs_basis_u256.checked_mul(abs_d).expect("wide product overflow");
+    let (q, rem) = div_rem_u256(p, den_u256);
+    if d.is_negative() {
+        // mag = q + 1 if r != 0 else q
+        let mag = if !rem.is_zero() {
+            q.checked_add(U256::ONE).expect("mag overflow")
+        } else {
+            q
+        };
+        let mag_u128 = mag.try_into_u128().expect("mag exceeds u128");
+        assert!(mag_u128 <= i128::MAX as u128, "wide_signed_mul_div_floor_from_k_pair: mag > i128::MAX");
+        -(mag_u128 as i128)
+    } else {
+        let q_u128 = q.try_into_u128().expect("quotient exceeds u128");
+        assert!(q_u128 <= i128::MAX as u128, "wide_signed_mul_div_floor_from_k_pair: q > i128::MAX");
+        q_u128 as i128
+    }
+}
+
+/// ADL delta_K representability check error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverI128Magnitude;
+
+/// ADL delta_K representability check.
+/// Returns Ok(v) if the ceil result fits in i128 magnitude, Err otherwise.
+pub fn wide_mul_div_ceil_u128_or_over_i128max(a: u128, b: u128, d: u128) -> core::result::Result<u128, OverI128Magnitude> {
+    assert!(d > 0, "wide_mul_div_ceil_u128_or_over_i128max: division by zero");
+    let result = mul_div_ceil_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d));
+    match result.try_into_u128() {
+        Some(v) if v <= i128::MAX as u128 => Ok(v),
+        _ => Err(OverI128Magnitude),
+    }
+}
+
+/// Saturating multiply for warmup cap computation.
+pub fn saturating_mul_u128_u64(a: u128, b: u64) -> u128 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let b128 = b as u128;
+    a.checked_mul(b128).unwrap_or(u128::MAX)
 }
 
 // ============================================================================

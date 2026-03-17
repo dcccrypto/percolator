@@ -475,39 +475,30 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
 
     let pos_mul: u8 = kani::any();
     kani::assume(pos_mul > 0);
-    let pos = I256::from_u128(POS_SCALE * (pos_mul as u128));
+    let pos = (POS_SCALE * (pos_mul as u128)) as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     let k_snap_val: i8 = kani::any();
-    let k_snap = I256::from_i128(k_snap_val as i128);
+    let k_snap = k_snap_val as i128;
     engine.accounts[idx as usize].adl_k_snap = k_snap;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
 
     // Use a DIFFERENT k_epoch_start so k_diff is non-trivial (not always 0)
     let k_start_val: i8 = kani::any();
-    let k_epoch_start = I256::from_i128(k_start_val as i128);
+    let k_epoch_start = k_start_val as i128;
 
     engine.adl_epoch_long = 1;
     engine.adl_epoch_start_k_long = k_epoch_start;
     engine.side_mode_long = SideMode::ResetPending;
     engine.stale_account_count_long = 1;
 
-    let pnl_before = engine.accounts[idx as usize].pnl;
     let result = engine.settle_side_effects(idx as usize);
     assert!(result.is_ok());
 
-    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+    assert!(engine.accounts[idx as usize].position_basis_q == 0);
     assert!(engine.stale_account_count_long == 0);
     assert!(engine.accounts[idx as usize].adl_epoch_snap == 1);
-
-    // When k_diff != 0, PnL must have changed (terminal settlement applied)
-    if k_snap_val != k_start_val {
-        let pnl_after = engine.accounts[idx as usize].pnl;
-        // PnL delta is non-zero for non-zero k_diff with non-zero position
-        // (may be zero due to floor rounding for very small values, but
-        // the position IS zeroed regardless — that's the terminal close)
-    }
 }
 
 #[kani::proof]
@@ -518,23 +509,23 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     let idx = engine.add_user(0).unwrap();
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
-    let pos = I256::from_u128(POS_SCALE);
+    let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
 
     let k_snap_val: i8 = kani::any();
-    let k_snap = I256::from_i128(k_snap_val as i128);
+    let k_snap = k_snap_val as i128;
     engine.accounts[idx as usize].adl_k_snap = k_snap;
 
     let k_diff_val: i8 = kani::any();
     kani::assume(k_diff_val != 0);
     let k_epoch_start_val = (k_snap_val as i16) + (k_diff_val as i16);
     kani::assume(k_epoch_start_val >= -120 && k_epoch_start_val <= 120);
-    let k_epoch_start = I256::from_i128(k_epoch_start_val as i128);
+    let k_epoch_start = k_epoch_start_val as i128;
 
-    engine.adl_coeff_long = I256::from_i128(0);
+    engine.adl_coeff_long = 0i128;
     engine.adl_epoch_long = 1;
     engine.adl_epoch_start_k_long = k_epoch_start;
     engine.side_mode_long = SideMode::ResetPending;
@@ -543,7 +534,7 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     let result = engine.settle_side_effects(idx as usize);
     assert!(result.is_ok());
 
-    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+    assert!(engine.accounts[idx as usize].position_basis_q == 0);
     assert!(engine.stale_account_count_long == 0);
     assert!(engine.accounts[idx as usize].adl_epoch_snap == 1);
 }
@@ -752,11 +743,11 @@ fn t6_26_full_drain_reset_regression() {
     engine.deposit(idx, 1_000_000, 100, 0).unwrap();
 
     let k_val: i8 = kani::any();
-    let k = I256::from_i128(k_val as i128);
+    let k = k_val as i128;
     let pos_mul: u8 = kani::any();
     kani::assume(pos_mul > 0);
 
-    engine.accounts[idx as usize].position_basis_q = I256::from_u128(POS_SCALE * (pos_mul as u128));
+    engine.accounts[idx as usize].position_basis_q = (POS_SCALE * (pos_mul as u128)) as i128;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     engine.accounts[idx as usize].adl_k_snap = k;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
@@ -764,7 +755,7 @@ fn t6_26_full_drain_reset_regression() {
 
     engine.adl_coeff_long = k;
 
-    engine.oi_eff_long_q = U256::ZERO;
+    engine.oi_eff_long_q = 0u128;
     engine.begin_full_drain_reset(Side::Long);
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
@@ -775,7 +766,7 @@ fn t6_26_full_drain_reset_regression() {
     let result = engine.settle_side_effects(idx as usize);
     assert!(result.is_ok());
 
-    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+    assert!(engine.accounts[idx as usize].position_basis_q == 0);
     assert!(engine.stale_account_count_long == 0);
 
     assert!(engine.stored_pos_count_long == 0);

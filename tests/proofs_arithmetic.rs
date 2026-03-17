@@ -226,14 +226,14 @@ fn proof_notional_scales_with_price() {
     // Give the account a non-zero position
     let q_mul: u8 = kani::any();
     kani::assume(q_mul > 0 && q_mul <= 10);
-    engine.accounts[idx as usize].position_basis_q = I256::from_u128(POS_SCALE * (q_mul as u128));
+    engine.accounts[idx as usize].position_basis_q = (POS_SCALE * (q_mul as u128)) as i128;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[idx as usize].adl_k_snap = 0i128;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.adl_epoch_long = 0;
     engine.adl_mult_long = ADL_ONE;
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE * (q_mul as u128));
+    engine.oi_eff_long_q = POS_SCALE * (q_mul as u128);
 
     let p1: u8 = kani::any();
     let p2: u8 = kani::any();
@@ -255,7 +255,7 @@ fn proof_warmup_bounded_by_available() {
 
     let pnl_val: u16 = kani::any();
     kani::assume(pnl_val > 0 && pnl_val <= 10_000);
-    engine.set_pnl(idx as usize, I256::from_u128(pnl_val as u128));
+    engine.set_pnl(idx as usize, pnl_val as i128);
     engine.update_warmup_slope(idx as usize);
 
     let elapsed: u16 = kani::any();
@@ -263,11 +263,11 @@ fn proof_warmup_bounded_by_available() {
     engine.current_slot = DEFAULT_SLOT + elapsed as u64;
 
     let warmable = engine.warmable_gross(idx as usize);
-    let pnl = &engine.accounts[idx as usize].pnl;
-    let avail = if pnl.is_positive() {
-        pnl.abs_u256().saturating_sub(engine.accounts[idx as usize].reserved_pnl)
+    let pnl = engine.accounts[idx as usize].pnl;
+    let avail = if pnl > 0 {
+        (pnl as u128).saturating_sub(engine.accounts[idx as usize].reserved_pnl)
     } else {
-        U256::ZERO
+        0u128
     };
 
     assert!(warmable <= avail);
@@ -281,7 +281,7 @@ fn proof_warmup_bounded_by_cap() {
     let idx = engine.add_user(0).unwrap();
     engine.deposit(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    engine.set_pnl(idx as usize, I256::from_u128(50_000));
+    engine.set_pnl(idx as usize, 50_000i128);
     engine.update_warmup_slope(idx as usize);
 
     let slope = engine.accounts[idx as usize].warmup_slope_per_step;
@@ -293,10 +293,10 @@ fn proof_warmup_bounded_by_cap() {
 
     let warmable = engine.warmable_gross(idx as usize);
 
-    let cap = if slope.is_zero() {
-        U256::ZERO
+    let cap = if slope == 0 {
+        0u128
     } else {
-        slope.checked_mul(U256::from_u128(elapsed as u128)).unwrap_or(U256::MAX)
+        slope.checked_mul(elapsed as u128).unwrap_or(u128::MAX)
     };
 
     assert!(warmable <= cap);
@@ -367,7 +367,7 @@ fn proof_haircut_mul_div_conservative() {
 
     let pnl_val: u16 = kani::any();
     kani::assume(pnl_val > 0 && pnl_val <= 10_000);
-    engine.set_pnl(idx as usize, I256::from_u128(pnl_val as u128));
+    engine.set_pnl(idx as usize, pnl_val as i128);
 
     // Set vault > c_tot so residual is positive
     let cap: u16 = kani::any();
@@ -377,12 +377,11 @@ fn proof_haircut_mul_div_conservative() {
 
     let (h_num, h_den) = engine.haircut_ratio();
     assert!(h_num <= h_den, "h_num must be <= h_den");
-    assert!(!h_den.is_zero(), "h_den must not be zero");
+    assert!(h_den != 0, "h_den must not be zero");
 
     // effective_pnl = floor(pnl * h_num / h_den) <= pnl
-    let effective = mul_div_floor_u256(
-        U256::from_u128(pnl_val as u128), h_num, h_den);
-    assert!(effective <= U256::from_u128(pnl_val as u128),
+    let effective = mul_div_floor_u128(pnl_val as u128, h_num, h_den);
+    assert!(effective <= pnl_val as u128,
         "floor haircut must not overshoot pnl");
 }
 

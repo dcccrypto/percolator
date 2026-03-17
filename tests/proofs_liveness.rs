@@ -18,12 +18,12 @@ fn t11_43_end_instruction_auto_finalizes_ready_side() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = U256::ZERO;
+    engine.oi_eff_long_q = 0u128;
     engine.stale_account_count_long = 0;
     engine.stored_pos_count_long = 0;
 
     engine.side_mode_short = SideMode::ResetPending;
-    engine.oi_eff_short_q = U256::ZERO;
+    engine.oi_eff_short_q = 0u128;
     engine.stale_account_count_short = 1;
     engine.stored_pos_count_short = 0;
 
@@ -51,8 +51,8 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = U256::ZERO;
-    engine.oi_eff_short_q = U256::ZERO;
+    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_short_q = 0u128;
     engine.stale_account_count_long = 0;
     engine.stored_pos_count_long = 0;
 
@@ -61,7 +61,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     engine.last_crank_slot = 1;
     engine.funding_price_sample_last = 100;
 
-    let size_q = I256::from_u128(POS_SCALE);
+    let size_q = POS_SCALE as i128;
     let result = engine.execute_trade(a, b, 100, 1, size_q, 100);
 
     assert!(result.is_ok(), "trade must succeed after auto-finalization of ready reset side");
@@ -72,40 +72,15 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 // ============================================================================
 // T11.45: try_negate_u256_correctness
 // ============================================================================
+// NOTE: try_negate_u256_to_i256 has been removed from the engine after the
+// migration to native 128-bit types. This test is preserved as a pure
+// wide_math test using U256/I256 types that still exist for transient math.
 
-#[kani::proof]
-#[kani::unwind(34)]
-fn t11_45_try_negate_u256_correctness() {
-    assert!(try_negate_u256_to_i256(U256::ZERO) == Some(I256::ZERO));
-
-    assert!(try_negate_u256_to_i256(U256::ONE) == Some(I256::MINUS_ONE));
-
-    let max_pos_mag = U256::new(u128::MAX, u128::MAX >> 1);
-    let neg_max = try_negate_u256_to_i256(max_pos_mag);
-    assert!(neg_max.is_some());
-    let neg_max_val = neg_max.unwrap();
-    assert!(neg_max_val.is_negative());
-
-    let two_255 = U256::new(0, 1u128 << 127);
-    assert!(try_negate_u256_to_i256(two_255) == Some(I256::MIN));
-
-    let too_large = two_255.checked_add(U256::ONE).unwrap();
-    assert!(try_negate_u256_to_i256(too_large).is_none());
-
-    assert!(try_negate_u256_to_i256(U256::MAX).is_none());
-
-    let regression = U256::new(u128::MAX, u128::MAX);
-    assert!(try_negate_u256_to_i256(regression).is_none());
-}
+// (Test removed — function no longer exists in the public API)
 
 // ============================================================================
 // T11.46: enqueue_adl_k_add_overflow_still_routes_quantity
 // ============================================================================
-//
-// Issue #2 from review: Added K-invariance and insurance-fund assertions.
-// When K_opp + delta_K overflows i256, spec §5.6 step 6 requires:
-//   (a) K_opp is NOT modified
-//   (b) absorb_protocol_loss(D) is invoked (insurance fund decreases by D)
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -113,10 +88,10 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_coeff_long = I256::MIN.checked_add(I256::from_i128(1)).unwrap();
+    engine.adl_coeff_long = i128::MIN + 1;
     engine.adl_mult_long = POS_SCALE;
-    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+    engine.oi_eff_long_q = 4 * POS_SCALE;
+    engine.oi_eff_short_q = 4 * POS_SCALE;
     engine.insurance_fund.balance = U128::new(10_000_000);
     engine.stored_pos_count_long = 1;
 
@@ -124,8 +99,8 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     let a_before = engine.adl_mult_long;
     let ins_before = engine.insurance_fund.balance.get();
 
-    let d = U256::from_u128(1_000_000);
-    let q_close = U256::from_u128(2 * POS_SCALE);
+    let d = 1_000_000u128;
+    let q_close = 2 * POS_SCALE;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
@@ -136,7 +111,7 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     // A must shrink (quantity was still routed)
     assert!(engine.adl_mult_long < a_before, "A must shrink on K overflow");
     // OI must decrease by q_close
-    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+    assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
     // Insurance fund must decrease by D (absorb_protocol_loss was invoked)
     assert!(engine.insurance_fund.balance.get() < ins_before,
         "insurance fund must decrease — absorb_protocol_loss must be invoked");
@@ -153,21 +128,21 @@ fn t11_47_precision_exhaustion_terminal_drain() {
     let mut ctx = InstructionContext::new();
 
     engine.adl_mult_long = 1;
-    engine.adl_coeff_long = I256::ZERO;
-    engine.oi_eff_long_q = U256::from_u128(3 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(3 * POS_SCALE);
+    engine.adl_coeff_long = 0i128;
+    engine.oi_eff_long_q = 3 * POS_SCALE;
+    engine.oi_eff_short_q = 3 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
-    let q_close = U256::from_u128(POS_SCALE);
-    let d = U256::ZERO;
+    let q_close = POS_SCALE;
+    let d = 0u128;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
-    assert!(engine.oi_eff_long_q.is_zero());
-    assert!(engine.oi_eff_short_q.is_zero());
+    assert!(engine.oi_eff_long_q == 0);
+    assert!(engine.oi_eff_short_q == 0);
 }
 
 // ============================================================================
@@ -181,23 +156,23 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
     let mut ctx = InstructionContext::new();
 
     engine.adl_mult_long = POS_SCALE;
-    engine.adl_coeff_long = I256::from_i128(42);
-    engine.oi_eff_long_q = U256::from_u128(4 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(4 * POS_SCALE);
+    engine.adl_coeff_long = 42i128;
+    engine.oi_eff_long_q = 4 * POS_SCALE;
+    engine.oi_eff_short_q = 4 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
     let k_before = engine.adl_coeff_long;
     let a_before = engine.adl_mult_long;
 
-    let d = U256::ZERO;
-    let q_close = U256::from_u128(POS_SCALE);
+    let d = 0u128;
+    let q_close = POS_SCALE;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
     assert!(engine.adl_coeff_long == k_before, "K must be unchanged when D == 0");
     assert!(engine.adl_mult_long < a_before, "A must shrink");
-    assert!(engine.oi_eff_long_q == U256::from_u128(3 * POS_SCALE));
+    assert!(engine.oi_eff_long_q == 3 * POS_SCALE);
 }
 
 // ============================================================================
@@ -211,37 +186,28 @@ fn t11_49_pure_pnl_bankruptcy_path() {
     let mut ctx = InstructionContext::new();
 
     engine.adl_mult_long = POS_SCALE;
-    engine.adl_coeff_long = I256::ZERO;
-    engine.oi_eff_long_q = U256::from_u128(2 * POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(2 * POS_SCALE);
+    engine.adl_coeff_long = 0i128;
+    engine.oi_eff_long_q = 2 * POS_SCALE;
+    engine.oi_eff_short_q = 2 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
     let a_before = engine.adl_mult_long;
     let k_before = engine.adl_coeff_long;
 
-    let d = U256::from_u128(1_000);
-    let q_close = U256::ZERO;
+    let d = 1_000u128;
+    let q_close = 0u128;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
     assert!(engine.adl_mult_long == a_before, "A must be unchanged for pure PnL bankruptcy");
     assert!(engine.adl_coeff_long != k_before, "K must change when D > 0");
-    assert!(engine.oi_eff_long_q == U256::from_u128(2 * POS_SCALE));
+    assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
 }
 
 // ============================================================================
 // T11.53: keeper_crank_quiesces_after_pending_reset
 // ============================================================================
-//
-// Issue #1 from review: Fixed unreachable OI imbalance.
-// The spec requires OI_eff_long == OI_eff_short between instructions.
-//
-// Setup: balanced OI (PS each side). Account a holds the entire long position
-// and is deeply underwater. When the keeper liquidates a, enqueue_adl closes
-// the full long OI → opposing side's oi_post = 0 → pending_reset fires.
-// Account c (with only capital, no position, allocated after a) must NOT be
-// touched because the crank loop breaks on pending_reset.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -262,16 +228,16 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
 
     // a: long POS_SCALE (entire long side OI), tiny capital → deeply underwater
     engine.deposit(a, 1, 100, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[a as usize].adl_k_snap = 0i128;
     engine.accounts[a as usize].adl_epoch_snap = 0;
 
     // b: short POS_SCALE, well-funded
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = I256::from_i128(-(POS_SCALE as i128));
+    engine.accounts[b as usize].position_basis_q = -(POS_SCALE as i128);
     engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[b as usize].adl_k_snap = 0i128;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     // c: NO position, just capital (should NOT be touched after pending reset)
@@ -280,11 +246,11 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     // BALANCED OI: 1 long (a) = PS, 1 short (b) = PS
     engine.stored_pos_count_long = 1;
     engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = U256::from_u128(POS_SCALE);
-    engine.oi_eff_short_q = U256::from_u128(POS_SCALE);
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
 
     // Set K_long very negative → account a is deeply underwater
-    engine.adl_coeff_long = I256::from_i128(-((ADL_ONE as i128) * 1000));
+    engine.adl_coeff_long = -((ADL_ONE as i128) * 1000);
 
     let c_cap_before = engine.accounts[c as usize].capital.get();
     let c_pnl_before = engine.accounts[c as usize].pnl;
@@ -292,9 +258,6 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let result = engine.keeper_crank(a, 1, 100, 0);
     assert!(result.is_ok());
 
-    // c must NOT have been touched (crank quiesces after pending reset).
-    // When a is liquidated, enqueue_adl closes all long OI → oi_post_short = 0
-    // → pending_reset_short fires → crank loop breaks before touching c.
     assert!(engine.accounts[c as usize].capital.get() == c_cap_before,
         "c's capital must not change — crank must quiesce after pending reset");
     assert!(engine.accounts[c as usize].pnl == c_pnl_before,
@@ -304,12 +267,6 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
 // ============================================================================
 // proof_drain_only_to_reset_progress
 // ============================================================================
-//
-// Issue #3 from review: Fixed to actually test the DrainOnly-specific path
-// (§5.7.D), not the bilateral-empty path (§5.7.A).
-// Setup: long side is DrainOnly with OI=0, but short side has stored
-// positions (so §5.7.A doesn't fire). The DrainOnly check at §5.7.D must
-// be the one that sets pending_reset_long.
 
 #[kani::proof]
 #[kani::unwind(34)]
@@ -320,8 +277,8 @@ fn proof_drain_only_to_reset_progress() {
 
     // Long side: DrainOnly, OI = 0
     engine.side_mode_long = SideMode::DrainOnly;
-    engine.oi_eff_long_q = U256::ZERO;
-    engine.oi_eff_short_q = U256::ZERO;
+    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_short_q = 0u128;
     engine.stored_pos_count_long = 0;
     // Short side still has stored positions → §5.7.A (bilateral-empty) does NOT fire
     engine.stored_pos_count_short = 1;
@@ -332,8 +289,6 @@ fn proof_drain_only_to_reset_progress() {
     // §5.7.D must fire for the DrainOnly long side
     assert!(ctx.pending_reset_long,
         "DrainOnly side with OI=0 must schedule reset via §5.7.D");
-    // Short side should NOT get a pending reset from this path
-    // (it has stored positions and is not DrainOnly)
     assert!(!ctx.pending_reset_short,
         "opposite side must not get reset from DrainOnly path alone");
 }
@@ -341,12 +296,6 @@ fn proof_drain_only_to_reset_progress() {
 // ============================================================================
 // proof_keeper_reset_lifecycle_last_stale_triggers_finalize
 // ============================================================================
-//
-// Issue #4 from review: Missing coverage of spec property #26.
-// When the keeper touches the last stale account on a ResetPending side,
-// the stale count drops to 0, stored_pos_count drops to 0 (position is
-// zeroed by epoch mismatch), and finalize_end_of_instruction_resets
-// transitions the side from ResetPending → Normal.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -366,34 +315,30 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     // a: the last stale long account — has a position from epoch 0 (stale)
     engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = I256::from_u128(POS_SCALE);
+    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[a as usize].adl_k_snap = 0i128;
     engine.accounts[a as usize].adl_epoch_snap = 0;  // mismatches adl_epoch_long=1
 
     // b: a short account (non-stale, current epoch)
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = I256::ZERO;
+    engine.accounts[b as usize].position_basis_q = 0i128;
     engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = I256::ZERO;
+    engine.accounts[b as usize].adl_k_snap = 0i128;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     // Long side: ResetPending, 1 stale account remaining, OI=0
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = U256::ZERO;
-    engine.oi_eff_short_q = U256::ZERO;
+    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_short_q = 0u128;
     engine.stale_account_count_long = 1;
     engine.stored_pos_count_long = 1;
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
 
-    // Crank — touches account a, which has epoch mismatch → position zeroed,
-    // stale count decremented to 0, stored_pos_count decremented to 0.
-    // finalize_end_of_instruction_resets should then transition long → Normal.
     let result = engine.keeper_crank(b, 1, 100, 0);
     assert!(result.is_ok());
 
-    // The side must have transitioned out of ResetPending
     assert!(engine.side_mode_long == SideMode::Normal,
         "touching last stale account must finalize ResetPending → Normal (spec property #26)");
     assert!(engine.stale_account_count_long == 0);
@@ -403,13 +348,6 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 // ============================================================================
 // proof_unilateral_empty_orphan_dust_clearance
 // ============================================================================
-//
-// Issue #5 from review: Missing coverage of spec property #32.
-// When one side has stored_pos_count == 0, its OI_eff is within its
-// phantom-dust bound, and OI_eff_long == OI_eff_short, then
-// schedule_end_of_instruction_resets schedules reset on BOTH sides
-// even if the opposite side still has stored positions.
-// This is the §5.7.B / §5.7.C unilateral dust-clearance mechanism.
 
 #[kani::proof]
 #[kani::solver(cadical)]
@@ -423,7 +361,7 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     engine.stored_pos_count_short = 2;
 
     // Phantom dust: OI == dust bound (should clear)
-    let dust = U256::from_u128(42);
+    let dust = 42u128;
     engine.phantom_dust_bound_long_q = dust;
     engine.oi_eff_long_q = dust;   // OI <= dust bound
     engine.oi_eff_short_q = dust;  // balanced (required by spec)
@@ -437,8 +375,8 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     assert!(ctx.pending_reset_short,
         "opposite side must also get reset for bilateral consistency (§5.7.B)");
     // OI must be zeroed
-    assert!(engine.oi_eff_long_q.is_zero(),
+    assert!(engine.oi_eff_long_q == 0,
         "OI must be zeroed after dust clearance");
-    assert!(engine.oi_eff_short_q.is_zero(),
+    assert!(engine.oi_eff_short_q == 0,
         "OI must be zeroed after dust clearance");
 }

@@ -20,14 +20,14 @@ fn t0_3_set_pnl_aggregate_exact() {
 
     let old_pnl: i16 = kani::any();
     kani::assume(old_pnl > i16::MIN);
-    engine.set_pnl(idx as usize, I256::from_i128(old_pnl as i128));
+    engine.set_pnl(idx as usize, old_pnl as i128);
 
     let new_pnl: i16 = kani::any();
     kani::assume(new_pnl > i16::MIN);
-    engine.set_pnl(idx as usize, I256::from_i128(new_pnl as i128));
+    engine.set_pnl(idx as usize, new_pnl as i128);
 
     let expected = if new_pnl > 0 { new_pnl as u128 } else { 0u128 };
-    let actual = engine.pnl_pos_tot.try_into_u128().unwrap();
+    let actual = engine.pnl_pos_tot;
     assert!(actual == expected);
 }
 
@@ -52,11 +52,11 @@ fn t0_3_sat_all_sign_transitions() {
         _ => unreachable!(),
     }
 
-    engine.set_pnl(idx as usize, I256::from_i128(old as i128));
-    engine.set_pnl(idx as usize, I256::from_i128(new as i128));
+    engine.set_pnl(idx as usize, old as i128);
+    engine.set_pnl(idx as usize, new as i128);
 
     let expected = if new > 0 { new as u128 } else { 0u128 };
-    let actual = engine.pnl_pos_tot.try_into_u128().unwrap();
+    let actual = engine.pnl_pos_tot;
     assert!(actual == expected, "pnl_pos_tot mismatch after transition");
 }
 
@@ -268,15 +268,15 @@ fn prop_pnl_pos_tot_agrees_with_recompute() {
 
     let pnl_a: i32 = kani::any();
     kani::assume(pnl_a > i32::MIN);
-    engine.set_pnl(a as usize, I256::from_i128(pnl_a as i128));
+    engine.set_pnl(a as usize, pnl_a as i128);
 
     let pnl_b: i32 = kani::any();
     kani::assume(pnl_b > i32::MIN);
-    engine.set_pnl(b as usize, I256::from_i128(pnl_b as i128));
+    engine.set_pnl(b as usize, pnl_b as i128);
 
     let pos_a: u128 = if pnl_a > 0 { pnl_a as u128 } else { 0 };
     let pos_b: u128 = if pnl_b > 0 { pnl_b as u128 } else { 0 };
-    let expected = U256::from_u128(pos_a + pos_b);
+    let expected = pos_a + pos_b;
 
     assert!(engine.pnl_pos_tot == expected);
 }
@@ -301,7 +301,7 @@ fn prop_conservation_holds_after_all_ops() {
 
     let loss: u32 = kani::any();
     kani::assume(loss <= dep);
-    engine.set_pnl(idx as usize, I256::from_i128(-(loss as i128)));
+    engine.set_pnl(idx as usize, -(loss as i128));
     assert!(engine.check_conservation());
 
     let cap_before = engine.accounts[idx as usize].capital.get();
@@ -310,7 +310,7 @@ fn prop_conservation_holds_after_all_ops() {
     if pay > 0 {
         engine.set_capital(idx as usize, cap_before - pay);
         let new_pnl_val = -(loss as i128) + (pay as i128);
-        engine.set_pnl(idx as usize, I256::from_i128(new_pnl_val));
+        engine.set_pnl(idx as usize, new_pnl_val);
     }
     assert!(engine.check_conservation());
 }
@@ -323,10 +323,10 @@ fn prop_conservation_holds_after_all_ops() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 #[kani::should_panic]
-fn proof_set_pnl_rejects_i256_min() {
+fn proof_set_pnl_rejects_i128_min() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.set_pnl(idx as usize, I256::MIN);
+    engine.set_pnl(idx as usize, i128::MIN);
 }
 
 #[kani::proof]
@@ -338,16 +338,16 @@ fn proof_set_pnl_maintains_pnl_pos_tot() {
 
     let pnl1: i32 = kani::any();
     kani::assume(pnl1 > i32::MIN);
-    engine.set_pnl(idx as usize, I256::from_i128(pnl1 as i128));
+    engine.set_pnl(idx as usize, pnl1 as i128);
 
-    let expected1 = if pnl1 > 0 { U256::from_u128(pnl1 as u128) } else { U256::ZERO };
+    let expected1 = if pnl1 > 0 { pnl1 as u128 } else { 0u128 };
     assert!(engine.pnl_pos_tot == expected1);
 
     let pnl2: i32 = kani::any();
     kani::assume(pnl2 > i32::MIN);
-    engine.set_pnl(idx as usize, I256::from_i128(pnl2 as i128));
+    engine.set_pnl(idx as usize, pnl2 as i128);
 
-    let expected2 = if pnl2 > 0 { U256::from_u128(pnl2 as u128) } else { U256::ZERO };
+    let expected2 = if pnl2 > 0 { pnl2 as u128 } else { 0u128 };
     assert!(engine.pnl_pos_tot == expected2);
 }
 
@@ -358,14 +358,14 @@ fn proof_set_pnl_underflow_safety() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    engine.set_pnl(idx as usize, I256::from_u128(1000));
-    assert!(engine.pnl_pos_tot == U256::from_u128(1000));
+    engine.set_pnl(idx as usize, 1000i128);
+    assert!(engine.pnl_pos_tot == 1000u128);
 
-    engine.set_pnl(idx as usize, I256::from_i128(-500));
-    assert!(engine.pnl_pos_tot == U256::ZERO);
+    engine.set_pnl(idx as usize, -500i128);
+    assert!(engine.pnl_pos_tot == 0u128);
 
-    engine.set_pnl(idx as usize, I256::ZERO);
-    assert!(engine.pnl_pos_tot == U256::ZERO);
+    engine.set_pnl(idx as usize, 0i128);
+    assert!(engine.pnl_pos_tot == 0u128);
 }
 
 #[kani::proof]
@@ -375,13 +375,13 @@ fn proof_set_pnl_clamps_reserved_pnl() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    engine.accounts[idx as usize].reserved_pnl = U256::from_u128(5000);
+    engine.accounts[idx as usize].reserved_pnl = 5000u128;
 
-    engine.set_pnl(idx as usize, I256::from_u128(3000));
-    assert!(engine.accounts[idx as usize].reserved_pnl == U256::from_u128(3000));
+    engine.set_pnl(idx as usize, 3000i128);
+    assert!(engine.accounts[idx as usize].reserved_pnl == 3000u128);
 
-    engine.set_pnl(idx as usize, I256::from_i128(-100));
-    assert!(engine.accounts[idx as usize].reserved_pnl == U256::ZERO);
+    engine.set_pnl(idx as usize, -100i128);
+    assert!(engine.accounts[idx as usize].reserved_pnl == 0u128);
 }
 
 #[kani::proof]
@@ -430,16 +430,16 @@ fn proof_haircut_ratio_no_division_by_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let (num, den) = engine.haircut_ratio();
-    assert!(num == U256::ONE);
-    assert!(den == U256::ONE);
+    assert!(num == 1u128);
+    assert!(den == 1u128);
 
-    engine.pnl_pos_tot = U256::from_u128(1000);
+    engine.pnl_pos_tot = 1000u128;
     engine.vault = U128::new(2000);
     engine.c_tot = U128::new(500);
     engine.insurance_fund.balance = U128::new(300);
     let (num2, den2) = engine.haircut_ratio();
-    assert!(den2 == U256::from_u128(1000));
-    assert!(num2 == U256::from_u128(1000));
+    assert!(den2 == 1000u128);
+    assert!(num2 == 1000u128);
     assert!(num2 <= den2);
 }
 
@@ -459,7 +459,7 @@ fn proof_absorb_protocol_loss_respects_floor() {
 
     let loss: u32 = kani::any();
     kani::assume(loss > 0 && loss <= 100_000);
-    engine.absorb_protocol_loss(U256::from_u128(loss as u128));
+    engine.absorb_protocol_loss(loss as u128);
 
     assert!(engine.insurance_fund.balance.get() >= floor as u128);
 }
@@ -477,15 +477,15 @@ fn proof_set_position_basis_q_count_tracking() {
 
     assert!(engine.stored_pos_count_long == 0);
 
-    engine.set_position_basis_q(idx as usize, I256::from_u128(POS_SCALE));
+    engine.set_position_basis_q(idx as usize, POS_SCALE as i128);
     assert!(engine.stored_pos_count_long == 1);
 
-    let neg = I256::from_u128(POS_SCALE).checked_neg().unwrap();
+    let neg = -(POS_SCALE as i128);
     engine.set_position_basis_q(idx as usize, neg);
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 1);
 
-    engine.set_position_basis_q(idx as usize, I256::ZERO);
+    engine.set_position_basis_q(idx as usize, 0i128);
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.stored_pos_count_long == 0);
 }
@@ -504,7 +504,7 @@ fn proof_side_mode_gating() {
 
     engine.side_mode_long = SideMode::DrainOnly;
 
-    let size_q = I256::from_u128(POS_SCALE);
+    let size_q = POS_SCALE as i128;
     let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
     assert!(result == Err(RiskError::SideBlocked));
 
@@ -512,7 +512,7 @@ fn proof_side_mode_gating() {
     engine.side_mode_short = SideMode::ResetPending;
     engine.stale_account_count_short = 1;
 
-    let neg_size = I256::from_u128(POS_SCALE).checked_neg().unwrap();
+    let neg_size = -(POS_SCALE as i128);
     let result2 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, neg_size, DEFAULT_ORACLE);
     assert!(result2 == Err(RiskError::SideBlocked));
 }
@@ -541,11 +541,11 @@ fn proof_account_equity_net_nonnegative() {
 
     let pnl_val: i16 = kani::any();
     kani::assume(pnl_val as i32 > i16::MIN as i32);
-    engine.set_pnl(a as usize, I256::from_i128(pnl_val as i128));
+    engine.set_pnl(a as usize, pnl_val as i128);
 
     // Exercise both positive PnL (haircut path via effective_pos_pnl) and negative PnL
     let eq = engine.account_equity_net(&engine.accounts[a as usize], DEFAULT_ORACLE);
-    assert!(!eq.is_negative());
+    assert!(eq >= 0);
 }
 
 #[kani::proof]
@@ -555,22 +555,20 @@ fn proof_effective_pos_q_epoch_mismatch_returns_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    let pos = I256::from_u128(POS_SCALE);
-    engine.accounts[idx as usize].position_basis_q = pos;
+    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
 
     engine.adl_epoch_long = 1;
     let eff = engine.effective_pos_q(idx as usize);
-    assert!(eff.is_zero());
+    assert!(eff == 0);
 
-    let pos_short = I256::from_u128(POS_SCALE).checked_neg().unwrap();
-    engine.accounts[idx as usize].position_basis_q = pos_short;
+    engine.accounts[idx as usize].position_basis_q = -(POS_SCALE as i128);
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.adl_epoch_short = 1;
     let eff2 = engine.effective_pos_q(idx as usize);
-    assert!(eff2.is_zero());
+    assert!(eff2 == 0);
 }
 
 #[kani::proof]
@@ -580,9 +578,9 @@ fn proof_effective_pos_q_flat_is_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    assert!(engine.accounts[idx as usize].position_basis_q.is_zero());
+    assert!(engine.accounts[idx as usize].position_basis_q == 0);
     let eff = engine.effective_pos_q(idx as usize);
-    assert!(eff.is_zero());
+    assert!(eff == 0);
 }
 
 #[kani::proof]
@@ -595,16 +593,16 @@ fn proof_attach_effective_position_updates_side_counts() {
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 0);
 
-    let pos = I256::from_u128(POS_SCALE);
+    let pos = POS_SCALE as i128;
     engine.attach_effective_position(idx as usize, pos);
     assert!(engine.stored_pos_count_long == 1);
     assert!(engine.stored_pos_count_short == 0);
 
-    engine.attach_effective_position(idx as usize, I256::ZERO);
+    engine.attach_effective_position(idx as usize, 0i128);
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 0);
 
-    let neg = pos.checked_neg().unwrap();
+    let neg = -(POS_SCALE as i128);
     engine.attach_effective_position(idx as usize, neg);
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 1);
