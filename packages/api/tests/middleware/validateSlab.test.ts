@@ -104,4 +104,30 @@ describe("validateSlab middleware", () => {
     const data = await res.json();
     expect(data).toEqual({ error: "Invalid slab address" });
   });
+
+  describe("blocklist (GH#1357 / Sentry 2026-03-17)", () => {
+    // These three addresses are phantom-OI / empty-vault slabs that cause backend
+    // 500s when queried. They are hardcoded so the API returns 404 even when called
+    // directly, bypassing the Next.js proxy blocklist.
+    const BLOCKED = [
+      "3bmCyPee8GWJR5aPGTyN5EyyQJLzYyD8Wkg9m1Afd1SD",
+      "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
+      "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
+    ];
+
+    for (const addr of BLOCKED) {
+      it(`returns 404 for blocked slab ${addr.slice(0, 8)}...`, async () => {
+        const res = await app.request(`/markets/${addr}`);
+        expect(res.status).toBe(404);
+        const data = await res.json();
+        expect(data).toEqual({ error: "Market not found" });
+      });
+    }
+
+    it("still allows valid non-blocked slabs through", async () => {
+      const valid = "11111111111111111111111111111111";
+      const res = await app.request(`/markets/${valid}`);
+      expect(res.status).toBe(200);
+    });
+  });
 });
