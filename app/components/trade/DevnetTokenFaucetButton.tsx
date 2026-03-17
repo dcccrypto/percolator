@@ -27,6 +27,8 @@ export function DevnetTokenFaucetButton({ mintAddress, symbol }: DevnetTokenFauc
   const [claimed, setClaimed] = useState<{ amount: number; sig: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rateLimited, setRateLimited] = useState<{ nextClaimAt: string } | null>(null);
+  // GH#1367: set true when API confirms this mint is not a devnet mirror
+  const [isNonMirrorMint, setIsNonMirrorMint] = useState(false);
 
   const isDevnet = getNetwork() === "devnet";
 
@@ -50,8 +52,8 @@ export function DevnetTokenFaucetButton({ mintAddress, symbol }: DevnetTokenFauc
       if (resp.status === 429) {
         setRateLimited({ nextClaimAt: data.nextClaimAt });
       } else if (resp.status === 400 && data.error?.includes("not a known devnet mirror mint")) {
-        // Silently hide — this market isn't a devnet mirror, button shouldn't render
-        // (parent should have guarded, but handle gracefully)
+        // GH#1367: Token is not a devnet mirror mint — switch to faucet link UI
+        setIsNonMirrorMint(true);
         setError(null);
       } else if (!resp.ok) {
         setError(data.error ?? "Faucet failed");
@@ -70,6 +72,21 @@ export function DevnetTokenFaucetButton({ mintAddress, symbol }: DevnetTokenFauc
 
   // Don't render without wallet
   if (!connected || !publicKey) return null;
+
+  // GH#1367: Not a devnet mirror mint — show faucet page link instead of airdrop button
+  if (isNonMirrorMint) {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px]">
+        <span className="text-[var(--text-secondary)]">Get {symbol} →</span>
+        <a
+          href={`/devnet-mint?mint=${encodeURIComponent(mintAddress)}&symbol=${encodeURIComponent(symbol)}`}
+          className="text-[var(--accent)] hover:underline underline-offset-2 font-medium"
+        >
+          Devnet Faucet
+        </a>
+      </div>
+    );
+  }
 
   // Rate limited — show countdown info
   if (rateLimited) {
