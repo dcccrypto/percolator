@@ -201,6 +201,25 @@ export function useLivePrice(): PriceState {
           }
         })
         .catch(() => {});
+
+      // PERC-1232: DB last_price display-only fallback.
+      // When oracle is unavailable (on-chain price is 0, WS feed has no data),
+      // seed the display price from the Supabase markets_with_stats table so the
+      // chart shows e.g. $0.00083 instead of "—". Trading remains blocked via
+      // the oracleStale / oracleUnavailable gate in TradeForm — this only affects display.
+      fetch(`/api/markets/${slabAddr}`)
+        .then((r) => { if (!r.ok) throw new Error("not found"); return r.json(); })
+        .then((json: { market?: { last_price?: number | null } }) => {
+          const dbPrice = json.market?.last_price;
+          if (dbPrice != null && dbPrice > 0 && mountedRef.current) {
+            setState((prev) => {
+              // Only apply if we still have no live price (don't overwrite WS/on-chain data)
+              if (prev.price !== null) return prev;
+              return { ...prev, price: dbPrice, priceUsd: dbPrice, priceE6: BigInt(Math.round(dbPrice * 1_000_000)), loading: false };
+            });
+          }
+        })
+        .catch(() => {});
     }
 
     // M3: Capture slabAddr at subscription time for cleanup
