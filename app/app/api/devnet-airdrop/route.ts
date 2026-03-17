@@ -313,6 +313,7 @@ export async function POST(req: NextRequest) {
       // Verify we are the mint authority — if not, we cannot mint tokens.
       // This happens for devnet-native tokens (e.g. user pasted a token address
       // that exists on devnet but was created by someone else).
+      let authorityVerified = false;
       try {
         const mintInfo = await connection.getAccountInfo(mintPk);
         if (!mintInfo) {
@@ -331,8 +332,9 @@ export async function POST(req: NextRequest) {
             if (!onChainAuthority.equals(mintAuthPk)) {
               return NextResponse.json(
                 {
-                  error: `Cannot mint tokens: this mint's authority is ${onChainAuthority.toBase58().slice(0, 8)}…, not our devnet mint authority. This token was not created by the Percolator mirror system. You need to obtain tokens from the original source.`,
+                  error: `Cannot mint tokens: this mint's authority is ${onChainAuthority.toBase58().slice(0, 8)}…, not our devnet mint authority. This token was not created by the Percolator mirror system — it may have been mirrored with an old key. Contact support or use the devnet faucet page to obtain tokens.`,
                   mintAuthority: onChainAuthority.toBase58(),
+                  hint: "old_key_mirror",
                 },
                 { status: 400 },
               );
@@ -343,11 +345,27 @@ export async function POST(req: NextRequest) {
               { status: 400 },
             );
           }
+          authorityVerified = true;
         }
       } catch (authCheckErr) {
-        console.warn("[devnet-airdrop] mint authority check failed:", authCheckErr);
-        // Continue anyway — the mintTo will fail with a clear Solana error if authority is wrong
+        // RPC error during authority check — log and surface as 503 (retryable) rather than
+        // silently falling through to mintTo, which would fail on-chain and return a generic 500.
+        const msg = authCheckErr instanceof Error ? authCheckErr.message : String(authCheckErr);
+        console.warn("[devnet-airdrop] mint authority check failed:", msg);
+        Sentry.captureException(authCheckErr, {
+          tags: { endpoint: "/api/devnet-airdrop", step: "authority_check" },
+          extra: { mintAddress, walletAddress },
+        });
+        return NextResponse.json(
+          { error: "Could not verify mint authority due to RPC error. Please retry.", retryable: true },
+          { status: 503 },
+        );
       }
+
+      // Extra guard: if the mint data was too short to parse authority (< 36 bytes),
+      // authorityVerified stays false. Proceed cautiously — sendRawTransaction will
+      // fail if authority is wrong, and we catch that below.
+      void authorityVerified; // used for Sentry context in future if needed
 
       // Derive user's ATA
       const ata = await getAssociatedTokenAddress(mintPk, walletPk);
@@ -378,16 +396,43 @@ export async function POST(req: NextRequest) {
       // signatures — including the one the sealed signer just applied. Use sendRawTransaction +
       // confirmTransaction instead (same pattern as auto-fund and devnet-mirror-mint).
       const signedTx = mintSigner.signTransaction(tx);
-      sig = await withTimeout(
-        (async () => {
-          const txSig = await connection.sendRawTransaction(
-            (signedTx as Transaction).serialize(),
+      try {
+        sig = await withTimeout(
+          (async () => {
+            const txSig = await connection.sendRawTransaction(
+              (signedTx as Transaction).serialize(),
+            );
+            await connection.confirmTransaction(txSig, "confirmed");
+            return txSig;
+          })(),
+          30_000,
+        );
+      } catch (mintErr) {
+        // Convert mint-authority program errors (spl-token error 0x4 = OwnerMismatch) to 400.
+        // Any other error (network, timeout) re-throws to surface as 500 via outer catch.
+        const errStr = mintErr instanceof Error ? mintErr.message : String(mintErr);
+        const isAuthorityError =
+          errStr.includes("owner does not match") ||
+          errStr.includes("OwnerMismatch") ||
+          errStr.includes("0x4") || // spl-token OwnerMismatch
+          errStr.includes("custom program error: 0x4");
+        if (isAuthorityError) {
+          Sentry.captureException(mintErr, {
+            tags: { endpoint: "/api/devnet-airdrop", step: "mint_authority_mismatch" },
+            extra: { mintAddress, walletAddress },
+          });
+          // Don't re-throw — let the finally block release the claim, then return 400
+          return NextResponse.json(
+            {
+              error:
+                "Cannot mint tokens: mint authority mismatch. This mirror token was created with an old key and needs to be re-keyed. Please use the devnet faucet page (/devnet-mint) to obtain tokens.",
+              hint: "old_key_mirror",
+            },
+            { status: 400 },
           );
-          await connection.confirmTransaction(txSig, "confirmed");
-          return txSig;
-        })(),
-        30_000,
-      );
+        }
+        throw mintErr; // re-throw non-authority errors (will 500 via outer catch)
+      }
       mintSucceeded = true;
     } finally {
       // Release the claim slot on ANY failure so user isn't locked out 24h.
