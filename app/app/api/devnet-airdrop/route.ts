@@ -391,6 +391,14 @@ export async function POST(req: NextRequest) {
       }
       tx.add(createMintToInstruction(mintPk, ata, mintAuthPk, rawAmount));
 
+      // Set recentBlockhash and feePayer before signing.
+      // sendRawTransaction requires both fields to be set — unlike sendAndConfirmTransaction
+      // which fetches the blockhash internally. Without this, serialize() throws
+      // "Transaction recentBlockhash field is required", causing a 500.
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = mintAuthPk;
+
       // Sign using sealed signer and send raw.
       // sendAndConfirmTransaction() calls tx.sign(signers) internally which wipes all existing
       // signatures — including the one the sealed signer just applied. Use sendRawTransaction +

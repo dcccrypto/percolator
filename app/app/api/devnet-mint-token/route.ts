@@ -220,6 +220,11 @@ export async function POST(req: NextRequest) {
           ),
         );
 
+        // Set recentBlockhash and feePayer before signing (required for sendRawTransaction).
+        const { blockhash: airdropBlockhash } = await connection.getLatestBlockhash();
+        airdropTx.recentBlockhash = airdropBlockhash;
+        airdropTx.feePayer = mintAuthPk;
+
         // Sign and send raw — sendAndConfirmTransaction wipes the sealed signer's signature
         // by calling tx.sign(signers) internally. Use sendRawTransaction instead.
         const signedAirdropTx = mintSigner.signTransaction(airdropTx);
