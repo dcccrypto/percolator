@@ -1,7 +1,6 @@
+# Risk Engine Spec (Source of Truth) — v11.9
 
-# Risk Engine Spec (Source of Truth) — v11.5
-
-**Combined Single-Document Native 128-bit Revision (Patched Again, Funding/Trade-Bound Fixes)**
+**Combined Single-Document Native 128-bit Revision (Patched Deposit / Dust-Fee / Time-Monotonicity / Settle-Wrapper Edition)**
 
 **Design:** Protected Principal + Junior Profit Claims + Lazy A/K Side Indices (Native 128-bit Base-10 Scaling)  
 **Status:** implementation source-of-truth (normative language: MUST / MUST NOT / SHOULD / MAY)  
@@ -10,29 +9,23 @@
 
 This is a single combined spec. It supersedes prior delta-style revisions by restating the full current design in one document, explicitly scaled for native 128-bit high-throughput VM execution.
 
-## Change summary from v11.4
+## Change summary from v11.8
 
-This revision fixes the remaining non-minor logic and sequencing issues found in v11.4 and tightens the arithmetic / lifecycle text so the document is internally consistent.
+This revision fixes the real remaining non-minor issues and removes the last stale normative contradictions discovered in the next audit pass.
 
-1. All signed `i128` state transitions that can overflow are normatively required to use checked helpers. The `pnl_delta` path computes the K-difference in a wide transient intermediate before division, so `K_now - K_snap` cannot overflow silently.
+1. `deposit` is now a timed instruction: it accepts `now_slot`, enforces time monotonicity, materializes new accounts using `slot_anchor = now_slot`, settles realized trading losses from newly deposited principal before sweeping fee debt, and resolves §7.3 only for **true stored-flat** accounts.
 
-2. `accrue_market_to` remains unambiguous: mark is applied **exactly once** per invocation from the pre-invocation `P_last` to the final `oracle_price`; funding is the only sub-stepped component.
+2. Liquidation fees now apply the configured minimum floor whenever `q_close_q > 0`, even if `closed_notional` floors to zero. Dust liquidations can no longer bypass `min_liquidation_abs`.
 
-3. Funding now applies only when the invocation snapshot has live effective OI on **both** sides. Empty-market or zero-live-OI snapshots accrue no funding K-motion, even if `r_last` is stale or nonzero.
+3. Timed helpers are now explicitly monotonic. Any helper or instruction that accepts `now_slot` must reject `now_slot < current_slot` or `now_slot < slot_last`. `accrue_market_to` synchronizes `current_slot = now_slot` on success.
 
-4. Explicit protocol-fee charging remains unified under `charge_fee_to_insurance(i, fee)`. Explicit fee shortfalls remain local `fee_credits_i` debt and are never written into `PNL_i`.
+4. Account materialization is now explicitly slot-anchored in normative text, not just in commentary. New accounts must initialize `w_start_i` and `last_fee_slot_i` from the calling instruction’s `now_slot`, not from any stale global slot.
 
-5. Trading-loss seniority remains preserved everywhere. In `execute_trade` and non-bankruptcy liquidation, realized trading losses are settled from principal **before** explicit protocol fees are charged.
+5. Funding-rate inputs are further constrained: they MUST NOT depend directly on `current_slot`, wall-clock time, or passive passage of time. Capital-only instructions such as `deposit` therefore remain funding-neutral and do not recompute `r_last`.
 
-6. Partial / non-bankruptcy liquidation remains fully normative. It reattaches the reduced local position, calls `enqueue_adl(ctx, liq_side, q_close_q, 0)`, and evaluates health using the current post-step state.
+6. `keeper_crank` now explicitly accepts `now_slot` and `oracle_price` and must accrue at instruction start so timed monotonicity is enforced even when the keeper performs only bounded maintenance work.
 
-7. Funding anti-retroactivity is now complete at the instruction lifecycle level: if funding-rate inputs change, `r_last` is recomputed **exactly once** after the instruction's final post-reset state is known. `withdraw` now participates in that same final-state recomputation rule.
-
-8. Trade-input bounds are now fully explicit. The spec introduces `MAX_TRADE_SIZE_Q`, requires `size_q <= MAX_TRADE_SIZE_Q` before any signed cast or slippage math, and requires the precomputed `trade_notional` to satisfy `trade_notional <= MAX_ACCOUNT_NOTIONAL`.
-
-9. Aggregate positive realized PnL overflow remains eliminated by construction. The spec keeps `MAX_MATERIALIZED_ACCOUNTS`, `MAX_ACCOUNT_POSITIVE_PNL`, and `MAX_PNL_POS_TOT` bounds with a deterministic account-materialization cap and per-account positive-PnL cap.
-
-10. Account initialization, canonical zero-position snapshots, recurring-fee time anchors, and current-state lifecycle rules remain fully normative.
+7. A standalone `settle_account` top-level wrapper is now defined. If implementations expose settlement as an external instruction, they MUST use this wrapper so end-of-instruction reset handling and final-state funding recomputation still occur.
 
 ## 0. Security goals (normative)
 
@@ -69,6 +62,8 @@ The engine MUST provide the following properties.
 15. **Instruction-final funding anti-retroactivity:** If an instruction mutates any funding-rate input, the stored next-interval funding rate `r_last` MUST correspond to the instruction's final post-reset state, not any intermediate state.
 
 16. **Deterministic overflow handling:** Any arithmetic condition that is not proven unreachable by the spec's numeric bounds MUST have a deterministic fail-safe or bounded fallback path. Silent wrap, unchecked panic, or undefined truncation are forbidden.
+
+**Atomic execution model (normative):** Every top-level external instruction defined in §10 MUST be atomic. If any required precondition, checked-arithmetic guard, or conservative-failure condition fails, the instruction MUST roll back all state mutations performed since that instruction began.
 
 ## 1. Types, units, scaling, and arithmetic requirements
 
@@ -162,9 +157,13 @@ The following interpretation is normative for dust accounting.
 
 ### 1.4.1 Time monotonicity and account freshness invariants
 
-- Any top-level instruction or helper call that accepts `now_slot` MUST require `now_slot >= slot_last` before state mutation.
+- Any top-level instruction or helper call that accepts `now_slot` MUST require both `now_slot >= current_slot` and `now_slot >= slot_last` before state mutation.
 
-- A newly materialized account MUST have `last_fee_slot_i = current_slot`, not `0`.
+- Timed helpers MUST NOT rewind `current_slot`. If `accrue_market_to(now_slot, ...)` succeeds, it MUST leave `current_slot = now_slot`.
+
+- Any account materialized inside an instruction that accepts `now_slot` MUST use `slot_anchor = now_slot` for both `w_start_i` and `last_fee_slot_i`.
+
+- A newly materialized account MUST NOT inherit a stale global slot anchor and MUST NOT initialize `last_fee_slot_i = 0`.
 
 - A newly materialized or re-zeroed account MUST have `a_basis_i = ADL_ONE`. The engine MUST NOT leave `a_basis_i = 0`.
 
@@ -317,7 +316,7 @@ A helper that resets an account to zero position in a known side epoch `e` MUST 
 
 - `epoch_snap_i = e`
 
-When a new account is materialized, the engine MUST initialize at minimum:
+A helper `materialize_account(i, slot_anchor)` MUST initialize a newly created account at minimum as follows:
 
 - `C_i = 0`, `PNL_i = 0`, `R_i = 0`, `basis_pos_q_i = 0`, `fee_credits_i = 0`
 
@@ -327,11 +326,13 @@ When a new account is materialized, the engine MUST initialize at minimum:
 
 - `epoch_snap_i = 0`
 
-- `w_start_i = current_slot`
+- `w_start_i = slot_anchor`
 
 - `w_slope_i = 0`
 
-- `last_fee_slot_i = current_slot`
+- `last_fee_slot_i = slot_anchor`
+
+`slot_anchor` MUST be the calling instruction's `now_slot` for any timed external instruction. A newly materialized account MUST NOT be initialized from a stale global slot value.
 
 A newly materialized account MUST be inserted only through a helper that increments `materialized_account_count` in checked arithmetic and enforces `materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS`.
 
@@ -916,25 +917,31 @@ When touching account `i`:
 
 Before any operation that depends on current market state, the engine MUST call `accrue_market_to(now_slot, oracle_price)`.
 
+Preconditions:
+
+- `now_slot >= current_slot`
+
+- `now_slot >= slot_last`
+
+- `0 < oracle_price <= MAX_ORACLE_PRICE`
+
 This helper MUST:
 
-1. require `now_slot >= slot_last`
+1. set `current_slot = now_slot`
 
-2. require `0 < oracle_price <= MAX_ORACLE_PRICE`
+2. if `now_slot == slot_last` and `oracle_price == P_last`, return with no further state change
 
-3. if `now_slot == slot_last` and `oracle_price == P_last`, return with no state change
+3. snapshot `OI_eff_long` and `OI_eff_short` at the start of the invocation; those OI values are fixed for all funding sub-steps in this invocation
 
-4. snapshot `OI_eff_long` and `OI_eff_short` at the start of the invocation; those OI values are fixed for all funding sub-steps in this invocation
-
-5. apply mark-to-market **exactly once** from the pre-invocation `P_last` to the final `oracle_price`:
+4. apply mark-to-market **exactly once** from the pre-invocation `P_last` to the final `oracle_price`:
    - let `delta_p = (oracle_price as i128) - (P_last as i128)`
    - if `delta_p != 0`:
      - if snapped `OI_eff_long > 0`, add `A_long * delta_p` to `K_long` using checked `i128` arithmetic
      - if snapped `OI_eff_short > 0`, add `-(A_short * delta_p)` to `K_short` using checked `i128` arithmetic
 
-6. let `dt_rem = now_slot - slot_last`
+5. let `dt_rem = now_slot - slot_last`
 
-7. while `dt_rem > 0`:
+6. while `dt_rem > 0`:
    - let `dt = min(dt_rem, MAX_FUNDING_DT)`
    - if `r_last != 0` **and** snapped `OI_eff_long > 0` **and** snapped `OI_eff_short > 0`:
      - `funding_term_raw = fund_px_last * abs(r_last) * dt`, computed natively in checked arithmetic
@@ -950,13 +957,13 @@ This helper MUST:
        - `K_receiver += delta_K_receiver_abs`
    - `dt_rem -= dt`
 
-8. update `slot_last = now_slot`, `P_last = oracle_price`, and `fund_px_last = oracle_price`
+7. update `slot_last = now_slot`, `P_last = oracle_price`, and `fund_px_last = oracle_price`
 
 Normative clarification:
 
-- Step 5 is one-shot mark application for the whole invocation.
+- Step 4 is one-shot mark application for the whole invocation.
 
-- Step 7 is the only sub-stepped component.
+- Step 6 is the only sub-stepped component.
 
 - If either snapped side OI is zero, funding is skipped for the entire invocation.
 
@@ -964,7 +971,11 @@ Normative clarification:
 
 ### 5.5 Funding anti-retroactivity
 
-In this source-of-truth spec, funding-rate inputs MAY depend on market state such as OI, skew, side modes, oracle-related funding inputs, and explicit funding-configuration state. They MUST NOT depend on vault-only capital bookkeeping such as `V`, `C_tot`, `I`, account principal deposits / withdrawals, or account-local fee debt.
+In this source-of-truth spec, funding-rate inputs MAY depend on market state such as OI, skew, side modes, oracle-related funding inputs, and explicit funding-configuration state.
+
+They MUST NOT depend on vault-only capital bookkeeping such as `V`, `C_tot`, `I`, account principal deposits / withdrawals, or account-local fee debt.
+
+They MUST NOT depend directly on `current_slot`, wall-clock time, or passive passage of time between instructions; passage of time affects funding only through `accrue_market_to` integrating the already-stored `r_last` over `dt`.
 
 Before any operation that can change funding-rate inputs, the engine MUST:
 
@@ -1251,6 +1262,12 @@ then the engine MUST:
 
 2. `set_pnl(i, 0)`
 
+Normative clarification:
+
+- In a fresh post-touch state reached through `settle_side_effects(i)`, the condition `effective_pos_q(i) == 0` is sufficient for this path.
+
+- A routine that has **not** just settled side effects for the account MUST NOT treat an epoch-stale stored position as flat merely because `effective_pos_q(i) == 0`. Outside a fresh post-touch state, the true stored-flat condition for this path is `basis_pos_q_i == 0`.
+
 ### 7.4 Profit conversion
 
 Let `x = WarmableGross_i`. If `x == 0`, do nothing.
@@ -1350,16 +1367,16 @@ The protocol MUST define:
 
 For a liquidation that closes `q_close_q` at `oracle_price`, define:
 
-- `closed_notional = mul_div_floor_u128(q_close_q, oracle_price, POS_SCALE)`
-
-- if `closed_notional == 0`, then `liq_fee = 0`
+- if `q_close_q == 0`, then `liq_fee = 0`
 
 - else:
+  - `closed_notional = mul_div_floor_u128(q_close_q, oracle_price, POS_SCALE)`
   - `liq_fee_raw = mul_div_ceil_u128(closed_notional, liquidation_fee_bps, 10_000)`
   - `liq_fee = min(max(liq_fee_raw, min_liquidation_abs), liquidation_fee_cap)`
 
 The liquidation fee MUST be charged using `charge_fee_to_insurance(i, liq_fee)`.
 
+Normative clarification: the minimum liquidation fee floor applies whenever `q_close_q > 0`, even if `closed_notional` floors to `0`.
 
 ## 9. Margin checks and liquidation
 
@@ -1429,13 +1446,11 @@ A successful non-bankruptcy liquidation MUST:
 
 8. invoke `enqueue_adl(ctx, liq_side, q_close_q, 0)` to decrease global OI and socialize the quantity reduction with zero quote deficit
 
-9. if `ctx.pending_reset_long` or `ctx.pending_reset_short` became true in step 8, the liquidation MUST perform no further live-OI-dependent health logic in this instruction and MUST return control to the caller for §§5.7–5.8
+9. if `effective_pos_q(i) == 0`, require `PNL_i >= 0` after the loss settlement of step 6
 
-10. evaluate `Eq_net_i`, `MM_req`, and any relevant current-state haircut inputs using the **current post-step-8 state**
+10. if `ctx.pending_reset_long` or `ctx.pending_reset_short` became true in step 8, the liquidation MUST perform no further live-OI-dependent health logic in this instruction and MUST return control to the caller for §§5.7–5.8. This short-circuit MUST NOT waive step 9.
 
-11. if `effective_pos_q(i) != 0`, require maintenance healthy on that current post-step-8 state
-
-12. if `effective_pos_q(i) == 0`, require `PNL_i >= 0` after the loss settlement of step 6
+11. if `effective_pos_q(i) != 0`, evaluate `Eq_net_i`, `MM_req`, and any relevant current-state haircut inputs using the **current post-step-8 state** and require maintenance healthy on that current post-step-8 state
 
 If a candidate partial liquidation would fail any of the above postconditions, the engine MUST NOT commit it as a successful partial liquidation; it MUST instead perform bankruptcy liquidation or reject according to the liquidation policy.
 
@@ -1485,56 +1500,80 @@ Any operation that would increase net side OI on a side whose mode is `DrainOnly
 
 ### 10.0 Account materialization
 
-Any external operation that references an account identifier MUST first ensure the account is materialized. If the account does not yet exist, the engine MUST materialize it using the canonical initialization of §2.1.1 and the bounded-account helper implied by `materialized_account_count`.
+Any external operation that references an account identifier MUST first ensure the account is materialized.
+
+If the account does not yet exist, the engine MUST materialize it using `materialize_account(i, slot_anchor)` from §2.1.1 and the bounded-account helper implied by `materialized_account_count`.
+
+For any timed external instruction, the caller MUST first enforce `now_slot >= current_slot` and `now_slot >= slot_last`, and it MUST pass `slot_anchor = now_slot` when materializing a new account.
+
+Unless a later procedure restates materialization explicitly, each external operation in §10 implicitly begins by executing this materialization rule for every referenced account.
 
 An implementation MAY physically delete empty accounts, but if it does so it MUST update `materialized_account_count` with checked arithmetic and MUST preserve all aggregate invariants. Implementations are not required to support deletion.
 
-### 10.1 `touch_account_full(i, oracle_price, now_slot)`
+### 10.1 `touch_account_full(i, oracle_price, now_slot)` (canonical local settle subroutine)
 
-Canonical settle routine. It MUST perform, in order:
+This is the canonical **local** settle routine used inside top-level instructions. It MAY be called by external instructions, but if an implementation exposes settlement as a standalone top-level instruction, it MUST use the wrapper in §10.7 rather than calling this helper alone.
 
-1. `current_slot = now_slot`
+It MUST perform, in order:
 
-2. `accrue_market_to(now_slot, oracle_price)`
+1. require `now_slot >= current_slot`
 
-3. `old_avail = max(PNL_i, 0) - R_i`
+2. require `now_slot >= slot_last`
 
-4. `old_warmable_i = WarmableGross_i` evaluated strictly before any profit-increasing state transition in this call
+3. `accrue_market_to(now_slot, oracle_price)`
 
-5. `settle_side_effects(i)`
+4. `old_avail = max(PNL_i, 0) - R_i`
 
-6. `new_avail = max(PNL_i, 0) - R_i`
+5. `old_warmable_i = WarmableGross_i` evaluated strictly before any profit-increasing state transition in this call
 
-7. if `new_avail > old_avail`:
+6. `settle_side_effects(i)`
+
+7. `new_avail = max(PNL_i, 0) - R_i`
+
+8. if `new_avail > old_avail`:
    - record `capital_before_restart = C_i`
    - invoke the restart-on-new-profit rule (§6.5) passing `old_warmable_i`
    - if `C_i > capital_before_restart`, immediately sweep fee debt (§7.5)
 
-8. charge account-local maintenance / extend fee debt if any, and if such logic is time-based update `last_fee_slot_i = current_slot`
-
 9. settle losses from principal (§7.1)
 
-10. if `effective_pos_q(i) == 0` and `PNL_i < 0`, resolve uncovered loss per §7.3
+10. charge account-local maintenance / extend fee debt if any, and if such logic is time-based update `last_fee_slot_i = current_slot`
 
-11. convert warmable profits (§7.4)
+11. if `effective_pos_q(i) == 0` and `PNL_i < 0`, resolve uncovered loss per §7.3
 
-12. sweep fee debt (§7.5)
+12. convert warmable profits (§7.4)
+
+13. sweep fee debt (§7.5)
 
 `touch_account_full` MUST NOT itself begin a side reset.
 
-### 10.2 `deposit(i, amount)`
+### 10.2 `deposit(i, amount, now_slot)`
 
 `deposit` is a pure capital-transfer instruction. It MUST NOT implicitly call `touch_account_full` or otherwise mutate side state.
 
-Effects:
+Procedure:
 
-1. require `checked_add_u128(V, amount) <= MAX_VAULT_TVL`
+1. require `now_slot >= current_slot`
 
-2. `V += amount`
+2. require `now_slot >= slot_last`
 
-3. `set_capital(i, checked_add_u128(C_i, amount))`
+3. if account `i` is not yet materialized, materialize it using `slot_anchor = now_slot` per §10.0
 
-4. immediately apply fee-debt sweep (§7.5)
+4. `current_slot = now_slot`
+
+5. compute `V_candidate = checked_add_u128(V, amount)` and require `V_candidate <= MAX_VAULT_TVL`
+
+6. set `V = V_candidate`
+
+7. `set_capital(i, checked_add_u128(C_i, amount))`
+
+8. settle losses from principal (§7.1)
+
+9. if `basis_pos_q_i == 0` and `PNL_i < 0`, resolve uncovered loss per §7.3
+
+10. immediately apply fee-debt sweep (§7.5)
+
+Because `deposit` cannot mutate OI, stored positions, stale-account counts, phantom-dust bounds, side modes, or funding-rate inputs by construction, it MAY omit §§5.7–5.8 and MUST NOT recompute `r_last`.
 
 ### 10.3 `withdraw(i, amount, oracle_price, now_slot)`
 
@@ -1663,7 +1702,7 @@ Procedure:
 
 9. assert `OI_eff_long == OI_eff_short`
 
-### 10.6 `keeper_crank(...)`
+### 10.6 `keeper_crank(now_slot, oracle_price, ...)`
 
 A keeper crank is a top-level external instruction and MUST use the same deferred reset lifecycle as other top-level instructions.
 
@@ -1671,23 +1710,50 @@ Procedure:
 
 1. initialize fresh instruction context `ctx`
 
-2. a keeper MAY:
-   - call `accrue_market_to`
+2. require `now_slot >= current_slot`
+
+3. require `now_slot >= slot_last`
+
+4. `accrue_market_to(now_slot, oracle_price)`
+
+5. a keeper MAY:
    - touch a bounded window of accounts
    - liquidate unhealthy accounts, passing `ctx` through any `enqueue_adl` call
    - advance warmup conversion
    - sweep fee debt
    - prioritize accounts on a `DrainOnly` or `ResetPending` side
-   - explicitly call `finalize_side_reset(side)` when its preconditions already hold, although this is not required because step 4 auto-finalizes eligible `ResetPending` sides
-   - if, during this work, either `ctx.pending_reset_long` or `ctx.pending_reset_short` becomes true, the keeper MUST stop processing further accounts in that instruction and proceed directly to steps 3–5
+   - explicitly call `finalize_side_reset(side)` when its preconditions already hold, although this is not required because step 7 auto-finalizes eligible `ResetPending` sides
+   - if, during this work, either `ctx.pending_reset_long` or `ctx.pending_reset_short` becomes true, the keeper MUST stop processing further accounts in that instruction and proceed directly to steps 6–8
 
-3. `schedule_end_of_instruction_resets(ctx)`
+6. `schedule_end_of_instruction_resets(ctx)`
 
-4. `finalize_end_of_instruction_resets(ctx)`
+7. `finalize_end_of_instruction_resets(ctx)`
 
-5. if funding-rate inputs changed, recompute `r_last` exactly once from the final post-reset state
+8. if funding-rate inputs changed, recompute `r_last` exactly once from the final post-reset state
+
+9. assert `OI_eff_long == OI_eff_short`
 
 The crank MUST maintain a cursor or equivalent progress mechanism so repeated calls eventually cover active accounts supplied to it.
+
+### 10.7 `settle_account(i, oracle_price, now_slot)`
+
+If an implementation exposes settlement as a standalone top-level instruction, it MUST use this wrapper rather than calling `touch_account_full` alone.
+
+Procedure:
+
+1. initialize fresh instruction context `ctx`
+
+2. ensure account `i` is materialized per §10.0 using `slot_anchor = now_slot` if needed
+
+3. `touch_account_full(i, oracle_price, now_slot)`
+
+4. `schedule_end_of_instruction_resets(ctx)`
+
+5. `finalize_end_of_instruction_resets(ctx)`
+
+6. if funding-rate inputs changed, recompute `r_last` exactly once from the final post-reset state
+
+7. assert `OI_eff_long == OI_eff_short`
 
 ## 11. Required test properties (minimum)
 
@@ -1789,6 +1855,24 @@ An implementation MUST include tests that cover at least:
 
 48. Trade-size precondition safety: `execute_trade` rejects `size_q > MAX_TRADE_SIZE_Q` or `trade_notional > MAX_ACCOUNT_NOTIONAL` before any signed cast or slippage multiplication.
 
+49. Maintenance-fee seniority on touch: if immediate account-local maintenance fees are enabled, `touch_account_full` settles existing realized trading losses from principal before extracting maintenance fees, so maintenance cannot inflate a later bankruptcy deficit.
+
+50. Partial-liquidation reset short-circuit: even if `enqueue_adl(ctx, liq_side, q_close_q, 0)` schedules a reset, a candidate partial liquidation that leaves the account flat with `PNL_i < 0` is not a successful partial liquidation and must instead fail as partial or route to bankruptcy according to policy.
+
+51. Keeper end-state parity: `keeper_crank` ends with `OI_eff_long == OI_eff_short`.
+
+52. Deposit loss seniority: in `deposit`, newly deposited principal settles realized trading losses from principal before any outstanding fee debt is swept.
+
+53. Deposit true-flat-only loss absorption: `deposit` may route a remaining negative remainder through §7.3 only when `basis_pos_q_i == 0`; an epoch-stale account with `basis_pos_q_i != 0` but `effective_pos_q(i) == 0` is not treated as flat before touch.
+
+54. Deposit slot-anchor materialization: a new account created by `deposit(..., now_slot)` initializes `w_start_i = now_slot` and `last_fee_slot_i = now_slot`, not a stale prior `current_slot` value.
+
+55. Dust-liquidation minimum fee floor: if `q_close_q > 0` but `closed_notional` floors to `0`, the liquidation fee still equals `min_liquidation_abs` subject to `liquidation_fee_cap`.
+
+56. Timed monotonicity: no instruction or helper accepting `now_slot` may reduce `current_slot`; `accrue_market_to` rejects `now_slot < current_slot` and leaves `current_slot = now_slot` on success.
+
+57. Standalone settle wrapper: if settlement is exposed as a top-level instruction, `settle_account` can reconcile the last stale or dusty account and still run end-of-instruction reset scheduling / finalization and final-state funding recomputation.
+
 
 ## 12. Reference pseudocode (non-normative)
 
@@ -1857,8 +1941,14 @@ if basis_pos_q_i != 0 and epoch_snap_i != epoch_s:
 
 ```text
 accrue_market_to(now_slot, oracle_price):
+    assert now_slot >= current_slot
     assert now_slot >= slot_last
     assert 0 < oracle_price <= MAX_ORACLE_PRICE
+
+    current_slot = now_slot
+
+    if now_slot == slot_last and oracle_price == P_last:
+        return
 
     oi_long_snap = OI_eff_long
     oi_short_snap = OI_eff_short
@@ -2073,6 +2163,87 @@ execute_trade(...):
     schedule_end_of_instruction_resets(ctx)
     finalize_end_of_instruction_resets(ctx)
     recompute_next_funding_rate_from_final_state(oracle_price) if inputs changed
+```
+
+### 12.10 `touch_account_full` loss-before-maintenance ordering
+
+```text
+touch_account_full(i, oracle_price, now_slot):
+    assert now_slot >= current_slot
+    assert now_slot >= slot_last
+    accrue_market_to(now_slot, oracle_price)
+    old_avail = max(PNL_i, 0) - R_i
+    old_warmable_i = WarmableGross_i on current_slot before any profit increase
+    settle_side_effects(i)
+    new_avail = max(PNL_i, 0) - R_i
+    if new_avail > old_avail:
+        capital_before_restart = C_i
+        restart_on_new_profit(old_warmable_i)
+        if C_i > capital_before_restart:
+            sweep_fee_debt()
+    settle_losses_from_principal(i)
+    charge_or_extend_account_local_maintenance(i)
+    // if time-based, set last_fee_slot_i = current_slot
+    if effective_pos_q(i) == 0 and PNL_i < 0:
+        absorb_protocol_loss((-PNL_i) as u128)
+        set_pnl(i, 0)
+    convert_warmable_profits()
+    sweep_fee_debt()
+```
+
+### 12.11 Partial-liquidation success path with reset short-circuit guard
+
+```text
+partial_liquidation(i, q_close_q, ctx):
+    old_eff = effective_pos_q(i)
+    new_eff = old_eff - sign(old_eff) * q_close_q
+    attach_effective_position(i, new_eff)
+    settle_losses_from_principal(i)
+    liq_fee = liquidation_fee_from(q_close_q, oracle_price)
+    charge_fee_to_insurance(i, liq_fee)
+    enqueue_adl(ctx, side(old_eff), q_close_q, 0)
+    if effective_pos_q(i) == 0:
+        assert PNL_i >= 0
+    if ctx.pending_reset_long or ctx.pending_reset_short:
+        return
+    if effective_pos_q(i) != 0:
+        assert maintenance_healthy_on_current_post_step_state(i)
+```
+
+### 12.12 Timed deposit with loss seniority and slot-anchored materialization
+
+```text
+deposit(i, amount, now_slot):
+    assert now_slot >= current_slot
+    assert now_slot >= slot_last
+    if account i does not exist:
+        materialize_account(i, now_slot)
+    current_slot = now_slot
+    V_candidate = checked_add_u128(V, amount)
+    assert V_candidate <= MAX_VAULT_TVL
+    V = V_candidate
+    set_capital(i, checked_add_u128(C_i, amount))
+    settle_losses_from_principal(i)
+    if basis_pos_q_i == 0 and PNL_i < 0:
+        absorb_protocol_loss((-PNL_i) as u128)
+        set_pnl(i, 0)
+    sweep_fee_debt()
+```
+
+### 12.13 Standalone settlement wrapper
+
+```text
+settle_account(i, oracle_price, now_slot):
+    assert now_slot >= current_slot
+    assert now_slot >= slot_last
+    if account i does not exist:
+        materialize_account(i, now_slot)
+    initialize fresh ctx
+    touch_account_full(i, oracle_price, now_slot)
+    schedule_end_of_instruction_resets(ctx)
+    finalize_end_of_instruction_resets(ctx)
+    recompute_next_funding_rate_from_final_state(oracle_price) if inputs changed
+    assert OI_eff_long == OI_eff_short
 ```
 
 ## 13. Compatibility notes
