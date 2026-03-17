@@ -157,10 +157,15 @@ export async function POST(req: NextRequest) {
               ),
             );
 
+            // Set recentBlockhash + feePayer before signing (required for sendRawTransaction)
+            const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+            tx.recentBlockhash = blockhash;
+            tx.feePayer = mintAuthPk;
+
             // Sign and send transaction using sealed signer
             const signed = mintSigner.signTransaction(tx);
             const sig = await connection.sendRawTransaction((signed as Transaction).serialize());
-            await connection.confirmTransaction(sig, "confirmed");
+            await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
 
             results.usdc_minted = true;
             results.usdc_amount = USDC_MINT_AMOUNT / 1_000_000;
