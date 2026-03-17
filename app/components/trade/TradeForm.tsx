@@ -341,7 +341,7 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
           </p>
           <p className="mt-1 text-[9px] text-[var(--text-secondary)] leading-relaxed">
             {oracleUnavailable
-              ? "No oracle price feed is available for this market. Trading is disabled until the oracle is activated."
+              ? "Oracle not yet active — keeper has not cranked this market."
               : "The oracle price for this market has not been updated recently. Trading is temporarily disabled to prevent failed transactions."}
           </p>
         </div>
