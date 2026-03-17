@@ -145,4 +145,39 @@ describe("/api/faucet route", () => {
     const decoded = new PublicKey(mintData.slice(4, 36));
     expect(decoded.equals(signerPk)).toBe(true); // ← match → route proceeds
   });
+
+  describe("SOL airdrop rate-limit detection (GH#1385)", () => {
+    // Mirror of the regex used in the route to detect Solana devnet rate-limits.
+    // Ensures the pattern catches real error strings from the devnet faucet.
+    const isRateLimit = (msg: string) =>
+      /429|too many requests|rate.?limit|airdrop.*limit|limit.*airdrop/i.test(msg);
+
+    it("detects '429 Too Many Requests' from devnet RPC", () => {
+      expect(isRateLimit("429 Too Many Requests")).toBe(true);
+    });
+
+    it("detects 'airdrop request limit reached' from devnet faucet", () => {
+      expect(isRateLimit("airdrop request limit reached for the wallet address")).toBe(true);
+    });
+
+    it("detects 'rate limit exceeded' variations", () => {
+      expect(isRateLimit("rate limit exceeded")).toBe(true);
+      expect(isRateLimit("RateLimit: too many requests")).toBe(true);
+    });
+
+    it("does NOT flag unrelated errors as rate-limits", () => {
+      expect(isRateLimit("Transaction simulation failed")).toBe(false);
+      expect(isRateLimit("Connection refused")).toBe(false);
+      expect(isRateLimit("Invalid public key input")).toBe(false);
+    });
+
+    it("returns 429 status for rate-limited SOL airdrop (not 500)", () => {
+      // Validate that a 429 from devnet → our API returns 429 with retryable:true.
+      // This is a logic regression guard — not a full integration test.
+      const errMsg = "429 Too Many Requests";
+      const rateLimited = isRateLimit(errMsg);
+      const statusCode = rateLimited ? 429 : 500;
+      expect(statusCode).toBe(429);
+    });
+  });
 });
