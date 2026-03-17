@@ -1052,7 +1052,6 @@ var V1_ENGINE_EMERGENCY_START_SLOT_OFF = 640;
 var V1_ENGINE_LAST_BREAKER_SLOT_OFF = 648;
 var V1_ENGINE_BITMAP_OFF = 656;
 var V1_LEGACY_ENGINE_BITMAP_OFF_ACTUAL = 672;
-var V1_LEGACY_ACCT_OWNER_OFF = 200;
 var V1D_CONFIG_LEN = 320;
 var V1D_ENGINE_OFF = 424;
 var V1D_ACCOUNT_SIZE = 248;
@@ -1116,7 +1115,7 @@ function buildLayout(version, maxAccounts, engineOffOverride) {
   const bitmapBytes = bitmapWords * 8;
   const postBitmap = 18;
   const nextFreeBytes = maxAccounts * 2;
-  const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
+  const preAccountsLen = actualBitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
   const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
   return {
     version,
@@ -1160,7 +1159,8 @@ function buildLayout(version, maxAccounts, engineOffOverride) {
     engineEmergencyStartSlotOff: isV0 ? -1 : V1_ENGINE_EMERGENCY_START_SLOT_OFF,
     engineLastBreakerSlotOff: isV0 ? -1 : V1_ENGINE_LAST_BREAKER_SLOT_OFF,
     engineBitmapOff: actualBitmapOff,
-    acctOwnerOff: isV1Legacy ? V1_LEGACY_ACCT_OWNER_OFF : ACCT_OWNER_OFF,
+    // V1_LEGACY: accountsOff is now correctly 1880 (fixed above), so standard +184 applies.
+    acctOwnerOff: ACCT_OWNER_OFF,
     hasInsuranceIsolation: !isV0,
     engineInsuranceIsolatedOff: isV0 ? -1 : 48,
     engineInsuranceIsolationBpsOff: isV0 ? -1 : 64
