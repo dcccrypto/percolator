@@ -682,18 +682,16 @@ impl RiskEngine {
 
         if new_eff_pos_q == 0 {
             self.set_position_basis_q(idx, 0i128);
-            // Reset snapshots to canonical zero-position defaults in current epoch (spec §4.5)
+            // Reset to canonical zero-position defaults anchored to discarded side's epoch (spec §4.6, §2.1.1)
             self.accounts[idx].adl_a_basis = ADL_ONE;
+            self.accounts[idx].adl_k_snap = 0i128;
             if old_basis > 0 {
-                self.accounts[idx].adl_k_snap = self.adl_coeff_long;
                 self.accounts[idx].adl_epoch_snap = self.adl_epoch_long;
             } else if old_basis < 0 {
-                self.accounts[idx].adl_k_snap = self.adl_coeff_short;
                 self.accounts[idx].adl_epoch_snap = self.adl_epoch_short;
             } else {
-                // Was already flat — use long side defaults
-                self.accounts[idx].adl_k_snap = self.adl_coeff_long;
-                self.accounts[idx].adl_epoch_snap = self.adl_epoch_long;
+                // Was already flat — anchor to epoch 0 (spec §2.1.1)
+                self.accounts[idx].adl_epoch_snap = 0;
             }
         } else {
             let side = side_of_i128(new_eff_pos_q).expect("attach: nonzero must have side");
@@ -930,9 +928,9 @@ impl RiskEngine {
                 // Position effectively zeroed (spec §5.3 step 3)
                 self.inc_phantom_dust_bound(side);
                 self.set_position_basis_q(idx, 0i128);
-                // Reset snapshots in current epoch
+                // Reset to canonical zero-position defaults anchored to epoch_s (spec §2.1.1)
                 self.accounts[idx].adl_a_basis = ADL_ONE;
-                self.accounts[idx].adl_k_snap = k_side;
+                self.accounts[idx].adl_k_snap = 0i128;
                 self.accounts[idx].adl_epoch_snap = epoch_side;
             } else {
                 // Update k_snap only; do NOT change basis or a_basis (non-compounding)
@@ -969,10 +967,9 @@ impl RiskEngine {
             let new_stale = old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?;
             self.set_stale_count(side, new_stale);
 
-            // Reset snapshots in current epoch
-            let k_side = self.get_k_side(side);
+            // Reset to canonical zero-position defaults anchored to epoch_s (spec §2.1.1)
             self.accounts[idx].adl_a_basis = ADL_ONE;
-            self.accounts[idx].adl_k_snap = k_side;
+            self.accounts[idx].adl_k_snap = 0i128;
             self.accounts[idx].adl_epoch_snap = epoch_side;
         }
 
@@ -988,9 +985,20 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
+        // Time monotonicity (spec §5.4 preconditions)
+        if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 1: set current_slot = now_slot (spec §5.4)
+        self.current_slot = now_slot;
+
         let total_dt = now_slot.saturating_sub(self.last_market_slot);
         if total_dt == 0 && self.last_oracle_price == oracle_price {
-            // No time elapsed and price unchanged — skip
+            // No time elapsed and price unchanged — skip (spec §5.4 step 2)
             self.funding_price_sample_last = oracle_price;
             return Ok(());
         }
@@ -1094,6 +1102,8 @@ impl RiskEngine {
 
         }
 
+        // Synchronize slots and prices (spec §5.4 step 7)
+        self.current_slot = now_slot;
         self.last_market_slot = now_slot;
         self.last_oracle_price = oracle_price;
         self.funding_price_sample_last = oracle_price;
@@ -1696,7 +1706,13 @@ impl RiskEngine {
     // ========================================================================
 
     pub fn touch_account_full(&mut self, idx: usize, oracle_price: u64, now_slot: u64) -> Result<()> {
-        // Step 1
+        // Time monotonicity (spec §10.1 steps 1-2)
+        if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
         self.current_slot = now_slot;
 
         // Step 2
@@ -1788,6 +1804,14 @@ impl RiskEngine {
         self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
         self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + required_fee;
 
+        // Enforce materialized_account_count bound (spec §10.0)
+        self.materialized_account_count = self.materialized_account_count
+            .checked_add(1).ok_or(RiskError::Overflow)?;
+        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
+            self.materialized_account_count -= 1;
+            return Err(RiskError::Overflow);
+        }
+
         let idx = self.alloc_slot()?;
         let account_id = self.next_account_id;
         self.next_account_id = self.next_account_id.saturating_add(1);
@@ -1838,6 +1862,14 @@ impl RiskEngine {
 
         let excess = fee_payment.saturating_sub(required_fee);
 
+        // Enforce materialized_account_count bound (spec §10.0)
+        self.materialized_account_count = self.materialized_account_count
+            .checked_add(1).ok_or(RiskError::Overflow)?;
+        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
+            self.materialized_account_count -= 1;
+            return Err(RiskError::Overflow);
+        }
+
         self.vault = self.vault + fee_payment;
         self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
         self.insurance_fund.fee_revenue = self.insurance_fund.fee_revenue + required_fee;
@@ -1887,20 +1919,41 @@ impl RiskEngine {
     // ========================================================================
 
     pub fn deposit(&mut self, idx: u16, amount: u128, _oracle_price: u64, now_slot: u64) -> Result<()> {
+        // Time monotonicity (spec §10.2 steps 1-2)
+        if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
         self.current_slot = now_slot;
 
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
 
-        // V += amount
-        self.vault = U128::new(add_u128(self.vault.get(), amount));
+        // V_candidate = checked_add(V, amount); require <= MAX_VAULT_TVL (spec §10.2 step 5)
+        let v_candidate = self.vault.get().checked_add(amount).ok_or(RiskError::Overflow)?;
+        if v_candidate > MAX_VAULT_TVL {
+            return Err(RiskError::Overflow);
+        }
+        self.vault = U128::new(v_candidate);
 
-        // set_capital(i, C_i + amount)
+        // set_capital(i, C_i + amount) (spec §10.2 step 7)
         let new_cap = add_u128(self.accounts[idx as usize].capital.get(), amount);
         self.set_capital(idx as usize, new_cap);
 
-        // Fee debt sweep (spec §10.2)
+        // Settle losses from principal (spec §10.2 step 8)
+        self.settle_losses(idx as usize);
+
+        // Resolve flat negative: basis_pos_q_i == 0 and PNL_i < 0 (spec §10.2 step 9)
+        if self.accounts[idx as usize].position_basis_q == 0
+            && self.accounts[idx as usize].pnl < 0
+        {
+            self.resolve_flat_negative(idx as usize);
+        }
+
+        // Fee debt sweep (spec §10.2 step 10)
         self.fee_debt_sweep(idx as usize);
 
         Ok(())
@@ -1971,6 +2024,40 @@ impl RiskEngine {
     }
 
     // ========================================================================
+    // settle_account (spec §10.7)
+    // ========================================================================
+
+    /// Top-level settle wrapper per spec §10.7.
+    /// If settlement is exposed as a standalone instruction, this wrapper MUST be used.
+    pub fn settle_account(
+        &mut self,
+        idx: u16,
+        oracle_price: u64,
+        now_slot: u64,
+    ) -> Result<()> {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let mut ctx = InstructionContext::new();
+
+        // Step 3: touch_account_full
+        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+
+        // Steps 4-5: end-of-instruction resets
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx);
+
+        // Step 7: assert OI balance
+        assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after settle");
+
+        Ok(())
+    }
+
+    // ========================================================================
     // execute_trade (spec §10.4)
     // ========================================================================
 
@@ -1995,12 +2082,15 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Validate size bounds
+        // Validate size bounds (spec §10.4 steps 4-6)
         let abs_size = size_q.unsigned_abs();
         if abs_size > MAX_TRADE_SIZE_Q {
             return Err(RiskError::Overflow);
         }
-        if abs_size > MAX_POSITION_ABS_Q {
+
+        // trade_notional check (spec §10.4 step 6)
+        let trade_notional_check = mul_div_floor_u128(abs_size, exec_price as u128, POS_SCALE);
+        if trade_notional_check > MAX_ACCOUNT_NOTIONAL {
             return Err(RiskError::Overflow);
         }
 
@@ -2082,12 +2172,15 @@ impl RiskEngine {
         // Step 9: update OI
         self.update_oi_from_positions(&old_eff_a, &new_eff_a, &old_eff_b, &new_eff_b)?;
 
-        // Step 10: charge trading fees (spec §8.1)
+        // Step 10: settle post-trade losses from principal for both accounts (spec §10.4 step 18)
+        // Loss seniority: losses MUST be settled before explicit fees (spec §0 item 14)
+        self.settle_losses(a as usize);
+        self.settle_losses(b as usize);
+
+        // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
         let trade_notional = mul_div_floor_u128(abs_size, exec_price as u128, POS_SCALE);
         let fee = if trade_notional > 0 && self.params.trading_fee_bps > 0 {
-            let raw = trade_notional.checked_mul(self.params.trading_fee_bps as u128)
-                .unwrap_or(0);
-            if raw == 0 { 0 } else { (raw + 9999) / 10_000 }
+            mul_div_ceil_u128(trade_notional, self.params.trading_fee_bps as u128, 10_000)
         } else {
             0
         };
@@ -2104,10 +2197,6 @@ impl RiskEngine {
                 add_u128(self.accounts[b as usize].fees_earned_total.get(), fee)
             );
         }
-
-        // Step 11: settle post-trade losses from principal for both accounts (spec §10.4)
-        self.settle_losses(a as usize);
-        self.settle_losses(b as usize);
 
         // Step 12: restart-on-new-profit only for accounts whose AvailGross actually increased
         // Per §6.5 step 2: if restart conversion increases C_i, sweep fee debt immediately
@@ -2366,18 +2455,18 @@ impl RiskEngine {
         // Step 6: settle losses from principal
         self.settle_losses(idx as usize);
 
-        // Step 7: charge liquidation fee
-        let notional_val = mul_div_floor_u128(q_close_q, oracle_price as u128, POS_SCALE);
-        let liq_fee_raw = if notional_val > 0 && self.params.liquidation_fee_bps > 0 {
-            let raw = mul_u128(notional_val, self.params.liquidation_fee_bps as u128);
-            (raw + 9999) / 10_000
+        // Step 7: charge liquidation fee (spec §8.4)
+        let liq_fee = if q_close_q == 0 {
+            0u128
         } else {
-            0
+            let notional_val = mul_div_floor_u128(q_close_q, oracle_price as u128, POS_SCALE);
+            let liq_fee_raw = mul_div_ceil_u128(notional_val, self.params.liquidation_fee_bps as u128, 10_000);
+            // min floor applies whenever q_close_q > 0, even if closed_notional is 0
+            core::cmp::min(
+                core::cmp::max(liq_fee_raw, self.params.min_liquidation_abs.get()),
+                self.params.liquidation_fee_cap.get(),
+            )
         };
-        let liq_fee = core::cmp::min(
-            core::cmp::max(liq_fee_raw, self.params.min_liquidation_abs.get()),
-            self.params.liquidation_fee_cap.get(),
-        );
         self.charge_fee_to_insurance(idx as usize, liq_fee)?;
 
         // Step 8: determine deficit D
