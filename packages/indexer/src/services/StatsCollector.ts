@@ -242,6 +242,19 @@ export class StatsCollector {
           }
 
           const maxLeverage = Math.floor(10000 / initialMarginBps);
+
+          // Guard: ensure computed maxLeverage is a valid positive integer.
+          // Math.floor(Infinity) = Infinity, NaN can propagate via type coercion, and
+          // JSON serialisation converts Infinity/NaN to null — violating the DB NOT NULL
+          // constraint (error code 23502). Slab 7dVewVxW triggers this path.
+          if (!Number.isFinite(maxLeverage) || maxLeverage <= 0 || !Number.isInteger(maxLeverage)) {
+            logger.warn("Skipping market registration — computed maxLeverage is invalid", {
+              slabAddress,
+              initialMarginBps,
+              maxLeverage,
+            });
+            continue;
+          }
           
           // Try to resolve token metadata from on-chain (Helius DAS / Metaplex)
           let symbol = mintAddress.substring(0, 8); // fallback
