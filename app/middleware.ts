@@ -194,6 +194,21 @@ const _fundingSlabRe = /^\/api\/funding\/([^/]+)(\/history)?$/;
 const _openInterestSlabRe = /^\/api\/open-interest\/([^/]+)$/;
 // Matches /api/insurance/<slab> (GH#1390)
 const _insuranceSlabRe = /^\/api\/insurance\/([^/]+)$/;
+// All proxied-route regexes that require slab blocklist checks (GH#1363, GH#1390)
+const _slabRouteRegexes = [
+  _fundingSlabRe,
+  _openInterestSlabRe,
+  _insuranceSlabRe,
+] as const;
+/** Returns the blocked slab address if `pathname` matches a guarded route and the slab is blocked. */
+function _blockedSlabFromPath(pathname: string): string | null {
+  for (const re of _slabRouteRegexes) {
+    const m = re.exec(pathname);
+    const slab = m?.[1];
+    if (slab && _blockedFundingSlabSet.has(slab)) return slab;
+  }
+  return null;
+}
 
 export async function middleware(request: NextRequest) {
   // ── IP Blocklist check ─────────────────────────────────────────────────────
@@ -225,37 +240,11 @@ export async function middleware(request: NextRequest) {
   // /api/insurance/:slab → Railway before route handlers run, making the
   // route.ts blocklist check unreachable for those paths.
   // Check here (pre-rewrite) and return 404 for any blocked slab.
-  const _fundingMatch = _fundingSlabRe.exec(request.nextUrl.pathname);
-  if (_fundingMatch) {
-    const slab = _fundingMatch[1]!;
-    if (_blockedFundingSlabSet.has(slab)) {
-      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-  }
-
-  const _openInterestMatch = _openInterestSlabRe.exec(request.nextUrl.pathname);
-  if (_openInterestMatch) {
-    const slab = _openInterestMatch[1]!;
-    if (_blockedFundingSlabSet.has(slab)) {
-      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-  }
-
-  const _insuranceMatch = _insuranceSlabRe.exec(request.nextUrl.pathname);
-  if (_insuranceMatch) {
-    const slab = _insuranceMatch[1]!;
-    if (_blockedFundingSlabSet.has(slab)) {
-      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+  if (_blockedSlabFromPath(request.nextUrl.pathname)) {
+    return new NextResponse(JSON.stringify({ error: "Market not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // ── Admin route guard (server-side session check) ──────────────────────────
