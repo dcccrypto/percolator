@@ -283,5 +283,64 @@ describe("open-interest routes", () => {
       const data = await res.json();
       expect(data.history).toHaveLength(0);
     });
+
+    describe("blocklist (GH#1388 / PR#1387)", () => {
+      // These three phantom-OI / empty-vault slabs must return 404 even when queried
+      // directly against the API, bypassing the Next.js proxy blocklist.
+      const BLOCKED = [
+        "3bmCyPee8GWJR5aPGTyN5EyyQJLzYyD8Wkg9m1Afd1SD",
+        "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
+        "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
+      ];
+
+      for (const addr of BLOCKED) {
+        it(`returns 404 for blocked slab ${addr.slice(0, 8)}... on /open-interest`, async () => {
+          const app = openInterestRoutes();
+          const res = await app.request(`/open-interest/${addr}`);
+          expect(res.status).toBe(404);
+          const data = await res.json();
+          expect(data).toEqual({ error: "Market not found" });
+          // DB should never be queried for blocked slabs
+          expect(mockSupabase.from).not.toHaveBeenCalled();
+        });
+      }
+
+      it("allows valid non-blocked slabs through to DB layer", async () => {
+        mockSupabase.from.mockImplementation((table: string) => {
+          if (table === "market_stats") {
+            return {
+              select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                  single: vi.fn().mockResolvedValue({
+                    data: {
+                      total_open_interest: "1000",
+                      net_lp_pos: "100",
+                      lp_sum_abs: "200",
+                      lp_max_abs: "50",
+                    },
+                    error: null,
+                  }),
+                })),
+              })),
+            };
+          } else if (table === "oi_history") {
+            return {
+              select: vi.fn(() => ({
+                eq: vi.fn(() => ({
+                  order: vi.fn(() => ({
+                    limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+                  })),
+                })),
+              })),
+            };
+          }
+          return mockSupabase;
+        });
+
+        const app = openInterestRoutes();
+        const res = await app.request("/open-interest/11111111111111111111111111111111");
+        expect(res.status).toBe(200);
+      });
+    });
   });
 });
