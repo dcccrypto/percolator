@@ -172,12 +172,13 @@ function _isBlocked(clientIp: string): boolean {
   return false;
 }
 
-// ── Funding slab blocklist (GH#1363) ─────────────────────────────────────────
-// next.config.ts rewrites /api/funding/:slab → Railway BEFORE Next.js route
-// handlers run, so the BLOCKED_SLAB_ADDRESSES check in route.ts is dead code
-// for those paths.  This guard lives in middleware (which runs pre-rewrite)
-// and returns 404 early — preventing blocked/corrupt slabs from ever reaching
-// Railway (which returns 500 for them).
+// ── Slab blocklist (GH#1363, GH#1390) ────────────────────────────────────────
+// next.config.ts rewrites /api/funding/:slab, /api/open-interest/:slab, and
+// /api/insurance/:slab → Railway BEFORE Next.js route handlers run, so the
+// BLOCKED_SLAB_ADDRESSES check in route.ts is dead code for those paths.
+// This guard lives in middleware (which runs pre-rewrite) and returns 404
+// early — preventing blocked/corrupt slabs from ever reaching Railway (which
+// returns 500 for them).
 //
 // Evaluated once at module load (Edge Runtime cold start), not per request.
 const _blockedFundingSlabSet: ReadonlySet<string> = new Set([
@@ -189,6 +190,10 @@ const _blockedFundingSlabSet: ReadonlySet<string> = new Set([
 ]);
 // Matches /api/funding/<slab> and /api/funding/<slab>/history
 const _fundingSlabRe = /^\/api\/funding\/([^/]+)(\/history)?$/;
+// Matches /api/open-interest/<slab> (GH#1390)
+const _openInterestSlabRe = /^\/api\/open-interest\/([^/]+)$/;
+// Matches /api/insurance/<slab> (GH#1390)
+const _insuranceSlabRe = /^\/api\/insurance\/([^/]+)$/;
 
 export async function middleware(request: NextRequest) {
   // ── IP Blocklist check ─────────────────────────────────────────────────────
@@ -215,13 +220,36 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // ── Funding slab blocklist guard (GH#1363) ────────────────────────────────
-  // next.config.ts rewrites /api/funding/:slab → Railway before route handlers
-  // run, making the route.ts blocklist check unreachable for those paths.
+  // ── Slab blocklist guards (GH#1363, GH#1390) ─────────────────────────────
+  // next.config.ts rewrites /api/funding/:slab, /api/open-interest/:slab, and
+  // /api/insurance/:slab → Railway before route handlers run, making the
+  // route.ts blocklist check unreachable for those paths.
   // Check here (pre-rewrite) and return 404 for any blocked slab.
   const _fundingMatch = _fundingSlabRe.exec(request.nextUrl.pathname);
   if (_fundingMatch) {
     const slab = _fundingMatch[1]!;
+    if (_blockedFundingSlabSet.has(slab)) {
+      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  const _openInterestMatch = _openInterestSlabRe.exec(request.nextUrl.pathname);
+  if (_openInterestMatch) {
+    const slab = _openInterestMatch[1]!;
+    if (_blockedFundingSlabSet.has(slab)) {
+      return new NextResponse(JSON.stringify({ error: "Market not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  const _insuranceMatch = _insuranceSlabRe.exec(request.nextUrl.pathname);
+  if (_insuranceMatch) {
+    const slab = _insuranceMatch[1]!;
     if (_blockedFundingSlabSet.has(slab)) {
       return new NextResponse(JSON.stringify({ error: "Market not found" }), {
         status: 404,

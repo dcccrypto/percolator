@@ -263,3 +263,89 @@ describe("middleware — funding slab blocklist guard (GH#1363)", () => {
     expect(res.status).not.toBe(404);
   });
 });
+
+// ── Suite 5: Open-interest slab blocklist guard (GH#1390) ─────────────────
+// next.config.ts rewrites /api/open-interest/:slab → Railway before route
+// handlers run.  The middleware guard must intercept pre-rewrite and 404.
+describe("middleware — open-interest slab blocklist guard (GH#1390)", () => {
+  let middleware: MiddlewareFn;
+
+  beforeEach(async () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+    middleware = await freshMiddleware();
+  });
+
+  it("returns 404 for hardcoded blocked slab on /api/open-interest/:slab", async () => {
+    const res = await middleware(
+      makeReq("/api/open-interest/BxJPaMaCfEGTBsjZ8wfj3Yfzf4wpasmxKAEvqZZRcGPP"),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Market not found");
+  });
+
+  it("returns 404 for env-var-injected blocked slab on /api/open-interest/:slab", async () => {
+    process.env.BLOCKED_MARKET_ADDRESSES = "RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX";
+    const mw = await freshMiddleware();
+    const res = await mw(
+      makeReq("/api/open-interest/RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX"),
+    );
+    expect(res.status).toBe(404);
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+  });
+
+  it("passes through unblocked slabs on /api/open-interest/:slab", async () => {
+    const res = await middleware(makeReq("/api/open-interest/ValidSlabAddressXXXXXXXXXXXXXXXX"));
+    expect(res.status).not.toBe(404);
+  });
+
+  it("does not affect non-open-interest routes", async () => {
+    const res = await middleware(makeReq("/api/markets"));
+    expect(res.status).not.toBe(404);
+  });
+});
+
+// ── Suite 6: Insurance slab blocklist guard (GH#1390) ─────────────────────
+// next.config.ts rewrites /api/insurance/:slab → Railway before route
+// handlers run.  The middleware guard must intercept pre-rewrite and 404.
+describe("middleware — insurance slab blocklist guard (GH#1390)", () => {
+  let middleware: MiddlewareFn;
+
+  beforeEach(async () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+    middleware = await freshMiddleware();
+  });
+
+  it("returns 404 for hardcoded blocked slab on /api/insurance/:slab", async () => {
+    const res = await middleware(
+      makeReq("/api/insurance/BxJPaMaCfEGTBsjZ8wfj3Yfzf4wpasmxKAEvqZZRcGPP"),
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Market not found");
+  });
+
+  it("returns 404 for env-var-injected blocked slab on /api/insurance/:slab", async () => {
+    process.env.BLOCKED_MARKET_ADDRESSES = "RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX";
+    const mw = await freshMiddleware();
+    const res = await mw(
+      makeReq("/api/insurance/RuntimeBlockedSlabXXXXXXXXXXXXXXXXXXXXX"),
+    );
+    expect(res.status).toBe(404);
+    delete process.env.BLOCKED_MARKET_ADDRESSES;
+  });
+
+  it("passes through unblocked slabs on /api/insurance/:slab", async () => {
+    const res = await middleware(makeReq("/api/insurance/ValidSlabAddressXXXXXXXXXXXXXXXX"));
+    expect(res.status).not.toBe(404);
+  });
+
+  it("does not affect non-insurance routes", async () => {
+    const res = await middleware(makeReq("/api/markets"));
+    expect(res.status).not.toBe(404);
+  });
+});
