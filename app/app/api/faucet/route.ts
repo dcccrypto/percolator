@@ -259,13 +259,22 @@ export async function POST(req: NextRequest) {
       createMintToInstruction(usdcMint, ata, mintAuthPk, USDC_MINT_AMOUNT),
     );
 
+    // Set blockhash + feePayer before signing (required for sendRawTransaction)
+    const { blockhash, lastValidBlockHeight } =
+      await connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = mintAuthPk;
+
     // Sign with sealed signer and send raw (GH#1382: replaces sendAndConfirmTransaction
     // which internally calls tx.sign() wiping existing partial signatures)
     const signedTx = mintSigner.signTransaction(tx);
     const sig = await connection.sendRawTransaction(
       (signedTx as Transaction).serialize(),
     );
-    await connection.confirmTransaction(sig, "confirmed");
+    await connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
 
     // Log the funding event
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
