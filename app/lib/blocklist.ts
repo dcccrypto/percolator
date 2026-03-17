@@ -20,6 +20,15 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   // false total OI). Migration 045 zeroed the DB but the indexer re-synced from on-chain.
   // Blocked permanently until on-chain state is corrected. PR #1219.
   "H5Vunzd2yAMygnpFiGUASDSx2s8P3bfPTzjCfrRsPeph",
+  // GH#1357 / PR#1362: no-liquidity slabs causing /funding/ 500 errors (Sentry).
+  // Previously expected in BLOCKED_MARKET_ADDRESSES env var; hardcoded here so the
+  // middleware guard (pre-rewrite) blocks them even in fresh deployments without env config.
+  // SEX/USD — devnet-only token, empty vault, phantom OI (migration 048). PR #1377.
+  "3bmCyPee8GWJR5aPGTyN5EyyQJLzYyD8Wkg9m1Afd1SD",
+  // Empty-vault phantom-OI slab (migration 048). PR #1377.
+  "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
+  // Empty-vault phantom-OI slab (no on-chain liquidity). PR #1377.
+  "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
 ]);
 
 /**
