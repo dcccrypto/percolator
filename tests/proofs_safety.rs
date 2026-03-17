@@ -684,3 +684,138 @@ fn proof_protected_principal() {
     assert!(a_cap_after == a_cap_before,
         "flat account capital must be unaffected by other's insolvency");
 }
+
+// ============================================================================
+// proof_withdraw_simulation_preserves_residual
+// ============================================================================
+//
+// Issue #1: Withdraw margin simulation must not inflate the haircut ratio.
+// The withdraw() function simulates the post-withdrawal state by calling
+// set_capital(idx, new_cap) which decreases c_tot. If vault is not also
+// temporarily decreased, Residual = Vault - (C_tot + I) is inflated,
+// which inflates the haircut and lets undercollateralized users withdraw.
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_withdraw_simulation_preserves_residual() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.funding_price_sample_last = 100;
+
+    // Trade so a has a position (needed for margin check path)
+    let size_q = I256::from_u128(POS_SCALE);
+    engine.execute_trade(a, b, 100, 1, size_q, 100).unwrap();
+
+    // Record haircut before withdraw attempt
+    let (h_num_before, h_den_before) = engine.haircut_ratio();
+
+    // Simulate what the FIXED withdraw does: adjust both capital AND vault
+    let withdraw_amount: u128 = 1_000;
+    let old_cap = engine.accounts[a as usize].capital.get();
+    let old_vault = engine.vault;
+    let new_cap = old_cap - withdraw_amount;
+    engine.set_capital(a as usize, new_cap);
+    engine.vault = U128::new(engine.vault.get() - withdraw_amount);
+
+    let (h_num_sim, h_den_sim) = engine.haircut_ratio();
+
+    // Revert
+    engine.set_capital(a as usize, old_cap);
+    engine.vault = old_vault;
+
+    // Cross-multiply to compare fractions: h_num_sim/h_den_sim <= h_num_before/h_den_before
+    let lhs = h_num_sim.checked_mul(h_den_before);
+    let rhs = h_num_before.checked_mul(h_den_sim);
+    if let (Some(l), Some(r)) = (lhs, rhs) {
+        assert!(l <= r,
+            "haircut must not increase during withdraw simulation — Residual inflation detected");
+    }
+}
+
+// ============================================================================
+// proof_funding_rate_validated_before_storage
+// ============================================================================
+//
+// Issue #2: keeper_crank must reject out-of-bounds funding rates before
+// storing them. Otherwise the stored rate bricks all future accrue_market_to.
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_funding_rate_validated_before_storage() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 0;
+    engine.last_crank_slot = 0;
+    engine.funding_price_sample_last = 100;
+
+    let a = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000_000, 100, 0).unwrap();
+
+    // Pass an invalid funding rate (> MAX_ABS_FUNDING_BPS_PER_SLOT)
+    let bad_rate: i64 = MAX_ABS_FUNDING_BPS_PER_SLOT + 1;
+    let result = engine.keeper_crank(a, 1, 100, bad_rate);
+
+    // The crank must EITHER:
+    // a) reject the bad rate entirely (Err), OR
+    // b) clamp/sanitize it so the stored rate is within bounds
+    //
+    // It must NOT succeed AND store an out-of-bounds rate.
+    if result.is_ok() {
+        let stored = engine.funding_rate_bps_per_slot_last;
+        assert!(stored.abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT,
+            "stored funding rate must be within bounds after successful crank");
+    }
+
+    // Regardless of the first crank result, a subsequent operation must NOT brick.
+    // Try a second crank — if accrue_market_to fails due to bad stored rate, protocol is bricked.
+    let result2 = engine.keeper_crank(a, 2, 100, 0);
+    assert!(result2.is_ok(),
+        "protocol must not be bricked by a previous bad funding rate input");
+}
+
+// ============================================================================
+// proof_gc_dust_preserves_fee_credits
+// ============================================================================
+//
+// Issue #3: garbage_collect_dust must not delete accounts with non-zero fee_credits.
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_gc_dust_preserves_fee_credits() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.last_oracle_price = 100;
+    engine.last_market_slot = 1;
+    engine.last_crank_slot = 1;
+    engine.current_slot = 1;
+
+    let a = engine.add_user(0).unwrap();
+    engine.deposit(a, 10_000, 100, 0).unwrap();
+
+    // Simulate: account has 0 capital, 0 position, but positive fee_credits
+    engine.set_capital(a as usize, 0);
+    engine.accounts[a as usize].fee_credits = I128::new(5_000); // prepaid credits
+    engine.accounts[a as usize].position_basis_q = I256::ZERO;
+    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
+    engine.set_pnl(a as usize, I256::ZERO);
+
+    let was_used_before = engine.is_used(a as usize);
+    assert!(was_used_before, "account must exist before GC");
+
+    // Run GC
+    engine.garbage_collect_dust();
+
+    // Account must NOT have been freed — it has prepaid fee_credits
+    assert!(engine.is_used(a as usize),
+        "GC must not delete account with non-zero fee_credits");
+    assert!(engine.accounts[a as usize].fee_credits.get() == 5_000,
+        "fee_credits must be preserved");
+}

@@ -2047,13 +2047,18 @@ impl RiskEngine {
         // If position exists, require post-withdraw initial margin
         let eff = self.effective_pos_q(idx as usize);
         if !eff.is_zero() {
-            // Simulate withdrawal
+            // Simulate withdrawal: must adjust BOTH capital AND vault to keep
+            // Residual = Vault - (C_tot + I) consistent. Otherwise decreasing
+            // C_tot alone inflates the haircut ratio, enabling margin bypass.
             let new_cap = self.accounts[idx as usize].capital.get() - amount;
             let old_cap = self.accounts[idx as usize].capital.get();
+            let old_vault = self.vault;
             self.set_capital(idx as usize, new_cap);
+            self.vault = U128::new(sub_u128(self.vault.get(), amount));
             let passes_im = self.is_above_initial_margin(&self.accounts[idx as usize], idx as usize, oracle_price);
-            // Revert
+            // Revert both
             self.set_capital(idx as usize, old_cap);
+            self.vault = old_vault;
             if !passes_im {
                 return Err(RiskError::Undercollateralized);
             }
@@ -2509,7 +2514,12 @@ impl RiskEngine {
         // Accrue market state using stored rate (anti-retroactivity)
         self.accrue_market_to(now_slot, oracle_price)?;
 
-        // Set new rate for next interval
+        // Validate and set new rate for next interval.
+        // Must reject out-of-bounds rates before storing; otherwise a bad rate
+        // bricks all future accrue_market_to calls (permanent DoS).
+        if funding_rate_bps_per_slot.abs() > MAX_ABS_FUNDING_BPS_PER_SLOT {
+            return Err(RiskError::Overflow);
+        }
         self.set_funding_rate_for_next_interval(funding_rate_bps_per_slot);
 
         let advanced = now_slot > self.last_crank_slot;
@@ -2706,7 +2716,9 @@ impl RiskEngine {
                 continue;
             }
 
-            // Dust predicate: zero position basis, zero capital, zero reserved, non-positive pnl
+            // Dust predicate: zero position basis, zero capital, zero reserved,
+            // non-positive pnl, AND zero fee_credits. Must not GC accounts
+            // with prepaid fee credits — those belong to the user.
             let account = &self.accounts[idx];
             if !account.position_basis_q.is_zero() {
                 continue;
@@ -2718,6 +2730,9 @@ impl RiskEngine {
                 continue;
             }
             if account.pnl.is_positive() {
+                continue;
+            }
+            if !account.fee_credits.is_zero() {
                 continue;
             }
 

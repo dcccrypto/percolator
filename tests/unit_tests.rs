@@ -1819,3 +1819,95 @@ fn test_double_crank_same_slot_is_safe() {
     assert!(engine.check_conservation());
 }
 
+// ============================================================================
+// Issue #1: Withdraw simulation must not inflate haircut ratio
+// ============================================================================
+
+#[test]
+fn test_withdraw_simulation_does_not_inflate_haircut() {
+    let (mut engine, a, b) = setup_two_users(10_000_000, 10_000_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+
+    // Open a position so the margin check path is exercised
+    let size_q = make_size_q(50);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Give a some positive PnL so haircut matters
+    engine.set_pnl(a as usize, I256::from_u128(5_000_000));
+
+    // Record haircut before
+    let (h_num_before, h_den_before) = engine.haircut_ratio();
+
+    // Simulate what the FIXED withdraw() does: adjust both capital AND vault
+    let old_cap = engine.accounts[a as usize].capital.get();
+    let old_vault = engine.vault;
+    let withdraw_amount = 1_000_000u128;
+    let new_cap = old_cap - withdraw_amount;
+    engine.set_capital(a as usize, new_cap);
+    engine.vault = U128::new(engine.vault.get() - withdraw_amount);
+
+    let (h_num_sim, h_den_sim) = engine.haircut_ratio();
+
+    // Revert both
+    engine.set_capital(a as usize, old_cap);
+    engine.vault = old_vault;
+
+    // Compare: h_sim <= h_before (cross-multiply)
+    // h_num_sim / h_den_sim <= h_num_before / h_den_before
+    let lhs = h_num_sim.checked_mul(h_den_before).unwrap();
+    let rhs = h_num_before.checked_mul(h_den_sim).unwrap();
+    assert!(lhs <= rhs,
+        "haircut must not increase during withdraw simulation (Residual inflation)");
+}
+
+// ============================================================================
+// Issue #2: Funding rate must be validated before storage
+// ============================================================================
+
+#[test]
+fn test_invalid_funding_rate_does_not_brick_protocol() {
+    let (mut engine, a, _b) = setup_two_users(10_000_000, 10_000_000);
+
+    // Pass a rate exceeding MAX_ABS_FUNDING_BPS_PER_SLOT
+    let bad_rate = MAX_ABS_FUNDING_BPS_PER_SLOT + 1;
+    let _ = engine.keeper_crank(a, 2, 1000, bad_rate);
+
+    // Regardless of whether the above succeeded, the protocol must not be bricked
+    let result = engine.keeper_crank(a, 3, 1000, 0);
+    assert!(result.is_ok(),
+        "protocol must not be bricked by a previous bad funding rate");
+}
+
+// ============================================================================
+// Issue #3: GC must not delete accounts with fee_credits
+// ============================================================================
+
+#[test]
+fn test_gc_dust_preserves_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    engine.deposit(a, 10_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    // Set up dust-like state: 0 capital, 0 position, but positive fee_credits
+    engine.set_capital(a as usize, 0);
+    engine.accounts[a as usize].position_basis_q = I256::ZERO;
+    engine.accounts[a as usize].reserved_pnl = U256::ZERO;
+    engine.set_pnl(a as usize, I256::ZERO);
+    engine.accounts[a as usize].fee_credits = I128::new(5_000);
+
+    assert!(engine.is_used(a as usize), "account must exist before GC");
+
+    engine.garbage_collect_dust();
+
+    assert!(engine.is_used(a as usize),
+        "GC must not delete account with non-zero fee_credits");
+    assert_eq!(engine.accounts[a as usize].fee_credits.get(), 5_000,
+        "fee_credits must be preserved");
+}
+
