@@ -525,23 +525,38 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   }
 
   const result = await getPrice(market.symbol, market.slab);
-  if (!result) {
+
+  // Resolve price: live source preferred, fall back to last known price when all
+  // external sources return null or zero (e.g. devnet token with no DEX pool).
+  // Without a fallback the on-chain oracle stays at 0, the UI freshness check marks
+  // the market "unavailable", and trading is blocked even though a valid price exists
+  // from a previous push.  This is safe: the circuit breaker below will still reject
+  // moves > MAX_PRICE_MOVE_PCT, and s.lastPrice is only set after a successful push.
+  let price: number;
+  let source: string;
+
+  if (result && isPriceValid(result.price)) {
+    price = result.price;
+    source = result.source;
+  } else if (s.lastPrice > 0) {
+    // Devnet / no-pool fallback: use last successfully pushed price to keep oracle alive.
+    // Logged clearly so ops know the market is running on cached data.
+    price = s.lastPrice;
+    source = "last-known";
+    if (!result) {
+      s.totalErrors++;
+      s.consecutiveErrors++;
+      log(`⚠️ ${market.label}: no live price (${s.consecutiveErrors} consecutive failures) — holding last known $${s.lastPrice.toFixed(2)} to keep oracle alive`);
+    } else {
+      log(`⚠️ ${market.label}: invalid live price $${result.price} from ${result.source} — holding last known $${s.lastPrice.toFixed(2)}`);
+    }
+  } else {
+    // No live price and no last known price — nothing we can safely push.
     s.totalErrors++;
     s.consecutiveErrors++;
     if (s.consecutiveErrors >= 3) {
       log(`⚠️ ${market.label}: no price from any source (${s.consecutiveErrors} consecutive failures)`);
     }
-    return;
-  }
-
-  const { price, source } = result;
-
-  // Reject zero or negative prices — these would corrupt market state on-chain.
-  // Some DEX APIs return priceUsd="0" for newly-created tokens with no liquidity.
-  if (!isPriceValid(price)) {
-    log(`⚠️ ${market.label}: invalid price $${price} from ${source} — skipping push`);
-    s.totalErrors++;
-    s.consecutiveErrors++;
     return;
   }
 
