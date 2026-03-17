@@ -84,20 +84,14 @@ export const DepositWithdrawCard: FC<DepositWithdrawCardProps> = ({ slabAddress,
             <p className="text-[10px] text-[var(--warning)]">
               You need {symbol} tokens to trade this market.
             </p>
-            {/* Show devnet faucet button for all devnet markets */}
-            {mktConfig?.collateralMint ? (
+            {/* GH#1367: Show faucet button for all devnet markets.
+                DevnetTokenFaucetButton self-corrects to a faucet link for non-mirror mints. */}
+            {mktConfig?.collateralMint && (
               <DevnetTokenFaucetButton
                 mintAddress={mktConfig.collateralMint.toBase58()}
                 symbol={symbol}
               />
-            ) : mktConfig?.collateralMint ? (
-              <a
-                href={`/devnet-mint?mint=${mktConfig.collateralMint.toBase58()}&symbol=${encodeURIComponent(symbol)}`}
-                className="text-[10px] text-[var(--warning)] underline underline-offset-2 hover:text-[var(--warning)]/80"
-              >
-                Mint some from the faucet →
-              </a>
-            ) : null}
+            )}
           </div>
         )}
         {hasTokens ? (
