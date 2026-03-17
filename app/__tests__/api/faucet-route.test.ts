@@ -36,10 +36,12 @@ vi.mock("@sentry/nextjs", () => ({
 describe("/api/faucet route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.NEXT_PUBLIC_DEFAULT_NETWORK = "devnet";
     process.env.NEXT_PUBLIC_SOLANA_NETWORK = "devnet";
   });
 
   it("should reject requests on mainnet", async () => {
+    process.env.NEXT_PUBLIC_DEFAULT_NETWORK = "mainnet";
     process.env.NEXT_PUBLIC_SOLANA_NETWORK = "mainnet";
 
     // We'd need to import the route handler and mock NextRequest
