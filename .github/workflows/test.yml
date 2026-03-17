@@ -14,7 +14,7 @@ concurrency:
 jobs:
   unit-tests:
     name: Unit Tests
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
@@ -80,7 +80,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     
     env:
@@ -128,7 +128,7 @@ jobs:
 
   e2e-tests:
     name: E2E Tests
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     
     env:
@@ -199,7 +199,7 @@ jobs:
 
   fuzz-tests:
     name: Fuzz Tests
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     
     steps:
@@ -235,7 +235,7 @@ jobs:
 
   coverage-check:
     name: Coverage Gate
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests]
     if: github.event_name == 'pull_request'
     
@@ -254,7 +254,7 @@ jobs:
 
   security-tests:
     name: Security Tests
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     
     steps:
@@ -293,7 +293,7 @@ jobs:
 
   type-check:
     name: Type Check
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     
     steps:
@@ -319,7 +319,7 @@ jobs:
 
   merge-gate:
     name: ✅ Merge Gate
-    runs-on: blacksmith-2vcpu-ubuntu-22.04
+    runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests, e2e-tests, security-tests, type-check]
     if: github.event_name == 'pull_request'
     
