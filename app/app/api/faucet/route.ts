@@ -118,12 +118,28 @@ export async function POST(req: NextRequest) {
         sig = await pubConn.requestAirdrop(walletPk, SOL_AIRDROP_AMOUNT);
         await pubConn.confirmTransaction(sig, "confirmed");
       } catch (airdropErr) {
+        const msg =
+          airdropErr instanceof Error ? airdropErr.message : "Airdrop failed";
+        // Detect Solana devnet RPC rate-limit responses.
+        // The public devnet faucet returns "429 Too Many Requests", "airdrop request limit",
+        // or similar strings when the wallet or IP has exceeded the daily drip.
+        const isRateLimit =
+          /429|too many requests|rate.?limit|airdrop.*limit|limit.*airdrop/i.test(msg);
+        if (isRateLimit) {
+          // Do NOT capture rate-limit hits as Sentry exceptions — they're expected.
+          return NextResponse.json(
+            {
+              error:
+                "Solana devnet faucet rate-limited. Wait a few minutes and retry.",
+              retryable: true,
+            },
+            { status: 429 },
+          );
+        }
         Sentry.captureException(airdropErr, {
           tags: { endpoint: "/api/faucet", type: "sol" },
           extra: { walletAddress },
         });
-        const msg =
-          airdropErr instanceof Error ? airdropErr.message : "Airdrop failed";
         return NextResponse.json({ error: msg }, { status: 500 });
       }
 
