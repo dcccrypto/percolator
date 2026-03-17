@@ -136,6 +136,20 @@ export async function POST(req: NextRequest) {
             { status: 429 },
           );
         }
+        // GH#1392: Solana devnet returns "Internal error" for transient failures
+        // (throttling, recent airdrop, RPC overload). Return 503 so clients can retry.
+        const isRetryable =
+          /internal error|service unavailable|timeout|ECONNREFUSED/i.test(msg);
+        if (isRetryable) {
+          return NextResponse.json(
+            {
+              error:
+                "Solana devnet temporarily unavailable. Please retry in a few minutes.",
+              retryable: true,
+            },
+            { status: 503 },
+          );
+        }
         Sentry.captureException(airdropErr, {
           tags: { endpoint: "/api/faucet", type: "sol" },
           extra: { walletAddress },

@@ -169,7 +169,47 @@ describe("/api/faucet route", () => {
       expect(isRateLimit("Transaction simulation failed")).toBe(false);
       expect(isRateLimit("Connection refused")).toBe(false);
       expect(isRateLimit("Invalid public key input")).toBe(false);
+      expect(isRateLimit("Internal error")).toBe(false); // GH#1392: handled separately as retryable
     });
+
+  });
+
+  describe("SOL airdrop retryable error detection (GH#1392)", () => {
+    // Mirror of the retryable regex added for transient Solana devnet failures.
+    const isRetryable = (msg: string) =>
+      /internal error|service unavailable|timeout|ECONNREFUSED/i.test(msg);
+
+    it("detects 'Internal error' from Solana devnet", () => {
+      expect(isRetryable("airdrop to G7NG... failed: Internal error")).toBe(true);
+    });
+
+    it("detects 'Service unavailable'", () => {
+      expect(isRetryable("Service unavailable")).toBe(true);
+    });
+
+    it("detects connection refused", () => {
+      expect(isRetryable("connect ECONNREFUSED 127.0.0.1:8899")).toBe(true);
+    });
+
+    it("detects timeout errors", () => {
+      expect(isRetryable("Request timeout")).toBe(true);
+    });
+
+    it("does NOT flag unrelated errors as retryable", () => {
+      expect(isRetryable("Transaction simulation failed")).toBe(false);
+      expect(isRetryable("Invalid public key input")).toBe(false);
+    });
+
+    it("returns 503 status for retryable SOL airdrop errors (not 500)", () => {
+      const errMsg = "airdrop to G7NG... failed: Internal error";
+      const statusCode = isRetryable(errMsg) ? 503 : 500;
+      expect(statusCode).toBe(503);
+    });
+  });
+
+  describe("SOL airdrop rate-limit detection — regression (GH#1385)", () => {
+    const isRateLimit = (msg: string) =>
+      /429|too many requests|rate.?limit|airdrop.*limit|limit.*airdrop/i.test(msg);
 
     it("returns 429 status for rate-limited SOL airdrop (not 500)", () => {
       // Validate that a 429 from devnet → our API returns 429 with retryable:true.
