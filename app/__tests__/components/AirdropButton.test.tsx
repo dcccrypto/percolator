@@ -137,6 +137,21 @@ describe("AirdropButton", () => {
     });
   });
 
+  it("shows faucet link when API returns 400 non-mirror-mint error (GH#1371)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch(400, { error: "mintAddress is not a known devnet mirror mint" })
+    );
+
+    render(<AirdropButton mintAddress={MINT} symbol="WENDYS" />);
+    fireEvent.click(screen.getByRole("button", { name: /get wendys/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Devnet Faucet →/i)).toBeDefined();
+      expect(screen.getByText(/Get WENDYS:/i)).toBeDefined();
+    });
+  });
+
   it("shows countdown on 429 rate-limit response", async () => {
     vi.stubGlobal(
       "fetch",
