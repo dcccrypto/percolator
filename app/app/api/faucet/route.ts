@@ -1,31 +1,34 @@
 /**
- * PERC-376: Devnet USDC faucet endpoint
+ * PERC-376: Devnet faucet endpoint
  *
- * POST /api/faucet { wallet: string }
+ * POST /api/faucet { wallet: string, type?: "sol" | "usdc" }
  *
- * Mints 10,000 test USDC to the requesting wallet on devnet.
- * Rate-limited: 1 claim per wallet per 24h (tracked in Supabase auto_fund_log).
+ * type="sol"  → airdrops 2 SOL via requestAirdrop on devnet public RPC
+ * type="usdc" → mints 10,000 test USDC (default when type omitted)
  *
- * This is the dedicated faucet endpoint called by the in-UI faucet modal.
- * Unlike /api/auto-fund (which also handles SOL), this only handles USDC
- * and returns structured status for the step-by-step UI.
+ * Rate-limited: 1 claim per wallet per type per 24h (tracked in Supabase auto_fund_log).
+ *
+ * GH#1382 (PERC-1233): switched from raw Keypair + sendAndConfirmTransaction to
+ * getDevnetMintSigner() + sendRawTransaction (sealed signer, same as auto-fund / devnet-airdrop).
+ * Added on-chain mint authority check → 400 (not 500) on mismatch.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import {
   Connection,
-  Keypair,
   PublicKey,
   Transaction,
-  sendAndConfirmTransaction,
+  LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
   createMintToInstruction,
+  getAccount,
 } from "@solana/spl-token";
 import { getConfig } from "@/lib/config";
 import { getServiceClient } from "@/lib/supabase";
+import { getDevnetMintSigner } from "@/lib/devnet-signer";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -34,8 +37,13 @@ export const dynamic = "force-dynamic";
 const NETWORK =
   process.env.NEXT_PUBLIC_DEFAULT_NETWORK?.trim() ??
   process.env.NEXT_PUBLIC_SOLANA_NETWORK;
+
 const USDC_MINT_AMOUNT = 10_000_000_000; // 10,000 USDC (6 decimals)
+const SOL_AIRDROP_AMOUNT = 2 * LAMPORTS_PER_SOL; // 2 SOL
 const RATE_LIMIT_HOURS = 24;
+
+// Public devnet RPC for requestAirdrop (private RPC may reject airdrop requests)
+const PUBLIC_DEVNET_RPC = "https://api.devnet.solana.com";
 
 export async function POST(req: NextRequest) {
   try {
@@ -48,6 +56,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const walletAddress = body?.wallet;
+    const type: "sol" | "usdc" = body?.type === "sol" ? "sol" : "usdc";
 
     if (!walletAddress || typeof walletAddress !== "string") {
       return NextResponse.json(
@@ -66,18 +75,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Rate limit check via Supabase
+    // Rate limit check via Supabase — per wallet per type
     const supabase = getServiceClient();
     const cutoff = new Date(
       Date.now() - RATE_LIMIT_HOURS * 60 * 60 * 1000,
     ).toISOString();
+
+    const rateField = type === "sol" ? "sol_airdropped" : "usdc_minted";
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: recent } = await (supabase as any)
       .from("auto_fund_log")
       .select("id, created_at")
       .eq("wallet", walletAddress)
-      .eq("usdc_minted", true)
+      .eq(rateField, true)
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
       .limit(1);
@@ -98,6 +109,44 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // ── SOL airdrop path ──────────────────────────────────────────────────────
+    if (type === "sol") {
+      // Use public devnet RPC — private/Helius endpoints may not support requestAirdrop
+      const pubConn = new Connection(PUBLIC_DEVNET_RPC, "confirmed");
+      let sig: string;
+      try {
+        sig = await pubConn.requestAirdrop(walletPk, SOL_AIRDROP_AMOUNT);
+        await pubConn.confirmTransaction(sig, "confirmed");
+      } catch (airdropErr) {
+        Sentry.captureException(airdropErr, {
+          tags: { endpoint: "/api/faucet", type: "sol" },
+          extra: { walletAddress },
+        });
+        const msg =
+          airdropErr instanceof Error ? airdropErr.message : "Airdrop failed";
+        return NextResponse.json({ error: msg }, { status: 500 });
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (supabase as any).from("auto_fund_log").insert({
+        wallet: walletAddress,
+        sol_airdropped: true,
+        usdc_minted: false,
+      });
+
+      return NextResponse.json({
+        funded: true,
+        sol_airdropped: true,
+        sol_amount: SOL_AIRDROP_AMOUNT / LAMPORTS_PER_SOL,
+        signature: sig,
+        nextClaimAt: new Date(
+          Date.now() + RATE_LIMIT_HOURS * 60 * 60 * 1000,
+        ).toISOString(),
+      });
+    }
+
+    // ── USDC mint path ────────────────────────────────────────────────────────
+
     // Load configuration
     const cfg = getConfig();
     const usdcMintAddr = (cfg as Record<string, unknown>).testUsdcMint as
@@ -113,32 +162,91 @@ export async function POST(req: NextRequest) {
 
     const usdcMint = new PublicKey(usdcMintAddr);
 
-    // Load mint authority
-    const mintAuthKeyJson = process.env.DEVNET_MINT_AUTHORITY_KEYPAIR;
-    if (!mintAuthKeyJson) {
+    // Load sealed mint authority signer (GH#1382: replaces raw Keypair.fromSecretKey)
+    const mintSigner = getDevnetMintSigner();
+    if (!mintSigner) {
       return NextResponse.json(
-        { error: "Server not configured for minting" },
+        { error: "Server not configured for minting (DEVNET_MINT_AUTHORITY_KEYPAIR missing)" },
         { status: 500 },
       );
     }
 
-    const mintAuthority = Keypair.fromSecretKey(
-      Uint8Array.from(JSON.parse(mintAuthKeyJson)),
-    );
-
+    const mintAuthPk = new PublicKey(mintSigner.publicKey());
     const connection = new Connection(cfg.rpcUrl, "confirmed");
+
+    // On-chain authority check: verify our signer matches the mint's authority
+    // before attempting MintTo. Returns 400 (not 500) on mismatch so callers
+    // can distinguish a config error from a transient failure.
+    try {
+      const mintInfo = await connection.getAccountInfo(usdcMint);
+      if (!mintInfo) {
+        return NextResponse.json(
+          { error: `Test USDC mint ${usdcMintAddr} does not exist on devnet` },
+          { status: 500 },
+        );
+      }
+      // SPL Token mint layout: bytes 0-3 coption(u32), bytes 4-35 mint_authority (32 bytes)
+      const mintData = new Uint8Array(mintInfo.data);
+      if (mintData.length >= 36) {
+        const hasAuthority =
+          new DataView(mintData.buffer, mintData.byteOffset).getUint32(0, true) === 1;
+        if (!hasAuthority) {
+          return NextResponse.json(
+            { error: "Test USDC mint has no mint authority (fixed supply)" },
+            { status: 500 },
+          );
+        }
+        const onChainAuthority = new PublicKey(mintData.slice(4, 36));
+        if (!onChainAuthority.equals(mintAuthPk)) {
+          Sentry.captureException(
+            new Error(
+              `faucet: mint authority mismatch — on-chain ${onChainAuthority.toBase58()}, signer ${mintAuthPk.toBase58()}`,
+            ),
+            { tags: { endpoint: "/api/faucet", step: "authority_check" } },
+          );
+          return NextResponse.json(
+            {
+              error:
+                "Cannot mint tokens: DEVNET_MINT_AUTHORITY_KEYPAIR does not match the on-chain " +
+                "mint authority for testUsdcMint. The mint needs to be re-keyed or the env var updated.",
+              mintAuthority: onChainAuthority.toBase58(),
+              hint: "authority_mismatch",
+            },
+            { status: 400 },
+          );
+        }
+      }
+    } catch (authErr) {
+      // RPC error during check — surface as 503 (retryable)
+      const msg = authErr instanceof Error ? authErr.message : String(authErr);
+      console.warn("[faucet] mint authority check failed:", msg);
+      Sentry.captureException(authErr, {
+        tags: { endpoint: "/api/faucet", step: "authority_check" },
+        extra: { walletAddress },
+      });
+      return NextResponse.json(
+        { error: "Could not verify mint authority due to RPC error. Please retry.", retryable: true },
+        { status: 503 },
+      );
+    }
 
     // Build mint transaction
     const ata = await getAssociatedTokenAddress(usdcMint, walletPk);
     const tx = new Transaction();
 
     // Create ATA if it doesn't exist
+    let ataExists = false;
     try {
-      await connection.getTokenAccountBalance(ata);
+      await getAccount(connection, ata);
+      ataExists = true;
     } catch {
+      // ATA not found — will be created in tx
+    }
+
+    if (!ataExists) {
       tx.add(
         createAssociatedTokenAccountInstruction(
-          mintAuthority.publicKey,
+          mintAuthPk,
           ata,
           walletPk,
           usdcMint,
@@ -148,20 +256,16 @@ export async function POST(req: NextRequest) {
 
     // Mint USDC
     tx.add(
-      createMintToInstruction(
-        usdcMint,
-        ata,
-        mintAuthority.publicKey,
-        USDC_MINT_AMOUNT,
-      ),
+      createMintToInstruction(usdcMint, ata, mintAuthPk, USDC_MINT_AMOUNT),
     );
 
-    const sig = await sendAndConfirmTransaction(
-      connection,
-      tx,
-      [mintAuthority],
-      { commitment: "confirmed" },
+    // Sign with sealed signer and send raw (GH#1382: replaces sendAndConfirmTransaction
+    // which internally calls tx.sign() wiping existing partial signatures)
+    const signedTx = mintSigner.signTransaction(tx);
+    const sig = await connection.sendRawTransaction(
+      (signedTx as Transaction).serialize(),
     );
+    await connection.confirmTransaction(sig, "confirmed");
 
     // Log the funding event
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
