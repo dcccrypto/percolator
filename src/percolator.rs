@@ -34,7 +34,7 @@ const ACCOUNT_IDX_MASK: usize = MAX_ACCOUNTS - 1;
 
 pub const GC_CLOSE_BUDGET: u32 = 32;
 pub const ACCOUNTS_PER_CRANK: u16 = 128;
-pub const LIQ_BUDGET_PER_CRANK: u16 = 120;
+pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
 
 /// POS_SCALE = 1_000_000 (spec §1.2)
 pub const POS_SCALE: u128 = 1_000_000;
@@ -551,7 +551,7 @@ impl RiskEngine {
         Ok(idx)
     }
 
-    fn free_slot(&mut self, idx: u16) {
+    pub fn free_slot(&mut self, idx: u16) {
         self.accounts[idx as usize] = empty_account();
         self.clear_used(idx as usize);
         self.next_free[idx as usize] = self.free_head;
