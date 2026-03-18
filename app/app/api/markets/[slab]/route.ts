@@ -3,6 +3,19 @@ import { PublicKey } from "@solana/web3.js";
 import { getServiceClient } from "@/lib/supabase";
 import { SLUG_ALIASES } from "@/lib/symbol-utils";
 import * as Sentry from "@sentry/nextjs";
+
+/**
+ * GH#1405: Sanitize price fields from the DB. Returns null for corrupt/garbage values.
+ * Matches the MAX_SANE_PRICE_USD guard in /api/markets route.ts ($1M ceiling).
+ * Prevents raw unscaled admin oracle values (e.g. 10001100011 for DfLoAzny) from
+ * being returned to callers of the individual slab endpoint.
+ */
+const MAX_SANE_PRICE_USD = 1_000_000; // $1M — matches bulk /api/markets guard
+function sanitizePrice(v: unknown): number | null {
+  if (v == null || typeof v !== "number") return null;
+  if (!Number.isFinite(v) || v <= 0 || v > MAX_SANE_PRICE_USD) return null;
+  return v;
+}
 export const dynamic = "force-dynamic";
 
 function isValidPublicKey(s: string): boolean {
@@ -96,7 +109,17 @@ export async function GET(
       return NextResponse.json({ error: "Market not found" }, { status: 404 });
     }
 
-    return NextResponse.json({ market: data });
+    // GH#1405: Sanitize price fields before returning — raw DB values from admin-mode
+    // markets may be unscaled u64 authorityPriceE6 values (e.g. DfLoAzny: 10001100011).
+    // Matches the sanitizePrice guard in the bulk /api/markets endpoint.
+    const sanitized = {
+      ...data,
+      last_price: sanitizePrice(data.last_price),
+      mark_price: sanitizePrice(data.mark_price),
+      index_price: sanitizePrice(data.index_price),
+    };
+
+    return NextResponse.json({ market: sanitized });
   } catch (error) {
     Sentry.captureException(error, {
       tags: { endpoint: "/api/markets/[slab]", method: "GET", slab },
