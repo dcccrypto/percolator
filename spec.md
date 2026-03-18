@@ -1,5 +1,4 @@
-
-# Risk Engine Spec (Source of Truth) — v11.11
+# Risk Engine Spec (Source of Truth) — v11.12
 
 **Combined Single-Document Native 128-bit Revision (Keeper-Current-State / Fee-Sweep-Seniority / Maintenance-Fee-Neutrality Edition)**
 
@@ -10,7 +9,7 @@
 
 This is a single combined spec. It supersedes prior delta-style revisions by restating the full current design in one document, explicitly scaled for native 128-bit high-throughput VM execution.
 
-## Change summary from v11.10
+## Change summary from v11.11
 
 This revision fixes the remaining real non-minor issues from the latest consistency pass and tightens the normative body around keeper behavior, fee-debt sweep ordering, and optional maintenance-fee designs.
 
@@ -23,6 +22,11 @@ This revision fixes the remaining real non-minor issues from the latest consiste
 4. **Maintenance-fee realization is now explicitly bounded.** If a recurring maintenance-fee realization would exceed `MAX_PROTOCOL_FEE_ABS` or the permitted one-step `fee_credits_i` write range, the implementation must split the interval or realization into bounded internal chunks rather than overflow or fail unpredictably.
 
 5. **Keeper pseudocode and required tests are now aligned with the normative body.** The new text explicitly covers keeper current-state gating and maintenance-fee neutrality / boundedness in both the normative sections and the minimum test suite.
+6. **Trusted time / oracle provenance is now explicit.** `now_slot` is now normatively defined as a trusted runtime slot and `oracle_price` as a validated configured-oracle read; production user entrypoints MUST NOT accept arbitrary caller-supplied substitutes.
+
+7. **Auto-materialization is no longer universal.** Missing accounts are no longer created by `settle_account`, `withdraw`, `execute_trade`, `liquidate`, or `keeper_crank`. Only an explicit account-creation path or a positive `deposit` MAY materialize a missing account.
+
+8. **Finite account-cap liveness is now preserved.** Because `MAX_MATERIALIZED_ACCOUNTS` is finite, the spec now requires permissionless empty-account reclamation (or equivalent slot reuse) so zero-state accounts cannot permanently exhaust capacity.
 
 
 ## 0. Security goals (normative)
@@ -113,6 +117,8 @@ The following bounds are normative and MUST be enforced.
 
 - `0 < price <= MAX_ORACLE_PRICE = 1_000_000_000_000`
 
+- `MAX_ORACLE_STALENESS_SLOTS` MUST be a finite implementation-configured bound on acceptable age of any oracle sample used as `oracle_price`
+
 - `abs(basis_pos_q_i) <= MAX_POSITION_ABS_Q = 100_000_000_000_000`
 
 - `abs(effective_pos_q(i)) <= MAX_POSITION_ABS_Q`
@@ -164,6 +170,16 @@ The following interpretation is normative for dust accounting.
 - A newly materialized account MUST NOT inherit a stale global slot anchor and MUST NOT initialize `last_fee_slot_i = 0`.
 
 - A newly materialized or re-zeroed account MUST have `a_basis_i = ADL_ONE`. The engine MUST NOT leave `a_basis_i = 0`.
+
+### 1.4.2 Trusted time and oracle input provenance
+
+- `now_slot` in every timed instruction is a logical parameter representing the current trusted chain / runtime slot. Production implementations MUST obtain it from trusted runtime metadata; caller-supplied, order-supplied, or otherwise user-controlled `now_slot` values are forbidden.
+
+- `oracle_price`, `init_oracle_price`, and any funding price sample basis used by the engine MUST come from the market's configured validated oracle pipeline. User-provided replacement prices are forbidden.
+
+- The implementation MUST define and enforce oracle validity checks before using `oracle_price`. At minimum, an oracle sample MUST be rejected if it is stale beyond `MAX_ORACLE_STALENESS_SLOTS` or marked invalid by the configured oracle source.
+
+- The external-operation signatures in §10 name `now_slot` and `oracle_price` as logical inputs for specification clarity only; in production they are trusted runtime / oracle reads, not arbitrary user arguments.
 
 ### 1.5 Arithmetic requirements
 
@@ -338,6 +354,32 @@ When a new account is materialized, the canonical materialization helper MUST ta
 The materialization helper MUST require `slot_anchor >= current_slot` and `slot_anchor >= slot_last`, and a timed top-level instruction MUST pass its own `now_slot` as `slot_anchor`.
 
 A newly materialized account MUST be inserted only through a helper that increments `materialized_account_count` in checked arithmetic and enforces `materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS`.
+
+### 2.1.2 Empty-account reclamation and materialized-account-cap liveness
+
+Because `MAX_MATERIALIZED_ACCOUNTS` is finite and is used in exact aggregate-bounding arguments, the engine MUST support reclaiming capacity from truly empty accounts.
+
+The engine MUST provide either physical deletion, logical de-materialization, or equivalent slot reuse that decrements `materialized_account_count` in checked arithmetic.
+
+An empty-account reclamation helper MAY succeed only if all of the following hold:
+
+- `C_i == 0`
+
+- `PNL_i == 0`
+
+- `R_i == 0`
+
+- `basis_pos_q_i == 0`
+
+- `fee_credits_i == 0`
+
+- the account has no remaining aggregate responsibilities beyond canonical zero-position state
+
+On success, the account becomes missing / reusable and `materialized_account_count` decreases by exactly `1`.
+
+Reclamation of a qualifying empty account MUST be permissionless or otherwise MUST NOT require cooperation from the account owner.
+
+A zero-state account MUST NOT permanently pin system capacity.
 
 ### 2.2 Global engine state
 
@@ -1508,15 +1550,29 @@ Any operation that would increase net side OI on a side whose mode is `DrainOnly
 
 ## 10. External operations
 
-### 10.0 Account materialization
+### 10.0 Account materialization and missing-account handling
 
-Any external operation that references an account identifier MUST first ensure the account is materialized.
+The engine MUST distinguish between **materialized** accounts and **missing** accounts.
 
-For a top-level instruction that accepts `now_slot`, any missing referenced account MUST be materialized using the canonical initialization of §2.1.1 with `slot_anchor = now_slot` before any per-account logic.
+A missing account MUST NOT be auto-materialized merely because an instruction references its identifier.
+
+Materialization rules:
+
+- A missing account MAY be materialized by `deposit(i, amount, now_slot)` only if `amount > 0`, using the canonical initialization of §2.1.1 with `slot_anchor = now_slot`, and only if that materialization is economically metered by the host chain's native account-allocation / storage-rent model or an equivalent explicit non-refundable creation fee.
+
+- An implementation MAY expose a separate explicit account-creation / registration path. If it does, that path MUST use the canonical initialization of §2.1.1, MUST enforce `materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS`, and MUST be economically metered by the host chain's native account-allocation / storage-rent model or an equivalent explicit non-refundable creation fee. Free unmetered materialization is forbidden.
+
+Missing-account rules for the standard external instructions in this spec:
+
+- `settle_account`, `withdraw`, `execute_trade`, and `liquidate` MUST fail conservatively if any referenced account is missing.
+
+- `keeper_crank` MUST NOT materialize missing work-plan entries. It MUST skip them or fail conservatively, but it MUST NOT create new accounts as part of keeper maintenance.
+
+- Zero-value or no-op instructions MUST NOT create a missing account.
 
 `touch_account_full(i, ...)` is a local canonical settle subroutine. It assumes account `i` is already materialized.
 
-An implementation MAY physically delete empty accounts, but if it does so it MUST update `materialized_account_count` with checked arithmetic and MUST preserve all aggregate invariants. Implementations are not required to support deletion.
+Because `MAX_MATERIALIZED_ACCOUNTS` is finite, implementations MUST support empty-account reclamation per §2.1.2.
 
 ### 10.1 `touch_account_full(i, oracle_price, now_slot)`
 
@@ -1570,9 +1626,9 @@ If an implementation exposes settlement as a standalone external instruction, it
 
 Procedure:
 
-1. initialize fresh instruction context `ctx`
+1. require account `i` is already materialized
 
-2. if account `i` is not yet materialized, materialize it using `slot_anchor = now_slot` per §10.0
+2. initialize fresh instruction context `ctx`
 
 3. `touch_account_full(i, oracle_price, now_slot)`
 
@@ -1594,7 +1650,9 @@ Procedure:
 
 2. require `now_slot >= slot_last`
 
-3. if account `i` is not yet materialized, materialize it using `slot_anchor = now_slot` per §10.0
+3. if account `i` is missing:
+   - require `amount > 0`
+   - materialize it using `slot_anchor = now_slot` per §10.0
 
 4. `current_slot = now_slot`
 
@@ -1612,9 +1670,11 @@ Procedure:
 
 Because `deposit` cannot mutate OI, stored positions, stale-account counts, phantom-dust bounds, side modes, or any permitted funding-rate input, it MAY omit §§5.7–5.8 and MUST NOT recompute `r_last`.
 
+A zero-amount deposit to a missing account MUST fail conservatively and MUST NOT materialize state.
+
 ### 10.3 `withdraw(i, amount, oracle_price, now_slot)`
 
-Before step 1, ensure account `i` is materialized per §10.0.
+Before step 1, require account `i` is already materialized.
 
 Procedure:
 
@@ -1643,7 +1703,7 @@ Procedure:
 
 `size_q > 0` means account `a` buys base from account `b`.
 
-Before step 1, ensure both accounts `a` and `b` are materialized per §10.0.
+Before step 1, require both accounts `a` and `b` are already materialized.
 
 Procedure:
 
@@ -1720,7 +1780,7 @@ Procedure:
 
 ### 10.5 `liquidate(i, oracle_price, now_slot, ...)`
 
-Before step 1, ensure account `i` is materialized per §10.0.
+Before step 1, require account `i` is already materialized.
 
 Procedure:
 
@@ -1762,8 +1822,8 @@ Procedure:
 2. `accrue_market_to(now_slot, oracle_price)`
 
 3. a keeper MAY:
-   - materialize any missing referenced account using `slot_anchor = now_slot` before touching or liquidating it
-   - call `touch_account_full(i, oracle_price, now_slot)` on a bounded window of materialized accounts
+   - skip missing referenced accounts, but MUST NOT materialize them as part of keeper maintenance
+   - call `touch_account_full(i, oracle_price, now_slot)` on a bounded window of already materialized accounts
    - liquidate unhealthy accounts only after those accounts have been touched to current state in this instruction, passing `ctx` through any `enqueue_adl` call
    - perform additional idempotent keeper-only cleanup only on accounts already touched to current state in this instruction
    - prioritize accounts on a `DrainOnly` or `ResetPending` side
@@ -1905,6 +1965,17 @@ An implementation MUST include tests that cover at least:
 60. Maintenance-fee neutrality: any recurring maintenance-fee realization increases `I` and/or negative `fee_credits_i` only; it does not mutate `K_side`, `PNL_i`, `PNL_pos_tot`, haircut inputs, or bankruptcy deficit `D`.
 
 61. Bounded maintenance-fee realization: if a recurring maintenance fee over a long interval would exceed `MAX_PROTOCOL_FEE_ABS` or the permitted one-step `fee_credits_i` write range, the implementation splits the realization into bounded internal chunks instead of overflowing, reverting spuriously, or socializing the excess through PnL.
+
+
+62. Missing-account gating: `settle_account`, `withdraw`, `execute_trade`, and `liquidate` do not auto-materialize missing accounts.
+
+63. Zero-value materialization guard: `deposit(i, 0, now_slot)` on a missing account fails conservatively and does not create state.
+
+64. Permissionless empty-account reclamation: a qualifying zero-state account can be reclaimed without owner cooperation, decrements `materialized_account_count`, and restores capacity for a new account.
+
+65. Keeper missing-account safety: `keeper_crank` skips or rejects missing work-plan entries without materializing them.
+
+66. Trusted time / oracle provenance: production entrypoints reject untrusted or invalid timing / oracle inputs, including stale oracle data beyond `MAX_ORACLE_STALENESS_SLOTS`.
 
 
 ## 12. Reference pseudocode (non-normative)
@@ -2253,6 +2324,7 @@ deposit(i, amount, now_slot):
     assert now_slot >= current_slot
     assert now_slot >= slot_last
     if account i does not exist:
+        assert amount > 0
         materialize_account(i, now_slot)
     current_slot = now_slot
     assert V + amount <= MAX_VAULT_TVL
@@ -2269,9 +2341,8 @@ deposit(i, amount, now_slot):
 
 ```text
 settle_account(i, oracle_price, now_slot):
+    assert account i already exists
     ctx = fresh_reset_context()
-    if account i does not exist:
-        materialize_account(i, now_slot)
     touch_account_full(i, oracle_price, now_slot)
     schedule_end_of_instruction_resets(ctx)
     finalize_end_of_instruction_resets(ctx)
@@ -2288,7 +2359,7 @@ keeper_crank(oracle_price, now_slot, work_plan):
 
     for each planned account i in bounded work_plan:
         if account i does not exist:
-            materialize_account(i, now_slot)
+            continue   // never materialize missing accounts here
 
         touch_account_full(i, oracle_price, now_slot)
 
