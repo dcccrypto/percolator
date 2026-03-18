@@ -3,6 +3,8 @@
  *
  * POST /api/faucet { wallet: string, type?: "sol" | "usdc" }
  *
+ * GH#1399: Unknown type values now return 400 instead of silently routing to USDC.
+ *
  * type="sol"  → airdrops 2 SOL via requestAirdrop on devnet public RPC
  * type="usdc" → mints 10,000 test USDC (default when type omitted)
  *
@@ -56,7 +58,17 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const walletAddress = body?.wallet;
-    const type: "sol" | "usdc" = body?.type === "sol" ? "sol" : "usdc";
+
+    // GH#1399: Validate type before coercing — unknown types must return 400,
+    // not silently fall through to the USDC mint path.
+    const rawType = body?.type;
+    if (rawType !== undefined && rawType !== "sol" && rawType !== "usdc") {
+      return NextResponse.json(
+        { error: "Invalid type. Use 'sol' or 'usdc'" },
+        { status: 400 },
+      );
+    }
+    const type: "sol" | "usdc" = rawType === "sol" ? "sol" : "usdc";
 
     if (!walletAddress || typeof walletAddress !== "string") {
       return NextResponse.json(

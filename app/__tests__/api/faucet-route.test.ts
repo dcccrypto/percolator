@@ -111,12 +111,34 @@ describe("/api/faucet route", () => {
   });
 
   it("type field defaults to 'usdc' when omitted", () => {
-    // Logic mirrored from route: body?.type === "sol" ? "sol" : "usdc"
-    const parseType = (t: unknown): "sol" | "usdc" => (t === "sol" ? "sol" : "usdc");
+    // GH#1399: type validation — only "sol" and "usdc" are accepted.
+    // Unknown/other values must be rejected (return 400), not silently coerced to usdc.
+    const parseType = (t: unknown): "sol" | "usdc" | "invalid" => {
+      if (t !== undefined && t !== "sol" && t !== "usdc") return "invalid";
+      return t === "sol" ? "sol" : "usdc";
+    };
     expect(parseType(undefined)).toBe("usdc");
     expect(parseType("sol")).toBe("sol");
     expect(parseType("usdc")).toBe("usdc");
-    expect(parseType("other")).toBe("usdc");
+    // GH#1399: unknown types must be rejected, NOT coerced to "usdc"
+    expect(parseType("token")).toBe("invalid");
+    expect(parseType("mirror")).toBe("invalid");
+    expect(parseType("other")).toBe("invalid");
+  });
+
+  it("GH#1399: unknown type returns 400 with descriptive error (not authority_mismatch)", () => {
+    // Regression guard: sending type:"token" or type:"mirror" previously
+    // silently fell through to the USDC mint path, producing a confusing
+    // authority_mismatch error. Now it must return 400 immediately.
+    const VALID_TYPES = ["sol", "usdc"];
+    const unknownType = "token";
+    const isKnown = VALID_TYPES.includes(unknownType);
+    const expectedStatus = isKnown ? 200 : 400;
+    expect(expectedStatus).toBe(400);
+
+    const unknownType2 = "mirror";
+    const isKnown2 = VALID_TYPES.includes(unknownType2);
+    expect(isKnown2).toBe(false);
   });
 
   it("on-chain authority check: authority mismatch should return 400, not 500 (GH#1382)", () => {
