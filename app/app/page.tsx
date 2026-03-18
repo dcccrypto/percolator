@@ -129,7 +129,7 @@ export default function Home() {
       }
 
       try {
-        const { data, error: dbError } = await getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals") as { data: { slab_address: string; symbol: string | null; volume_24h: number | null; insurance_balance: number | null; insurance_fund: number | null; last_price: number | null; total_open_interest: number | null; open_interest_long: number | null; open_interest_short: number | null; decimals: number | null }[] | null; error: { message: string } | null };
+        const { data, error: dbError } = await getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals, vault_balance, total_accounts") as { data: { slab_address: string; symbol: string | null; volume_24h: number | null; insurance_balance: number | null; insurance_fund: number | null; last_price: number | null; total_open_interest: number | null; open_interest_long: number | null; open_interest_short: number | null; decimals: number | null; vault_balance: number | null; total_accounts: number | null }[] | null; error: { message: string } | null };
         if (dbError) {
           console.error("Failed to query markets_with_stats:", dbError.message);
           throw new Error(dbError.message);
@@ -163,11 +163,27 @@ export default function Home() {
             return usd > MAX_PER_MARKET_USD ? 0 : usd;
           };
 
+          // GH#1397: Apply phantom OI guard before isActiveMarket — mirrors /api/stats
+          // logic exactly (GH#1337). Markets with no accounts or dust vault still carry
+          // stale non-zero OI in the DB (the indexer syncs from on-chain, where the
+          // value hasn't been zeroed). Without this guard, those phantom markets pass
+          // isActiveMarket (via total_open_interest > 0) and inflate the homepage count.
+          // threshold matches /api/markets + /api/stats: vault < 1M = dust/empty.
+          const MIN_VAULT_FOR_ACTIVE = 1_000_000;
+          const phantomAwareData = data.map((m) => {
+            const accountsCount = m.total_accounts ?? 0;
+            const vaultBal = m.vault_balance ?? 0;
+            const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+            if (!isPhantom) return m;
+            // Zero OI so isActiveMarket won't count stale phantom OI as "active"
+            return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 };
+          });
+
           // Filter out empty/abandoned markets using shared active-market filter
           // (consistent with /api/stats and markets page). Also exclude blocked/stale
           // slab addresses — these pass isActiveMarket (last_price > 0) but are bad
           // on-chain data that corrupt insurance and volume aggregates (GH#1181).
-          const activeData = data
+          const activeData = phantomAwareData
             .filter((m) => !isBlockedSlab(m.slab_address))
             .filter(isActiveMarket);
           setStats({
@@ -197,7 +213,7 @@ export default function Home() {
           setStatsLoaded(true);
           // Convert to USD first, then sort by converted volume
           // GH#1224: exclude blocked slab addresses (same filter as activeData/stats)
-          const converted = data
+          const converted = phantomAwareData
             .filter((m) => !isBlockedSlab(m.slab_address))
             .map((m) => ({
             slab_address: m.slab_address,
