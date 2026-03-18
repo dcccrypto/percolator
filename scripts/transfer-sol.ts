@@ -6,7 +6,7 @@ dotenv.config();
 async function main() {
   const conn = new Connection(process.env.RPC_URL!, 'confirmed');
   
-  const mintAuthPath = '/Users/khubair/.config/solana/percolator-devnet-mint-authority.json';
+  const mintAuthPath = process.env.ADMIN_KEYPAIR_PATH ?? `${process.env.HOME}/.config/solana/percolator-devnet-mint-authority.json`;
   const mintAuth = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(mintAuthPath, 'utf-8'))));
   
   const adminPk = new PublicKey('FF7KFfU5Bb3Mze2AasDHCCZuyhdaSLjUZy2K3JvjdB7x');
