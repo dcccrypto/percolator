@@ -223,7 +223,10 @@ export default function Home() {
               const usd = toUsd(Number(m.volume_24h || 0), m.decimals, m.last_price);
               return usd > 10_000_000 ? 0 : usd;
             })(),
-            last_price: m.last_price,
+            // GH#1405: sanitize last_price before display — raw DB value may be an
+            // unscaled admin oracle price (e.g. DfLoAzny: 10001100011 ≈ $10B).
+            // Clamp to MAX_SANE_PRICE_USD (same guard used by toUsd). Null → "—".
+            last_price: (m.last_price != null && m.last_price > 0 && m.last_price <= MAX_SANE_PRICE_USD) ? m.last_price : null,
             total_open_interest: toUsd(Number(m.total_open_interest ?? ((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))), m.decimals, m.last_price),
           }));
           // #1159: Sort by volume first, fall back to OI when volume is 0 for all
