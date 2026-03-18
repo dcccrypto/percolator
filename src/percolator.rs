@@ -2396,6 +2396,11 @@ impl RiskEngine {
         oracle_price: u64,
     ) -> Result<bool> {
         let mut ctx = InstructionContext::new();
+
+        // Per spec §9.4: the enclosing top-level instruction must call
+        // touch_account_full before the liquidation routine.
+        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+
         let result = self.liquidate_at_oracle_internal(idx, now_slot, oracle_price, &mut ctx)?;
 
         // End-of-instruction resets must run unconditionally because
@@ -2411,6 +2416,7 @@ impl RiskEngine {
     }
 
     /// Internal liquidation routine: takes caller's shared InstructionContext.
+    /// Precondition (spec §9.4): caller has already called touch_account_full(i).
     /// Does NOT call schedule/finalize resets — caller is responsible.
     fn liquidate_at_oracle_internal(
         &mut self,
@@ -2429,8 +2435,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 2: touch
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        // No touch_account_full here — spec §9.4 requires caller to have
+        // already called it. Calling it again would be redundant and waste CU.
 
         // Check position exists
         let old_eff = self.effective_pos_q(idx as usize);
