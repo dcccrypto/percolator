@@ -213,7 +213,7 @@ export default function Home() {
           setStatsLoaded(true);
           // Convert to USD first, then sort by converted volume
           // GH#1224: exclude blocked slab addresses (same filter as activeData/stats)
-          const converted = data
+          const converted = phantomAwareData
             .filter((m) => !isBlockedSlab(m.slab_address))
             .map((m) => ({
             slab_address: m.slab_address,
