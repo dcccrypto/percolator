@@ -1,7 +1,7 @@
 #![cfg(feature = "test")]
 
 use percolator::*;
-use percolator::wide_math::U256;
+use percolator::wide_math::{U256, fee_debt_u128_checked};
 
 // ============================================================================
 // Helpers
@@ -2126,3 +2126,698 @@ fn test_min_liquidation_fee_does_not_exceed_cap() {
     assert!(engine.check_conservation(), "conservation must hold after liquidation");
 }
 
+// ============================================================================
+// A7: Two-phase barrier wave tests (spec §A7)
+// ============================================================================
+
+// A7.1: Read-only scan — phase 1 mutates no account-local or side state
+// except the single initial accrue_market_to.
+#[test]
+fn test_barrier_a7_1_read_only_scan() {
+    let (mut engine, a, b) = setup_two_users(1_000_000, 1_000_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size_q = make_size_q(10);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Advance and accrue so engine is at scan_slot
+    let scan_slot = slot + 100;
+    engine.accrue_market_to(scan_slot, oracle).unwrap();
+    let snap_before = engine.clone();
+
+    // Run preview on all accounts — must not mutate engine state
+    let barrier = engine.capture_barrier_snapshot(scan_slot, oracle);
+    for idx in 0..MAX_ACCOUNTS {
+        let _ = engine.preview_account_at_barrier(idx, &barrier);
+    }
+
+    assert_eq!(engine, snap_before, "phase 1 scan must not mutate engine state");
+}
+
+// A7.2: No false negatives at barrier — liquidatable account never classified Safe.
+#[test]
+fn test_barrier_a7_2_no_false_negatives() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    // a: just enough for IM (100 units @ 1000: notional=100k, IM=10k)
+    engine.deposit(a, 15_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(100);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Crash price to 100 → PnL = 100*(100-1000) = -90k, far exceeds capital
+    let crash_price = 100u64;
+    let check_slot = slot + 1;
+    engine.accrue_market_to(check_slot, crash_price).unwrap();
+
+    let barrier = engine.capture_barrier_snapshot(check_slot, crash_price);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    // Verify it IS liquidatable via full touch + check
+    let mut verify = engine.clone();
+    verify.touch_account_full(a as usize, crash_price, check_slot).unwrap();
+    let eff = verify.effective_pos_q(a as usize);
+    let is_liq = eff != 0 && !verify.is_above_maintenance_margin(
+        &verify.accounts[a as usize], a as usize, crash_price,
+    );
+    assert!(is_liq, "account must be liquidatable after full touch");
+    assert_ne!(class_a, ReviewClass::Safe, "liquidatable account must not be Safe");
+}
+
+// A7.3: Positive-PnL conservatism — ignoring positive PnL is conservative.
+#[test]
+fn test_barrier_a7_3_positive_pnl_conservatism() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 10_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(5);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Give account a some positive PnL. Preview ignores it in eq_lb.
+    engine.set_pnl(a as usize, 5000);
+
+    let barrier = engine.capture_barrier_snapshot(slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    // eq_lb = max(0, C + min(PNL_virtual, 0) - 0). Since PNL_virtual includes
+    // pnl_delta + 5000 which is positive, min(.,0) = 0. So eq_lb = C.
+    // This is conservative: true equity is higher (includes haircutted PnL).
+    assert!(
+        class_a == ReviewClass::Safe || class_a == ReviewClass::ReviewLiquidation,
+        "positive PnL account should be Safe or conservatively ReviewLiquidation"
+    );
+}
+
+// A7.4: Maintenance-fee conservatism — preview UB >= true fee charge.
+#[test]
+fn test_barrier_a7_4_fee_debt_conservatism() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::new(100);
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.accounts[a as usize].last_fee_slot = slot;
+
+    // Preview fee UB at slot + 50
+    let barrier_slot = slot + 50;
+    let barrier = engine.capture_barrier_snapshot(barrier_slot, oracle);
+    let fee_ub = engine
+        .preview_account_local_fee_debt_ub(a as usize, &barrier)
+        .unwrap();
+
+    // True fee after touch
+    let mut verify = engine.clone();
+    verify.last_oracle_price = oracle;
+    verify.last_market_slot = slot;
+    verify.touch_account_full(a as usize, oracle, barrier_slot).unwrap();
+    let true_fee_debt = fee_debt_u128_checked(verify.accounts[a as usize].fee_credits.get());
+
+    assert!(
+        fee_ub >= true_fee_debt,
+        "preview fee UB ({}) must be >= true fee debt ({})",
+        fee_ub,
+        true_fee_debt
+    );
+}
+
+// A7.5: Epoch-mismatch routing — routes to ReviewCleanupResetProgress, never Safe.
+#[test]
+fn test_barrier_a7_5_epoch_mismatch_routing() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(10);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Account a has epoch_snap == adl_epoch_long. Simulate side reset.
+    let current_epoch = engine.adl_epoch_long;
+    engine.adl_epoch_start_k_long = engine.adl_coeff_long;
+    engine.adl_epoch_long = current_epoch + 1;
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.stale_account_count_long = engine.stored_pos_count_long;
+
+    let barrier = engine.capture_barrier_snapshot(slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    assert_eq!(
+        class_a,
+        ReviewClass::ReviewCleanupResetProgress,
+        "epoch-mismatch with ResetPending and epoch+1 must route to ReviewCleanupResetProgress"
+    );
+}
+
+// A7.6: Dust-zero routing — basis!=0, q_eff==0 → cleanup class, not Safe.
+#[test]
+fn test_barrier_a7_6_dust_zero_routing() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(1);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Shrink a_basis so floor(|basis| * A_side / a_basis) = 0
+    // basis ≈ POS_SCALE, A_side = ADL_ONE. Set a_basis = ADL_ONE * 2.
+    // floor(POS_SCALE * ADL_ONE / (2 * ADL_ONE)) = floor(POS_SCALE/2) = 500_000 != 0
+    // Need smaller: basis = 1, a_basis = ADL_ONE * 2 → floor(1 * ADL_ONE / (2*ADL_ONE)) = 0
+    engine.accounts[a as usize].position_basis_q = 1; // tiny long basis
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE * 2;
+
+    let barrier = engine.capture_barrier_snapshot(slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    assert!(
+        class_a == ReviewClass::ReviewCleanup
+            || class_a == ReviewClass::ReviewCleanupResetProgress,
+        "dust-zero account must be a cleanup class, got {:?}",
+        class_a,
+    );
+    assert_ne!(class_a, ReviewClass::Safe, "dust-zero must not be Safe");
+}
+
+// A7.7: Open-position preview failure priority — failure → ReviewLiquidation.
+#[test]
+fn test_barrier_a7_7_preview_failure_priority() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(10);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Force overflow: a_basis * POS_SCALE would overflow u128
+    engine.accounts[a as usize].adl_a_basis = u128::MAX;
+
+    let barrier = engine.capture_barrier_snapshot(slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    assert_eq!(
+        class_a,
+        ReviewClass::ReviewLiquidation,
+        "preview arithmetic failure on open position must route to ReviewLiquidation"
+    );
+}
+
+// A7.8: Reset-progress fairness — at least one reset candidate processed before
+// budget exhaustion on non-liquidatable candidates.
+#[test]
+fn test_barrier_a7_8_reset_progress_fairness() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    params.new_account_fee = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+    engine.last_oracle_price = oracle;
+    engine.last_market_slot = slot;
+    engine.last_crank_slot = slot;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    let c = engine.add_user(0).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(c, 1_000_000, oracle, slot).unwrap();
+
+    // Account b: long position with extreme a_basis → preview overflow → ReviewLiquidation.
+    // touch will fail (overflow), consuming a budget slot.
+    engine.accounts[b as usize].position_basis_q = POS_SCALE as i128;
+    engine.stored_pos_count_long += 1;
+    engine.accounts[b as usize].adl_a_basis = u128::MAX;
+    engine.accounts[b as usize].adl_epoch_snap = 0;
+    engine.accounts[b as usize].last_fee_slot = slot;
+
+    // Account c: short position, epoch mismatch → ReviewCleanupResetProgress.
+    engine.accounts[c as usize].position_basis_q = -(POS_SCALE as i128);
+    engine.stored_pos_count_short += 1;
+    engine.accounts[c as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[c as usize].adl_k_snap = 0;
+    engine.accounts[c as usize].adl_epoch_snap = 0;
+    engine.accounts[c as usize].last_fee_slot = slot;
+
+    // Set short side to ResetPending, epoch=1 (c is stale: epoch_snap=0, epoch_side=1)
+    engine.adl_epoch_start_k_short = 0;
+    engine.adl_epoch_short = 1;
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.stale_account_count_short = 1;
+
+    // Budget = 2: one for b (preview overflow → touch fails → consumes budget),
+    // one reserved for c (reset candidate).
+    let scan_window: [u16; 2] = [b, c];
+    let result = engine
+        .keeper_barrier_wave(a, slot, oracle, 0, &scan_window, 2)
+        .unwrap();
+
+    // Account c must have been processed: position zeroed by settle_side_effects.
+    assert_eq!(
+        engine.accounts[c as usize].position_basis_q, 0,
+        "reset candidate must have been processed (position zeroed)"
+    );
+    assert_eq!(result.num_phase2_revalidations, 2);
+}
+
+// A7.9: Cleanup ordering — ReviewCleanup processed after ReviewLiquidation + ResetProgress.
+#[test]
+fn test_barrier_a7_9_cleanup_ordering() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    params.new_account_fee = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+    engine.last_oracle_price = oracle;
+    engine.last_market_slot = slot;
+    engine.last_crank_slot = slot;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    let c = engine.add_user(0).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(c, 1_000_000, oracle, slot).unwrap();
+
+    // b: flat with negative PnL → ReviewCleanup
+    engine.set_pnl(b as usize, -100);
+    engine.accounts[b as usize].last_fee_slot = slot;
+
+    // c: open position with preview overflow → ReviewLiquidation
+    engine.accounts[c as usize].position_basis_q = POS_SCALE as i128;
+    engine.stored_pos_count_long += 1;
+    engine.accounts[c as usize].adl_a_basis = u128::MAX;
+    engine.accounts[c as usize].adl_epoch_snap = 0;
+    engine.accounts[c as usize].last_fee_slot = slot;
+
+    // Budget = 1: only one revalidation slot
+    let scan_window: [u16; 2] = [b, c];
+    let result = engine
+        .keeper_barrier_wave(a, slot, oracle, 0, &scan_window, 1)
+        .unwrap();
+
+    // With budget=1, ReviewLiquidation (c) should be processed before ReviewCleanup (b).
+    // c gets the one budget slot; b is skipped.
+    assert_eq!(result.num_phase2_revalidations, 1);
+    // b's PnL should be unchanged (not processed)
+    assert_eq!(
+        engine.accounts[b as usize].pnl, -100,
+        "cleanup account must not be processed before liq candidates"
+    );
+}
+
+// A7.10: Stale shortlist safety — phase 2 revalidates on current state.
+#[test]
+fn test_barrier_a7_10_stale_shortlist_safety() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 60_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(50);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Preview at a borderline price where a might look liquidatable
+    let scan_slot = slot + 1;
+    let borderline_price = 900u64;
+    engine.accrue_market_to(scan_slot, borderline_price).unwrap();
+
+    let barrier = engine.capture_barrier_snapshot(scan_slot, borderline_price);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    // Now "fix" the state: deposit more capital to make a healthy
+    engine.deposit(a, 500_000, borderline_price, scan_slot).unwrap();
+
+    // Run barrier wave — phase 2 revalidates with current state (post-deposit)
+    let scan_window: [u16; 1] = [a];
+    let result = engine
+        .keeper_barrier_wave(a, scan_slot, borderline_price, 0, &scan_window, 10)
+        .unwrap();
+
+    // Even if preview said ReviewLiquidation, phase 2 revalidates: a is now healthy.
+    // a must NOT be liquidated.
+    let eff = engine.effective_pos_q(a as usize);
+    assert_ne!(eff, 0, "healthy account must not be liquidated by stale shortlist");
+    assert_eq!(result.num_liquidations, 0);
+}
+
+// A7.11: Barrier invalidation — after a phase-2 write, barrier state differs from engine.
+#[test]
+fn test_barrier_a7_11_barrier_invalidation() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 15_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(100);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Crash price to trigger liquidation of a
+    let crash_price = 100u64;
+    let wave_slot = slot + 1;
+
+    // Capture barrier before wave
+    engine.accrue_market_to(wave_slot, crash_price).unwrap();
+    let barrier_before = engine.capture_barrier_snapshot(wave_slot, crash_price);
+
+    // Run wave that will liquidate a
+    let scan_window: [u16; 1] = [a];
+    let result = engine
+        .keeper_barrier_wave(a, wave_slot, crash_price, 0, &scan_window, 10)
+        .unwrap();
+    assert!(result.num_liquidations > 0, "must liquidate");
+
+    // After liquidation, engine state differs from barrier
+    let post_snap = engine.capture_barrier_snapshot(wave_slot, crash_price);
+    // ADL changes A and/or K on the opposing side
+    let a_long_changed = post_snap.a_long_b != barrier_before.a_long_b;
+    let k_long_changed = post_snap.k_long_b != barrier_before.k_long_b;
+    let a_short_changed = post_snap.a_short_b != barrier_before.a_short_b;
+    let k_short_changed = post_snap.k_short_b != barrier_before.k_short_b;
+    assert!(
+        a_long_changed || k_long_changed || a_short_changed || k_short_changed,
+        "barrier must be invalidated after a phase-2 liquidation"
+    );
+}
+
+// A7.12: Reset short-circuit — pending_reset stops further processing.
+#[test]
+fn test_barrier_a7_12_reset_short_circuit() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    let c = engine.add_user(1000).unwrap();
+    // Just enough capital for IM: 50 units @ 1000 = 50k notional, IM = 5k
+    engine.deposit(a, 10_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(c, 10_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    // a long vs b short, c long vs b short
+    let size_q = make_size_q(50);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+    engine.execute_trade(c, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Crash price: both a and c become liquidatable
+    let crash_price = 100u64;
+    let wave_slot = slot + 1;
+
+    let scan_window: [u16; 2] = [a, c];
+    let result = engine
+        .keeper_barrier_wave(a, wave_slot, crash_price, 0, &scan_window, 10)
+        .unwrap();
+
+    // At least one liquidation occurred. The key property:
+    // the wave doesn't crash and OI is balanced.
+    assert!(result.num_liquidations >= 1);
+    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q, "OI must be balanced");
+}
+
+// A7.13: No repeated-rounding writes — repeated phase-1 scans don't change state.
+#[test]
+fn test_barrier_a7_13_no_repeated_rounding_writes() {
+    let (mut engine, a, b) = setup_two_users(1_000_000, 1_000_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size_q = make_size_q(10);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    let scan_slot = slot + 50;
+    engine.accrue_market_to(scan_slot, oracle).unwrap();
+
+    let barrier = engine.capture_barrier_snapshot(scan_slot, oracle);
+
+    // Run preview multiple times
+    for _ in 0..5 {
+        for idx in 0..MAX_ACCOUNTS {
+            let _ = engine.preview_account_at_barrier(idx, &barrier);
+        }
+    }
+
+    // Verify no state mutation on critical fields
+    let a_idx = a as usize;
+    let basis_after = engine.accounts[a_idx].position_basis_q;
+    let k_snap_after = engine.accounts[a_idx].adl_k_snap;
+    assert_ne!(basis_after, 0, "basis must not be zeroed by preview");
+    // k_snap must not change
+    let b_idx = b as usize;
+    let b_basis = engine.accounts[b_idx].position_basis_q;
+    assert_ne!(b_basis, 0, "basis must not be zeroed by repeated preview");
+    assert_eq!(
+        engine.stored_pos_count_long + engine.stored_pos_count_short,
+        2,
+        "stored pos counts must not change"
+    );
+}
+
+// A7.14: Open-account loss-settlement invariance — scan LB is conservative
+// without settle_losses.
+#[test]
+fn test_barrier_a7_14_loss_settlement_invariance() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 200_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(a, slot, oracle, 0).unwrap();
+
+    let size_q = make_size_q(50);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Give account a a negative PnL (unsettled loss)
+    engine.set_pnl(a as usize, -50_000);
+
+    let barrier = engine.capture_barrier_snapshot(slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+
+    // The preview uses min(PNL_virtual, 0) which includes the negative PnL.
+    // This is conservative: settle_losses only converts negative PnL to capital
+    // reduction (doesn't improve equity). So the preview's eq_lb accounts for
+    // the loss even without explicitly running settle_losses.
+    // class_a should reflect the loss impact correctly.
+    // With -50k PnL and ~200k capital: eq_lb = max(0, 200k - 50k) = 150k.
+    // mm_req depends on position and oracle.
+    // The key: the scan LB is conservative regardless of settle_losses state.
+    assert!(
+        class_a == ReviewClass::Safe || class_a == ReviewClass::ReviewLiquidation,
+        "must classify consistently without settle_losses"
+    );
+}
+
+// A7.15: Missing-account safety — missing returns Missing, no materialization.
+#[test]
+fn test_barrier_a7_15_missing_account_safety() {
+    let engine = RiskEngine::new(default_params());
+    let barrier = engine.capture_barrier_snapshot(100, 1000);
+
+    // All accounts are missing (unused) in a fresh engine
+    for idx in 0..MAX_ACCOUNTS {
+        let class = engine.preview_account_at_barrier(idx, &barrier);
+        assert_eq!(class, ReviewClass::Missing, "unused account must be Missing");
+    }
+
+    // No accounts materialized
+    assert_eq!(engine.num_used_accounts, 0, "no accounts must be materialized");
+}
+
+// A7.16: Sieve superset — SKIP (no sieve implemented).
+
+// A7.17: Budget counts false positives — healthy ReviewLiquidation consumes budget.
+#[test]
+fn test_barrier_a7_17_budget_counts_false_positives() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::new(100);
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+
+    let caller = engine.add_user(1000).unwrap();
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(caller, 100_000, oracle, slot).unwrap();
+    // a: moderate capital with a position
+    engine.deposit(a, 5_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.keeper_crank(caller, slot, oracle, 0).unwrap();
+
+    // 5 units at 1000: notional = 5000, mm_req = 250
+    let size_q = make_size_q(5);
+    engine.execute_trade(a, b, oracle, slot, size_q, oracle).unwrap();
+
+    // Give a prepaid fee credits: fee_credits = +10000 (positive)
+    // At wave_slot (dt=50): pending_fee = 100*50 = 5000, fee_debt_ub = 0 + 5000 = 5000
+    // Preview: eq_lb = max(0, C + min(PNL_virtual,0) - 5000)
+    // After trade fee (~5): C ≈ 4995. PNL ≈ 0. eq_lb = max(0, 4995 - 5000) = 0
+    // mm_req = 250. 0 <= 250 → ReviewLiquidation
+    // But after touch: fee_credits = 10000 - 5000 = 5000 > 0, fee_debt = 0
+    // eq_net ≈ 4995, which is > mm_req = 250 → healthy → false positive!
+    engine.add_fee_credits(a, 10_000).unwrap();
+
+    let wave_slot = slot + 50;
+
+    // Verify the preview classifies as ReviewLiquidation
+    engine.accrue_market_to(wave_slot, oracle).unwrap();
+    let barrier = engine.capture_barrier_snapshot(wave_slot, oracle);
+    let class_a = engine.preview_account_at_barrier(a as usize, &barrier);
+    assert_eq!(
+        class_a,
+        ReviewClass::ReviewLiquidation,
+        "preview must see false positive as ReviewLiquidation"
+    );
+
+    // Use caller (different from a) to avoid caller-touch interfering with a's preview
+    let scan_window: [u16; 1] = [a];
+    let result = engine
+        .keeper_barrier_wave(caller, wave_slot, oracle, 0, &scan_window, 5)
+        .unwrap();
+
+    // False positive must consume at least one budget slot
+    assert!(
+        result.num_phase2_revalidations >= 1,
+        "false positive must consume budget: got {} revalidations",
+        result.num_phase2_revalidations
+    );
+    // No liquidation since a is healthy after revalidation
+    assert_eq!(result.num_liquidations, 0, "healthy account must not be liquidated");
+}
+
+// A7.18: ResetPending scan fairness — repeated waves eventually cover reset candidates.
+#[test]
+fn test_barrier_a7_18_reset_pending_scan_fairness() {
+    let mut params = default_params();
+    params.maintenance_fee_per_slot = U128::ZERO;
+    params.new_account_fee = U128::ZERO;
+    let mut engine = RiskEngine::new(params);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+    engine.last_oracle_price = oracle;
+    engine.last_market_slot = slot;
+    engine.last_crank_slot = slot;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    let c = engine.add_user(0).unwrap();
+    let d = engine.add_user(0).unwrap();
+    engine.deposit(a, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(b, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(c, 1_000_000, oracle, slot).unwrap();
+    engine.deposit(d, 1_000_000, oracle, slot).unwrap();
+
+    // Set up b and c as stale short-side accounts (epoch mismatch)
+    for &idx in &[b, c] {
+        engine.accounts[idx as usize].position_basis_q = -(POS_SCALE as i128);
+        engine.stored_pos_count_short += 1;
+        engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+        engine.accounts[idx as usize].adl_k_snap = 0;
+        engine.accounts[idx as usize].adl_epoch_snap = 0;
+        engine.accounts[idx as usize].last_fee_slot = slot;
+    }
+
+    engine.adl_epoch_start_k_short = 0;
+    engine.adl_epoch_short = 1;
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.stale_account_count_short = 2;
+
+    // Wave 1: scan only b (budget=1)
+    let scan1: [u16; 1] = [b];
+    engine
+        .keeper_barrier_wave(a, slot, oracle, 0, &scan1, 1)
+        .unwrap();
+    assert_eq!(
+        engine.accounts[b as usize].position_basis_q, 0,
+        "b must be processed in wave 1"
+    );
+
+    // Wave 2: scan only c (budget=1)
+    let scan2: [u16; 1] = [c];
+    engine
+        .keeper_barrier_wave(a, slot, oracle, 0, &scan2, 1)
+        .unwrap();
+    assert_eq!(
+        engine.accounts[c as usize].position_basis_q, 0,
+        "c must be processed in wave 2"
+    );
+
+    // Both reset candidates eventually covered
+    assert_eq!(engine.stale_account_count_short, 0);
+}

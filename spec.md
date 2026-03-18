@@ -2395,3 +2395,519 @@ keeper_crank(oracle_price, now_slot, work_plan):
 
 - Any upgrade path from a version that did not maintain `basis_pos_q_i`, `a_basis_i`, `stored_pos_count_*`, `stale_account_count_*`, `phantom_dust_bound_*_q`, or `materialized_account_count` consistently MUST complete migration before OI-increasing operations are re-enabled.
 
+
+# Risk Engine Spec Addendum — Compute-Limited Barrier Scan / Two-Phase Keeper Mode
+
+**Addendum ID:** A2  
+**Applies to:** Risk Engine Spec v11.12 family and later compatible revisions  
+**Status:** normative addendum  
+**Scope:** optional keeper execution mode for compute-limited environments  
+**Goal:** allow a keeper to scan many accounts cheaply in a read-only first phase, then perform expensive settlement / liquidation / cleanup only on a bounded shortlisted set, while reducing worst-case divergence caused by mixed mid-cascade passive touches.
+
+This addendum is self-contained. Where an implementation elects to use the two-phase keeper mode defined here, this addendum is normative and supersedes any inconsistent earlier keeper-scan wording in the base spec.
+
+---
+
+## A0. Design intent
+
+The base engine remains unchanged: exact economic state is still defined only by the base spec's authoritative current-state helpers and write paths.
+
+This addendum introduces an **optional** keeper mode with the following properties:
+
+1. **Single-barrier scan:** all accounts scanned in phase 1 are evaluated against one frozen barrier snapshot created after a single `accrue_market_to(now_slot, oracle_price)`.
+2. **Read-only phase 1:** phase 1 MUST NOT mutate account state, side state, OI, `A_side`, `K_side`, `epoch_side`, `stored_pos_count_*`, `stale_account_count_*`, `phantom_dust_bound_*_q`, `C_tot`, `PNL_pos_tot`, `I`, `V`, or `r_last`, except for the single top-level `accrue_market_to` done before the scan begins.
+3. **Conservative shortlist:** phase 1 MAY produce false positives, but it MUST NOT discard an account that is liquidatable at the barrier state.
+4. **Priority exact revalidation for risky open accounts:** open-position accounts that phase 1 cannot safely classify MUST remain in the high-priority exact-revalidation queue; they MUST NOT be demoted behind ordinary cleanup-only accounts due solely to preview arithmetic failure.
+5. **Reset-progress fairness:** when a side is already `ResetPending`, the two-phase mode MUST preserve liveness by reserving phase-2 progress for cleanup touches that can reconcile that side. False-positive liquidation candidates MUST NOT be able to starve reset finalization forever.
+6. **Current-state revalidation:** every candidate acted on in phase 2 MUST be revalidated on the then-current state with the base spec's exact helpers before any liquidation or cleanup write is committed.
+7. **Bounded phase-2 compute:** the phase-2 budget MUST count exact current-state revalidation attempts, not only committed writes, so a false-positive flood cannot defeat the keeper's compute cap.
+8. **No carry-forward of safety decisions:** an account classified safe under one barrier snapshot MUST NOT be treated as safe under a later barrier without rescanning it at the later barrier.
+
+This addendum reduces divergence by removing nonlinear local realization from the scan path. It does **not** claim to make multi-wave liquidation outcomes identical to a global eager settlement model.
+
+---
+
+## A1. New definitions
+
+### A1.1 Barrier snapshot `B`
+
+A **barrier snapshot** is the tuple captured immediately after a single successful `accrue_market_to(now_slot, oracle_price)` at the start of a keeper instruction and before any account-local touch, liquidation, reset scheduling, or cleanup write in that instruction.
+
+`B` MUST include at least:
+
+- `current_slot_B = now_slot`
+- `oracle_price_B = oracle_price`
+- `A_long_B`, `A_short_B`
+- `K_long_B`, `K_short_B`
+- `epoch_long_B`, `epoch_short_B`
+- `K_epoch_start_long_B`, `K_epoch_start_short_B`
+- `mode_long_B`, `mode_short_B`
+- `OI_eff_long_B`, `OI_eff_short_B`
+- any implementation-specific read-only maintenance-fee accumulator state needed to upper-bound account-local pending fee debt through `current_slot_B`
+
+Within one two-phase keeper instruction, phase 1 MUST use only this single barrier `B`.
+
+### A1.2 Review candidate classes
+
+A **review candidate** is an account that phase 1 does not prove safe at `B`.
+
+This addendum defines three review classes:
+
+- `ReviewLiquidation`: an open-position account that may be liquidatable at `B`, or an open-position account whose preview could not safely complete and therefore requires priority exact revalidation.
+- `ReviewCleanupResetProgress`: an account that is not proven liquidatable, but whose exact touch may be necessary to decrement `stale_account_count_*`, reconcile an epoch-mismatch account on a `ResetPending` side, or clear no-live-OI dust that can block reset scheduling/finalization.
+- `ReviewCleanup`: any other cleanup-only account whose exact touch may still be needed for dust zeroing, flat negative-loss cleanup, or other conservative housekeeping.
+
+### A1.3 Safe account at barrier
+
+An account is **safe at barrier** only if phase 1 proves that, at barrier `B`, the account is not liquidatable and does not require mandatory stale/dust cleanup for current reset progress.
+
+### A1.4 Pending maintenance-fee upper bound
+
+If recurring account-local maintenance fees are disabled, define:
+
+- `pending_maint_fee_ub_i(B) = 0`
+
+If recurring account-local maintenance fees are enabled, the implementation MUST provide a pure helper:
+
+- `preview_account_local_fee_debt_ub(i, B) -> u128`
+
+with all of the following properties:
+
+1. It MUST be read-only.
+2. It MUST use the same bounded arithmetic and interval-splitting obligations as the realized maintenance-fee path.
+3. It MUST return an upper bound on the additional account-local fee effect on `Eq_net_i` that a full current-state touch at barrier `B` could realize.
+4. It MAY model pending maintenance charges as fee debt even if the realized implementation would partially collect them from capital, provided the returned amount is not smaller than the true current-state equity reduction.
+
+Define:
+
+- `pending_maint_fee_ub_i(B) = preview_account_local_fee_debt_ub(i, B)` when enabled.
+
+### A1.5 Local notation
+
+In this addendum:
+
+- `checked_cast_i128(x)` means an exact cast from a bounded nonnegative integer to `i128`, or conservative failure if the cast would not fit
+- `checked_mul_u128(a, b)` means exact `u128` multiplication, or conservative failure on overflow
+
+These are notation shorthands only; an implementation MAY inline equivalent checked logic.
+
+---
+
+## A2. Pure preview helper
+
+The implementation MAY expose, or internally use, the following pure helper.
+
+### A2.1 `preview_account_at_barrier(i, B)`
+
+This helper MUST be read-only and MUST NOT materialize missing accounts.
+
+For an existing account `i`, it MUST either:
+
+- return one of the review classes defined in §A1.2 directly, or
+- compute the virtual quantities below and then classify under §A3.
+
+### A2.1.1 Virtual position / epoch status
+
+If `basis_pos_q_i == 0`:
+
+- `preview_kind = Flat`
+- `q_eff_barrier = 0`
+- `pnl_delta_barrier = 0`
+
+Else let `s = side(basis_pos_q_i)` and `den = checked_mul_u128(a_basis_i, POS_SCALE)`.
+
+If `epoch_snap_i == epoch_s_B`:
+
+- `preview_kind = SameEpoch`
+- `q_eff_barrier_abs = mul_div_floor_u128(abs(basis_pos_q_i) as u128, A_s_B, a_basis_i)`
+- `q_eff_barrier = sign(basis_pos_q_i) * (q_eff_barrier_abs as i128)`
+- `pnl_delta_barrier = wide_signed_mul_div_floor_from_k_pair(abs(basis_pos_q_i) as u128, k_snap_i, K_s_B, den)`
+
+Else:
+
+- if `mode_s_B != ResetPending` or `epoch_snap_i + 1 != epoch_s_B`, the preview MUST conservatively return `ReviewLiquidation` when `basis_pos_q_i != 0`; it MUST NOT classify the account `Safe`
+- `preview_kind = EpochMismatch`
+- `q_eff_barrier = 0`
+- `pnl_delta_barrier = wide_signed_mul_div_floor_from_k_pair(abs(basis_pos_q_i) as u128, k_snap_i, K_epoch_start_s_B, den)`
+
+The helper MUST then compute:
+
+- `PNL_virtual_i = checked_add_i128(PNL_i, pnl_delta_barrier)`
+
+### A2.1.2 Preview failure routing
+
+Any checked-arithmetic failure, invalid cast under the base spec's numeric bounds, inability to compute a required conservative upper bound, or other failure encountered anywhere in `preview_account_at_barrier(i, B)` MUST be routed as follows:
+
+1. If `basis_pos_q_i != 0`, the preview MUST classify the account as `ReviewLiquidation`.
+2. If `basis_pos_q_i == 0`, the preview MUST classify the account as `ReviewCleanup`.
+3. Phase 1 MUST NOT classify any such account `Safe`.
+
+This rule is normative even when the implementation internally computes fee-debt bounds or equity terms before position terms.
+
+### A2.1.3 Virtual fee-debt upper bound
+
+If preview has not already returned a review class under §A2.1.2, the helper MUST compute:
+
+- `FeeDebt_virtual_ub_i = checked_add_u128(fee_debt_u128_checked(fee_credits_i), pending_maint_fee_ub_i(B))`
+
+### A2.1.4 Conservative equity lower bound
+
+If preview has not already returned a review class under §A2.1.2, the helper MUST compute:
+
+- `Eq_scan_lb_i = max(0, (C_i as i128) + min(PNL_virtual_i, 0) - checked_cast_i128(FeeDebt_virtual_ub_i))`
+
+This helper MUST NOT include positive realized PnL, positive warmup conversion, fee-debt sweeps, or any other capital-increasing effect in `Eq_scan_lb_i`.
+
+### A2.1.5 Maintenance requirement at barrier
+
+If preview has not already returned a review class under §A2.1.2 and `q_eff_barrier != 0`, the helper MUST compute exact current-position maintenance requirement at barrier:
+
+- `Notional_barrier_i = mul_div_floor_u128(abs(q_eff_barrier) as u128, oracle_price_B, POS_SCALE)`
+- `MM_req_barrier_i = mul_div_floor_u128(Notional_barrier_i, maintenance_bps, 10_000)`
+
+Else define:
+
+- `Notional_barrier_i = 0`
+- `MM_req_barrier_i = 0`
+
+---
+
+## A3. Conservative classification rule
+
+Phase 1 MUST classify each scanned existing account as follows.
+
+### A3.1 `ReviewCleanupResetProgress`
+
+Classify as `ReviewCleanupResetProgress` if any of the following hold:
+
+1. `preview_kind == EpochMismatch`
+2. `basis_pos_q_i != 0` and `q_eff_barrier == 0`, and at least one of the following also holds:
+   - `mode_s_B == ResetPending`
+   - `mode_s_B == DrainOnly`
+   - `OI_eff_s_B == 0`
+
+An implementation MAY also classify additional accounts as `ReviewCleanupResetProgress` for conservative reset-progress reasons.
+
+### A3.2 `ReviewCleanup`
+
+Otherwise classify as `ReviewCleanup` if any of the following hold:
+
+1. `basis_pos_q_i != 0` and `q_eff_barrier == 0`
+2. `basis_pos_q_i == 0` and `PNL_virtual_i < 0`
+
+An implementation MAY also classify additional accounts as `ReviewCleanup` for conservative operational reasons.
+
+### A3.3 `ReviewLiquidation`
+
+Otherwise, if `q_eff_barrier != 0` and `Eq_scan_lb_i <= (MM_req_barrier_i as i128)`, classify as `ReviewLiquidation`.
+
+Accounts already returned as `ReviewLiquidation` under §A2.1.2 remain in this class.
+
+### A3.4 `Safe`
+
+Otherwise classify as `Safe`.
+
+### A3.5 No-false-negative guarantee
+
+For the barrier state `B`, the phase-1 classifier MUST satisfy:
+
+- if a full exact current-state touch at `B` would make the account liquidatable under the base spec, phase 1 MUST classify it as `ReviewLiquidation`, `ReviewCleanupResetProgress`, or `ReviewCleanup`, never `Safe`
+
+This follows because:
+
+1. `q_eff_barrier` is exact at `B` when preview succeeds
+2. `MM_req_barrier_i` is exact at `B`
+3. `Eq_scan_lb_i` ignores positive realized PnL and treats pending maintenance charges adversarially, so it is a lower bound on the account's true post-linear-settlement current-state equity at `B`
+4. principal loss settlement and fee-debt sweep are local bookkeeping transfers that do not improve liquidation health for an open account beyond what `Eq_scan_lb_i` already lower-bounds
+5. any preview failure on an open-position account is conservatively routed to `ReviewLiquidation`, never `Safe`
+
+---
+
+## A4. Two-phase keeper mode
+
+### A4.1 Phase 1 — read-only scan
+
+A keeper instruction using this addendum MUST perform phase 1 as follows:
+
+1. validate trusted `now_slot` and validated `oracle_price` exactly as required by the base spec
+2. call `accrue_market_to(now_slot, oracle_price)` exactly once
+3. capture barrier snapshot `B`
+4. choose a bounded window of existing accounts and scan them using `preview_account_at_barrier(i, B)`
+5. build an in-memory or off-chain shortlist of `ReviewLiquidation`, `ReviewCleanupResetProgress`, and `ReviewCleanup` accounts
+6. perform **no** account-local or side-state writes during this scan other than the single initial accrual in step 2
+
+A missing account in the scan window MUST be ignored or rejected according to the base spec's missing-account rules. It MUST NOT be materialized by the scan.
+
+### A4.1.1 ResetPending scan fairness
+
+If either side is `ResetPending` at barrier `B`, the keeper's scan-window selection policy MUST eventually include the remaining accounts whose exact touch can decrement `stale_account_count_side` or otherwise progress reconciliation for that side. It MUST NOT indefinitely spend all scan windows on unrelated accounts while such reset-progress accounts remain.
+
+### A4.2 Optional preliminary sieve
+
+An implementation MAY prepend a cheaper preliminary sieve before the exact phase-1 preview above.
+
+However, any such sieve MUST satisfy one of the following:
+
+- it proves the account would be `Safe` under the exact phase-1 preview, or
+- it forwards the account to the exact phase-1 preview
+
+A preliminary sieve MUST NOT discard an account unless the exact phase-1 preview would also classify it as `Safe`.
+
+### A4.3 Phase 2 — exact current-state processing
+
+After phase 1 completes for the chosen scan window, phase 2 MAY process a bounded subset of shortlisted accounts.
+
+For every phase-2 account revalidation attempt, the keeper MUST:
+
+1. revalidate exact current state using the base spec's authoritative write path for that action
+2. decide liquidation / cleanup only from the current state at the moment of revalidation, not from the old barrier preview alone
+3. count the attempted exact current-state revalidation against the phase-2 budget whether or not it ultimately commits a liquidation or cleanup write
+4. stop further processing immediately and proceed to end-of-instruction reset handling if any pending reset flag becomes true during processing, exactly as required by the base spec
+
+### A4.3.1 Phase-2 budget metric
+
+The phase-2 budget MUST be expressed in terms of **exact current-state revalidation attempts**, not only committed writes.
+
+For this addendum, one **phase-2 revalidation attempt** is one shortlisted account for which the keeper invokes the base spec's exact current-state path (`touch_account_full`, an equivalent exact settle wrapper, or an exact liquidation revalidation sequence) in order to decide whether to write.
+
+A false-positive candidate that exact revalidation proves safe still consumes one phase-2 revalidation attempt.
+
+### A4.4 Scheduling and anti-starvation rule
+
+Within one two-phase keeper instruction, phase 2 scheduling MUST satisfy all of the following:
+
+1. `ReviewLiquidation` candidates are risk-priority candidates.
+2. `ReviewCleanup` candidates are ordinary cleanup-only candidates.
+3. If either side is `ResetPending` at barrier `B` and the shortlist contains one or more `ReviewCleanupResetProgress` candidates relevant to that side, then before the keeper exhausts its phase-2 revalidation budget on candidates that exact revalidation proves non-liquidatable, it MUST spend at least one phase-2 revalidation attempt on a relevant `ReviewCleanupResetProgress` candidate for that side, unless an earlier phase-2 write in the same instruction schedules a pending reset and forces immediate finalization.
+4. The keeper MAY interleave chosen `ReviewLiquidation` and `ReviewCleanupResetProgress` candidates in any order consistent with rule 3.
+5. The keeper MUST NOT process an ordinary `ReviewCleanup` candidate before it has completed all chosen `ReviewLiquidation` work and all chosen `ReviewCleanupResetProgress` work from the same shortlist.
+6. An implementation MAY reserve more than one reset-progress slot, and MAY run dedicated reset-progress waves when a side is `ResetPending`.
+
+This rule prevents both of the following:
+
+- dangerous open-position accounts being demoted behind ordinary cleanup solely because preview arithmetic failed
+- a false-positive `ReviewLiquidation` flood permanently starving reset-progress cleanup on an already `ResetPending` side
+
+### A4.5 Barrier invalidation after writes
+
+Once phase 2 performs any write that may change `A_side`, `K_side`, `epoch_side`, `OI_eff_*`, `stored_pos_count_*`, `stale_account_count_*`, `phantom_dust_bound_*_q`, or any account-local state used by classification, the original barrier `B` is no longer authoritative for future instructions.
+
+Therefore:
+
+- a `Safe` decision from one barrier MUST NOT be reused in any later instruction
+- an off-chain shortlist derived from one barrier MAY be stale or adversarial and MUST be revalidated on current state before any write
+
+This rule does **not** prevent the same instruction from continuing to process already-shortlisted candidates, because every such candidate is revalidated on current state immediately before action.
+
+---
+
+## A5. Allowed and forbidden write shortcuts
+
+### A5.1 Forbidden in phase 1
+
+Phase 1 MUST NOT do any of the following for scanned accounts:
+
+- call `touch_account_full`
+- call `settle_side_effects`
+- call `attach_effective_position`
+- call `set_pnl`
+- call `set_capital`
+- mutate `fee_credits_i`, `R_i`, `w_start_i`, `w_slope_i`, `last_fee_slot_i`, `k_snap_i`, `a_basis_i`, `basis_pos_q_i`, or `epoch_snap_i`
+- schedule resets
+- finalize resets
+- sweep fee debt
+- convert warmup profits
+- settle losses from principal
+- perform cleanup-only zeroing
+
+### A5.2 Required exact path in phase 2
+
+A phase-2 `ReviewLiquidation` candidate MUST be revalidated by the base spec's exact current-state path before liquidation.
+
+A phase-2 `ReviewCleanupResetProgress` or `ReviewCleanup` candidate MUST be revalidated by the base spec's exact current-state path before any zeroing, stale reconciliation, or flat-loss cleanup.
+
+This addendum introduces **no** new economic write path. It introduces only a new read-only shortlist path and a new processing order.
+
+---
+
+## A6. Pseudocode (non-normative)
+
+### A6.1 Pure preview
+
+```text
+preview_account_at_barrier(i, B):
+    if account i is missing:
+        return Missing
+
+    // Any preview failure on an open-position account routes to ReviewLiquidation.
+    // Any preview failure on a flat account routes to ReviewCleanup.
+
+    fee_due_ub = preview_account_local_fee_debt_ub(i, B)   // or 0 if disabled
+    fee_debt_ub = checked_add_u128(fee_debt_u128_checked(fee_credits_i), fee_due_ub)
+
+    if basis_pos_q_i == 0:
+        pnl_virtual = PNL_i
+        if any_checked_failure_so_far:
+            return ReviewCleanup
+        if pnl_virtual < 0:
+            return ReviewCleanup
+        return Safe
+
+    s = side(basis_pos_q_i)
+    den = checked_mul_u128(a_basis_i, POS_SCALE)
+
+    if epoch_snap_i == epoch_s_B:
+        q_eff_abs = mul_div_floor_u128(abs(basis_pos_q_i) as u128, A_s_B, a_basis_i)
+        q_eff = sign(basis_pos_q_i) * q_eff_abs
+        pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs(basis_pos_q_i) as u128, k_snap_i, K_s_B, den)
+        pnl_virtual = checked_add_i128(PNL_i, pnl_delta)
+    else:
+        if mode_s_B != ResetPending or epoch_snap_i + 1 != epoch_s_B:
+            return ReviewLiquidation
+        q_eff = 0
+        pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs(basis_pos_q_i) as u128, k_snap_i, K_epoch_start_s_B, den)
+        pnl_virtual = checked_add_i128(PNL_i, pnl_delta)
+        return ReviewCleanupResetProgress
+
+    if any_checked_failure:
+        return ReviewLiquidation
+
+    if q_eff == 0:
+        if mode_s_B == ResetPending or mode_s_B == DrainOnly or OI_eff_s_B == 0:
+            return ReviewCleanupResetProgress
+        return ReviewCleanup
+
+    eq_lb = max(0, checked_cast_i128(C_i) + min(pnl_virtual, 0) - checked_cast_i128(fee_debt_ub))
+    notional = floor(abs(q_eff) * oracle_price_B / POS_SCALE)
+    mm_req = floor(notional * maintenance_bps / 10_000)
+
+    if eq_lb <= mm_req:
+        return ReviewLiquidation
+    return Safe
+```
+
+### A6.2 Two-phase keeper
+
+```text
+keeper_barrier_wave(now_slot, oracle_price, scan_window, max_phase2_revalidations):
+    ctx = fresh_instruction_context()
+    assert max_phase2_revalidations >= 0
+    accrue_market_to(now_slot, oracle_price)
+    B = capture_barrier_snapshot(now_slot, oracle_price)
+
+    review_liq = []
+    review_reset = []
+    review_cleanup = []
+
+    for i in scan_window:
+        cls = preview_account_at_barrier(i, B)
+        if cls == ReviewLiquidation:
+            review_liq.push(i)
+        else if cls == ReviewCleanupResetProgress:
+            review_reset.push(i)
+        else if cls == ReviewCleanup:
+            review_cleanup.push(i)
+
+    revalidations = 0
+    reset_slot_required = (
+        max_phase2_revalidations > 0 and (
+            (mode_long_B == ResetPending and exists_relevant(review_reset, long)) or
+            (mode_short_B == ResetPending and exists_relevant(review_reset, short))
+        )
+    )
+    reset_slot_used = false
+
+    for i in review_liq:
+        if revalidations == max_phase2_revalidations:
+            break
+        remaining = max_phase2_revalidations - revalidations
+        if reset_slot_required and not reset_slot_used and remaining == 1:
+            break
+
+        touch_account_full(i, oracle_price, now_slot)
+        revalidations += 1
+        if account_is_liquidatable_now(i):
+            liquidate_current_state(i, oracle_price, now_slot, ctx)
+        if ctx.pending_reset_long or ctx.pending_reset_short:
+            goto finalize
+
+    if reset_slot_required and not reset_slot_used and revalidations < max_phase2_revalidations:
+        j = choose_relevant_reset_progress_candidate(review_reset, B)
+        if j exists:
+            touch_account_full(j, oracle_price, now_slot)
+            revalidations += 1
+            reset_slot_used = true
+            if ctx.pending_reset_long or ctx.pending_reset_short:
+                goto finalize
+
+    for i in review_liq not yet revalidated:
+        if revalidations == max_phase2_revalidations:
+            break
+        touch_account_full(i, oracle_price, now_slot)
+        revalidations += 1
+        if account_is_liquidatable_now(i):
+            liquidate_current_state(i, oracle_price, now_slot, ctx)
+        if ctx.pending_reset_long or ctx.pending_reset_short:
+            goto finalize
+
+    for i in review_reset not yet revalidated:
+        if revalidations == max_phase2_revalidations:
+            break
+        touch_account_full(i, oracle_price, now_slot)
+        revalidations += 1
+        if ctx.pending_reset_long or ctx.pending_reset_short:
+            goto finalize
+
+    for i in review_cleanup:
+        if revalidations == max_phase2_revalidations:
+            break
+        touch_account_full(i, oracle_price, now_slot)
+        revalidations += 1
+        if ctx.pending_reset_long or ctx.pending_reset_short:
+            goto finalize
+
+finalize:
+    schedule_end_of_instruction_resets(ctx)
+    finalize_end_of_instruction_resets(ctx)
+    if funding_rate_inputs_changed:
+        recompute_r_last_from_final_post_reset_state()
+    assert OI_eff_long == OI_eff_short
+```
+
+---
+
+## A7. Required tests for this addendum
+
+An implementation using this addendum MUST add tests that cover at least:
+
+1. **Read-only scan:** phase 1 mutates no account-local or side state except the single initial `accrue_market_to`.
+2. **No false negatives at barrier:** any account that is liquidatable after a full exact current-state touch at barrier `B` is never classified `Safe` by phase 1.
+3. **Positive-PnL conservatism:** ignoring positive realized PnL in `Eq_scan_lb_i` cannot turn a truly liquidatable account into `Safe`.
+4. **Maintenance-fee conservatism:** `preview_account_local_fee_debt_ub(i, B)` is never smaller than the true current-state equity reduction from recurring account-local maintenance through `B`.
+5. **Epoch-mismatch routing:** accounts with `epoch_snap_i + 1 == epoch_s_B` are classified `ReviewCleanupResetProgress`, never `Safe`.
+6. **Dust-zero routing:** same-epoch accounts with `basis_pos_q_i != 0` but `q_eff_barrier == 0` are classified as a cleanup class, never `Safe`.
+7. **Open-position preview failure priority:** any preview arithmetic failure on an account with `basis_pos_q_i != 0` routes to `ReviewLiquidation`, not to an ordinary cleanup class.
+8. **Reset-progress fairness:** when a side is `ResetPending` and the shortlist contains at least one relevant `ReviewCleanupResetProgress` candidate, the keeper spends at least one phase-2 revalidation attempt on such a candidate before exhausting its budget on candidates that exact revalidation proves non-liquidatable, unless an earlier write forces immediate finalization.
+9. **Ordinary cleanup ordering:** ordinary `ReviewCleanup` accounts are not processed before chosen `ReviewLiquidation` and chosen `ReviewCleanupResetProgress` work from the same shortlist.
+10. **Stale shortlist safety:** a candidate list derived from one barrier cannot cause an incorrect liquidation when replayed later, because phase 2 revalidates on current state before any write.
+11. **Barrier invalidation:** after a phase-2 liquidation mutates `A/K` or OI, accounts not yet processed must be rescanned in a later instruction before any new `Safe` decision is relied upon.
+12. **Reset short-circuit:** if a phase-2 action schedules a reset, the instruction stops further account processing and proceeds directly to end-of-instruction reset handling.
+13. **No repeated-rounding writes in phase 1:** repeated phase-1 scans without phase-2 writes do not change `k_snap_i`, `basis_pos_q_i`, `stored_pos_count_*`, or `phantom_dust_bound_*_q`.
+14. **Open-account loss-settlement invariance:** for an open account at a fixed barrier state, the scan lower-bound remains conservative even though phase 1 does not run `settle_losses_from_principal`.
+15. **Missing-account safety:** scanning a missing account neither materializes it nor creates a candidate write path.
+16. **Optional sieve superset property:** any configured preliminary sieve may reduce scan compute, but it never discards an account that the exact phase-1 preview would classify as a review class.
+17. **Phase-2 budget counts false positives:** a false-positive `ReviewLiquidation` candidate that exact revalidation proves safe still consumes one phase-2 revalidation attempt.
+18. **ResetPending scan fairness:** repeated keeper waves eventually scan the remaining reset-progress accounts on a `ResetPending` side; they are not starved forever by unrelated scan windows.
+
+---
+
+## A8. Integration notes
+
+1. This addendum does **not** replace the base spec's exact settlement, liquidation, reset, or funding logic.
+2. This addendum is compatible with on-chain in-memory shortlists and with off-chain candidate derivation, provided every phase-2 action is revalidated on current state before write.
+3. The intended fairness improvement comes from two facts:
+   - phase 1 never performs passive nonlinear realization on accounts that are merely scanned
+   - phase 2 keeps risky open-account revalidation high-priority while reserving explicit progress for already-`ResetPending` sides
+4. This addendum intentionally allows false positives. It does not allow false negatives at the barrier.
+5. The addendum's phase-2 cap is a compute cap on **revalidation attempts**, not merely on successful writes.
+

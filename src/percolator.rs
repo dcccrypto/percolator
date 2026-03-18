@@ -340,6 +340,60 @@ pub struct CrankOutcome {
     pub num_gc_closed: u32,
     pub last_cursor: u16,
     pub sweep_complete: bool,
+    pub num_phase1_scanned: u16,
+    pub num_phase2_revalidations: u16,
+}
+
+/// Review classification for two-phase keeper mode (spec §A1.2)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewClass {
+    Safe,
+    ReviewLiquidation,
+    ReviewCleanupResetProgress,
+    ReviewCleanup,
+    Missing,
+}
+
+/// Frozen barrier snapshot for phase-1 read-only classification (spec §A2)
+#[derive(Clone, Copy, Debug)]
+pub struct BarrierSnapshot {
+    pub oracle_price_b: u64,
+    pub current_slot_b: u64,
+    pub a_long_b: u128,
+    pub a_short_b: u128,
+    pub k_long_b: i128,
+    pub k_short_b: i128,
+    pub epoch_long_b: u64,
+    pub epoch_short_b: u64,
+    pub k_epoch_start_long_b: i128,
+    pub k_epoch_start_short_b: i128,
+    pub mode_long_b: SideMode,
+    pub mode_short_b: SideMode,
+    pub oi_eff_long_b: u128,
+    pub oi_eff_short_b: u128,
+    pub maintenance_margin_bps: u64,
+    pub maintenance_fee_per_slot: u128,
+}
+
+impl BarrierSnapshot {
+    pub fn a_side(&self, s: Side) -> u128 {
+        match s { Side::Long => self.a_long_b, Side::Short => self.a_short_b }
+    }
+    pub fn k_side(&self, s: Side) -> i128 {
+        match s { Side::Long => self.k_long_b, Side::Short => self.k_short_b }
+    }
+    pub fn epoch_side(&self, s: Side) -> u64 {
+        match s { Side::Long => self.epoch_long_b, Side::Short => self.epoch_short_b }
+    }
+    pub fn k_epoch_start_side(&self, s: Side) -> i128 {
+        match s { Side::Long => self.k_epoch_start_long_b, Side::Short => self.k_epoch_start_short_b }
+    }
+    pub fn mode_side(&self, s: Side) -> SideMode {
+        match s { Side::Long => self.mode_long_b, Side::Short => self.mode_short_b }
+    }
+    pub fn oi_eff_side(&self, s: Side) -> u128 {
+        match s { Side::Long => self.oi_eff_long_b, Side::Short => self.oi_eff_short_b }
+    }
 }
 
 // ============================================================================
@@ -2639,6 +2693,447 @@ impl RiskEngine {
             num_gc_closed,
             last_cursor: self.crank_cursor,
             sweep_complete,
+            num_phase1_scanned: 0,
+            num_phase2_revalidations: 0,
+        })
+    }
+
+    // ========================================================================
+    // Barrier snapshot and preview helpers (spec §A2)
+    // ========================================================================
+
+    /// Capture a frozen barrier snapshot of current engine side state.
+    /// Called after `accrue_market_to`. Pure `&self` reader.
+    pub fn capture_barrier_snapshot(&self, now_slot: u64, oracle_price: u64) -> BarrierSnapshot {
+        BarrierSnapshot {
+            oracle_price_b: oracle_price,
+            current_slot_b: now_slot,
+            a_long_b: self.adl_mult_long,
+            a_short_b: self.adl_mult_short,
+            k_long_b: self.adl_coeff_long,
+            k_short_b: self.adl_coeff_short,
+            epoch_long_b: self.adl_epoch_long,
+            epoch_short_b: self.adl_epoch_short,
+            k_epoch_start_long_b: self.adl_epoch_start_k_long,
+            k_epoch_start_short_b: self.adl_epoch_start_k_short,
+            mode_long_b: self.side_mode_long,
+            mode_short_b: self.side_mode_short,
+            oi_eff_long_b: self.oi_eff_long_q,
+            oi_eff_short_b: self.oi_eff_short_q,
+            maintenance_margin_bps: self.params.maintenance_margin_bps,
+            maintenance_fee_per_slot: self.params.maintenance_fee_per_slot.get(),
+        }
+    }
+
+    /// Compute conservative upper bound on pending maintenance fee debt.
+    /// Returns `None` on overflow (caller routes to conservative class).
+    pub fn preview_account_local_fee_debt_ub(&self, idx: usize, barrier: &BarrierSnapshot) -> Option<u128> {
+        let last_fee_slot = self.accounts[idx].last_fee_slot;
+        let dt = barrier.current_slot_b.checked_sub(last_fee_slot)?;
+        barrier.maintenance_fee_per_slot.checked_mul(dt as u128)
+    }
+
+    /// Core phase-1 classifier per spec §A2.1 + §A3. Read-only (`&self`).
+    pub fn preview_account_at_barrier(&self, idx: usize, barrier: &BarrierSnapshot) -> ReviewClass {
+        // Step 1: Missing account
+        if !self.is_used(idx) {
+            return ReviewClass::Missing;
+        }
+
+        let account = &self.accounts[idx];
+        let basis = account.position_basis_q;
+
+        // Flat account (basis == 0): §A3.2 / §A3.4
+        if basis == 0 {
+            if account.pnl < 0 {
+                return ReviewClass::ReviewCleanup;
+            }
+            return ReviewClass::Safe;
+        }
+
+        // Open position (basis != 0)
+        // All checked-arithmetic failures → ReviewLiquidation (§A2.1.2)
+        let side = match side_of_i128(basis) {
+            Some(s) => s,
+            None => return ReviewClass::ReviewLiquidation,
+        };
+        let abs_basis = basis.unsigned_abs();
+        let a_basis = account.adl_a_basis;
+        let epoch_snap = account.adl_epoch_snap;
+        let k_snap = account.adl_k_snap;
+        let epoch_s = barrier.epoch_side(side);
+
+        if epoch_snap == epoch_s {
+            // Same epoch (§A2.1.1)
+            if a_basis == 0 {
+                return ReviewClass::ReviewLiquidation;
+            }
+
+            // q_eff_barrier_abs
+            let q_eff_abs = mul_div_floor_u128(abs_basis, barrier.a_side(side), a_basis);
+
+            // pnl_delta: k_now = barrier K, k_then = account k_snap
+            let den = match a_basis.checked_mul(POS_SCALE) {
+                Some(d) => d,
+                None => return ReviewClass::ReviewLiquidation,
+            };
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(
+                abs_basis, barrier.k_side(side), k_snap, den,
+            );
+
+            // pnl_virtual
+            let pnl_virtual = match account.pnl.checked_add(pnl_delta) {
+                Some(v) if v != i128::MIN => v,
+                _ => return ReviewClass::ReviewLiquidation,
+            };
+
+            if q_eff_abs == 0 {
+                // §A3.1 item 2: basis != 0 and q_eff == 0
+                let mode = barrier.mode_side(side);
+                if mode == SideMode::ResetPending
+                    || mode == SideMode::DrainOnly
+                    || barrier.oi_eff_side(side) == 0
+                {
+                    return ReviewClass::ReviewCleanupResetProgress;
+                }
+                // §A3.2 item 1
+                return ReviewClass::ReviewCleanup;
+            }
+
+            // q_eff != 0: compute equity lower bound and maintenance requirement
+
+            // Fee debt UB (§A2.1.3)
+            let fee_debt_base = fee_debt_u128_checked(account.fee_credits.get());
+            let pending_fee = match self.preview_account_local_fee_debt_ub(idx, barrier) {
+                Some(f) => f,
+                None => return ReviewClass::ReviewLiquidation,
+            };
+            let fee_debt_ub = match fee_debt_base.checked_add(pending_fee) {
+                Some(f) => f,
+                None => return ReviewClass::ReviewLiquidation,
+            };
+
+            // eq_lb = max(0, C + min(PNL_virtual, 0) - fee_debt_ub) (§A2.1.4)
+            let cap_i128 = account.capital.get() as i128;
+            let neg_pnl = if pnl_virtual < 0 { pnl_virtual } else { 0i128 };
+            let fee_debt_i128: i128 = match fee_debt_ub.try_into() {
+                Ok(v) => v,
+                Err(_) => return ReviewClass::ReviewLiquidation,
+            };
+
+            let inner = match cap_i128.checked_add(neg_pnl) {
+                Some(v) => match v.checked_sub(fee_debt_i128) {
+                    Some(r) => r,
+                    None => return ReviewClass::ReviewLiquidation,
+                },
+                None => return ReviewClass::ReviewLiquidation,
+            };
+            let eq_lb = if inner > 0 { inner } else { 0i128 };
+
+            // Notional and MM requirement (§A2.1.5)
+            let notional = mul_div_floor_u128(
+                q_eff_abs, barrier.oracle_price_b as u128, POS_SCALE,
+            );
+            let mm_req = mul_div_floor_u128(
+                notional, barrier.maintenance_margin_bps as u128, 10_000,
+            );
+
+            let mm_req_i128 = if mm_req > i128::MAX as u128 { i128::MAX } else { mm_req as i128 };
+
+            // §A3.3: ReviewLiquidation if eq_lb <= mm_req
+            if eq_lb <= mm_req_i128 {
+                return ReviewClass::ReviewLiquidation;
+            }
+
+            ReviewClass::Safe
+        } else {
+            // Epoch mismatch (§A2.1.1)
+            let mode = barrier.mode_side(side);
+            if mode == SideMode::ResetPending
+                && epoch_snap.checked_add(1) == Some(epoch_s)
+            {
+                // §A3.1 item 1: preview_kind == EpochMismatch
+                return ReviewClass::ReviewCleanupResetProgress;
+            }
+            // Conservative: must not classify Safe (§A2.1.1)
+            ReviewClass::ReviewLiquidation
+        }
+    }
+
+    // ========================================================================
+    // keeper_barrier_wave (spec §A2 two-phase keeper)
+    // ========================================================================
+
+    pub fn keeper_barrier_wave(
+        &mut self,
+        caller_idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_bps_per_slot: i64,
+        scan_window: &[u16],
+        max_phase2_revalidations: u16,
+    ) -> Result<CrankOutcome> {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        let mut ctx = InstructionContext::new();
+
+        // Step 1: accrue market state using stored rate (anti-retroactivity)
+        self.accrue_market_to(now_slot, oracle_price)?;
+
+        // Validate and set new rate for next interval
+        if funding_rate_bps_per_slot.abs() > MAX_ABS_FUNDING_BPS_PER_SLOT {
+            return Err(RiskError::Overflow);
+        }
+        self.set_funding_rate_for_next_interval(funding_rate_bps_per_slot);
+
+        let advanced = now_slot > self.last_crank_slot;
+        if advanced {
+            self.last_crank_slot = now_slot;
+        }
+
+        // Step 2: caller maintenance discount + touch (same as keeper_crank)
+        let (slots_forgiven, caller_settle_ok) = if (caller_idx as usize) < MAX_ACCOUNTS
+            && self.is_used(caller_idx as usize)
+        {
+            let last_fee = self.accounts[caller_idx as usize].last_fee_slot;
+            let dt = now_slot.saturating_sub(last_fee);
+            let forgive = dt / 2;
+            if forgive > 0 && dt > 0 {
+                self.accounts[caller_idx as usize].last_fee_slot =
+                    last_fee.saturating_add(forgive);
+            }
+            self.touch_account_full(caller_idx as usize, oracle_price, now_slot)?;
+            (forgive, true)
+        } else {
+            (0, true)
+        };
+
+        // Step 3: capture barrier snapshot
+        let barrier = self.capture_barrier_snapshot(now_slot, oracle_price);
+
+        // Step 4: Phase 1 scan — classify accounts into buckets
+        let mut review_liq: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+        let mut review_liq_len: usize = 0;
+        let mut review_reset: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+        let mut review_reset_len: usize = 0;
+        let mut review_cleanup: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
+        let mut review_cleanup_len: usize = 0;
+
+        let mut num_phase1_scanned: u16 = 0;
+
+        for i in 0..scan_window.len() {
+            let idx = scan_window[i];
+            if (idx as usize) >= MAX_ACCOUNTS {
+                continue;
+            }
+            num_phase1_scanned += 1;
+            let class = self.preview_account_at_barrier(idx as usize, &barrier);
+            match class {
+                ReviewClass::ReviewLiquidation => {
+                    if review_liq_len < MAX_ACCOUNTS {
+                        review_liq[review_liq_len] = idx;
+                        review_liq_len += 1;
+                    }
+                }
+                ReviewClass::ReviewCleanupResetProgress => {
+                    if review_reset_len < MAX_ACCOUNTS {
+                        review_reset[review_reset_len] = idx;
+                        review_reset_len += 1;
+                    }
+                }
+                ReviewClass::ReviewCleanup => {
+                    if review_cleanup_len < MAX_ACCOUNTS {
+                        review_cleanup[review_cleanup_len] = idx;
+                        review_cleanup_len += 1;
+                    }
+                }
+                ReviewClass::Safe | ReviewClass::Missing => {}
+            }
+        }
+
+        // Step 5: Phase 2 processing (budget-bounded)
+        let mut budget = max_phase2_revalidations;
+        let mut num_liquidations: u32 = 0;
+        let mut num_phase2_revalidations: u16 = 0;
+        let mut liq_cursor: usize = 0;
+        let mut reset_cursor: usize = 0;
+        let mut cleanup_cursor: usize = 0;
+
+        let has_reset_pending = barrier.mode_long_b == SideMode::ResetPending
+            || barrier.mode_short_b == SideMode::ResetPending;
+        let reserve_for_reset = has_reset_pending && review_reset_len > 0;
+
+        'phase2: {
+            // 2a: Process review_liq, reserving 1 slot for reset-progress if needed
+            while liq_cursor < review_liq_len && budget > 0 {
+                if reserve_for_reset && reset_cursor < review_reset_len && budget <= 1 {
+                    break;
+                }
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break 'phase2;
+                }
+                let idx = review_liq[liq_cursor] as usize;
+                liq_cursor += 1;
+                budget = budget.saturating_sub(1);
+                num_phase2_revalidations += 1;
+
+                if self.touch_account_full(idx, oracle_price, now_slot).is_err() {
+                    continue;
+                }
+
+                let eff = self.effective_pos_q(idx);
+                if eff != 0
+                    && !self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price)
+                {
+                    match self.liquidate_at_oracle_internal(
+                        idx as u16, now_slot, oracle_price, &mut ctx,
+                    ) {
+                        Ok(true) => { num_liquidations += 1; }
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            // 2b: Process reserved reset-progress candidate
+            if reserve_for_reset && reset_cursor < review_reset_len && budget > 0 {
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break 'phase2;
+                }
+                let idx = review_reset[reset_cursor] as usize;
+                reset_cursor += 1;
+                budget = budget.saturating_sub(1);
+                num_phase2_revalidations += 1;
+
+                if self.touch_account_full(idx, oracle_price, now_slot).is_ok() {
+                    let eff = self.effective_pos_q(idx);
+                    if eff != 0
+                        && !self.is_above_maintenance_margin(
+                            &self.accounts[idx], idx, oracle_price,
+                        )
+                    {
+                        match self.liquidate_at_oracle_internal(
+                            idx as u16, now_slot, oracle_price, &mut ctx,
+                        ) {
+                            Ok(true) => { num_liquidations += 1; }
+                            Ok(false) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+
+            // 2c: Continue remaining review_liq
+            while liq_cursor < review_liq_len && budget > 0 {
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break 'phase2;
+                }
+                let idx = review_liq[liq_cursor] as usize;
+                liq_cursor += 1;
+                budget = budget.saturating_sub(1);
+                num_phase2_revalidations += 1;
+
+                if self.touch_account_full(idx, oracle_price, now_slot).is_err() {
+                    continue;
+                }
+
+                let eff = self.effective_pos_q(idx);
+                if eff != 0
+                    && !self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price)
+                {
+                    match self.liquidate_at_oracle_internal(
+                        idx as u16, now_slot, oracle_price, &mut ctx,
+                    ) {
+                        Ok(true) => { num_liquidations += 1; }
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            // 2d: Process remaining review_reset
+            while reset_cursor < review_reset_len && budget > 0 {
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break 'phase2;
+                }
+                let idx = review_reset[reset_cursor] as usize;
+                reset_cursor += 1;
+                budget = budget.saturating_sub(1);
+                num_phase2_revalidations += 1;
+
+                if self.touch_account_full(idx, oracle_price, now_slot).is_err() {
+                    continue;
+                }
+
+                let eff = self.effective_pos_q(idx);
+                if eff != 0
+                    && !self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price)
+                {
+                    match self.liquidate_at_oracle_internal(
+                        idx as u16, now_slot, oracle_price, &mut ctx,
+                    ) {
+                        Ok(true) => { num_liquidations += 1; }
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            // 2e: Process review_cleanup
+            while cleanup_cursor < review_cleanup_len && budget > 0 {
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break 'phase2;
+                }
+                let idx = review_cleanup[cleanup_cursor] as usize;
+                cleanup_cursor += 1;
+                budget = budget.saturating_sub(1);
+                num_phase2_revalidations += 1;
+
+                if self.touch_account_full(idx, oracle_price, now_slot).is_err() {
+                    continue;
+                }
+
+                let eff = self.effective_pos_q(idx);
+                if eff != 0
+                    && !self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price)
+                {
+                    match self.liquidate_at_oracle_internal(
+                        idx as u16, now_slot, oracle_price, &mut ctx,
+                    ) {
+                        Ok(true) => { num_liquidations += 1; }
+                        Ok(false) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+
+        // Step 6: Finalize
+        let num_gc_closed = self.garbage_collect_dust();
+
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx);
+
+        assert!(
+            self.oi_eff_long_q == self.oi_eff_short_q,
+            "OI_eff_long != OI_eff_short after keeper_barrier_wave"
+        );
+
+        Ok(CrankOutcome {
+            advanced,
+            slots_forgiven,
+            caller_settle_ok,
+            force_realize_needed: false,
+            panic_needed: false,
+            num_liquidations,
+            num_liq_errors: 0,
+            num_gc_closed,
+            last_cursor: 0,
+            sweep_complete: false,
+            num_phase1_scanned,
+            num_phase2_revalidations,
         })
     }
 
