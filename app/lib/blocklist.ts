@@ -29,6 +29,10 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
   // Empty-vault phantom-OI slab (no on-chain liquidity). PR #1377.
   "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
+  // GH#1398: Garbage test market — symbol "11111111", 333x max_leverage,
+  // oracle_authority = system program (11111111...), cannot receive price updates.
+  // Deployer = DEVNET_MINT_AUTHORITY_KEYPAIR (accidental test deployment).
+  "CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v",
 ]);
 
 /**

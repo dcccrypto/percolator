@@ -283,6 +283,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // GH#1398: Reject markets with unreasonably high max_leverage.
+  // 333x (and similar) garbage test markets have been observed on devnet.
+  // Cap at 100x — any higher is almost certainly a misconfiguration or test artifact.
+  // The on-chain program may allow higher values, but we reject at the API layer to
+  // keep the market list clean and prevent user-facing extreme-leverage exposure.
+  const MAX_ALLOWED_LEVERAGE = 100;
+  if (max_leverage != null && max_leverage > MAX_ALLOWED_LEVERAGE) {
+    return NextResponse.json(
+      { error: `max_leverage exceeds allowed maximum of ${MAX_ALLOWED_LEVERAGE}x` },
+      { status: 400 }
+    );
+  }
+
   // #813: Validate oracle_mode enum
   const VALID_ORACLE_MODES = ["pyth", "hyperp", "admin"] as const;
   type OracleMode = typeof VALID_ORACLE_MODES[number];
