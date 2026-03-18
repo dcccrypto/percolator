@@ -128,11 +128,30 @@ describe("POST /api/markets — max_leverage guard (GH#1398)", () => {
   });
 });
 
-describe("blocklist — CRJH9Gtk garbage market (GH#1398)", () => {
-  it("CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v is in BLOCKED_SLAB_ADDRESSES", async () => {
-    vi.resetModules();
-    const { BLOCKED_SLAB_ADDRESSES, isBlockedSlab } = await import("@/lib/blocklist");
-    expect(BLOCKED_SLAB_ADDRESSES.has("CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v")).toBe(true);
-    expect(isBlockedSlab("CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v")).toBe(true);
-  });
+describe("blocklist — GH#1398 garbage markets (system program oracle_authority)", () => {
+  const PHANTOM_SLABS = [
+    "CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v", // original (PR #1401)
+    // GH#1398 follow-up (PR #1404): remaining 11 phantom oracle_authority = system program slabs
+    "J6UU4VHbYXpCAACr5o5xjUVmquagiP2NGbbMp68VUCX9",
+    "8L47yqvQRLxZ6PzW3b9jawEM79CmokBvUzeLR7mvtyuU",
+    "8kkED3uZznGzSidr8kYJPd3VhzSh7LVngNUx2V1qnW9L",
+    "8pKtAV3z6iTKekieF9EenQ4tk1rkAVa9oYsqe7h1PGjx",
+    "Eekuz2TgXRPq3rsp5brRW5hofxLdwt6KUXbLUQCKHK9G",
+    "Av3zVrW5deLpLo1qZZ7yNJ5Lq5ja4Z9ixijVhV4MuRzE",
+    "CrbDmfiooBUTFfGyMhJ1hpToCrBLAXXKySBwEnLHV6kj",
+    "FhpPmmuh5UDAjvEjrYBPFwmj4CP4otvsYMxtTb46p1Ss",
+    "7xozYEbKhEdjQn5pCAV8bUDQGugZttqZTduPeHkoqRb8",
+    "3dp3e288oPjs5w92fg26cVYQMHGuUpsj8YbSFn6wrzp4",
+    "8nzjXMvdkC4fRF491QkpKE6aFTLmEcpXEnbh4wQT4iUA",
+  ];
+
+  it.each(PHANTOM_SLABS)(
+    "%s is in BLOCKED_SLAB_ADDRESSES and isBlockedSlab returns true",
+    async (slab) => {
+      vi.resetModules();
+      const { BLOCKED_SLAB_ADDRESSES, isBlockedSlab } = await import("@/lib/blocklist");
+      expect(BLOCKED_SLAB_ADDRESSES.has(slab)).toBe(true);
+      expect(isBlockedSlab(slab)).toBe(true);
+    }
+  );
 });
