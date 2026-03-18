@@ -168,12 +168,15 @@ export default function Home() {
           // stale non-zero OI in the DB (the indexer syncs from on-chain, where the
           // value hasn't been zeroed). Without this guard, those phantom markets pass
           // isActiveMarket (via total_open_interest > 0) and inflate the homepage count.
-          // threshold matches /api/markets + /api/stats: vault < 1M = dust/empty.
+          // threshold matches /api/markets + /api/stats: vault <= 1M = dust/empty.
+          // GH#1405 Part 2: use strict GTE (<=) so vault_balance == MIN_VAULT_FOR_ACTIVE
+          // is also treated as phantom — markets at exactly the threshold have no real LP
+          // liquidity backing and carry stale/corrupt OI (e.g. DfLoAzny).
           const MIN_VAULT_FOR_ACTIVE = 1_000_000;
           const phantomAwareData = data.map((m) => {
             const accountsCount = m.total_accounts ?? 0;
             const vaultBal = m.vault_balance ?? 0;
-            const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+            const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
             if (!isPhantom) return m;
             // Zero OI so isActiveMarket won't count stale phantom OI as "active"
             return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 };

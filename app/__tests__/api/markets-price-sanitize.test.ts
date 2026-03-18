@@ -296,26 +296,31 @@ describe("GET /api/markets — price sanitization (#856)", () => {
       expect(m?.total_open_interest_usd).toBeNull();
     });
 
-    it("suppresses total_open_interest_usd when vault_balance is dust (< 1,000,000)", async () => {
+    it("suppresses total_open_interest_usd when vault_balance is dust (<= 1,000,000) — GH#1405 Part 2", async () => {
       mockMarkets = [
         mkMarket({ symbol: "DUST_1", vault_balance: 1, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
         mkMarket({ symbol: "DUST_100", vault_balance: 100, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
         mkMarket({ symbol: "DUST_999999", vault_balance: 999_999, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        // GH#1405 Part 2: exactly at threshold (1M) is now also phantom (was previously allowed through)
+        mkMarket({ symbol: "DUST_1M", vault_balance: 1_000_000, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
       ];
       vi.resetModules();
       const { GET } = await import("@/app/api/markets/route");
       const res = await GET();
       const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
-      for (const sym of ["DUST_1", "DUST_100", "DUST_999999"]) {
+      for (const sym of ["DUST_1", "DUST_100", "DUST_999999", "DUST_1M"]) {
         const m = body.markets.find((m) => m.symbol === sym);
         expect(m?.total_open_interest_usd).toBeNull(); // dust vault → phantom OI suppressed
       }
     });
 
-    it("passes through total_open_interest_usd when vault_balance >= 1,000,000 (real liquidity)", async () => {
+    it("passes through total_open_interest_usd when vault_balance > 1,000,000 (real liquidity)", async () => {
       mockMarkets = [
-        // exactly at threshold boundary — real liquidity starts here
+        // GH#1405 Part 2: exactly at threshold (1M) is now treated as phantom (<=).
+        // Real liquidity requires vault_balance > 1_000_000.
         mkMarket({ symbol: "AT_THRESHOLD", vault_balance: 1_000_000, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
+        // one above threshold — real liquidity
+        mkMarket({ symbol: "ABOVE_THRESHOLD", vault_balance: 1_000_001, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
         // well above threshold — typical LP deposit
         mkMarket({ symbol: "REAL_VAULT", vault_balance: 500_000_000, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
       ];
@@ -324,8 +329,12 @@ describe("GET /api/markets — price sanitization (#856)", () => {
       const res = await GET();
       const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
       const atThreshold = body.markets.find((m) => m.symbol === "AT_THRESHOLD");
+      const aboveThreshold = body.markets.find((m) => m.symbol === "ABOVE_THRESHOLD");
       const realVault = body.markets.find((m) => m.symbol === "REAL_VAULT");
-      expect(atThreshold?.total_open_interest_usd).toBeCloseTo(0.001, 6); // 1000 / 1e6 * 1.0
+      // exactly at threshold → phantom (GH#1405 Part 2: <= guard)
+      expect(atThreshold?.total_open_interest_usd).toBeNull();
+      // one above threshold → real liquidity, OI passes through
+      expect(aboveThreshold?.total_open_interest_usd).toBeCloseTo(0.001, 6); // 1000 / 1e6 * 1.0
       expect(realVault?.total_open_interest_usd).toBeCloseTo(0.001, 6);
     });
 
