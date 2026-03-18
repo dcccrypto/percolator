@@ -33,6 +33,21 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   // oracle_authority = system program (11111111...), cannot receive price updates.
   // Deployer = DEVNET_MINT_AUTHORITY_KEYPAIR (accidental test deployment).
   "CRJH9Gtk7qQDdjzDufnAZdfa7AHisfvxCmVVvzpzQN9v",
+  // GH#1398 follow-up (PR #1404): Remaining 11 phantom slabs with oracle_authority =
+  // system program (11111111...). These cannot receive oracle price pushes, have no
+  // real liquidity, and cause /funding/[slab] → 500 errors via backend proxy.
+  // Addresses queried from markets_with_stats where oracle_authority = system program.
+  "J6UU4VHbYXpCAACr5o5xjUVmquagiP2NGbbMp68VUCX9",
+  "8L47yqvQRLxZ6PzW3b9jawEM79CmokBvUzeLR7mvtyuU",
+  "8kkED3uZznGzSidr8kYJPd3VhzSh7LVngNUx2V1qnW9L",
+  "8pKtAV3z6iTKekieF9EenQ4tk1rkAVa9oYsqe7h1PGjx",
+  "Eekuz2TgXRPq3rsp5brRW5hofxLdwt6KUXbLUQCKHK9G",
+  "Av3zVrW5deLpLo1qZZ7yNJ5Lq5ja4Z9ixijVhV4MuRzE",
+  "CrbDmfiooBUTFfGyMhJ1hpToCrBLAXXKySBwEnLHV6kj",
+  "FhpPmmuh5UDAjvEjrYBPFwmj4CP4otvsYMxtTb46p1Ss",
+  "7xozYEbKhEdjQn5pCAV8bUDQGugZttqZTduPeHkoqRb8",
+  "3dp3e288oPjs5w92fg26cVYQMHGuUpsj8YbSFn6wrzp4",
+  "8nzjXMvdkC4fRF491QkpKE6aFTLmEcpXEnbh4wQT4iUA",
 ]);
 
 /**
