@@ -73,3 +73,12 @@ render-pdf.mjs
 program/target/
 percolator/target/
 tests/devnet-e2e-large*.ts
+
+# Agent workspace files — never commit these
+CONTEXT.md
+PROGRESS.md
+HEARTBEAT.md
+SOUL.md
+IDENTITY.md
+AGENTS.md
+TOOLS.md
