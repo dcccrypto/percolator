@@ -8,6 +8,7 @@ import { isMockMode } from "@/lib/mock-mode";
 import { MOCK_SLAB_ADDRESSES, getMockMarketData } from "@/lib/mock-trade-data";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
 import { isBlockedSlab } from "@/lib/blocklist";
+import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
 import { GradientText } from "@/components/ui/GradientText";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
@@ -168,15 +169,15 @@ export default function Home() {
           // stale non-zero OI in the DB (the indexer syncs from on-chain, where the
           // value hasn't been zeroed). Without this guard, those phantom markets pass
           // isActiveMarket (via total_open_interest > 0) and inflate the homepage count.
-          // threshold matches /api/markets + /api/stats: vault <= 1M = dust/empty.
-          // GH#1405 Part 2: use strict GTE (<=) so vault_balance == MIN_VAULT_FOR_ACTIVE
-          // is also treated as phantom — markets at exactly the threshold have no real LP
-          // liquidity backing and carry stale/corrupt OI (e.g. DfLoAzny).
-          const MIN_VAULT_FOR_ACTIVE = 1_000_000;
+          // GH#1448: Use shared isPhantomOpenInterest() from lib/phantom-oi.ts (strict <)
+          // instead of local MIN_VAULT_FOR_ACTIVE with <=. The <= operator treated
+          // vault_balance == 1_000_000 (standard creation deposit) as phantom, which
+          // zeroed stats for ~67 of 69 active devnet markets → homepage showed "2".
+          // /api/stats already uses isPhantomOpenInterest (strict <), so this aligns both.
           const phantomAwareData = data.map((m) => {
             const accountsCount = m.total_accounts ?? 0;
             const vaultBal = m.vault_balance ?? 0;
-            const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
+            const isPhantom = isPhantomOpenInterest(accountsCount, vaultBal);
             if (!isPhantom) return m;
             // Zero OI AND last_price so isActiveMarket won't count stale phantom OI or
             // corrupt raw last_price (e.g. DfLoAzny: last_price=10001100011 ≈$10B from
