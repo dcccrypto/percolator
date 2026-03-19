@@ -10,6 +10,7 @@ import { HealthBadge } from "@/components/market/HealthBadge";
 import { formatTokenAmount } from "@/lib/format";
 import { getSupabase } from "@/lib/supabase";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
+import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import type { Database } from "@/lib/database.types";
 
 type MarketWithStats = Database['public']['Views']['markets_with_stats']['Row'];
@@ -201,13 +202,20 @@ function MarketsPageInner() {
   // as /api/stats and /api/markets, with phantom OI suppression, so all three agree.
   // Previously this used a broader custom filter that included on-chain-only markets
   // and markets with phantom OI, inflating the count vs the API endpoints.
-  const MIN_VAULT_FOR_ACTIVE = 1_000_000;
+  //
+  // GH#1452: Replaced inline custom phantom predicate with shared isPhantomOpenInterest()
+  // from lib/phantom-oi.ts. Also added MAX_SANE_PRICE_FOR_ACTIVE null-out to match
+  // /api/stats behaviour: corrupt oracle prices (> $1M) are zeroed before isActiveMarket()
+  // so they don't inflate the count (105 UI vs 69 API).
+  const MAX_SANE_PRICE_FOR_ACTIVE = 1_000_000; // $1M — mirrors /api/stats sanitizePrice cap
   const activeMarkets = useMemo(() => {
     return effectiveMarkets.filter((m) => {
       // Build a phantom-OI-aware stats object for isActiveMarket()
       const accountsCount = m.supabase?.total_accounts ?? 0;
       const vaultBal = m.supabase?.vault_balance ?? 0;
-      const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+      // GH#1452: Use shared isPhantomOpenInterest() — single source of truth for phantom
+      // determination across /api/stats, /api/markets, and the markets page.
+      const isPhantom = isPhantomOpenInterest(accountsCount, vaultBal);
 
       // GH#1445: Match the API route's zombie definition exactly so the frontend
       // count agrees with /api/markets. The API nulls out last_price AND volume_24h
@@ -230,23 +238,41 @@ function MarketsPageInner() {
 
       // If we have Supabase stats, use isActiveMarket with zombie + phantom OI suppression
       if (m.supabase) {
-        const effectiveStats = isZombie
-          ? {
-              // Zombie: null out ALL signals — stale prices with no liquidity are misleading
-              // and would otherwise pass isActiveMarket via last_price (GH#1445).
-              ...m.supabase,
-              last_price: null,
-              mark_price: null,
-              index_price: null,
-              volume_24h: null,
-              total_open_interest: 0,
-              open_interest_long: 0,
-              open_interest_short: 0,
-            }
-          : isPhantom
-          ? { ...m.supabase, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 }
-          : m.supabase;
-        return isActiveMarket(effectiveStats);
+        if (isZombie) {
+          // Zombie: null out ALL signals — stale prices with no liquidity are misleading
+          // and would otherwise pass isActiveMarket via last_price (GH#1445).
+          return isActiveMarket({
+            last_price: null,
+            volume_24h: null,
+            total_open_interest: 0,
+            open_interest_long: 0,
+            open_interest_short: 0,
+          });
+        }
+        // GH#1452: Sanitize corrupt prices (> $1M) before isActiveMarket(), mirroring
+        // /api/stats MAX_SANE_PRICE_FOR_ACTIVE guard so the count agrees.
+        const rawPrice = m.supabase.last_price;
+        const sanitizedPrice = (rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_FOR_ACTIVE)
+          ? rawPrice
+          : null;
+        if (isPhantom) {
+          // Phantom: zero out OI to suppress sentinel values, but keep sanitized price/volume.
+          return isActiveMarket({
+            last_price: sanitizedPrice,
+            volume_24h: m.supabase.volume_24h,
+            total_open_interest: 0,
+            open_interest_long: 0,
+            open_interest_short: 0,
+          });
+        }
+        // Non-phantom, non-zombie: pass sanitized price and real stats.
+        return isActiveMarket({
+          last_price: sanitizedPrice,
+          volume_24h: m.supabase.volume_24h,
+          total_open_interest: m.supabase.total_open_interest,
+          open_interest_long: m.supabase.open_interest_long,
+          open_interest_short: m.supabase.open_interest_short,
+        });
       }
 
       // GH#1346: On-chain-only markets (no Supabase stats) are NOT counted as
