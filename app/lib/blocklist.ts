@@ -48,6 +48,11 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   "7xozYEbKhEdjQn5pCAV8bUDQGugZttqZTduPeHkoqRb8",
   "3dp3e288oPjs5w92fg26cVYQMHGuUpsj8YbSFn6wrzp4",
   "8nzjXMvdkC4fRF491QkpKE6aFTLmEcpXEnbh4wQT4iUA",
+  // GH#1410: phantom slab returning HTTP 200 from /api/funding despite 404 on
+  // /api/open-interest and /api/insurance. Not covered by prior blocklist entries.
+  // SEX/USD devnet — empty vault, no real liquidity, causes misleading zero-filled
+  // funding responses. Verified 2026-03-19 UTC.
+  "3bmCyPeeDwAfLbhfnRpYJHkWVqAf3Q5JaWXGfZjbmjNp",
 ]);
 
 /**

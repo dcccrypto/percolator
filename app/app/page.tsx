@@ -216,8 +216,13 @@ export default function Home() {
           setStatsLoaded(true);
           // Convert to USD first, then sort by converted volume
           // GH#1224: exclude blocked slab addresses (same filter as activeData/stats)
+          // GH#1409: also apply isActiveMarket (using phantomAwareData) so phantom markets
+          // with zeroed OI and null price are excluded from Active Markets display.
+          // Without this, DfLoAzny (vault=1M=MIN_VAULT, OI zeroed by phantom guard,
+          // price=null after sanitization) still appeared in the sorted featured list.
           const converted = phantomAwareData
             .filter((m) => !isBlockedSlab(m.slab_address))
+            .filter(isActiveMarket)
             .map((m) => ({
             slab_address: m.slab_address,
             symbol: m.symbol,
