@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/supabase";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
+import { MIN_VAULT_FOR_OI, isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { BLOCKED_SLAB_ADDRESSES } from "@/lib/blocklist";
 import type { Database } from "@/lib/database.types";
 export const dynamic = "force-dynamic";
@@ -92,7 +93,6 @@ export async function GET(request: NextRequest) {
   // count as "active" here but not in /api/markets (which zeros OI post-sanitization).
   // This produced a 172 vs 135 mismatch. Now we zero phantom OI first, so both
   // endpoints agree on what counts as "active".
-  const MIN_VAULT_FOR_ACTIVE = 1_000_000;
   // GH#1430: Match /api/markets sanitizePrice cap — null out last_price > $1M before
   // isActiveMarket() so markets with corrupt oracle prices (e.g. $7.9T) don't count
   // as "active" in stats while being nulled in /api/markets. Previously this cap was
@@ -102,14 +102,11 @@ export async function GET(request: NextRequest) {
   const phantomAwareData = statsData.map((m) => {
     const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
     const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-    // GH#1435 HOTFIX: Revert <= back to strict <.
-    // PR #1433 changed this to <= to match /api/markets isPhantomOI, but all active devnet
-    // markets have vault_balance=1_000_000 exactly (the creation-deposit amount). Using <=
-    // caused every market to be treated as phantom → totalMarkets=0 on production since 09:38 UTC.
-    // Correct discriminant: use strict < so vault=1M markets are NOT phantom.
-    // The mismatch with /api/markets (GH#1432) must be fixed by aligning /api/markets to
-    // use strict < instead — not by changing stats to <=.
-    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+    // GH#1435/GH#1438: Use shared isPhantomOpenInterest() from lib/phantom-oi.ts (strict <).
+    // Previously this route had its own copy of the predicate (MIN_VAULT_FOR_ACTIVE).
+    // Now both /api/markets and /api/stats derive the phantom determination from the same
+    // function, eliminating the drift that caused GH#1432, GH#1435, and GH#1438.
+    const isPhantom = isPhantomOpenInterest(accountsCount, vaultBal);
     if (!isPhantom) {
       // GH#1430: Null out corrupt prices before isActiveMarket() check so the active-market
       // count matches /api/markets which applies sanitizePrice (> $1M → null) before filtering.
@@ -180,31 +177,19 @@ export async function GET(request: NextRequest) {
   // Markets with accounts_count=0 or vault<1M are stale/orphaned; their raw OI atoms
   // are not backed by real positions. Without this filter, the $1 fallback (GH#1265)
   // inflated /api/stats totalOpenInterest to $117K vs /api/markets sum of $64K.
-  const MIN_VAULT_FOR_OI_STATS = 1_000_000;
   const totalOpenInterest = activeData.reduce(
     (sum, m) => {
-      // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
+      // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets.
+      // GH#1438: Now uses shared isPhantomOpenInterest() from lib/phantom-oi.ts (MIN_VAULT_FOR_OI = 1_000_000, strict <).
       const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
       const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-      // GH#1314→GH#1432: /api/markets now uses <= 1M for phantom OI (PR #1405).
-      // Keeping strict < here for the OI sum to preserve existing OI accounting.
-      // The active-market count fix (GH#1432) uses <= above in phantomAwareData.
-      // OI sum was already accurate; only totalMarkets count needed aligning.
-      // PR #1303 used <= which incorrectly filtered vault=1M markets;
-      // /api/markets isPhantomOI is the single source of truth for OI filtering.
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
             ? (m.open_interest_long ?? 0) + (m.open_interest_short ?? 0)
             : 0);
       if (!isSaneMarketValue(rawOi)) return sum;
-      // Skip phantom markets: no accounts, OR vault below creation-deposit threshold.
-      // Intentional divergence from /api/markets: strict < here means vault=1M is NOT phantom
-      // (so it contributes to OI sum), whereas /api/markets uses <= (vault=1M IS phantom for
-      // active-market counting). The two operators serve different purposes: OI sum accounting
-      // vs active-market count — they are not required to match.
-      const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS;
-      if (isPhantomOI) return sum;
+      if (isPhantomOpenInterest(accountsCount, vaultBal)) return sum;
       // GH#1318: No $1 fallback — markets without a valid oracle price have indeterminate
       // USD OI and must NOT contribute to totalOpenInterest.
       // Previously (GH#1265) a $1/token fallback was used for admin-mode devnet markets
