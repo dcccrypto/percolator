@@ -26,6 +26,11 @@ import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { detectOracleMode, resolveMarketPriceE6, priceE6ToUsd } from "@/lib/oraclePrice";
 import { formatStatValue } from "@/lib/format";
 
+/** Max sane price (USD) for both active-market filtering and display capping.
+ *  Mirrors /api/stats sanitizePrice() cap. Corrupt oracle prices (e.g. $7.9T)
+ *  exceed this and are nulled/excluded. */
+const MAX_SANE_PRICE_USD = 1_000_000;
+
 function formatNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "\u2014";
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -204,10 +209,9 @@ function MarketsPageInner() {
   // and markets with phantom OI, inflating the count vs the API endpoints.
   //
   // GH#1452: Replaced inline custom phantom predicate with shared isPhantomOpenInterest()
-  // from lib/phantom-oi.ts. Also added MAX_SANE_PRICE_FOR_ACTIVE null-out to match
+  // from lib/phantom-oi.ts. Also added MAX_SANE_PRICE_USD null-out to match
   // /api/stats behaviour: corrupt oracle prices (> $1M) are zeroed before isActiveMarket()
   // so they don't inflate the count (105 UI vs 69 API).
-  const MAX_SANE_PRICE_FOR_ACTIVE = 1_000_000; // $1M — mirrors /api/stats sanitizePrice cap
   const activeMarkets = useMemo(() => {
     return effectiveMarkets.filter((m) => {
       // Build a phantom-OI-aware stats object for isActiveMarket()
@@ -250,9 +254,9 @@ function MarketsPageInner() {
           });
         }
         // GH#1452: Sanitize corrupt prices (> $1M) before isActiveMarket(), mirroring
-        // /api/stats MAX_SANE_PRICE_FOR_ACTIVE guard so the count agrees.
+        // /api/stats MAX_SANE_PRICE_USD guard so the count agrees.
         const rawPrice = m.supabase.last_price;
-        const sanitizedPrice = (rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_FOR_ACTIVE)
+        const sanitizedPrice = (rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_USD)
           ? rawPrice
           : null;
         if (isPhantom) {
@@ -283,9 +287,9 @@ function MarketsPageInner() {
     });
   }, [effectiveMarkets]);
 
-  // Cap bogus prices: if a resolved price is above $1M per unit, it's almost certainly
-  // a display error from corrupted on-chain data. We'll clamp these in the display layer.
-  const MAX_SANE_PRICE_USD = 1_000_000; // $1M — no Percolator market should exceed this
+  // Cap bogus prices: if a resolved price is above $1M per unit it's almost certainly
+  // a display error from corrupted on-chain data. We clamp in the display layer.
+  // MAX_SANE_PRICE_USD is defined at module level (shared with active-market filtering).
 
   const filtered = useMemo(() => {
     let list = activeMarkets;
