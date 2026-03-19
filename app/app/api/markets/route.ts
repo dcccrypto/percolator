@@ -119,7 +119,7 @@ export async function GET(request: NextRequest) {
       .from("markets_with_stats")
       .select(
         "slab_address,mint_address,symbol,name,decimals,deployer,logo_url,max_leverage,trading_fee_bps," +
-        "last_price,mark_price,volume_24h,trade_count_24h,open_interest_long,open_interest_short,total_open_interest," +
+        "last_price,mark_price,index_price,volume_24h,trade_count_24h,open_interest_long,open_interest_short,total_open_interest," +
         "insurance_fund,insurance_balance,total_accounts,funding_rate,net_lp_pos,lp_sum_abs,c_tot," +
         "vault_balance,created_at,stats_updated_at,oracle_mode,dex_pool_address,mainnet_ca,oracle_authority"
       );
@@ -137,6 +137,11 @@ export async function GET(request: NextRequest) {
     // Derive from oracle_authority: zero pubkey → pyth-pinned, else admin/hyperp.
     // Default to "admin" when unknown — safest assumption for old devnet markets.
     const ZERO_PUBKEY = "11111111111111111111111111111111";
+    // GH#1420: Parse ?include_zombie=true to opt-in to zombie markets in the response.
+    // By default, markets with vault_balance=0 are excluded as they have no LP liquidity
+    // and return garbage/stale prices (e.g. BTC@$148, SOL@$0.60).
+    const includeZombie = request?.nextUrl?.searchParams?.get("include_zombie") === "true";
+
     const sanitized = ((data ?? []) as unknown as Record<string, unknown>[])
       .filter((m) => !BLOCKED_MARKET_ADDRESSES.has(m.slab_address as string))
       .map((m) => {
@@ -195,18 +200,29 @@ export async function GET(request: NextRequest) {
         sanitizedPrice,
       );
 
+      // GH#1420: Mark zombie markets (vault_balance == 0) so they can be filtered.
+      // Zombie markets have no LP liquidity; their prices are stale/garbage from
+      // when the vault drained (e.g. BTC@$148, SOL@$0.60 — prices from months ago).
+      // We tag them with is_zombie=true and exclude them from the default response
+      // (opt-in via ?include_zombie=true). vault_balance=0 is strictly zero (fully drained).
+      // Only mark zombie when vault_balance is explicitly 0 — do not treat null/missing
+      // stats rows as drained (CodeRabbit: null-coalesce to 0 misclassifies stats-less markets).
+      const is_zombie = m.vault_balance != null && (m.vault_balance as number) === 0;
+
       return {
         ...m,
         oracle_mode,
+        is_zombie,
         funding_rate: sanitizeFundingRate(m.funding_rate as number | null),
         // #856: Null out corrupt admin-set test prices (raw unscaled u64 values or billions/trillions).
         // Matches Rust MAX_ORACLE_PRICE = $1B USD ceiling.
-        last_price: sanitizedPrice,
-        mark_price: sanitizePrice(m.mark_price as number | null, "mark_price", m.slab_address as string),
+        // GH#1420: Also null out prices for zombie markets — stale prices with no liquidity are misleading.
+        last_price: is_zombie ? null : sanitizedPrice,
+        mark_price: is_zombie ? null : sanitizePrice(m.mark_price as number | null, "mark_price", m.slab_address as string),
         // #855: Apply same sanitization to index_price — same DB column type and
         // corruption vector as last_price/mark_price. Inconsistent sanitization
         // means a corrupt index price still reaches consumers.
-        index_price: sanitizePrice(m.index_price as number | null, "index_price", m.slab_address as string),
+        index_price: is_zombie ? null : sanitizePrice(m.index_price as number | null, "index_price", m.slab_address as string),
         // #1160 / GH#1290 / PERC-570: OI fields — USD and raw atoms.
         // Raw atom fields (total_open_interest, open_interest_long, open_interest_short) are
         // zeroed (not just the USD conversion) when the phantom OI guard fires.
@@ -226,18 +242,22 @@ export async function GET(request: NextRequest) {
       };
     });
 
+    // GH#1420: Filter zombie markets (vault_balance=0) unless ?include_zombie=true
+    const nonZombie = sanitized.filter((m) => includeZombie || !(m as Record<string, unknown>).is_zombie);
+    const zombieCount = sanitized.length - nonZombie.length;
+
     // #1168: Include total count so API consumers can get market count without
     // fetching all records. Reflects post-filter count (blocked markets excluded).
     // #1172: Add activeTotal — markets with at least one sane stat (price/volume/OI).
     // This matches the count shown by /api/stats totalMarkets.
-    const activeTotal = sanitized.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
+    const activeTotal = nonZombie.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
 
     // GH#1348: Respect ?limit= query param to avoid returning 100+ markets
     const limitParam = request?.nextUrl?.searchParams?.get("limit") ?? null;
     const limitNum = limitParam ? parseInt(limitParam, 10) : 0;
-    const limited = limitNum > 0 ? sanitized.slice(0, limitNum) : sanitized;
+    const limited = limitNum > 0 ? nonZombie.slice(0, limitNum) : nonZombie;
 
-    return NextResponse.json({ total: sanitized.length, activeTotal, markets: limited }, {
+    return NextResponse.json({ total: nonZombie.length, activeTotal, zombieCount, markets: limited }, {
       headers: {
         "Cache-Control": "public, s-maxage=10, stale-while-revalidate=30",
       },
