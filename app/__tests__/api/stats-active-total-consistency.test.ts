@@ -1,13 +1,20 @@
 /**
  * GH#1430: /api/stats totalMarkets must not count corrupt-price markets as active.
+ * GH#1432: /api/stats phantom check must use <= 1M (not strict <) to match /api/markets.
  *
- * Root cause: /api/stats used isSaneMarketValue (< 1e18) for last_price
+ * GH#1430 root cause: /api/stats used isSaneMarketValue (< 1e18) for last_price
  * before counting active markets, while /api/markets applies sanitizePrice
  * (nulls last_price > $1M) first. Markets with $1M < last_price < 1e18
  * counted as active in stats but not in markets.
  *
- * Fix: apply the $1M cap to last_price in phantomAwareData before
+ * GH#1432 root cause: /api/stats phantomAwareData used strict < 1M for vault_balance
+ * but /api/markets isPhantomOI (PR #1405) uses <= 1M. Markets with vault=1M exactly
+ * were non-phantom in stats (counted in totalMarkets) but phantom in /api/markets
+ * (excluded from activeTotal), creating a 29-count gap.
+ *
+ * Fix: (1) apply the $1M cap to last_price in phantomAwareData before
  * isActiveMarket() in /api/stats, mirroring /api/markets sanitizePrice.
+ * (2) change vault_balance phantom check from < to <= to match /api/markets.
  */
 import { describe, it, expect } from "vitest";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
@@ -54,12 +61,13 @@ function phantomAwareDataBuggy(statsData: StatsRow[]): StatsRow[] {
   });
 }
 
-/** Reproduces the fixed phantomAwareData: applies $1M price cap for non-phantoms */
+/** Reproduces the fixed phantomAwareData: applies $1M price cap + <= vault check */
 function phantomAwareDataFixed(statsData: StatsRow[]): StatsRow[] {
   return statsData.map((m) => {
     const accountsCount = (m.total_accounts ?? 0);
     const vaultBal = (m.vault_balance ?? 0);
-    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+    // GH#1432: <= (not strict <) to match /api/markets isPhantomOI
+    const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
     if (!isPhantom) {
       // GH#1430: Apply sanitizePrice cap before isActiveMarket
       const rawPrice = m.last_price;
@@ -203,6 +211,19 @@ describe("GH#1430 — fixed phantomAwareData applies $1M cap before isActiveMark
     const row = market({ vault_balance: 500_000, total_accounts: 5 });
     const processed = phantomAwareDataFixed([row]);
     expect(countActive(processed)).toBe(0);
+  });
+
+  // GH#1432: vault=1M exactly is now phantom (<=), matching /api/markets PR #1405
+  it("GH#1432: phantom market (vault === 1M exactly) is zeroed out and not counted", () => {
+    const row = market({ vault_balance: 1_000_000, total_accounts: 3 });
+    const processed = phantomAwareDataFixed([row]);
+    expect(countActive(processed)).toBe(0);
+  });
+
+  it("GH#1432: market with vault just above 1M (1_000_001) is NOT phantom", () => {
+    const row = market({ vault_balance: 1_000_001, total_accounts: 3 });
+    const processed = phantomAwareDataFixed([row]);
+    expect(countActive(processed)).toBe(1);
   });
 
   it("mixed: 2 valid + 1 corrupt price + 1 phantom = 2 active", () => {
