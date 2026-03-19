@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { PublicKey } from "@solana/web3.js";
 import { getServiceClient } from "@/lib/supabase";
 import { SLUG_ALIASES } from "@/lib/symbol-utils";
+import { isBlockedSlab } from "@/lib/blocklist";
 import * as Sentry from "@sentry/nextjs";
 
 /**
@@ -38,6 +39,15 @@ export async function GET(
   { params }: { params: Promise<{ slab: string }> }
 ) {
   const { slab } = await params;
+
+  // GH#1417: Blocked slabs must return 404 even when addressed directly.
+  // The bulk /api/markets endpoint already filters via BLOCKED_SLAB_ADDRESSES but
+  // this individual endpoint had no guard, allowing blocked addresses (e.g. 8eFFEFBY)
+  // to return HTTP 200 with phantom data.
+  if (isBlockedSlab(slab)) {
+    return NextResponse.json({ error: "Market not found" }, { status: 404 });
+  }
+
   try {
     const supabase = getServiceClient();
     let data: Record<string, unknown> | null = null;
