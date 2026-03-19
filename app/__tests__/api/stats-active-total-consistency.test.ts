@@ -1,20 +1,24 @@
 /**
  * GH#1430: /api/stats totalMarkets must not count corrupt-price markets as active.
- * GH#1432: /api/stats phantom check must use <= 1M (not strict <) to match /api/markets.
+ * GH#1435 HOTFIX: /api/stats phantom check must use strict < 1M (NOT <=).
  *
  * GH#1430 root cause: /api/stats used isSaneMarketValue (< 1e18) for last_price
  * before counting active markets, while /api/markets applies sanitizePrice
  * (nulls last_price > $1M) first. Markets with $1M < last_price < 1e18
  * counted as active in stats but not in markets.
  *
- * GH#1432 root cause: /api/stats phantomAwareData used strict < 1M for vault_balance
- * but /api/markets isPhantomOI (PR #1405) uses <= 1M. Markets with vault=1M exactly
- * were non-phantom in stats (counted in totalMarkets) but phantom in /api/markets
- * (excluded from activeTotal), creating a 29-count gap.
+ * GH#1432 (REVERTED by GH#1435): PR #1433 changed the vault phantom check to <=
+ * to align with /api/markets isPhantomOI. This caused totalMarkets=0 in production
+ * because ALL active devnet markets have vault_balance=1_000_000 exactly (the creation
+ * deposit minimum). Using <= classifies all of them as phantom.
+ *
+ * GH#1435 correct fix: use strict < for vault phantom check in /api/stats so that
+ * vault=1M markets are correctly counted as active. The mismatch with /api/markets
+ * isPhantomOI (which uses <=) must be addressed by fixing /api/markets, not stats.
  *
  * Fix: (1) apply the $1M cap to last_price in phantomAwareData before
  * isActiveMarket() in /api/stats, mirroring /api/markets sanitizePrice.
- * (2) change vault_balance phantom check from < to <= to match /api/markets.
+ * (2) vault_balance phantom check uses strict < (vault=1M is ACTIVE, not phantom).
  */
 import { describe, it, expect } from "vitest";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
@@ -61,13 +65,13 @@ function phantomAwareDataBuggy(statsData: StatsRow[]): StatsRow[] {
   });
 }
 
-/** Reproduces the fixed phantomAwareData: applies $1M price cap + <= vault check */
+/** Reproduces the fixed phantomAwareData: applies $1M price cap + strict < vault check */
 function phantomAwareDataFixed(statsData: StatsRow[]): StatsRow[] {
   return statsData.map((m) => {
     const accountsCount = (m.total_accounts ?? 0);
     const vaultBal = (m.vault_balance ?? 0);
-    // GH#1432: <= (not strict <) to match /api/markets isPhantomOI
-    const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
+    // GH#1435: strict < (vault=1M is NOT phantom — it is the creation deposit amount)
+    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
     if (!isPhantom) {
       // GH#1430: Apply sanitizePrice cap before isActiveMarket
       const rawPrice = m.last_price;
@@ -213,14 +217,21 @@ describe("GH#1430 — fixed phantomAwareData applies $1M cap before isActiveMark
     expect(countActive(processed)).toBe(0);
   });
 
-  // GH#1432: vault=1M exactly is now phantom (<=), matching /api/markets PR #1405
-  it("GH#1432: phantom market (vault === 1M exactly) is zeroed out and not counted", () => {
+  // GH#1435: vault=1M exactly is NOT phantom (strict <), it is the creation deposit amount.
+  // All active devnet markets have vault=1M exactly; <= would zero totalMarkets on production.
+  it("GH#1435: market with vault === 1M exactly is NOT phantom — it is active", () => {
     const row = market({ vault_balance: 1_000_000, total_accounts: 3 });
+    const processed = phantomAwareDataFixed([row]);
+    expect(countActive(processed)).toBe(1);
+  });
+
+  it("GH#1435: market with vault just below 1M (999_999) IS phantom", () => {
+    const row = market({ vault_balance: 999_999, total_accounts: 3 });
     const processed = phantomAwareDataFixed([row]);
     expect(countActive(processed)).toBe(0);
   });
 
-  it("GH#1432: market with vault just above 1M (1_000_001) is NOT phantom", () => {
+  it("GH#1435: market with vault just above 1M (1_000_001) is also NOT phantom", () => {
     const row = market({ vault_balance: 1_000_001, total_accounts: 3 });
     const processed = phantomAwareDataFixed([row]);
     expect(countActive(processed)).toBe(1);
