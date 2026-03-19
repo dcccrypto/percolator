@@ -102,11 +102,14 @@ export async function GET(request: NextRequest) {
   const phantomAwareData = statsData.map((m) => {
     const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
     const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-    // GH#1432: Use <= (not strict <) to match /api/markets isPhantomOI condition.
-    // After PR #1405 updated /api/markets to use <= 1M, this strict < caused a 29-count
-    // gap: vault=1M markets were phantom in /api/markets (excluded from activeTotal) but
-    // not phantom here (counted in totalMarkets). Aligning to <= fixes the residual mismatch.
-    const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
+    // GH#1435 HOTFIX: Revert <= back to strict <.
+    // PR #1433 changed this to <= to match /api/markets isPhantomOI, but all active devnet
+    // markets have vault_balance=1_000_000 exactly (the creation-deposit amount). Using <=
+    // caused every market to be treated as phantom → totalMarkets=0 on production since 09:38 UTC.
+    // Correct discriminant: use strict < so vault=1M markets are NOT phantom.
+    // The mismatch with /api/markets (GH#1432) must be fixed by aligning /api/markets to
+    // use strict < instead — not by changing stats to <=.
+    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
     if (!isPhantom) {
       // GH#1430: Null out corrupt prices before isActiveMarket() check so the active-market
       // count matches /api/markets which applies sanitizePrice (> $1M → null) before filtering.
