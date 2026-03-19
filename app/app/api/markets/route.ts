@@ -119,7 +119,7 @@ export async function GET(request: NextRequest) {
       .from("markets_with_stats")
       .select(
         "slab_address,mint_address,symbol,name,decimals,deployer,logo_url,max_leverage,trading_fee_bps," +
-        "last_price,mark_price,volume_24h,trade_count_24h,open_interest_long,open_interest_short,total_open_interest," +
+        "last_price,mark_price,index_price,volume_24h,trade_count_24h,open_interest_long,open_interest_short,total_open_interest," +
         "insurance_fund,insurance_balance,total_accounts,funding_rate,net_lp_pos,lp_sum_abs,c_tot," +
         "vault_balance,created_at,stats_updated_at,oracle_mode,dex_pool_address,mainnet_ca,oracle_authority"
       );
@@ -205,7 +205,9 @@ export async function GET(request: NextRequest) {
       // when the vault drained (e.g. BTC@$148, SOL@$0.60 — prices from months ago).
       // We tag them with is_zombie=true and exclude them from the default response
       // (opt-in via ?include_zombie=true). vault_balance=0 is strictly zero (fully drained).
-      const is_zombie = (m.vault_balance as number ?? 0) === 0;
+      // Only mark zombie when vault_balance is explicitly 0 — do not treat null/missing
+      // stats rows as drained (CodeRabbit: null-coalesce to 0 misclassifies stats-less markets).
+      const is_zombie = m.vault_balance != null && (m.vault_balance as number) === 0;
 
       return {
         ...m,
