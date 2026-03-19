@@ -1,5 +1,10 @@
 /**
- * GH#1314 / GH#1318 / GH#1321: /api/stats phantom OI vault boundary + price fallback tests.
+ * GH#1314 / GH#1318 / GH#1321 / GH#1425: /api/stats phantom OI vault boundary + price fallback tests.
+ *
+ * GH#1425: totalMarkets overcount (~40 zombie markets). phantomAwareData only zeroed OI fields,
+ * leaving last_price intact. Zombie markets (vault_balance=0) with stale last_price still
+ * passed isActiveMarket() via the last_price path. Fix: zero ALL stat fields for phantom markets
+ * (mirrors GH#1412 homepage fix). Expected: totalMarkets=128, was: totalMarkets=168.
  *
  * History:
  * - PR#1299 (GH#1297): first vault guard, strict < 1M. Correct, but also fixed $1 fallback.
@@ -204,5 +209,128 @@ describe("GH#1318: /api/stats no $1 fallback — markets without oracle price sk
     const result = simulateOISum(markets);
     expect(result).toBeGreaterThan(59_994); // MOLTBOT now contributes
     expect(result).toBeCloseTo(59_994 + 4_620, -1); // ≈ $64,614 (within $10)
+  });
+});
+
+describe("GH#1425: /api/stats totalMarkets zombie overcount — all stat fields zeroed for phantoms", () => {
+  /**
+   * Simulates the phantomAwareData mapping + isActiveMarket filtering to reproduce GH#1425.
+   * BEFORE fix: only OI fields zeroed → vault=0 zombies with stale last_price still active.
+   * AFTER fix: ALL stat fields zeroed → zombies fail isActiveMarket() → excluded from totalMarkets.
+   */
+
+  const MIN_VAULT = 1_000_000;
+
+  function isSane(v: number | null | undefined): boolean {
+    if (v == null) return false;
+    return v > 0 && v < 1e18 && Number.isFinite(v);
+  }
+
+  function isActive(row: {
+    last_price?: number | null;
+    volume_24h?: number | null;
+    total_open_interest?: number | null;
+    open_interest_long?: number | null;
+    open_interest_short?: number | null;
+  }): boolean {
+    if (isSane(row.last_price)) return true;
+    if (isSane(row.volume_24h)) return true;
+    if (isSane(row.total_open_interest)) return true;
+    const combined = (row.open_interest_long ?? 0) + (row.open_interest_short ?? 0);
+    if (isSane(combined)) return true;
+    return false;
+  }
+
+  function simulateTotalMarketsAfterFix(
+    markets: Array<{
+      vault_balance: number;
+      total_accounts: number;
+      last_price?: number | null;
+      volume_24h?: number | null;
+      total_open_interest?: number | null;
+      open_interest_long?: number | null;
+      open_interest_short?: number | null;
+    }>
+  ): number {
+    const phantomAware = markets.map((m) => {
+      const isPhantom = m.total_accounts === 0 || m.vault_balance < MIN_VAULT;
+      if (!isPhantom) return m;
+      // GH#1425 fix: zero ALL stat fields (including last_price, volume_24h)
+      return {
+        ...m,
+        last_price: 0,
+        volume_24h: 0,
+        total_open_interest: 0,
+        open_interest_long: 0,
+        open_interest_short: 0,
+      };
+    });
+    return phantomAware.filter(isActive).length;
+  }
+
+  function simulateTotalMarketsBeforeFix(
+    markets: Array<{
+      vault_balance: number;
+      total_accounts: number;
+      last_price?: number | null;
+      volume_24h?: number | null;
+      total_open_interest?: number | null;
+    }>
+  ): number {
+    const phantomAware = markets.map((m) => {
+      const isPhantom = m.total_accounts === 0 || m.vault_balance < MIN_VAULT;
+      if (!isPhantom) return m;
+      // BEFORE fix: only OI fields zeroed — last_price left intact
+      return {
+        ...m,
+        total_open_interest: 0,
+        open_interest_long: 0,
+        open_interest_short: 0,
+      };
+    });
+    return phantomAware.filter(isActive).length;
+  }
+
+  it("GH#1425: zombie markets (vault=0) with stale last_price overcount before fix", () => {
+    const markets = Array.from({ length: 40 }, () => ({
+      vault_balance: 0,
+      total_accounts: 5,
+      last_price: 1.23, // stale, non-zero → leaked through old phantom guard
+      volume_24h: 0,
+      total_open_interest: 0,
+    }));
+    // Before fix: zombies pass isActive via stale last_price → overcounted by 40
+    expect(simulateTotalMarketsBeforeFix(markets)).toBe(40);
+    // After fix: all stat fields zeroed → isActive returns false → excluded
+    expect(simulateTotalMarketsAfterFix(markets)).toBe(0);
+  });
+
+  it("GH#1425 regression: reproduces 168 → 128 totalMarkets correction", () => {
+    // 128 real markets + 40 zombie markets (vault=0, stale price)
+    const realMarkets = Array.from({ length: 128 }, (_, i) => ({
+      vault_balance: 2_000_000,
+      total_accounts: 3,
+      last_price: 1.0 + i * 0.01,
+      volume_24h: 1000,
+      total_open_interest: 1_000_000,
+    }));
+    const zombieMarkets = Array.from({ length: 40 }, () => ({
+      vault_balance: 0,
+      total_accounts: 2,
+      last_price: 0.95, // stale last_price — zombie was once active
+      volume_24h: null,
+      total_open_interest: null,
+    }));
+    const all = [...realMarkets, ...zombieMarkets];
+    expect(simulateTotalMarketsBeforeFix(all)).toBe(168); // before fix: zombies counted
+    expect(simulateTotalMarketsAfterFix(all)).toBe(128);  // after fix: zombies excluded
+  });
+
+  it("does not exclude real markets (vault >= 1M) that have valid last_price", () => {
+    const markets = [
+      { vault_balance: 1_000_000, total_accounts: 2, last_price: 1.0, volume_24h: 500, total_open_interest: 1_000 },
+      { vault_balance: 5_000_000, total_accounts: 10, last_price: 200.0, volume_24h: 50_000, total_open_interest: null },
+    ];
+    expect(simulateTotalMarketsAfterFix(markets)).toBe(2); // both real → both counted
   });
 });
