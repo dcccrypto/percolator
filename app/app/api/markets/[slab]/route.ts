@@ -119,6 +119,15 @@ export async function GET(
       return NextResponse.json({ error: "Market not found" }, { status: 404 });
     }
 
+    // GH#1444: Re-check blocklist after symbol/slug resolution.
+    // The initial guard at the top only checks the raw URL param (e.g. "DfLoAzny"),
+    // which may not be in the blocklist. After DB lookup, `data.slab_address` holds the
+    // resolved on-chain address (e.g. "8eFFEFBY3...") which IS blocked. Without this
+    // second check, symbol-addressed requests bypass the blocklist entirely.
+    if (isBlockedSlab(String(data.slab_address ?? ""))) {
+      return NextResponse.json({ error: "Market not found" }, { status: 404 });
+    }
+
     // GH#1405: Sanitize price fields before returning — raw DB values from admin-mode
     // markets may be unscaled u64 authorityPriceE6 values (e.g. DfLoAzny: 10001100011).
     // Matches the sanitizePrice guard in the bulk /api/markets endpoint.
