@@ -14,10 +14,16 @@
  * The converted map must apply isActiveMarket() on phantomAwareData before mapping
  * to display rows — so DfLoAzny (OI zeroed by phantom guard, price null, vol 0)
  * is not included in the sorted top-5 list.
+ *
+ * GH#1412: Regression fix — phantom guard must also zero last_price (not just OI).
+ * The homepage queries Supabase directly and gets raw last_price=10001100011 (~$10B).
+ * isSaneMarketValue(10B) is TRUE (10B < 1e18), so isActiveMarket returned true based
+ * on last_price alone even after OI was zeroed. Fix: phantom guard sets last_price:null
+ * so isActiveMarket sees all three signal fields as null/zero → returns false.
  */
 
 import { describe, it, expect } from "vitest";
-import { isActiveMarket } from "@/lib/activeMarketFilter";
+import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
 
 /**
  * Mirror of the sanitize logic in page.tsx `converted` map (GH#1405):
@@ -39,12 +45,15 @@ function applyPhantomGuard<T extends {
   total_open_interest?: number | null;
   open_interest_long?: number | null;
   open_interest_short?: number | null;
+  last_price?: number | null;
 }>(m: T): T {
   const accountsCount = m.total_accounts ?? 0;
   const vaultBal = m.vault_balance ?? 0;
   const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
   if (!isPhantom) return m;
-  return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 };
+  // GH#1412: zero last_price too — raw DB value (e.g. DfLoAzny: 10001100011 ≈$10B)
+  // passes isSaneMarketValue(<1e18) and causes isActiveMarket to return true on price alone.
+  return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0, last_price: null };
 }
 
 describe("homepage featured markets — last_price sanitization (GH#1405)", () => {
@@ -106,28 +115,38 @@ describe("homepage Active Markets phantom guard (GH#1409)", () => {
     expect(guarded.open_interest_short).toBe(0);
   });
 
-  it("isActiveMarket returns false for DfLoAzny after phantom guard (GH#1409)", () => {
-    // After phantom guard: OI zeroed, last_price=10B (fails isSaneMarketValue), volume=0
-    // isActiveMarket checks last_price, volume_24h, total_open_interest, combined OI
-    const guarded = applyPhantomGuard(dfLoAznyRaw);
-    // last_price of 10B fails isSaneMarketValue (> 1e18 is the guard, but 10B < 1e18 passes isSane)
-    // However isActiveMarket sees the raw last_price from DB, not the display-sanitized one.
-    // The real fix in page.tsx filters on phantomAwareData (which has OI=0) via isActiveMarket:
-    // isActiveMarket checks last_price (10B: isSaneMarketValue? 10B < 1e18 → true → isActive=true)
-    // Wait — DfLoAzny has last_price=10001100011 which IS < 1e18, so isActiveMarket would still
-    // return true based on last_price alone. The fix must therefore also rely on the price
-    // sanitation step or additional check. Let's verify what page.tsx actually does:
-    // phantomAwareData only zeros OI fields — last_price is left as-is.
-    // So isActiveMarket(phantomAwareData[DfLoAzny]) returns true because last_price=10B is sane
-    // by isSaneMarketValue (10B < 1e18 and isFinite). The fix in page.tsx adds .filter(isActiveMarket)
-    // to the converted chain — but this alone won't exclude DfLoAzny if last_price passes isSane.
+  it("isActiveMarket returns false for DfLoAzny after phantom guard (GH#1409 + GH#1412)", () => {
+    // GH#1412 regression: before the fix, phantom guard only zeroed OI — not last_price.
+    // DfLoAzny has raw last_price=10001100011 ($10B) from Supabase (homepage queries DB
+    // directly, not /api/markets). isSaneMarketValue(10B) = true (10B < 1e18, isFinite)
+    // so isActiveMarket returned true on last_price alone, even with OI=0.
     //
-    // Re-reading the issue: DfLoAzny returns last_price:null from /api/markets/[slab] ✅
-    // which means the DB row has last_price=null or 0 (not the raw 10B value).
-    // So isActiveMarket on phantomAwareData: last_price=null → false, volume=0 → false,
-    // OI=0 (zeroed by phantom guard) → false → isActive=false → EXCLUDED. ✓
-    const guardedWithNullPrice = { ...guarded, last_price: null };
-    expect(isActiveMarket(guardedWithNullPrice)).toBe(false);
+    // GH#1412 fix: phantom guard now also sets last_price:null.
+    // After guard: last_price=null, volume=0, OI=0 → isActiveMarket returns false → EXCLUDED.
+    const guarded = applyPhantomGuard(dfLoAznyRaw);
+    expect(guarded.last_price).toBeNull(); // GH#1412: last_price must be zeroed by phantom guard
+    expect(guarded.total_open_interest).toBe(0);
+    expect(isActiveMarket(guarded)).toBe(false); // now correctly excluded
+  });
+
+  it("GH#1412 regression: raw last_price=10B passes isSaneMarketValue but must not make market active", () => {
+    // Verify the root cause: 10B IS < 1e18, so without the fix, isActiveMarket returned true
+    const rawLastPrice = 10001100011;
+    // isSaneMarketValue(10B) = true (this is the root cause of the regression)
+    expect(isSaneMarketValue(rawLastPrice)).toBe(true); // confirms the root cause
+    // But after phantom guard zeroes last_price, isActiveMarket should return false:
+    const phantomRowWithRawPrice = {
+      last_price: rawLastPrice,
+      volume_24h: 0,
+      total_open_interest: 0,
+      open_interest_long: 0,
+      open_interest_short: 0,
+      total_accounts: 2,
+      vault_balance: 1_000_000, // phantom threshold
+    };
+    const guarded = applyPhantomGuard(phantomRowWithRawPrice);
+    expect(guarded.last_price).toBeNull();
+    expect(isActiveMarket(guarded)).toBe(false);
   });
 
   it("phantom guard does NOT affect market with vault > MIN_VAULT_FOR_ACTIVE", () => {

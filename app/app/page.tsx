@@ -178,8 +178,12 @@ export default function Home() {
             const vaultBal = m.vault_balance ?? 0;
             const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
             if (!isPhantom) return m;
-            // Zero OI so isActiveMarket won't count stale phantom OI as "active"
-            return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0 };
+            // Zero OI AND last_price so isActiveMarket won't count stale phantom OI or
+            // corrupt raw last_price (e.g. DfLoAzny: last_price=10001100011 ≈$10B from
+            // unscaled admin oracle, which passes isSaneMarketValue(<1e18)=true) as "active".
+            // GH#1412: without zeroing last_price here, isActiveMarket sees the raw
+            // DB value before the MAX_SANE_PRICE_USD clamp in the .map() and returns true.
+            return { ...m, total_open_interest: 0, open_interest_long: 0, open_interest_short: 0, last_price: null };
           });
 
           // Filter out empty/abandoned markets using shared active-market filter
