@@ -260,7 +260,11 @@ export async function GET(request: NextRequest) {
 
     // GH#1420: Filter zombie markets (vault_balance=0) unless ?include_zombie=true
     const nonZombie = sanitized.filter((m) => includeZombie || !(m as Record<string, unknown>).is_zombie);
-    const zombieCount = sanitized.length - nonZombie.length;
+    // GH#1429: Compute zombieCount from sanitized array BEFORE the zombie filter, not from
+    // the difference sanitized.length - nonZombie.length. When include_zombie=true, nonZombie
+    // includes all markets (including zombies), making the difference always 0. Computing
+    // directly from the tagged is_zombie field gives the correct count regardless of the flag.
+    const zombieCount = sanitized.filter((m) => (m as Record<string, unknown>).is_zombie === true).length;
 
     // #1168: Include total count so API consumers can get market count without
     // fetching all records. Reflects post-filter count (blocked markets excluded).
