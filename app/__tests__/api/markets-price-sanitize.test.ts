@@ -284,16 +284,17 @@ describe("GET /api/markets — price sanitization (#856)", () => {
 
   // PERC-816: Dust vault guard — phantom OI suppression for markets with dust vault_balance.
   describe("PERC-816 — phantom OI suppression for dust vault_balance", () => {
-    it("suppresses total_open_interest_usd when vault_balance is zero", async () => {
+    it("excludes vault_balance=0 markets by default (GH#1420 zombie filter)", async () => {
       mockMarkets = [
         mkMarket({ symbol: "ZERO_VAULT", vault_balance: 0, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        mkMarket({ symbol: "HEALTHY", vault_balance: 5_000_000_000, total_open_interest: 1_000_000_000, last_price: 100.0 }),
       ];
       vi.resetModules();
       const { GET } = await import("@/app/api/markets/route");
       const res = await GET();
-      const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
-      const m = body.markets.find((m) => m.symbol === "ZERO_VAULT");
-      expect(m?.total_open_interest_usd).toBeNull();
+      const body = (await res.json()) as { markets: { symbol: string }[] };
+      expect(body.markets.find((m) => m.symbol === "ZERO_VAULT")).toBeUndefined();
+      expect(body.markets.find((m) => m.symbol === "HEALTHY")).toBeDefined();
     });
 
     it("suppresses total_open_interest_usd when vault_balance is dust (<= 1,000,000) — GH#1405 Part 2", async () => {
