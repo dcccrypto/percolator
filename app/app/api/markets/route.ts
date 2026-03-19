@@ -207,7 +207,23 @@ export async function GET(request: NextRequest) {
       // (opt-in via ?include_zombie=true). vault_balance=0 is strictly zero (fully drained).
       // Only mark zombie when vault_balance is explicitly 0 — do not treat null/missing
       // stats rows as drained (CodeRabbit: null-coalesce to 0 misclassifies stats-less markets).
-      const is_zombie = m.vault_balance != null && (m.vault_balance as number) === 0;
+      //
+      // GH#1427: Also mark as zombie when vault_balance IS null AND all key stats are null
+      // (no last_price, no volume_24h, no total_open_interest, no accounts). These are
+      // phantom markets that have never received data from the indexer — they have explicitly
+      // is_zombie=false from the DB but no evidence of ever being active or having LP capital.
+      // Condition: vault_balance == null AND !isSaneMarketValue on all three price/volume/OI
+      // fields AND total_accounts == 0. This is more conservative than null-coalescing to 0
+      // (which would misclassify markets still being indexed), while still catching the 6
+      // phantom markets reported in GH#1427.
+      const hasNoStats =
+        !isSaneMarketValue(m.last_price as number | null) &&
+        !isSaneMarketValue(m.volume_24h as number | null) &&
+        !isSaneMarketValue(m.total_open_interest as number | null) &&
+        ((m.total_accounts as number) ?? 0) === 0;
+      const is_zombie =
+        (m.vault_balance != null && (m.vault_balance as number) === 0) ||
+        (m.vault_balance == null && hasNoStats);
 
       return {
         ...m,
