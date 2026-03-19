@@ -106,13 +106,17 @@ describe("validateSlab middleware", () => {
   });
 
   describe("blocklist (GH#1357 / Sentry 2026-03-17)", () => {
-    // These three addresses are phantom-OI / empty-vault slabs that cause backend
+    // These addresses are phantom-OI / empty-vault slabs that cause backend
     // 500s when queried. They are hardcoded so the API returns 404 even when called
     // directly, bypassing the Next.js proxy blocklist.
     const BLOCKED = [
       "3bmCyPee8GWJR5aPGTyN5EyyQJLzYyD8Wkg9m1Afd1SD",
       "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
       "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
+      // GH#1413: DfLoAzny/USD slab — was blocked in frontend blocklist.ts (PR #1415)
+      // but missing from backend validateSlab; /api/open-interest/8eFFEFBY was returning
+      // 200 with phantom 2T micro-unit OI data. Fixed by PR #1416.
+      "8eFFEFBY3HHbBgzxJJP5hyxdzMNMAumnYNhkWXErBM4c",
     ];
 
     for (const addr of BLOCKED) {
