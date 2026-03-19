@@ -38,8 +38,18 @@ const ENV_BLOCKED_SLABS: ReadonlySet<string> = new Set(
     .filter(Boolean),
 );
 
-function isBlocked(slab: string): boolean {
+/**
+ * Returns true if the slab is on the backend blocklist (hardcoded or env-var).
+ * Exported so other routes (e.g. /funding/global) can apply the same predicate
+ * without going through the Hono middleware (GH#1459).
+ */
+export function isBlockedSlab(slab: string): boolean {
   return HARDCODED_BLOCKED_SLABS.has(slab) || ENV_BLOCKED_SLABS.has(slab);
+}
+
+// Keep internal alias for the middleware below
+function isBlocked(slab: string): boolean {
+  return isBlockedSlab(slab);
 }
 
 /**

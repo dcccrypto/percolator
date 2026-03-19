@@ -294,5 +294,89 @@ describe("funding routes", () => {
       expect(data.count).toBe(0);
       expect(data.markets).toHaveLength(0);
     });
+
+    describe("GH#1459: blocklist bypass — blocked slabs must not appear in /funding/global", () => {
+      // These four addresses are on the backend HARDCODED_BLOCKED_SLABS list.
+      // Individual /funding/:slab 404s via validateSlab, but /funding/global was
+      // querying all market_stats rows without filtering, exposing phantom netLpPosition.
+      const BLOCKED_SLABS = [
+        "8eFFEFBY3HHbBgzxJJP5hyxdzMNMAumnYNhkWXErBM4c", // DfLoAzny/USD — GH#1413
+        "3bmCyPee8GWJR5aPGTyN5EyyQJLzYyD8Wkg9m1Afd1SD", // SEX/USD — migration 048
+        "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ", // phantom-OI — migration 048
+        "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn", // phantom-OI — no liquidity
+      ];
+
+      it("filters out all 4 blocked slabs from /funding/global response", async () => {
+        const mockStats = [
+          // 1 real market
+          { slab_address: "11111111111111111111111111111111", funding_rate: 5, net_lp_pos: "1000000" },
+          // 4 blocked slabs with phantom netLpPosition
+          ...BLOCKED_SLABS.map((addr) => ({
+            slab_address: addr,
+            funding_rate: 0,
+            net_lp_pos: "987000000000000000000000000000000000", // phantom value
+          })),
+        ];
+
+        mockSupabase.from.mockReturnValue({
+          select: vi.fn().mockResolvedValue({ data: mockStats, error: null }),
+        });
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/global");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        // Only the real market should appear
+        expect(data.count).toBe(1);
+        expect(data.markets).toHaveLength(1);
+        expect(data.markets[0].slabAddress).toBe("11111111111111111111111111111111");
+
+        // None of the blocked slabs should be in the response
+        const returnedAddrs = data.markets.map((m: { slabAddress: string }) => m.slabAddress);
+        for (const blocked of BLOCKED_SLABS) {
+          expect(returnedAddrs).not.toContain(blocked);
+        }
+      });
+
+      it("count in response reflects only unblocked markets", async () => {
+        const mockStats = BLOCKED_SLABS.map((addr) => ({
+          slab_address: addr,
+          funding_rate: 0,
+          net_lp_pos: "987000000000000000000000000000000000",
+        }));
+
+        mockSupabase.from.mockReturnValue({
+          select: vi.fn().mockResolvedValue({ data: mockStats, error: null }),
+        });
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/global");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.count).toBe(0);
+        expect(data.markets).toHaveLength(0);
+      });
+
+      it("allows real (non-blocked) slabs through to the response", async () => {
+        const mockStats = [
+          { slab_address: "11111111111111111111111111111111", funding_rate: 10, net_lp_pos: "0" },
+          { slab_address: "22222222222222222222222222222222", funding_rate: -3, net_lp_pos: "500000" },
+        ];
+
+        mockSupabase.from.mockReturnValue({
+          select: vi.fn().mockResolvedValue({ data: mockStats, error: null }),
+        });
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/global");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.count).toBe(2);
+        expect(data.markets).toHaveLength(2);
+      });
+    });
   });
 });
