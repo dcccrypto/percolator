@@ -19,6 +19,12 @@ const HARDCODED_BLOCKED_SLABS: ReadonlySet<string> = new Set([
   "3YDqCJGz88xGiPBiRvx4vrM51mWTiTZPZ95hxYDZqKpJ",
   // Empty-vault phantom-OI slab (no on-chain liquidity)
   "3ZKKwsKoo5UP28cYmMpvGpwoFpWLVgEWLQJCejJnECQn",
+  // GH#1413: DfLoAzny/USD slab — phantom market with vault_balance=1M (at threshold),
+  // stale on-chain OI (2T micro-units ≈ 2,000,000 tokens). Added to frontend blocklist
+  // (app/lib/blocklist.ts) via PR #1415 but missing from backend validateSlab middleware.
+  // /api/open-interest/8eFFEFBY returns 200 with phantom data without this entry.
+  // Also covers /api/funding/8eFFEFBY returning stale zero-rate data.
+  "8eFFEFBY3HHbBgzxJJP5hyxdzMNMAumnYNhkWXErBM4c",
 ]);
 
 /**
