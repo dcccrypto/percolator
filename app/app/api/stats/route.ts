@@ -97,9 +97,16 @@ export async function GET(request: NextRequest) {
     const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
     const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
     if (!isPhantom) return m;
-    // Zero out OI fields so isActiveMarket won't consider stale phantom OI as "active"
+    // GH#1425: Zero out ALL stat fields (including last_price and volume_24h) so
+    // isActiveMarket() won't consider stale values as "active" for zombie markets.
+    // Previously only OI fields were zeroed; vault_balance=0 zombies still passed
+    // isActiveMarket() via stale last_price, overcounting totalMarkets by ~40.
+    // Mirrors the homepage fix from GH#1412.
     return {
       ...m,
+      last_price: 0,
+      volume_24h: 0,
+      trade_count_24h: 0,
       total_open_interest: 0,
       open_interest_long: 0,
       open_interest_short: 0,
