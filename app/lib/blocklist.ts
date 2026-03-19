@@ -53,6 +53,11 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   // SEX/USD devnet — empty vault, no real liquidity, causes misleading zero-filled
   // funding responses. Verified 2026-03-19 UTC.
   "3bmCyPeeDwAfLbhfnRpYJHkWVqAf3Q5JaWXGfZjbmjNp",
+  // GH#1413: DfLoAzny/USD slab — phantom market with vault_balance=1M (at threshold),
+  // stale on-chain OI (2T micro-units ≈ 2,000,000 tokens). Not in prior blocklist so
+  // /api/open-interest/8eFFEFBY returns 200 with raw phantom data. Block to return 404.
+  // Also covers /api/funding/8eFFEFBY which was returning 200 with stale zero-rate data.
+  "8eFFEFBY3HHbBgzxJJP5hyxdzMNMAumnYNhkWXErBM4c",
 ]);
 
 /**
