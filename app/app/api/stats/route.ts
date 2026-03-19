@@ -93,11 +93,28 @@ export async function GET(request: NextRequest) {
   // This produced a 172 vs 135 mismatch. Now we zero phantom OI first, so both
   // endpoints agree on what counts as "active".
   const MIN_VAULT_FOR_ACTIVE = 1_000_000;
+  // GH#1430: Match /api/markets sanitizePrice cap — null out last_price > $1M before
+  // isActiveMarket() so markets with corrupt oracle prices (e.g. $7.9T) don't count
+  // as "active" in stats while being nulled in /api/markets. Previously this cap was
+  // only applied during USD conversion (toUsd), not before the isActiveMarket check,
+  // causing 65 corrupt-price markets to be counted in totalMarkets but not activeTotal.
+  const MAX_SANE_PRICE_FOR_ACTIVE = 1_000_000; // $1M — mirrors /api/markets sanitizePrice
   const phantomAwareData = statsData.map((m) => {
     const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
     const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
     const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
-    if (!isPhantom) return m;
+    if (!isPhantom) {
+      // GH#1430: Null out corrupt prices before isActiveMarket() check so the active-market
+      // count matches /api/markets which applies sanitizePrice (> $1M → null) before filtering.
+      const rawPrice = (m as Record<string, unknown>).last_price as number | null;
+      const sanitizedPrice = (rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_FOR_ACTIVE)
+        ? rawPrice
+        : null;
+      if (sanitizedPrice !== rawPrice) {
+        return { ...m, last_price: sanitizedPrice };
+      }
+      return m;
+    }
     // GH#1425: Zero out ALL stat fields (including last_price and volume_24h) so
     // isActiveMarket() won't consider stale values as "active" for zombie markets.
     // Previously only OI fields were zeroed; vault_balance=0 zombies still passed
