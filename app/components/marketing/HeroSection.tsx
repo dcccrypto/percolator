@@ -4,9 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { getConfig } from "@/lib/config";
 import { isMockMode } from "@/lib/mock-mode";
-import { MOCK_SLAB_ADDRESSES } from "@/lib/mock-trade-data";
-import { getSupabase } from "@/lib/supabase";
-import { isActiveMarket } from "@/lib/activeMarketFilter";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { HeroHeadline } from "./HeroHeadline";
 import { HeroStats } from "./HeroStats";
@@ -54,7 +51,7 @@ export function HeroSection({ marketsCount }: HeroSectionProps = {}) {
   useEffect(() => {
     if (isMockMode() || process.env.NODE_ENV === "development") {
       setStats({
-        markets: MOCK_SLAB_ADDRESSES.length,
+        markets: 2,
         volume: 124_000,
         traders: 847,
       });
@@ -62,43 +59,21 @@ export function HeroSection({ marketsCount }: HeroSectionProps = {}) {
     }
     async function loadHeroStats() {
       try {
-        // Fetch market data and platform stats in parallel.
-        // Use /api/stats for totalTraders — it counts unique trader wallet addresses
-        // from the trades table, which is the correct definition.
-        // Do NOT sum total_accounts across markets: that counts sub-accounts per slab
-        // (which is ~500 per market × 191 markets ≈ 99,000 — wildly misleading).
-        const [{ data }, statsRes] = await Promise.all([
-          getSupabase()
-            .from("markets_with_stats")
-            .select("volume_24h, last_price, decimals, total_open_interest, open_interest_long, open_interest_short"),
-          fetch("/api/stats", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null),
-        ]);
-        if (data && data.length > 0) {
-          const activeData = data.filter(isActiveMarket);
-          // GH#1195: sanitise raw volume → USD with the same guards as page.tsx.
-          // Without these, corrupt devnet price oracles (e.g. $11M–$100M/token) or
-          // huge raw values produce absurd hero stats (e.g. $106B volume).
-          // Rules (mirror page.tsx loadStats):
-          //   1. Clamp decimals to 0–18.
-          //   2. Reject price > $100K as corrupt (covers BTC/ETH; blocks bad oracle data).
-          //   3. Cap per-market USD contribution at $10M — no devnet market should exceed.
-          const MAX_HERO_PRICE_USD = 100_000; // $100K — same as page.tsx
-          const MAX_HERO_PER_MARKET_USD = 10_000_000; // $10M per market
-          const heroToUsd = (raw: number, decimals: number | null, price: number | null): number => {
-            if (raw <= 0 || !Number.isFinite(raw) || raw >= 1e18) return 0;
-            const d = Math.min(Math.max(decimals ?? 6, 0), 18);
-            const p = (price != null && price > 0 && price <= MAX_HERO_PRICE_USD) ? price : 0;
-            if (p <= 0) return 0;
-            const usd = (raw / 10 ** d) * p;
-            return usd > MAX_HERO_PER_MARKET_USD ? 0 : usd;
-          };
-          const volume = activeData.reduce((s: number, m: { volume_24h: number | null; last_price: number | null; decimals: number | null }) => {
-            return s + heroToUsd(Number(m.volume_24h || 0), m.decimals, m.last_price);
-          }, 0);
-          // Prefer /api/stats totalTraders (unique wallets). Fall back to 0 if unavailable.
-          const traders: number = (statsRes as { totalTraders?: number } | null)?.totalTraders ?? 0;
-          setStats({ markets: activeData.length, volume, traders });
-        }
+        // GH#1442: Use /api/stats as the single source of truth for all hero stats.
+        // Previously the hero fetched raw Supabase data and recomputed volume locally,
+        // bypassing the 48h staleness filter applied in /api/stats (GH#1419). This caused
+        // the hero to show $15K stale volume while /api/stats correctly returned $0.
+        // Now we use totalVolume24h, totalTraders, and totalMarkets directly from /api/stats
+        // so hero and "Built Different" section always agree.
+        const statsRes = await fetch("/api/stats", { cache: "no-store" })
+          .then((r) => r.ok ? r.json() : null)
+          .catch(() => null) as { totalVolume24h?: number; totalTraders?: number; totalMarkets?: number } | null;
+        const volume: number = statsRes?.totalVolume24h ?? 0;
+        const traders: number = statsRes?.totalTraders ?? 0;
+        // markets count is injected from parent (marketsCount prop) to stay in sync
+        // with the "Built Different" section — fall back to /api/stats if not provided.
+        const markets: number = statsRes?.totalMarkets ?? 0;
+        setStats({ markets, volume, traders });
       } catch {
         // Silently fail — hero stats are non-critical
       }
