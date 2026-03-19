@@ -305,6 +305,11 @@ describe("GET /api/markets — price sanitization (#856)", () => {
         // GH#1438: vault=1M is the creation-deposit amount; strict < means it is NOT phantom.
         // OI should pass through for vault=1M (aligns /api/markets with /api/stats).
         mkMarket({ symbol: "CREATION_DEPOSIT_1M", vault_balance: 1_000_000, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        // GH#1438 pure-OI boundary: vault=1M market with no last_price and no volume_24h.
+        // This is the exact regression vector — a market at the threshold that has OI
+        // but no price data. The phantom guard must NOT suppress its OI; activeTotal
+        // should reflect it (though USD value will be 0/null without a price).
+        mkMarket({ symbol: "PURE_OI_1M", vault_balance: 1_000_000, total_open_interest: 5_000_000_000, last_price: null, volume_24h: null }),
       ];
       vi.resetModules();
       const { GET } = await import("@/app/api/markets/route");
@@ -318,6 +323,13 @@ describe("GET /api/markets — price sanitization (#856)", () => {
       // vault=1M → NOT phantom (strict <), OI passes through
       const creation1M = body.markets.find((m) => m.symbol === "CREATION_DEPOSIT_1M");
       expect(creation1M?.total_open_interest_usd).toBeGreaterThan(0); // real OI for creation-deposit vault
+      // Pure-OI boundary (GH#1438 regression vector): vault=1M, no last_price, no volume_24h.
+      // The phantom guard must NOT suppress the raw OI atoms. USD is null (no price) but the
+      // market still appears in the response and its raw total_open_interest is non-zero.
+      const pureOi1M = body.markets.find((m) => m.symbol === "PURE_OI_1M");
+      expect(pureOi1M).toBeDefined(); // market is included (vault=1M is not phantom)
+      expect(pureOi1M?.total_open_interest_usd).toBeNull(); // no price → USD is null, not phantom-suppressed
+      expect((pureOi1M as Record<string, unknown>)?.total_open_interest).toBe(5_000_000_000); // raw OI passes through
     });
 
     it("passes through total_open_interest_usd when vault_balance >= 1,000,000 (real liquidity)", async () => {
