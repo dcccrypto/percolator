@@ -136,7 +136,7 @@ export default function Home() {
         // from /api/stats (which uses the server-side indexer view), causing
         // discrepancies (107 vs 69 after #1449). API count wins.
         const [{ data, error: dbError }, apiStatsRes] = await Promise.all([
-          getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals, vault_balance, total_accounts") as Promise<{ data: { slab_address: string; symbol: string | null; volume_24h: number | null; insurance_balance: number | null; insurance_fund: number | null; last_price: number | null; total_open_interest: number | null; open_interest_long: number | null; open_interest_short: number | null; decimals: number | null; vault_balance: number | null; total_accounts: number | null }[] | null; error: { message: string } | null }>,
+          getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals, vault_balance, total_accounts"),
           fetch("/api/stats").then((r) => r.ok ? r.json() : null).catch(() => null),
         ]);
         // totalMarkets from /api/stats (authoritative). Fall back to local count if unavailable.
@@ -240,10 +240,11 @@ export default function Home() {
           // Without this, DfLoAzny (vault=1M=MIN_VAULT, OI zeroed by phantom guard,
           // price=null after sanitization) still appeared in the sorted featured list.
           const converted = phantomAwareData
-            .filter((m) => !isBlockedSlab(m.slab_address))
+            .filter((m) => m.slab_address != null)
+            .filter((m) => !isBlockedSlab(m.slab_address!))
             .filter(isActiveMarket)
             .map((m) => ({
-            slab_address: m.slab_address,
+            slab_address: m.slab_address!,
             symbol: m.symbol,
             // GH#1195: same $10M USD per-market cap as stats.volume above.
             volume_24h: (() => {
