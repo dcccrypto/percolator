@@ -13,8 +13,10 @@
  * deposit minimum). Using <= classifies all of them as phantom.
  *
  * GH#1435 correct fix: use strict < for vault phantom check in /api/stats so that
- * vault=1M markets are correctly counted as active. The mismatch with /api/markets
- * isPhantomOI (which uses <=) must be addressed by fixing /api/markets, not stats.
+ * vault=1M markets are correctly counted as active.
+ *
+ * GH#1438: /api/markets isPhantomOI also changed to strict < to align with /api/stats.
+ * Both endpoints now agree: vault=1_000_000 (creation-deposit) is NOT phantom.
  *
  * Fix: (1) apply the $1M cap to last_price in phantomAwareData before
  * isActiveMarket() in /api/stats, mirroring /api/markets sanitizePrice.

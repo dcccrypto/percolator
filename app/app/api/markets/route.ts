@@ -177,10 +177,13 @@ export async function GET(request: NextRequest) {
       // GH#1271: Also suppress when vault_balance = 0 (no LP liquidity → no real positions).
       // PERC-816: Extend to suppress for dust vault_balance (0 < vault < 1,000,000 micro-units).
       // Mirrors the invariant enforced by StatsCollector and migration 049.
-      // GH#1405 Part 2: use strict GTE (<=) so vault_balance == MIN_VAULT_FOR_OI is
-      // also treated as phantom — markets at exactly the threshold have no real LP
-      // liquidity. Consistent with homepage phantomAwareData guard.
-      const MIN_VAULT_FOR_OI = 1_000_000; // <= 1 USDC at 6 decimals; dust at 9 decimals
+      // GH#1438: Align with /api/stats strict < so vault=1_000_000 (creation-deposit amount)
+      // is NOT treated as phantom OI. All active devnet markets have vault=1M exactly;
+      // using <= caused /api/markets to suppress their OI while /api/stats counted them,
+      // producing a visible totalOpenInterest mismatch between the two endpoints.
+      // Proper zombie threshold is vault=0 (strictly zero) — markets with any real LP deposit
+      // above dust are not phantom. See GH#1432 original intent + GH#1435 hotfix context.
+      const MIN_VAULT_FOR_OI = 1_000_000; // strict <: vault=1M is NOT phantom (creation-deposit)
       const accountsCount = (m.total_accounts as number) ?? 0;
       const vaultBal = (m.vault_balance as number) ?? 0;
       // GH#1290 / PERC-570: Phantom OI guard — suppress all OI fields (USD and raw atoms)
@@ -188,7 +191,8 @@ export async function GET(request: NextRequest) {
       // and migration 051. Suppressing only total_open_interest_usd left the raw
       // total_open_interest atom value in the response, which fed phantom OI into
       // computeMarketHealthFromStats and the markets page sort/filter.
-      const isPhantomOI = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_OI;
+      // GH#1438: Changed <= to < to align with /api/stats phantom OI guard.
+      const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI;
       const displayOiUsd = isPhantomOI ? null : total_open_interest_usd;
 
       // GH#1270: Pre-compute volume_24h in USD so consumers (e.g. Watchlist) don't need
