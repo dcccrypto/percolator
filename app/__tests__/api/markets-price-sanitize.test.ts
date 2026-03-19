@@ -297,28 +297,33 @@ describe("GET /api/markets — price sanitization (#856)", () => {
       expect(body.markets.find((m) => m.symbol === "HEALTHY")).toBeDefined();
     });
 
-    it("suppresses total_open_interest_usd when vault_balance is dust (<= 1,000,000) — GH#1405 Part 2", async () => {
+    it("suppresses total_open_interest_usd when vault_balance is dust (< 1,000,000) — GH#1438 alignment", async () => {
       mockMarkets = [
         mkMarket({ symbol: "DUST_1", vault_balance: 1, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
         mkMarket({ symbol: "DUST_100", vault_balance: 100, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
         mkMarket({ symbol: "DUST_999999", vault_balance: 999_999, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
-        // GH#1405 Part 2: exactly at threshold (1M) is now also phantom (was previously allowed through)
-        mkMarket({ symbol: "DUST_1M", vault_balance: 1_000_000, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
+        // GH#1438: vault=1M is the creation-deposit amount; strict < means it is NOT phantom.
+        // OI should pass through for vault=1M (aligns /api/markets with /api/stats).
+        mkMarket({ symbol: "CREATION_DEPOSIT_1M", vault_balance: 1_000_000, total_open_interest: 2_000_000_000_000, last_price: 1.0 }),
       ];
       vi.resetModules();
       const { GET } = await import("@/app/api/markets/route");
       const res = await GET();
       const body = (await res.json()) as { markets: { symbol: string; total_open_interest_usd: number | null }[] };
-      for (const sym of ["DUST_1", "DUST_100", "DUST_999999", "DUST_1M"]) {
+      // vault < 1M → phantom OI suppressed
+      for (const sym of ["DUST_1", "DUST_100", "DUST_999999"]) {
         const m = body.markets.find((m) => m.symbol === sym);
         expect(m?.total_open_interest_usd).toBeNull(); // dust vault → phantom OI suppressed
       }
+      // vault=1M → NOT phantom (strict <), OI passes through
+      const creation1M = body.markets.find((m) => m.symbol === "CREATION_DEPOSIT_1M");
+      expect(creation1M?.total_open_interest_usd).toBeGreaterThan(0); // real OI for creation-deposit vault
     });
 
-    it("passes through total_open_interest_usd when vault_balance > 1,000,000 (real liquidity)", async () => {
+    it("passes through total_open_interest_usd when vault_balance >= 1,000,000 (real liquidity)", async () => {
       mockMarkets = [
-        // GH#1405 Part 2: exactly at threshold (1M) is now treated as phantom (<=).
-        // Real liquidity requires vault_balance > 1_000_000.
+        // GH#1438: vault=1M is the creation-deposit amount; strict < means it is NOT phantom.
+        // Aligned with /api/stats which also uses strict < for the same boundary.
         mkMarket({ symbol: "AT_THRESHOLD", vault_balance: 1_000_000, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
         // one above threshold — real liquidity
         mkMarket({ symbol: "ABOVE_THRESHOLD", vault_balance: 1_000_001, total_open_interest: 1_000, decimals: 6, last_price: 1.0 }),
@@ -332,8 +337,8 @@ describe("GET /api/markets — price sanitization (#856)", () => {
       const atThreshold = body.markets.find((m) => m.symbol === "AT_THRESHOLD");
       const aboveThreshold = body.markets.find((m) => m.symbol === "ABOVE_THRESHOLD");
       const realVault = body.markets.find((m) => m.symbol === "REAL_VAULT");
-      // exactly at threshold → phantom (GH#1405 Part 2: <= guard)
-      expect(atThreshold?.total_open_interest_usd).toBeNull();
+      // exactly at threshold (vault=1M) → NOT phantom (GH#1438: strict < aligns with /api/stats)
+      expect(atThreshold?.total_open_interest_usd).toBeCloseTo(0.001, 6); // 1000 / 1e6 * 1.0
       // one above threshold → real liquidity, OI passes through
       expect(aboveThreshold?.total_open_interest_usd).toBeCloseTo(0.001, 6); // 1000 / 1e6 * 1.0
       expect(realVault?.total_open_interest_usd).toBeCloseTo(0.001, 6);
