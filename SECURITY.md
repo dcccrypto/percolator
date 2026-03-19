@@ -185,6 +185,19 @@ pnpm --filter=@percolator/api dev
 
 ---
 
+## ⚠️ Known Risk Acceptances
+
+### bigint-buffer (via @solana/spl-token)
+
+- **Package**: `bigint-buffer` (transitive, via `@solana/spl-token`)
+- **Issue**: No upstream security fix available as of 2026-03-19
+- **Risk**: Theoretical integer overflow/type coercion in BigInt ↔ Buffer conversions
+- **Mitigation**: bigint-buffer is used only for SPL token account deserialization (read path); it does not handle untrusted external input in our context
+- **Action**: Monitor upstream. Will update as soon as a patched version is released.
+- **Accepted by**: Security agent (GH#1421, 2026-03-19)
+
+---
+
 ## 🐛 Responsible Disclosure
 
 We take security seriously and appreciate the work of security researchers who help keep Percolator Launch safe for everyone.

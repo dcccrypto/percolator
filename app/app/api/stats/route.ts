@@ -67,7 +67,8 @@ export async function GET(request: NextRequest) {
     // GH#1218: include slab_address so we can filter blocked markets (same as /api/markets)
     // GH#1265: also fetch trade_count_24h so we can sum it directly (replaces buggy trades table count query)
     // GH#1297: include vault_balance + total_accounts to apply phantom OI guard (consistent with /api/markets)
-    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals, vault_balance, total_accounts").limit(500),
+    // GH#1419: include stats_updated_at to filter stale volume_24h (markets not updated in >48h)
+    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals, vault_balance, total_accounts, stats_updated_at").limit(500),
     supabase.from("trades").select("trader").limit(5000),
   ]);
 
@@ -126,8 +127,22 @@ export async function GET(request: NextRequest) {
     return usd > MAX_PER_MARKET_USD ? 0 : usd;
   };
 
+  // GH#1419: Only include volume_24h from markets whose stats were updated within 48h.
+  // A market with stats_updated_at > 48h ago has stale rolling stats — its volume_24h
+  // no longer reflects actual 24h activity and will inflate the platform total.
+  // 48h is intentionally generous: the StatsCollector runs every few minutes, so a
+  // >48h gap means the market's indexer stopped (vault drained, market closed, etc).
+  const STALE_VOLUME_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
+  const now = Date.now();
   const totalVolume24h = activeData.reduce(
-    (sum, m) => sum + toUsd(m.volume_24h ?? 0, m),
+    (sum, m) => {
+      const updatedAt = (m as Record<string, unknown>).stats_updated_at as string | null;
+      if (updatedAt) {
+        const ageMs = now - new Date(updatedAt).getTime();
+        if (ageMs > STALE_VOLUME_THRESHOLD_MS) return sum; // skip stale volume
+      }
+      return sum + toUsd(m.volume_24h ?? 0, m);
+    },
     0
   );
   // GH#1297: Phantom OI guard — mirrors /api/markets isPhantomOI logic.
@@ -184,7 +199,15 @@ export async function GET(request: NextRequest) {
   // GH#1265: trades table count query (head:true) returns 0 — likely a column name mismatch
   // or supabase HEAD count limitation. Use trade_count_24h from markets_with_stats instead,
   // which is the same source used by /api/markets and is reliable.
-  const trades24h = activeData.reduce((sum, m) => sum + (m.trade_count_24h ?? 0), 0);
+  // GH#1419: Also skip stale markets (>48h) for trade_count_24h to match volume filter.
+  const trades24h = activeData.reduce((sum, m) => {
+    const updatedAt = (m as Record<string, unknown>).stats_updated_at as string | null;
+    if (updatedAt) {
+      const ageMs = now - new Date(updatedAt).getTime();
+      if (ageMs > STALE_VOLUME_THRESHOLD_MS) return sum; // skip stale trade count
+    }
+    return sum + (m.trade_count_24h ?? 0);
+  }, 0);
 
   return NextResponse.json({
     totalMarkets,
