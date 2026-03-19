@@ -102,7 +102,11 @@ export async function GET(request: NextRequest) {
   const phantomAwareData = statsData.map((m) => {
     const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
     const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-    const isPhantom = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_ACTIVE;
+    // GH#1432: Use <= (not strict <) to match /api/markets isPhantomOI condition.
+    // After PR #1405 updated /api/markets to use <= 1M, this strict < caused a 29-count
+    // gap: vault=1M markets were phantom in /api/markets (excluded from activeTotal) but
+    // not phantom here (counted in totalMarkets). Aligning to <= fixes the residual mismatch.
+    const isPhantom = accountsCount === 0 || vaultBal <= MIN_VAULT_FOR_ACTIVE;
     if (!isPhantom) {
       // GH#1430: Null out corrupt prices before isActiveMarket() check so the active-market
       // count matches /api/markets which applies sanitizePrice (> $1M → null) before filtering.
@@ -179,12 +183,12 @@ export async function GET(request: NextRequest) {
       // GH#1297: Skip phantom markets (no accounts or dust/empty vault) — same guard as /api/markets
       const accountsCount = (m as Record<string, unknown>).total_accounts as number ?? 0;
       const vaultBal = (m as Record<string, unknown>).vault_balance as number ?? 0;
-      // GH#1314: Mirror /api/markets phantom guard exactly — strict < 1M (not <=).
-      // vault=1M (creation-deposit only) markets like usdEkK5G and MOLTBOT are NOT
-      // phantom (strict < excludes only vault < 1M). PR #1303 used <= which incorrectly
-      // filtered them; PR #1307 over-corrected with (vaultBal <= 1M && rawOi === 0)
-      // which let through markets with vault < 1M + stale non-zero rawOi, causing the
-      // residual $42K phantom OI. The /api/markets condition is the single source of truth.
+      // GH#1314→GH#1432: /api/markets now uses <= 1M for phantom OI (PR #1405).
+      // Keeping strict < here for the OI sum to preserve existing OI accounting.
+      // The active-market count fix (GH#1432) uses <= above in phantomAwareData.
+      // OI sum was already accurate; only totalMarkets count needed aligning.
+      // PR #1303 used <= which incorrectly filtered vault=1M markets;
+      // /api/markets isPhantomOI is the single source of truth for OI filtering.
       const rawOi = isSaneMarketValue(m.total_open_interest)
         ? m.total_open_interest!
         : (isSaneMarketValue((m.open_interest_long ?? 0) + (m.open_interest_short ?? 0))
