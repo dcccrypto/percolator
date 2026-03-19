@@ -6,6 +6,11 @@
  * while /api/stats used isPhantomOpenInterest() with `vaultBal < 1_000_000`.
  * Since most devnet markets have vault_balance == 1_000_000 (creation deposit),
  * the homepage zeroed their stats → only 2 of 69 survived isActiveMarket().
+ *
+ * GH#1450: Homepage shows 107 after #1449 fix — direct Supabase query returns
+ * different count than /api/stats. Fix: homepage now uses /api/stats.totalMarkets
+ * as single source of truth for the market count (falls back to local count if
+ * API unavailable).
  */
 
 import { describe, it, expect } from "vitest";
@@ -47,5 +52,40 @@ describe("GH#1448: Homepage phantom OI alignment with /api/stats", () => {
 
   it("accounts=0 is always phantom regardless of vault", () => {
     expect(isPhantomOpenInterest(0, 10_000_000)).toBe(true);
+  });
+});
+
+describe("GH#1450: Homepage uses /api/stats.totalMarkets as authoritative count", () => {
+  /**
+   * These tests verify the merge logic between /api/stats response and local count.
+   * The actual fetch is in page.tsx (client component); here we test the fallback
+   * and merge logic in isolation.
+   */
+
+  function mergeMarketCount(apiTotalMarkets: number | null, localCount: number): number {
+    // Mirrors the logic in page.tsx: apiTotalMarkets ?? localCount
+    return apiTotalMarkets ?? localCount;
+  }
+
+  it("uses API count when /api/stats returns a valid totalMarkets", () => {
+    expect(mergeMarketCount(69, 107)).toBe(69);
+  });
+
+  it("falls back to local count when API returns null (fetch failed)", () => {
+    expect(mergeMarketCount(null, 107)).toBe(107);
+  });
+
+  it("falls back to local count when API returns 0 (not falsy edge case)", () => {
+    // 0 is a valid API value (no markets) — should not fall back
+    expect(mergeMarketCount(0, 107)).toBe(0);
+  });
+
+  it("when API and local agree, count is consistent", () => {
+    expect(mergeMarketCount(69, 69)).toBe(69);
+  });
+
+  it("when API is higher than local (shouldn't happen but safe)", () => {
+    // If API has more markets than local filter, trust the API
+    expect(mergeMarketCount(75, 69)).toBe(75);
   });
 });

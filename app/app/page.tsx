@@ -130,7 +130,17 @@ export default function Home() {
       }
 
       try {
-        const { data, error: dbError } = await getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals, vault_balance, total_accounts") as { data: { slab_address: string; symbol: string | null; volume_24h: number | null; insurance_balance: number | null; insurance_fund: number | null; last_price: number | null; total_open_interest: number | null; open_interest_long: number | null; open_interest_short: number | null; decimals: number | null; vault_balance: number | null; total_accounts: number | null }[] | null; error: { message: string } | null };
+        // GH#1450: Fetch /api/stats in parallel with Supabase query.
+        // Use totalMarkets from the API as the single source of truth for the count —
+        // the homepage's direct Supabase query applies different filtering logic
+        // from /api/stats (which uses the server-side indexer view), causing
+        // discrepancies (107 vs 69 after #1449). API count wins.
+        const [{ data, error: dbError }, apiStatsRes] = await Promise.all([
+          getSupabase().from("markets_with_stats").select("slab_address, symbol, volume_24h, insurance_balance, insurance_fund, last_price, total_open_interest, open_interest_long, open_interest_short, decimals, vault_balance, total_accounts") as Promise<{ data: { slab_address: string; symbol: string | null; volume_24h: number | null; insurance_balance: number | null; insurance_fund: number | null; last_price: number | null; total_open_interest: number | null; open_interest_long: number | null; open_interest_short: number | null; decimals: number | null; vault_balance: number | null; total_accounts: number | null }[] | null; error: { message: string } | null }>,
+          fetch("/api/stats").then((r) => r.ok ? r.json() : null).catch(() => null),
+        ]);
+        // totalMarkets from /api/stats (authoritative). Fall back to local count if unavailable.
+        const apiTotalMarkets: number | null = (apiStatsRes && typeof apiStatsRes.totalMarkets === "number") ? apiStatsRes.totalMarkets : null;
         if (dbError) {
           console.error("Failed to query markets_with_stats:", dbError.message);
           throw new Error(dbError.message);
@@ -195,7 +205,11 @@ export default function Home() {
             .filter((m) => !isBlockedSlab(m.slab_address))
             .filter(isActiveMarket);
           setStats({
-            markets: activeData.length,
+            // GH#1450: Use /api/stats.totalMarkets as single source of truth for market count.
+            // The homepage Supabase query applies subtly different filtering from /api/stats
+            // (different view snapshot timing, row count, filter ordering) → use API count
+            // when available, fall back to local activeData.length if fetch failed.
+            markets: apiTotalMarkets ?? activeData.length,
             // GH#1195: apply USD-value cap per market AFTER decimal conversion.
             // Raw-token guards (e.g. raw > 1e13) are decimal-unaware and block
             // legitimate TEST market (raw=1.5e13, dec=9, price=$1 → $15K USD).
