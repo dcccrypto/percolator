@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/supabase";
 import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
-import { MIN_VAULT_FOR_OI, isPhantomOpenInterest } from "@/lib/phantom-oi";
+import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { BLOCKED_SLAB_ADDRESSES } from "@/lib/blocklist";
 import type { Database } from "@/lib/database.types";
 export const dynamic = "force-dynamic";
