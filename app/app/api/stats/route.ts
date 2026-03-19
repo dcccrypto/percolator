@@ -196,7 +196,10 @@ export async function GET(request: NextRequest) {
             : 0);
       if (!isSaneMarketValue(rawOi)) return sum;
       // Skip phantom markets: no accounts, OR vault below creation-deposit threshold.
-      // Strict < mirrors /api/markets isPhantomOI exactly (vault=1M is NOT phantom).
+      // Intentional divergence from /api/markets: strict < here means vault=1M is NOT phantom
+      // (so it contributes to OI sum), whereas /api/markets uses <= (vault=1M IS phantom for
+      // active-market counting). The two operators serve different purposes: OI sum accounting
+      // vs active-market count — they are not required to match.
       const isPhantomOI = accountsCount === 0 || vaultBal < MIN_VAULT_FOR_OI_STATS;
       if (isPhantomOI) return sum;
       // GH#1318: No $1 fallback — markets without a valid oracle price have indeterminate
