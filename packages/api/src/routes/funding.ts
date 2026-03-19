@@ -19,6 +19,14 @@ import {
   truncateErrorMessage,
 } from "@percolator/shared";
 
+/**
+ * GH#1459: Import the backend blocklist predicate so /funding/global can
+ * filter blocked slabs. validateSlab middleware only runs on /:slab routes;
+ * the global endpoint bypasses it and must apply the same check inline.
+ * isBlockedSlab covers both HARDCODED_BLOCKED_SLABS and BLOCKED_MARKET_ADDRESSES env var.
+ */
+import { isBlockedSlab } from "../middleware/validateSlab.js";
+
 const logger = createLogger("api:funding");
 
 /**
@@ -52,16 +60,22 @@ export function fundingRoutes(): Hono {
       const SLOTS_PER_HOUR = 9000;
       const SLOTS_PER_DAY = 216000;
 
-      const markets = (allStats ?? []).map((stats) => {
-        const rateBps = sanitizeFundingRateBps(Number(stats.funding_rate ?? 0));
-        return {
-          slabAddress: stats.slab_address,
-          currentRateBpsPerSlot: rateBps,
-          hourlyRatePercent: Number(((rateBps / 10000.0) * SLOTS_PER_HOUR).toFixed(6)),
-          dailyRatePercent: Number(((rateBps / 10000.0) * SLOTS_PER_DAY).toFixed(4)),
-          netLpPosition: stats.net_lp_pos ?? "0",
-        };
-      });
+      // GH#1459: Filter blocked slabs from the global response.
+      // validateSlab middleware only runs on /:slab routes; the global endpoint
+      // queries all market_stats rows and previously exposed blocked slabs
+      // (8eFFEFBY, 3bmCyPee, 3YDqCJGz, 3ZKKwsK) with phantom netLpPosition values.
+      const markets = (allStats ?? [])
+        .filter((stats) => !isBlockedSlab(stats.slab_address))
+        .map((stats) => {
+          const rateBps = sanitizeFundingRateBps(Number(stats.funding_rate ?? 0));
+          return {
+            slabAddress: stats.slab_address,
+            currentRateBpsPerSlot: rateBps,
+            hourlyRatePercent: Number(((rateBps / 10000.0) * SLOTS_PER_HOUR).toFixed(6)),
+            dailyRatePercent: Number(((rateBps / 10000.0) * SLOTS_PER_DAY).toFixed(4)),
+            netLpPosition: stats.net_lp_pos ?? "0",
+          };
+        });
 
       return c.json({
         count: markets.length,
