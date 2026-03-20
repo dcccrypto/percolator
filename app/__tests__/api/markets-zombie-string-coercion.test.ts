@@ -150,6 +150,93 @@ describe("isPhantomOpenInterest with Number() coercion (GH#1494)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GH#1499 — c_tot > 0 only exempts when market has corroborating activity
+// ---------------------------------------------------------------------------
+describe("GH#1499 isZombieMarket c_tot + activity check", () => {
+  it("NNOB case: c_tot>0, vault=0, no price, no accounts → zombie (was bug: returned false)", () => {
+    // Before fix: c_tot > 0 short-circuited → return false (NNOB showed in response w/ null prices)
+    // After fix: c_tot > 0 only exempts if hasActivity (price or accounts) is truthy
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 100_000_000_000,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("FF7K healthy: c_tot>0, vault=0, has price → NOT zombie (keeper cranking)", () => {
+    // The 33 working FF7K markets: keeper pushes prices → hasActivity=true → exemption holds
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 1_000_000_000,
+        last_price: 1.0,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("FF7K with accounts: c_tot>0, vault=0, has accounts → NOT zombie", () => {
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 5_000_000_000,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 5,
+      }),
+    ).toBe(false);
+  });
+
+  it("no c_tot, vault=0, no activity → zombie", () => {
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: null,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("c_tot=0, vault=0, no activity → zombie (c_tot=0 not exempt)", () => {
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 0,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("c_tot>0, vault>0 (normal market with price) → NOT zombie", () => {
+    // Standard healthy market: both c_tot and vault > 0, has price
+    expect(
+      isZombieMarket({
+        vault_balance: 5_000_000_000,
+        c_tot: 1_000_000_000_000,
+        last_price: 150,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 10,
+      }),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isSaneMarketValue with Supabase string values
 // ---------------------------------------------------------------------------
 describe("isSaneMarketValue with string inputs (defensive)", () => {

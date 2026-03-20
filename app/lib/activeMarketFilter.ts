@@ -38,10 +38,24 @@ export function isActiveMarket(row: {
 /**
  * Determine if a market row is a "zombie" — has no LP liquidity and no real activity.
  *
- * Two zombie conditions (GH#1420 + GH#1427):
- *   1. vault_balance === 0  → explicitly drained vault, no liquidity.
+ * Three zombie conditions (GH#1420 + GH#1427 + GH#1499):
+ *   1. vault_balance === 0 AND no sane stats AND total_accounts === 0
+ *      → drained/dead market with no activity (even if c_tot > 0 from stale slab data).
  *   2. vault_balance === null AND no sane stats AND total_accounts === 0
  *      → phantom market that was never indexed or funded.
+ *   3. (Legacy) vault_balance === 0 with no c_tot and no activity
+ *      → explicitly drained vault.
+ *
+ * GH#1499 edge case — "c_tot > 0 → not zombie" is too broad:
+ * NNOB has c_tot=100B but vault=0, zero accounts, and null price because no oracle
+ * keeper cranks it. After PR#1496 (c_tot > 0 → short-circuit return false), NNOB
+ * escaped the zombie filter and appeared in the default response with null prices.
+ * Fix: c_tot > 0 only exempts a market from zombie status when there is corroborating
+ * activity — a live price (keeper is cranking) OR real accounts (users have positions).
+ * Without either, c_tot is legacy collateral in a dead slab and should be zombie.
+ *
+ * FF7K keeper markets (33 of 34): vault=0, c_tot>0, have prices → hasActivity=true → not zombie ✓
+ * NNOB (the outlier): vault=0, c_tot>0, no price, no accounts → hasActivity=false → zombie ✓
  *
  * SINGLE SOURCE OF TRUTH: used by /api/markets and /api/stats to ensure
  * consistent zombie exclusion across the platform. Previously duplicated
@@ -58,11 +72,22 @@ export function isZombieMarket(row: {
   const vaultBal = row.vault_balance ?? null;
   const cTot = row.c_tot ?? null;
 
-  // If on-chain collateral total (c_tot) is positive, market has real funds
-  // even if vault_balance reads 0. This happens because c_tot tracks collateral
-  // inside the slab data, while vault_balance reads the separate vault ATA.
-  // FF7K keeper markets store collateral in the slab, not the vault ATA.
-  if (cTot !== null && cTot > 0) return false;
+  // Compute whether this market has any live activity — price, volume, OI, or
+  // real user accounts. Used to validate the c_tot exemption (GH#1499).
+  const hasActivity =
+    isSaneMarketValue(row.last_price) ||
+    isSaneMarketValue(row.volume_24h) ||
+    isSaneMarketValue(row.total_open_interest) ||
+    (row.total_accounts ?? 0) > 0;
+
+  // If on-chain collateral total (c_tot) is positive AND there is corroborating activity,
+  // the market has real funds and a live oracle — not a zombie.
+  // FF7K keeper markets: vault=0 (stores collateral in slab), c_tot>0, prices present → active.
+  //
+  // GH#1499: Do NOT exempt when c_tot>0 but vault=0, accounts=0, and no price.
+  // That pattern means the slab has legacy collateral but no active keeper or positions.
+  // In that case, fall through to the vault_balance=0 zombie check below.
+  if (cTot !== null && cTot > 0 && hasActivity) return false;
 
   if (vaultBal !== null && vaultBal === 0) return true;
   if (vaultBal === null) {
