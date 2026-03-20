@@ -229,6 +229,9 @@ pub struct RiskParams {
     pub liquidation_buffer_bps: u64,
     pub min_liquidation_abs: U128,
     pub min_initial_deposit: U128,
+    /// Absolute nonzero-position margin floors (spec §9.1)
+    pub min_nonzero_mm_req: u128,
+    pub min_nonzero_im_req: u128,
 }
 
 /// Main risk engine state (spec §2.2)
@@ -406,6 +409,10 @@ impl RiskEngine {
         assert!(
             params.maintenance_margin_bps < params.initial_margin_bps,
             "maintenance_margin_bps must be strictly less than initial_margin_bps"
+        );
+        assert!(
+            params.min_nonzero_mm_req < params.min_nonzero_im_req,
+            "min_nonzero_mm_req must be strictly less than min_nonzero_im_req"
         );
         let mut engine = Self {
             vault: U128::ZERO,
@@ -1671,21 +1678,23 @@ impl RiskEngine {
     }
 
     /// is_above_maintenance_margin (spec §9.1): Eq_net_i > MM_req_i
-    /// Uses Eq_net_i = max(0, Eq_maint_raw_i) with full local PNL_i.
+    /// MM_req_i = max(proportional, MIN_NONZERO_MM_REQ)
     pub fn is_above_maintenance_margin(&self, account: &Account, idx: usize, oracle_price: u64) -> bool {
         let eq_net = self.account_equity_net(account, oracle_price);
         let not = self.notional(idx, oracle_price);
-        let mm_req = mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000;
+        let proportional = mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000);
+        let mm_req = core::cmp::max(proportional, self.params.min_nonzero_mm_req);
         let mm_req_i128 = if mm_req > i128::MAX as u128 { i128::MAX } else { mm_req as i128 };
         eq_net > mm_req_i128
     }
 
     /// is_above_initial_margin (spec §9.1): Eq_init_net_i >= IM_req_i
-    /// Uses Eq_init_net_i with haircutted matured PnL only.
+    /// IM_req_i = max(proportional, MIN_NONZERO_IM_REQ)
     pub fn is_above_initial_margin(&self, account: &Account, idx: usize, oracle_price: u64) -> bool {
         let eq_init_net = self.account_equity_init_net(account, idx);
         let not = self.notional(idx, oracle_price);
-        let im_req = mul_u128(not, self.params.initial_margin_bps as u128) / 10_000;
+        let proportional = mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
+        let im_req = core::cmp::max(proportional, self.params.min_nonzero_im_req);
         let im_req_i128 = if im_req > i128::MAX as u128 { i128::MAX } else { im_req as i128 };
         eq_init_net >= im_req_i128
     }
@@ -2292,11 +2301,17 @@ impl RiskEngine {
         // Steps 14-16: capture pre-trade MM requirements and raw maintenance buffers
         let mm_req_pre_a = {
             let not = self.notional(a as usize, oracle_price);
-            mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000
+            core::cmp::max(
+                    mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req
+                )
         };
         let mm_req_pre_b = {
             let not = self.notional(b as usize, oracle_price);
-            mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000
+            core::cmp::max(
+                    mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req
+                )
         };
         let maint_raw_wide_pre_a = self.account_equity_maint_raw_wide(&self.accounts[a as usize]);
         let maint_raw_wide_pre_b = self.account_equity_maint_raw_wide(&self.accounts[b as usize]);
@@ -2546,7 +2561,10 @@ impl RiskEngine {
             let maint_raw_fee_neutral = maint_raw_wide_post.checked_add(fee_wide).expect("I256 add");
             let mm_req_post = {
                 let not = self.notional(idx, oracle_price);
-                mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000
+                core::cmp::max(
+                    mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req
+                )
             };
             let buffer_post_fee_neutral = maint_raw_fee_neutral.checked_sub(I256::from_u128(mm_req_post)).expect("I256 sub");
 
@@ -2555,7 +2573,10 @@ impl RiskEngine {
                 let not_pre = if *old_eff == 0 { 0u128 } else {
                     mul_div_floor_u128(old_eff.unsigned_abs(), oracle_price as u128, POS_SCALE)
                 };
-                mul_u128(not_pre, self.params.maintenance_margin_bps as u128) / 10_000
+                core::cmp::max(
+                    mul_div_floor_u128(not_pre, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req
+                )
             };
             let maint_raw_pre = buffer_pre.checked_add(I256::from_u128(mm_req_pre)).expect("I256 add");
 

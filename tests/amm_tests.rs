@@ -22,6 +22,8 @@ fn default_params() -> RiskParams {
         liquidation_buffer_bps: 100,
         min_liquidation_abs: U128::new(0),
         min_initial_deposit: U128::ZERO,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
     }
 }
 
