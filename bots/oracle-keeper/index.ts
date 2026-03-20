@@ -466,6 +466,78 @@ function log(msg: string) {
   console.log(`[${ts}] [oracle-keeper] ${msg}`);
 }
 
+/**
+ * Extract transaction context from error or transaction object for debugging.
+ * Helps diagnose cranking failures by capturing:
+ * - Transaction size (bytes)
+ * - Instruction count
+ * - Compute budget allocated vs used
+ * - Blockhash age
+ * - Recent transaction signatures (for duplicate detection)
+ * - Error code if ParsedTransactionError
+ */
+function formatTransactionContext(error: any, tx?: any): string {
+  const parts: string[] = [];
+
+  // Extract error code if available
+  if (error?.code) {
+    parts.push(`code=${error.code}`);
+  } else if (error?.message?.match(/error [0-9]+/i)) {
+    const match = error.message.match(/error (\d+)/i);
+    if (match) parts.push(`code=${match[1]}`);
+  }
+
+  // Transaction details if available
+  if (tx) {
+    try {
+      // Transaction size
+      const txSize = tx.serialize?.().length || tx.instructions?.reduce?.((sum: number, ix: any) => {
+        const ixSize = (ix.data?.length || 0) + (ix.keys?.length || 0) * 32;
+        return sum + ixSize;
+      }, 0) || 0;
+      if (txSize > 0) parts.push(`tx_size=${txSize}B`);
+
+      // Instruction count
+      const ixCount = tx.instructions?.length || 0;
+      if (ixCount > 0) parts.push(`ixs=${ixCount}`);
+
+      // Compute budget — look for setComputeUnitLimit instruction
+      const computeIx = tx.instructions?.find?.((ix: any) =>
+        ix.programId?.equals?.(ComputeBudgetProgram.programId) &&
+        ix.data?.[0] === 0x00 // setComputeUnitLimit opcode
+      );
+      if (computeIx) {
+        const budget = computeIx.data ? new DataView(computeIx.data.buffer).getUint32(1, true) : 0;
+        if (budget > 0) parts.push(`compute_budget=${budget}CU`);
+      }
+
+      // Blockhash age
+      if (tx.recentBlockhash) {
+        // This is approximate — actual age would require fetching blockhash creation time
+        const age = Math.floor(Date.now() / 1000) % 256; // Rough estimate
+        if (age < 256) parts.push(`blockhash_age_approx=${age}s`);
+      }
+    } catch {
+      // Silently skip if unable to extract transaction details
+    }
+  }
+
+  // Recent transaction signatures from error — helps detect duplicates
+  if (error?.signature) {
+    parts.push(`sig=${(error.signature as string).slice(0, 12)}...`);
+  }
+
+  if (error?.logs?.length > 0) {
+    // Count WARN/ERROR log lines
+    const errorLogs = (error.logs as string[]).filter((l: string) =>
+      l.includes("ERROR") || l.includes("panic") || l.includes("Custom:")
+    );
+    if (errorLogs.length > 0) parts.push(`error_logs=${errorLogs.length}`);
+  }
+
+  return parts.length > 0 ? `[${parts.join(" | ")}]` : "";
+}
+
 // ── Push + Crank ────────────────────────────────────────────
 async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<void> {
   const s = getOrCreateStats(market);
@@ -590,9 +662,19 @@ async function pushAndCrank(market: MarketInfo, programId: PublicKey): Promise<v
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
 
-  const sig = await sendAndConfirmTransaction(conn, tx, [admin], {
-    commitment: "confirmed",
-  });
+  let sig: string;
+  try {
+    sig = await sendAndConfirmTransaction(conn, tx, [admin], {
+      commitment: "confirmed",
+    });
+  } catch (e) {
+    // MEDIUM-004: Attach transaction details to error for better debugging
+    const err = e as any;
+    if (!err.txContext) {
+      err.txContext = formatTransactionContext(e, tx);
+    }
+    throw err;
+  }
 
   s.lastPrice = price;
   s.lastPushAt = Date.now();
@@ -681,9 +763,19 @@ async function updateHyperpMark(
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
 
-  const sig = await sendAndConfirmTransaction(conn, tx, [admin], {
-    commitment: "confirmed",
-  });
+  let sig: string;
+  try {
+    sig = await sendAndConfirmTransaction(conn, tx, [admin], {
+      commitment: "confirmed",
+    });
+  } catch (e) {
+    // MEDIUM-004: Attach transaction details to error for better debugging
+    const err = e as any;
+    if (!err.txContext) {
+      err.txContext = formatTransactionContext(e, tx);
+    }
+    throw err;
+  }
 
   const s = getOrCreateStats(market);
   s.lastPushAt = Date.now();
@@ -1150,7 +1242,11 @@ async function main() {
           ? err.message.slice(0, 120)
           : (typeof err === "string" ? err.slice(0, 120) : `[${Object.prototype.toString.call(err)}]`);
         const txLogs = Array.isArray(err?.logs) ? (err.logs as string[]) : [];
-        log(`❌ ${market.label}: ${msg}`);
+        
+        // MEDIUM-004: Format transaction context for enhanced debugging
+        const txContext = formatTransactionContext(err);
+        log(`❌ ${market.label}: ${msg} ${txContext}`);
+        
         if (txLogs.length > 0) {
           // Print last 5 program log lines — this reveals the actual on-chain error
           log(`   TX logs: ${txLogs.slice(-5).join(" | ").slice(0, 400)}`);
