@@ -5,6 +5,7 @@ import { getSupabase } from "@/lib/supabase";
 import type { Database } from "@/lib/database.types";
 
 type MarketWithStats = Database['public']['Views']['markets_with_stats']['Row'];
+type SupabaseClient = ReturnType<typeof getSupabase>;
 
 export function useMarketInfo(slabAddress: string) {
   const [market, setMarket] = useState<MarketWithStats | null>(null);
@@ -14,10 +15,22 @@ export function useMarketInfo(slabAddress: string) {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const supabase = getSupabase();
+
+    let supabase: SupabaseClient;
+    try {
+      supabase = getSupabase();
+    } catch {
+      // Supabase client creation can fail if env vars missing (e.g. in test env)
+      setError("Database unavailable");
+      setLoading(false);
+      return;
+    }
+
+    const sb = supabase;
+
     async function load() {
       try {
-        const { data, error: dbError } = await supabase
+        const { data, error: dbError } = await sb
           .from("markets_with_stats")
           .select("*")
           .eq("slab_address", slabAddress)
@@ -40,7 +53,7 @@ export function useMarketInfo(slabAddress: string) {
     load();
 
     // Subscribe to stat updates
-    const channel = supabase
+    const channel = sb
       .channel(`market-${slabAddress}`)
       .on("postgres_changes", {
         event: "UPDATE",
@@ -52,7 +65,7 @@ export function useMarketInfo(slabAddress: string) {
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => { sb.removeChannel(channel); };
   }, [slabAddress]);
 
   return { market, loading, error };

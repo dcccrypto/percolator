@@ -156,10 +156,17 @@ function MarketsPageInner() {
       // GH#1106: deduplicate — same slab can appear from multiple program scans
       if (seenSlabs.has(addr)) continue;
       const mint = d.config.collateralMint.toBase58();
-      const maxLev = d.params.initialMarginBps > 0n ? Math.floor(10000 / Number(d.params.initialMarginBps)) : 0;
+      // GH#1480: Prefer Supabase max_leverage (indexed by keeper, always correct) over
+      // on-chain initialMarginBps computation. The on-chain bps → leverage conversion can
+      // give 0 when initialMarginBps is misread (e.g. layout mismatch on V1D slabs reads
+      // warmup_period_slots instead). Supabase is set at market creation and updated by
+      // the indexer, matching what /api/markets returns. Fall back to bps derivation only
+      // when no Supabase record exists (new market not yet indexed).
+      const stats = statsMap.get(addr) || null;
+      const onChainMaxLev = d.params.initialMarginBps > 0n ? Math.floor(10000 / Number(d.params.initialMarginBps)) : 0;
+      const maxLev = (stats?.max_leverage != null && stats.max_leverage > 0) ? stats.max_leverage : onChainMaxLev;
       const oracleMode = detectOracleMode(d.config);
       const isAdminOracle = oracleMode === "hyperp" || oracleMode === "admin";
-      const stats = statsMap.get(addr) || null;
       seenSlabs.add(addr);
       result.push({ slabAddress: addr, mintAddress: mint, symbol: null, name: null, maxLeverage: maxLev, isAdminOracle, onChain: d, supabase: stats });
     }
