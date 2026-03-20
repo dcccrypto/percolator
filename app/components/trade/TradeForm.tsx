@@ -22,6 +22,7 @@ import { usePrivyLogin } from "@/hooks/usePrivySafe";
 import { isMockMode } from "@/lib/mock-mode";
 import { isMockSlab, getMockUserAccountIdle } from "@/lib/mock-trade-data";
 import { sanitizeSymbol } from "@/lib/symbol-utils";
+import { useMarketInfo } from "@/hooks/useMarketInfo";
 
 const LEVERAGE_PRESETS = [1, 2, 3, 5, 10];
 const MARGIN_PRESETS = [25, 50, 75, 100];
@@ -117,12 +118,20 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   // program will reject trades with Custom(14) Undercollateralized on the LP side.
   const lpUnderfunded = hasValidLP && lpEntry!.account.capital === 0n;
 
+  // GH#1480: Bug #845 — many devnet slabs have initialMarginBps=0 due to init bug.
+  // Use Supabase max_leverage as fallback when on-chain value is 0.
+  const { market: marketInfo } = useMarketInfo(slabAddress);
   const initialMarginBps = params?.initialMarginBps ?? 1000n;
   const maintenanceMarginBps = params?.maintenanceMarginBps ?? 500n;
   const tradingFeeBps = params?.tradingFeeBps ?? 30n;
   // Clamp to minimum 1 — if initialMarginBps > 10000 (>100% margin), integer division yields
   // 0 which breaks the slider (min=1 > max=0) and causes the "1x and 0x simultaneously" bug.
-  const maxLeverage = initialMarginBps > 0n ? Math.max(1, Number(10000n / initialMarginBps)) : 1;
+  // GH#1480: When initialMarginBps is 0 (Bug #845 uninitialised slab), fall back to
+  // Supabase max_leverage which is set correctly at market creation time.
+  const maxLeverageFromOnChain = initialMarginBps > 0n ? Math.max(1, Number(10000n / initialMarginBps)) : 0;
+  const maxLeverage = maxLeverageFromOnChain > 0
+    ? maxLeverageFromOnChain
+    : (marketInfo?.max_leverage != null && marketInfo.max_leverage > 0 ? marketInfo.max_leverage : 1);
 
   const availableLeverage = useMemo(() => {
     const arr = LEVERAGE_PRESETS.filter((l) => l <= maxLeverage);
