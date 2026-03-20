@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",
-    "@metaplex-foundation/mpl-token-metadata": "2.13.0",
     "@percolator/sdk": "workspace:*",
     "@privy-io/react-auth": "^3.14.1",
     "@sentry/nextjs": "^10.39.0",
