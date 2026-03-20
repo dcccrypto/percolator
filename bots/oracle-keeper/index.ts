@@ -92,7 +92,10 @@ const ORACLE_KEEPER_BLOCKED_MARKETS = new Set<string>([
 ]);
 const ADMIN_KP_PATH = process.env.ADMIN_KEYPAIR_PATH ??
   `${process.env.HOME}/.config/solana/percolator-upgrade-authority.json`;
-const RPC_URL = process.env.RPC_URL ?? "https://api.devnet.solana.com";
+// RPC_URL is required and validated at startup by validateEnvironmentConfig()
+// Removed silent fallback to prevent misconfigured production deployments from
+// accidentally connecting to public devnet (HIGH-002 security hardening)
+const RPC_URL = process.env.RPC_URL!;
 
 const conn = new Connection(RPC_URL, "confirmed");
 
