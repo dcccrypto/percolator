@@ -4,6 +4,7 @@ import {
   parseConfig,
   parseParams,
   detectSlabLayout,
+  SLAB_TIERS_V2,
   type SlabHeader,
   type MarketConfig,
   type EngineState,
@@ -289,6 +290,51 @@ function parseEngineLight(
     };
   }
 
+  // V2 engine struct (BPF intermediate): ENGINE_OFF=600, BITMAP_OFF=432
+  // No mark_price, long_oi, short_oi, emergency OI fields.
+  // Field offsets relative to engineOff are different from V1.
+  const isV2 = layout?.version === 2;
+  if (isV2) {
+    return {
+      vault: readU128LE(data, base + 0),
+      insuranceFund: {
+        balance: readU128LE(data, base + 16),
+        feeRevenue: readU128LE(data, base + 32),
+        isolatedBalance: readU128LE(data, base + 48),
+        isolationBps: readU16LE(data, base + 64),
+      },
+      currentSlot: readU64LE(data, base + 352),
+      fundingIndexQpbE6: readI128LE(data, base + 360),
+      lastFundingSlot: readU64LE(data, base + 376),
+      fundingRateBpsPerSlotLast: readI64LE(data, base + 384),
+      lastCrankSlot: readU64LE(data, base + 392),
+      maxCrankStalenessSlots: readU64LE(data, base + 400),
+      totalOpenInterest: readU128LE(data, base + 408),
+      longOi: 0n,              // V2 has no long_oi
+      shortOi: 0n,             // V2 has no short_oi
+      cTot: readU128LE(data, base + 424),
+      pnlPosTot: readU128LE(data, base + 440),
+      liqCursor: readU16LE(data, base + 456),
+      gcCursor: readU16LE(data, base + 458),
+      lastSweepStartSlot: readU64LE(data, base + 464),
+      lastSweepCompleteSlot: readU64LE(data, base + 472),
+      crankCursor: readU16LE(data, base + 480),
+      sweepStartIdx: readU16LE(data, base + 482),
+      lifetimeLiquidations: readU64LE(data, base + 488),
+      lifetimeForceCloses: readU64LE(data, base + 496),
+      netLpPos: readI128LE(data, base + 504),
+      lpSumAbs: readU128LE(data, base + 520),
+      lpMaxAbs: readU128LE(data, base + 536),
+      lpMaxAbsSweep: readU128LE(data, base + 552),
+      emergencyOiMode: false,   // V2 has no emergency OI fields
+      emergencyStartSlot: 0n,
+      lastBreakerSlot: 0n,
+      markPriceE6: 0n,          // V2 has no mark_price
+      numUsedAccounts: canReadNumUsed ? readU16LE(data, base + numUsedOff) : 0,
+      nextAccountId: canReadNextId ? readU64LE(data, base + nextAccountIdOff) : 0n,
+    };
+  }
+
   // V1 engine struct (PERC-1094 corrected): ENGINE_OFF=600 (BPF/SBF, CONFIG_LEN=496)
   // vault(0,16) + insurance(16,56) + params(72,288) + currentSlot(360) + fundingIndex(368,16)
   // + lastFundingSlot(384) + fundingRateBps(392) + markPrice(400) + lastCrankSlot(424)
@@ -359,6 +405,7 @@ export async function discoverMarkets(
     ...Object.values(SLAB_TIERS_V0),
     ...Object.values(SLAB_TIERS_V1D),
     ...Object.values(SLAB_TIERS_V1D_LEGACY),
+    ...Object.values(SLAB_TIERS_V2),
   ];
   type RawEntry = { pubkey: PublicKey; account: { data: Buffer | Uint8Array }; maxAccounts: number; dataSize: number };
   let rawAccounts: RawEntry[] = [];
@@ -444,7 +491,8 @@ export async function discoverMarkets(
 
     // Detect layout from actual slab size — not slice length — so parse functions
     // get correct V0/V1 offsets even when working on the partial HEADER_SLICE_LENGTH slice.
-    const layout = detectSlabLayout(dataSize);
+    // Pass the data buffer so V2 slabs (same size as V1D) can be disambiguated via version field.
+    const layout = detectSlabLayout(dataSize, data);
 
     try {
       const header = parseHeader(data);

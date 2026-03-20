@@ -86,7 +86,7 @@ const FLAG_RESOLVED = 1 << 0;
  * All engine field offsets are relative to engineOff.
  */
 export interface SlabLayout {
-  version: 0 | 1;
+  version: 0 | 1 | 2;
   headerLen: number;
   configOffset: number;
   configLen: number;
@@ -266,6 +266,43 @@ const V1D_ENGINE_LP_SUM_ABS_OFF = 608;
 // lp_max_abs, lp_max_abs_sweep, emergency_*, trade_twap_* do NOT exist in this version
 const V1D_ENGINE_BITMAP_OFF = 624;
 
+// ---- V2 layout constants (BPF intermediate layout, ENGINE_OFF=600, BITMAP_OFF=432) ----
+// V2 shares ENGINE_OFF=600 with V1, but has a completely different engine struct layout:
+//   - CONFIG_LEN=496 (same as V1 on-chain), HEADER_LEN=104, ACCOUNT_SIZE=248
+//   - Engine lacks mark_price, long_oi, short_oi, emergency OI fields
+//   - Different field offsets than V1D (which has ENGINE_OFF=424)
+// V2 is identified by reading the version field at slab header offset 8 (u32 LE) == 2.
+// Without data, V2 cannot be distinguished from V1D by size alone (postBitmap=18 produces
+// identical sizes to V1D postBitmap=2 — both 65088 for 256 accounts).
+const V2_HEADER_LEN = 104;
+const V2_CONFIG_LEN = 496;
+const V2_ENGINE_OFF = 600;    // align_up(104 + 496, 8) = 600
+const V2_ACCOUNT_SIZE = 248;
+const V2_ENGINE_BITMAP_OFF = 432;
+
+// V2 engine field offsets (relative to engineOff)
+const V2_ENGINE_CURRENT_SLOT_OFF = 352;
+const V2_ENGINE_FUNDING_INDEX_OFF = 360;
+const V2_ENGINE_LAST_FUNDING_SLOT_OFF = 376;
+const V2_ENGINE_FUNDING_RATE_BPS_OFF = 384;
+const V2_ENGINE_LAST_CRANK_SLOT_OFF = 392;
+const V2_ENGINE_MAX_CRANK_STALENESS_OFF = 400;
+const V2_ENGINE_TOTAL_OI_OFF = 408;
+const V2_ENGINE_C_TOT_OFF = 424;
+const V2_ENGINE_PNL_POS_TOT_OFF = 440;
+const V2_ENGINE_LIQ_CURSOR_OFF = 456;
+const V2_ENGINE_GC_CURSOR_OFF = 458;
+const V2_ENGINE_LAST_SWEEP_START_OFF = 464;
+const V2_ENGINE_LAST_SWEEP_COMPLETE_OFF = 472;
+const V2_ENGINE_CRANK_CURSOR_OFF = 480;
+const V2_ENGINE_SWEEP_START_IDX_OFF = 482;
+const V2_ENGINE_LIFETIME_LIQUIDATIONS_OFF = 488;
+const V2_ENGINE_LIFETIME_FORCE_CLOSES_OFF = 496;
+const V2_ENGINE_NET_LP_POS_OFF = 504;
+const V2_ENGINE_LP_SUM_ABS_OFF = 520;
+const V2_ENGINE_LP_MAX_ABS_OFF = 536;
+const V2_ENGINE_LP_MAX_ABS_SWEEP_OFF = 552;
+
 // For backward compatibility, export ENGINE_OFF and ENGINE_MARK_PRICE_OFF
 // (used by reinit-slab and other scripts). These refer to V1 layout.
 export const ENGINE_OFF = V1_ENGINE_OFF;
@@ -309,6 +346,8 @@ const V1D_SIZES = new Map<number, number>();
 // The top active market (6ZytbpV4, $14k 24h vol) was created with postBitmap=18 and uses 65104.
 // PR #1236 fixed postBitmap for new slabs (→2) but broke recognition of these legacy 65104 slabs.
 // GH#1237: add both size variants so detectSlabLayout handles both old and new V1D on-chain data.
+// V2: ENGINE_OFF=600, BITMAP_OFF=432, ACCOUNT_SIZE=248, postBitmap=18
+const V2_SIZES = new Map<number, number>();
 const V1D_SIZES_LEGACY = new Map<number, number>();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
@@ -319,7 +358,20 @@ for (const n of TIERS) {
   V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 2), n);
   // GH#1237: also register the legacy postBitmap=18 sizes for slabs created before GH#1234 fix.
   V1D_SIZES_LEGACY.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 18), n);
+  // V2: postBitmap=18 — produces same sizes as V1D postBitmap=2 (e.g. 65088 for n=256).
+  // Disambiguation requires peeking at the version field in the slab header.
+  V2_SIZES.set(computeSlabSize(V2_ENGINE_OFF, V2_ENGINE_BITMAP_OFF, V2_ACCOUNT_SIZE, n, 18), n);
 }
+
+/**
+ * V2 slab tier sizes (small and large) for discovery.
+ * V2 uses ENGINE_OFF=600, BITMAP_OFF=432, ACCOUNT_SIZE=248, postBitmap=18.
+ * Sizes overlap with V1D (postBitmap=2) — disambiguation requires reading the version field.
+ */
+export const SLAB_TIERS_V2 = {
+  small: { maxAccounts: 256,  dataSize: 65_088,    label: "Small",  description: "256 slots (V2 BPF intermediate)" },
+  large: { maxAccounts: 4096, dataSize: 1_025_568, label: "Large",  description: "4,096 slots (V2 BPF intermediate)" },
+} as const;
 
 /**
  * Build a complete SlabLayout descriptor for V0 or V1 (including V1-legacy) slabs.
@@ -473,22 +525,100 @@ function buildLayoutV1D(maxAccounts: number, postBitmap = 2): SlabLayout {
 }
 
 /**
- * Detect slab layout version from data length.
- * Returns a full SlabLayout descriptor or null if unrecognized.
+ * Build a SlabLayout for V2 (BPF intermediate layout).
+ * ENGINE_OFF=600, BITMAP_OFF=432, ACCOUNT_SIZE=248, postBitmap=18.
+ * V2 lacks mark_price, long_oi, short_oi, emergency OI fields.
  */
+function buildLayoutV2(maxAccounts: number): SlabLayout {
+  const engineOff = V2_ENGINE_OFF;
+  const bitmapOff = V2_ENGINE_BITMAP_OFF;
+  const accountSize = V2_ACCOUNT_SIZE;
+  const bitmapWords = Math.ceil(maxAccounts / 64);
+  const bitmapBytes = bitmapWords * 8;
+  const postBitmap = 18;
+  const nextFreeBytes = maxAccounts * 2;
+  const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
+  const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
+
+  return {
+    version: 2,
+    headerLen: V2_HEADER_LEN,
+    configOffset: V2_HEADER_LEN,
+    configLen: V2_CONFIG_LEN,
+    reservedOff: V1_RESERVED_OFF,   // V2 shares V1's header layout (reserved at 80)
+    engineOff,
+    accountSize,
+    maxAccounts,
+    bitmapWords,
+    accountsOff: engineOff + accountsOffRel,
+
+    engineInsuranceOff: 16,
+    engineParamsOff: V1_ENGINE_PARAMS_OFF,  // same as V1: 72
+    paramsSize: V1_PARAMS_SIZE,             // same as V1: 288
+    engineCurrentSlotOff: V2_ENGINE_CURRENT_SLOT_OFF,
+    engineFundingIndexOff: V2_ENGINE_FUNDING_INDEX_OFF,
+    engineLastFundingSlotOff: V2_ENGINE_LAST_FUNDING_SLOT_OFF,
+    engineFundingRateBpsOff: V2_ENGINE_FUNDING_RATE_BPS_OFF,
+    engineMarkPriceOff: -1,                 // V2 has no mark_price
+    engineLastCrankSlotOff: V2_ENGINE_LAST_CRANK_SLOT_OFF,
+    engineMaxCrankStalenessOff: V2_ENGINE_MAX_CRANK_STALENESS_OFF,
+    engineTotalOiOff: V2_ENGINE_TOTAL_OI_OFF,
+    engineLongOiOff: -1,                    // V2 has no long_oi
+    engineShortOiOff: -1,                   // V2 has no short_oi
+    engineCTotOff: V2_ENGINE_C_TOT_OFF,
+    enginePnlPosTotOff: V2_ENGINE_PNL_POS_TOT_OFF,
+    engineLiqCursorOff: V2_ENGINE_LIQ_CURSOR_OFF,
+    engineGcCursorOff: V2_ENGINE_GC_CURSOR_OFF,
+    engineLastSweepStartOff: V2_ENGINE_LAST_SWEEP_START_OFF,
+    engineLastSweepCompleteOff: V2_ENGINE_LAST_SWEEP_COMPLETE_OFF,
+    engineCrankCursorOff: V2_ENGINE_CRANK_CURSOR_OFF,
+    engineSweepStartIdxOff: V2_ENGINE_SWEEP_START_IDX_OFF,
+    engineLifetimeLiquidationsOff: V2_ENGINE_LIFETIME_LIQUIDATIONS_OFF,
+    engineLifetimeForceClosesOff: V2_ENGINE_LIFETIME_FORCE_CLOSES_OFF,
+    engineNetLpPosOff: V2_ENGINE_NET_LP_POS_OFF,
+    engineLpSumAbsOff: V2_ENGINE_LP_SUM_ABS_OFF,
+    engineLpMaxAbsOff: V2_ENGINE_LP_MAX_ABS_OFF,
+    engineLpMaxAbsSweepOff: V2_ENGINE_LP_MAX_ABS_SWEEP_OFF,
+    engineEmergencyOiModeOff: -1,           // V2 has no emergency OI fields
+    engineEmergencyStartSlotOff: -1,
+    engineLastBreakerSlotOff: -1,
+    engineBitmapOff: V2_ENGINE_BITMAP_OFF,
+    acctOwnerOff: ACCT_OWNER_OFF,
+
+    hasInsuranceIsolation: true,
+    engineInsuranceIsolatedOff: 48,
+    engineInsuranceIsolationBpsOff: 64,
+  };
+}
+
 /**
  * Detect the slab layout version from the raw account data length.
  * Returns the full SlabLayout descriptor, or null if the size is unrecognised.
  * Checks V0, V1D, V1D-legacy, V1, and V1-legacy (pre-PERC-1094) sizes in priority order.
+ *
+ * When `data` is provided and the size matches V1D, the version field at offset 8 is read
+ * to disambiguate V2 slabs (which produce identical sizes to V1D with postBitmap=2).
+ * V2 slabs have version===2 at offset 8 (u32 LE).
+ *
+ * @param dataLen - The slab account data length in bytes
+ * @param data    - Optional raw slab data for version-field disambiguation
  */
-export function detectSlabLayout(dataLen: number): SlabLayout | null {
+export function detectSlabLayout(dataLen: number, data?: Uint8Array): SlabLayout | null {
   // Check V0 sizes first (deployed devnet V0 program)
   const v0n = V0_SIZES.get(dataLen);
   if (v0n !== undefined) return buildLayout(0, v0n);
 
-  // Check V1D sizes (actually deployed V1 program — ENGINE_OFF=424, correct struct layout)
+  // Check V1D sizes (actually deployed V1 program — ENGINE_OFF=424, correct struct layout).
+  // V2 slabs produce identical sizes (postBitmap=18 for V2 == postBitmap=2 for V1D).
+  // When data is available, peek at the version field to disambiguate.
   const v1dn = V1D_SIZES.get(dataLen);
-  if (v1dn !== undefined) return buildLayoutV1D(v1dn, 2);
+  if (v1dn !== undefined) {
+    if (data && data.length >= 12) {
+      const version = readU32LE(data, 8);
+      if (version === 2) return buildLayoutV2(v1dn);
+    }
+    return buildLayoutV1D(v1dn, 2);
+  }
 
   // Check V1D legacy sizes (postBitmap=18 on-chain slabs created before GH#1234 fix).
   // e.g. slab 6ZytbpV4 (TEST/USD, top active market) = 65104 bytes, uses postBitmap=18.

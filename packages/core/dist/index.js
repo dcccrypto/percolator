@@ -1081,6 +1081,32 @@ var V1D_ENGINE_LIFETIME_FORCE_CLOSES_OFF = 584;
 var V1D_ENGINE_NET_LP_POS_OFF = 592;
 var V1D_ENGINE_LP_SUM_ABS_OFF = 608;
 var V1D_ENGINE_BITMAP_OFF = 624;
+var V2_HEADER_LEN = 104;
+var V2_CONFIG_LEN = 496;
+var V2_ENGINE_OFF = 600;
+var V2_ACCOUNT_SIZE = 248;
+var V2_ENGINE_BITMAP_OFF = 432;
+var V2_ENGINE_CURRENT_SLOT_OFF = 352;
+var V2_ENGINE_FUNDING_INDEX_OFF = 360;
+var V2_ENGINE_LAST_FUNDING_SLOT_OFF = 376;
+var V2_ENGINE_FUNDING_RATE_BPS_OFF = 384;
+var V2_ENGINE_LAST_CRANK_SLOT_OFF = 392;
+var V2_ENGINE_MAX_CRANK_STALENESS_OFF = 400;
+var V2_ENGINE_TOTAL_OI_OFF = 408;
+var V2_ENGINE_C_TOT_OFF = 424;
+var V2_ENGINE_PNL_POS_TOT_OFF = 440;
+var V2_ENGINE_LIQ_CURSOR_OFF = 456;
+var V2_ENGINE_GC_CURSOR_OFF = 458;
+var V2_ENGINE_LAST_SWEEP_START_OFF = 464;
+var V2_ENGINE_LAST_SWEEP_COMPLETE_OFF = 472;
+var V2_ENGINE_CRANK_CURSOR_OFF = 480;
+var V2_ENGINE_SWEEP_START_IDX_OFF = 482;
+var V2_ENGINE_LIFETIME_LIQUIDATIONS_OFF = 488;
+var V2_ENGINE_LIFETIME_FORCE_CLOSES_OFF = 496;
+var V2_ENGINE_NET_LP_POS_OFF = 504;
+var V2_ENGINE_LP_SUM_ABS_OFF = 520;
+var V2_ENGINE_LP_MAX_ABS_OFF = 536;
+var V2_ENGINE_LP_MAX_ABS_SWEEP_OFF = 552;
 var ENGINE_OFF = V1_ENGINE_OFF;
 var ENGINE_MARK_PRICE_OFF = V1_ENGINE_MARK_PRICE_OFF;
 function computeSlabSize(engineOff, bitmapOff, accountSize, maxAccounts, postBitmap = 18) {
@@ -1096,6 +1122,7 @@ var V0_SIZES = /* @__PURE__ */ new Map();
 var V1_SIZES = /* @__PURE__ */ new Map();
 var V1_SIZES_LEGACY = /* @__PURE__ */ new Map();
 var V1D_SIZES = /* @__PURE__ */ new Map();
+var V2_SIZES = /* @__PURE__ */ new Map();
 var V1D_SIZES_LEGACY = /* @__PURE__ */ new Map();
 for (const n of TIERS) {
   V0_SIZES.set(computeSlabSize(V0_ENGINE_OFF, V0_ENGINE_BITMAP_OFF, V0_ACCOUNT_SIZE, n), n);
@@ -1103,7 +1130,12 @@ for (const n of TIERS) {
   V1_SIZES_LEGACY.set(computeSlabSize(V1_ENGINE_OFF_LEGACY, V1_ENGINE_BITMAP_OFF, V1_ACCOUNT_SIZE, n), n);
   V1D_SIZES.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 2), n);
   V1D_SIZES_LEGACY.set(computeSlabSize(V1D_ENGINE_OFF, V1D_ENGINE_BITMAP_OFF, V1D_ACCOUNT_SIZE, n, 18), n);
+  V2_SIZES.set(computeSlabSize(V2_ENGINE_OFF, V2_ENGINE_BITMAP_OFF, V2_ACCOUNT_SIZE, n, 18), n);
 }
+var SLAB_TIERS_V2 = {
+  small: { maxAccounts: 256, dataSize: 65088, label: "Small", description: "256 slots (V2 BPF intermediate)" },
+  large: { maxAccounts: 4096, dataSize: 1025568, label: "Large", description: "4,096 slots (V2 BPF intermediate)" }
+};
 function buildLayout(version, maxAccounts, engineOffOverride) {
   const isV0 = version === 0;
   const engineOff = engineOffOverride ?? (isV0 ? V0_ENGINE_OFF : V1_ENGINE_OFF);
@@ -1230,11 +1262,82 @@ function buildLayoutV1D(maxAccounts, postBitmap = 2) {
     // same within InsuranceFund
   };
 }
-function detectSlabLayout(dataLen) {
+function buildLayoutV2(maxAccounts) {
+  const engineOff = V2_ENGINE_OFF;
+  const bitmapOff = V2_ENGINE_BITMAP_OFF;
+  const accountSize = V2_ACCOUNT_SIZE;
+  const bitmapWords = Math.ceil(maxAccounts / 64);
+  const bitmapBytes = bitmapWords * 8;
+  const postBitmap = 18;
+  const nextFreeBytes = maxAccounts * 2;
+  const preAccountsLen = bitmapOff + bitmapBytes + postBitmap + nextFreeBytes;
+  const accountsOffRel = Math.ceil(preAccountsLen / 8) * 8;
+  return {
+    version: 2,
+    headerLen: V2_HEADER_LEN,
+    configOffset: V2_HEADER_LEN,
+    configLen: V2_CONFIG_LEN,
+    reservedOff: V1_RESERVED_OFF,
+    // V2 shares V1's header layout (reserved at 80)
+    engineOff,
+    accountSize,
+    maxAccounts,
+    bitmapWords,
+    accountsOff: engineOff + accountsOffRel,
+    engineInsuranceOff: 16,
+    engineParamsOff: V1_ENGINE_PARAMS_OFF,
+    // same as V1: 72
+    paramsSize: V1_PARAMS_SIZE,
+    // same as V1: 288
+    engineCurrentSlotOff: V2_ENGINE_CURRENT_SLOT_OFF,
+    engineFundingIndexOff: V2_ENGINE_FUNDING_INDEX_OFF,
+    engineLastFundingSlotOff: V2_ENGINE_LAST_FUNDING_SLOT_OFF,
+    engineFundingRateBpsOff: V2_ENGINE_FUNDING_RATE_BPS_OFF,
+    engineMarkPriceOff: -1,
+    // V2 has no mark_price
+    engineLastCrankSlotOff: V2_ENGINE_LAST_CRANK_SLOT_OFF,
+    engineMaxCrankStalenessOff: V2_ENGINE_MAX_CRANK_STALENESS_OFF,
+    engineTotalOiOff: V2_ENGINE_TOTAL_OI_OFF,
+    engineLongOiOff: -1,
+    // V2 has no long_oi
+    engineShortOiOff: -1,
+    // V2 has no short_oi
+    engineCTotOff: V2_ENGINE_C_TOT_OFF,
+    enginePnlPosTotOff: V2_ENGINE_PNL_POS_TOT_OFF,
+    engineLiqCursorOff: V2_ENGINE_LIQ_CURSOR_OFF,
+    engineGcCursorOff: V2_ENGINE_GC_CURSOR_OFF,
+    engineLastSweepStartOff: V2_ENGINE_LAST_SWEEP_START_OFF,
+    engineLastSweepCompleteOff: V2_ENGINE_LAST_SWEEP_COMPLETE_OFF,
+    engineCrankCursorOff: V2_ENGINE_CRANK_CURSOR_OFF,
+    engineSweepStartIdxOff: V2_ENGINE_SWEEP_START_IDX_OFF,
+    engineLifetimeLiquidationsOff: V2_ENGINE_LIFETIME_LIQUIDATIONS_OFF,
+    engineLifetimeForceClosesOff: V2_ENGINE_LIFETIME_FORCE_CLOSES_OFF,
+    engineNetLpPosOff: V2_ENGINE_NET_LP_POS_OFF,
+    engineLpSumAbsOff: V2_ENGINE_LP_SUM_ABS_OFF,
+    engineLpMaxAbsOff: V2_ENGINE_LP_MAX_ABS_OFF,
+    engineLpMaxAbsSweepOff: V2_ENGINE_LP_MAX_ABS_SWEEP_OFF,
+    engineEmergencyOiModeOff: -1,
+    // V2 has no emergency OI fields
+    engineEmergencyStartSlotOff: -1,
+    engineLastBreakerSlotOff: -1,
+    engineBitmapOff: V2_ENGINE_BITMAP_OFF,
+    acctOwnerOff: ACCT_OWNER_OFF,
+    hasInsuranceIsolation: true,
+    engineInsuranceIsolatedOff: 48,
+    engineInsuranceIsolationBpsOff: 64
+  };
+}
+function detectSlabLayout(dataLen, data) {
   const v0n = V0_SIZES.get(dataLen);
   if (v0n !== void 0) return buildLayout(0, v0n);
   const v1dn = V1D_SIZES.get(dataLen);
-  if (v1dn !== void 0) return buildLayoutV1D(v1dn, 2);
+  if (v1dn !== void 0) {
+    if (data && data.length >= 12) {
+      const version = readU32LE(data, 8);
+      if (version === 2) return buildLayoutV2(v1dn);
+    }
+    return buildLayoutV1D(v1dn, 2);
+  }
   const v1dln = V1D_SIZES_LEGACY.get(dataLen);
   if (v1dln !== void 0) return buildLayoutV1D(v1dln, 18);
   const v1n = V1_SIZES.get(dataLen);
@@ -1870,6 +1973,51 @@ function parseEngineLight(data, layout, maxAccounts = 4096) {
       nextAccountId: canReadNextId ? readU64LE2(data, base + nextAccountIdOff) : 0n
     };
   }
+  const isV2 = layout?.version === 2;
+  if (isV2) {
+    return {
+      vault: readU128LE2(data, base + 0),
+      insuranceFund: {
+        balance: readU128LE2(data, base + 16),
+        feeRevenue: readU128LE2(data, base + 32),
+        isolatedBalance: readU128LE2(data, base + 48),
+        isolationBps: readU16LE2(data, base + 64)
+      },
+      currentSlot: readU64LE2(data, base + 352),
+      fundingIndexQpbE6: readI128LE2(data, base + 360),
+      lastFundingSlot: readU64LE2(data, base + 376),
+      fundingRateBpsPerSlotLast: readI64LE2(data, base + 384),
+      lastCrankSlot: readU64LE2(data, base + 392),
+      maxCrankStalenessSlots: readU64LE2(data, base + 400),
+      totalOpenInterest: readU128LE2(data, base + 408),
+      longOi: 0n,
+      // V2 has no long_oi
+      shortOi: 0n,
+      // V2 has no short_oi
+      cTot: readU128LE2(data, base + 424),
+      pnlPosTot: readU128LE2(data, base + 440),
+      liqCursor: readU16LE2(data, base + 456),
+      gcCursor: readU16LE2(data, base + 458),
+      lastSweepStartSlot: readU64LE2(data, base + 464),
+      lastSweepCompleteSlot: readU64LE2(data, base + 472),
+      crankCursor: readU16LE2(data, base + 480),
+      sweepStartIdx: readU16LE2(data, base + 482),
+      lifetimeLiquidations: readU64LE2(data, base + 488),
+      lifetimeForceCloses: readU64LE2(data, base + 496),
+      netLpPos: readI128LE2(data, base + 504),
+      lpSumAbs: readU128LE2(data, base + 520),
+      lpMaxAbs: readU128LE2(data, base + 536),
+      lpMaxAbsSweep: readU128LE2(data, base + 552),
+      emergencyOiMode: false,
+      // V2 has no emergency OI fields
+      emergencyStartSlot: 0n,
+      lastBreakerSlot: 0n,
+      markPriceE6: 0n,
+      // V2 has no mark_price
+      numUsedAccounts: canReadNumUsed ? readU16LE2(data, base + numUsedOff) : 0,
+      nextAccountId: canReadNextId ? readU64LE2(data, base + nextAccountIdOff) : 0n
+    };
+  }
   return {
     vault: readU128LE2(data, base + 0),
     insuranceFund: {
@@ -1916,7 +2064,8 @@ async function discoverMarkets(connection, programId) {
     ...Object.values(SLAB_TIERS),
     ...Object.values(SLAB_TIERS_V0),
     ...Object.values(SLAB_TIERS_V1D),
-    ...Object.values(SLAB_TIERS_V1D_LEGACY)
+    ...Object.values(SLAB_TIERS_V1D_LEGACY),
+    ...Object.values(SLAB_TIERS_V2)
   ];
   let rawAccounts = [];
   try {
@@ -1992,7 +2141,7 @@ async function discoverMarkets(connection, programId) {
       }
     }
     if (!valid) continue;
-    const layout = detectSlabLayout(dataSize);
+    const layout = detectSlabLayout(dataSize, data);
     try {
       const header = parseHeader(data);
       const config = parseConfig(data, layout);
@@ -3214,6 +3363,7 @@ export {
   SLAB_TIERS_V1,
   SLAB_TIERS_V1D,
   SLAB_TIERS_V1D_LEGACY,
+  SLAB_TIERS_V2,
   STAKE_IX,
   STAKE_POOL_SIZE,
   STAKE_PROGRAM_ID,
