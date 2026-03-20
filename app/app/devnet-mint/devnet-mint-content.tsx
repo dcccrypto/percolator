@@ -23,7 +23,7 @@ import {
 import {
   createCreateMetadataAccountV3Instruction,
   PROGRAM_ID as TOKEN_METADATA_PROGRAM_ID,
-} from "@metaplex-foundation/mpl-token-metadata";
+} from "@/lib/mpl-token-metadata-stub";
 import gsap from "gsap";
 import Link from "next/link";
 import { ScrollReveal } from "@/components/ui/ScrollReveal";
