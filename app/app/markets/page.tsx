@@ -31,6 +31,12 @@ import { formatStatValue } from "@/lib/format";
  *  exceed this and are nulled/excluded. */
 const MAX_SANE_PRICE_USD = 1_000_000;
 
+/** GH#1483: Upper bound for UI leverage display. The Solana program enforces margin
+ *  requirements at execution time, so this is display-only protection against corrupt
+ *  DB values (keeper bug, row injection, data corruption). 200x is well above any
+ *  legitimate max leverage on Percolator devnet (current max: 20x). */
+const MAX_DISPLAY_LEVERAGE = 200;
+
 function formatNum(n: number | null | undefined): string {
   if (n === null || n === undefined) return "\u2014";
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -164,7 +170,8 @@ function MarketsPageInner() {
       // when no Supabase record exists (new market not yet indexed).
       const stats = statsMap.get(addr) || null;
       const onChainMaxLev = d.params.initialMarginBps > 0n ? Math.floor(10000 / Number(d.params.initialMarginBps)) : 0;
-      const maxLev = (stats?.max_leverage != null && stats.max_leverage > 0) ? stats.max_leverage : onChainMaxLev;
+      const rawLev = (stats?.max_leverage != null && stats.max_leverage > 0) ? stats.max_leverage : onChainMaxLev;
+      const maxLev = Math.min(MAX_DISPLAY_LEVERAGE, rawLev);
       const oracleMode = detectOracleMode(d.config);
       const isAdminOracle = oracleMode === "hyperp" || oracleMode === "admin";
       seenSlabs.add(addr);
@@ -176,7 +183,7 @@ function MarketsPageInner() {
       if (seenSlabs.has(slabAddr)) continue;
       // Use Supabase fields for display
       const mint = stats.mint_address ?? "";
-      const maxLev = stats.max_leverage ?? 10;
+      const maxLev = Math.min(MAX_DISPLAY_LEVERAGE, stats.max_leverage ?? 10);
       // Without on-chain data, we can't detect oracle mode — use Supabase oracle_authority hint
       const isAdminOracle = stats.oracle_authority != null && stats.oracle_authority !== "";
       result.push({
