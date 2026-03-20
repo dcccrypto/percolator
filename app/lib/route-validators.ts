@@ -59,6 +59,15 @@ export function validateNumericParam(
     };
   }
 
+  // Strict integer check: reject floats ("1.5"), trailing garbage ("20abc"), and negatives
+  // expressed as non-integer strings. parseInt alone would silently accept these.
+  if (!/^-?\d+$/.test(value)) {
+    return {
+      valid: false,
+      response: NextResponse.json({ error: "Invalid numeric parameter" }, { status: 400 }),
+    };
+  }
+
   const num = parseInt(value, 10);
   if (isNaN(num)) {
     return {

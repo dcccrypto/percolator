@@ -272,20 +272,23 @@ export async function GET(request: NextRequest) {
     // GH#1490: Validate limit (must be 1–500) and offset (must be >= 0) using
     // validateNumericParam() from route-validators.ts. Previously limit=-1/0/999999
     // all returned the full dataset and non-numeric offset was silently ignored.
+    // Follow-up: use validated .value directly (not re-parsed) to reject "1.5"/"20abc".
     const MAX_LIMIT = 500;
     const limitParam = request?.nextUrl?.searchParams?.get("limit") ?? null;
+    let limitNum = 0;
     if (limitParam !== null) {
       const limitValidation = validateNumericParam(limitParam, { min: 1, max: MAX_LIMIT });
       if (!limitValidation.valid) return limitValidation.response;
+      limitNum = limitValidation.value;
     }
-    const limitNum = limitParam ? parseInt(limitParam, 10) : 0;
 
     const offsetParam = request?.nextUrl?.searchParams?.get("offset") ?? null;
+    let offsetNum = 0;
     if (offsetParam !== null) {
       const offsetValidation = validateNumericParam(offsetParam, { min: 0 });
       if (!offsetValidation.valid) return offsetValidation.response;
+      offsetNum = offsetValidation.value;
     }
-    const offsetNum = offsetParam ? parseInt(offsetParam, 10) : 0;
 
     const paged = offsetNum > 0 ? nonZombie.slice(offsetNum) : nonZombie;
     const limited = limitNum > 0 ? paged.slice(0, limitNum) : paged;
