@@ -228,11 +228,33 @@ export async function GET(request: NextRequest) {
     return sum + (m.trade_count_24h ?? 0);
   }, 0);
 
+  // GH#1465: Align totalListedMarkets with /api/markets total by excluding zombie markets.
+  // /api/markets excludes zombies (vault=0 or null+no-stats) from its `total` field.
+  // Previously statsData.length included zombies, causing totalListedMarkets (195) to
+  // diverge from /api/markets total (122) by exactly zombieCount (73).
+  // Apply the same zombie predicate used in /api/markets (GH#1420 + GH#1427):
+  //   - vault_balance == 0 (explicitly drained)
+  //   - vault_balance == null AND no sane stats AND total_accounts == 0 (never indexed)
+  const nonZombieListedMarkets = statsData.filter((m) => {
+    const vaultBal = (m as Record<string, unknown>).vault_balance as number | null;
+    const hasNoStats =
+      !isSaneMarketValue(m.last_price) &&
+      !isSaneMarketValue(m.volume_24h) &&
+      !isSaneMarketValue(m.total_open_interest) &&
+      ((m as Record<string, unknown>).total_accounts as number ?? 0) === 0;
+    const isZombie =
+      (vaultBal != null && vaultBal === 0) ||
+      (vaultBal == null && hasNoStats);
+    return !isZombie;
+  });
+
   return NextResponse.json({
     totalMarkets,
-    // #1172: totalListedMarkets includes all non-blocked markets (even those with
-    // zero stats). totalMarkets counts only "active" markets (at least one sane stat).
-    totalListedMarkets: statsData.length,
+    // #1172: totalListedMarkets includes all non-blocked, non-zombie markets.
+    // totalMarkets counts only "active" markets (at least one sane stat).
+    // GH#1465: Previously this was statsData.length (included zombies), diverging
+    // from /api/markets total. Now aligned by applying the same zombie filter.
+    totalListedMarkets: nonZombieListedMarkets.length,
     totalVolume24h,
     totalOpenInterest,
     totalTraders: uniqueTraders,
