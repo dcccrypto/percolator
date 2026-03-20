@@ -49,12 +49,21 @@ export function isActiveMarket(row: {
  */
 export function isZombieMarket(row: {
   vault_balance?: number | null;
+  c_tot?: number | null;
   last_price?: number | null;
   volume_24h?: number | null;
   total_open_interest?: number | null;
   total_accounts?: number | null;
 }): boolean {
   const vaultBal = row.vault_balance ?? null;
+  const cTot = row.c_tot ?? null;
+
+  // If on-chain collateral total (c_tot) is positive, market has real funds
+  // even if vault_balance reads 0. This happens because c_tot tracks collateral
+  // inside the slab data, while vault_balance reads the separate vault ATA.
+  // FF7K keeper markets store collateral in the slab, not the vault ATA.
+  if (cTot !== null && cTot > 0) return false;
+
   if (vaultBal !== null && vaultBal === 0) return true;
   if (vaultBal === null) {
     const hasNoStats =

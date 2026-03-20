@@ -69,7 +69,7 @@ export async function GET(request: NextRequest) {
     // GH#1265: also fetch trade_count_24h so we can sum it directly (replaces buggy trades table count query)
     // GH#1297: include vault_balance + total_accounts to apply phantom OI guard (consistent with /api/markets)
     // GH#1419: include stats_updated_at to filter stale volume_24h (markets not updated in >48h)
-    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals, vault_balance, total_accounts, stats_updated_at").limit(500),
+    supabase.from("markets_with_stats").select("slab_address, volume_24h, trade_count_24h, open_interest_long, open_interest_short, total_open_interest, last_price, decimals, vault_balance, c_tot, total_accounts, stats_updated_at").limit(500),
     supabase.from("trades").select("trader").limit(5000),
   ]);
 
@@ -235,6 +235,7 @@ export async function GET(request: NextRequest) {
   // Uses shared isZombieMarket() helper (GH#1420 + GH#1427 predicate, CodeRabbit #1466).
   const nonZombieListedMarkets = statsData.filter((m) => !isZombieMarket(m as {
     vault_balance?: number | null;
+    c_tot?: number | null;
     last_price?: number | null;
     volume_24h?: number | null;
     total_open_interest?: number | null;

@@ -222,6 +222,7 @@ export async function GET(request: NextRequest) {
       };
       const is_zombie = isZombieMarket({
         vault_balance: numericOrNull(m.vault_balance),
+        c_tot: numericOrNull(m.c_tot),
         last_price: numericOrNull(m.last_price),
         volume_24h: numericOrNull(m.volume_24h),
         total_open_interest: numericOrNull(m.total_open_interest),
