@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { proxyToApi } from "@/lib/api-proxy";
+import { validateSlabParam } from "@/lib/route-validators";
 import { isBlockedSlab } from "@/lib/blocklist";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,8 @@ function isPhantomOiRecord(record: {
  *
  * Previously this was a next.config.js rewrite with no server-side filtering,
  * so phantom data from Railway (if it hadn't redeployed) passed straight through.
+ * 
+ * MEDIUM-003: Added slab parameter validation.
  */
 export async function GET(
   req: NextRequest,
@@ -41,12 +44,19 @@ export async function GET(
 ) {
   const { slab } = await params;
 
+  // Validate slab parameter format
+  const validation = validateSlabParam(slab);
+  if (!validation.valid) {
+    return validation.response;
+  }
+  const validSlab = validation.slab;
+
   // Blocklist check — short-circuit before hitting Railway.
-  if (isBlockedSlab(slab)) {
+  if (isBlockedSlab(validSlab)) {
     return NextResponse.json({ error: "Market not found" }, { status: 404 });
   }
 
-  const upstream = await proxyToApi(req, `/open-interest/${slab}`);
+  const upstream = await proxyToApi(req, `/open-interest/${validSlab}`);
 
   if (!upstream.ok) return upstream;
 

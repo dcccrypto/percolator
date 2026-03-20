@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/supabase";
 import { PublicKey } from "@solana/web3.js";
+import { validateSlabParam } from "@/lib/route-validators";
 import { requireAuth, UNAUTHORIZED } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
@@ -16,11 +17,18 @@ export async function GET(
 ) {
   const { slab } = await params;
 
+  // Validate slab parameter format
+  const validation = validateSlabParam(slab);
+  if (!validation.valid) {
+    return validation.response;
+  }
+  const validSlab = validation.slab;
+
   const supabase = getServiceClient();
   const { data, error } = await supabase
     .from("markets")
     .select("logo_url")
-    .eq("slab_address", slab)
+    .eq("slab_address", validSlab)
     .single();
 
   if (error) {
@@ -42,14 +50,14 @@ export async function POST(
   const { slab } = await params;
 
   // Validate slab address
-  try {
-    new PublicKey(slab);
-  } catch {
-    return NextResponse.json({ error: "Invalid slab address" }, { status: 400 });
+  const validation = validateSlabParam(slab);
+  if (!validation.valid) {
+    return validation.response;
   }
+  const validSlab = validation.slab;
 
   // Rate limit
-  const lastUpload = uploadTimestamps.get(slab) ?? 0;
+  const lastUpload = uploadTimestamps.get(validSlab) ?? 0;
   if (Date.now() - lastUpload < RATE_LIMIT_MS) {
     return NextResponse.json({ error: "Rate limited. Try again in 30s." }, { status: 429 });
   }
