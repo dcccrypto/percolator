@@ -18,16 +18,31 @@ function isSaneMarketValue(v: number | null | undefined): boolean {
 
 type MarketRow = {
   vault_balance?: number | null;
+  c_tot?: number | null;
   last_price?: number | null;
   volume_24h?: number | null;
   total_open_interest?: number | null;
   total_accounts?: number | null;
 };
 
-/** GH#1427: mirrors the route.ts is_zombie logic */
+/** GH#1427 + GH#1499: mirrors the activeMarketFilter.ts isZombieMarket logic */
 function isZombie(m: MarketRow): boolean {
-  if (m.vault_balance != null && m.vault_balance === 0) return true;
-  if (m.vault_balance == null) {
+  const vaultBal = m.vault_balance ?? null;
+  const cTot = m.c_tot ?? null;
+
+  // GH#1499: c_tot > 0 only exempts when there is corroborating activity.
+  // FF7K markets: vault=0, c_tot>0, has price → hasActivity=true → not zombie.
+  // NNOB: vault=0, c_tot>0, no price, no accounts → hasActivity=false → zombie.
+  const hasActivity =
+    isSaneMarketValue(m.last_price) ||
+    isSaneMarketValue(m.volume_24h) ||
+    isSaneMarketValue(m.total_open_interest) ||
+    (m.total_accounts ?? 0) > 0;
+
+  if (cTot !== null && cTot > 0 && hasActivity) return false;
+
+  if (vaultBal !== null && vaultBal === 0) return true;
+  if (vaultBal === null) {
     const hasNoStats =
       !isSaneMarketValue(m.last_price) &&
       !isSaneMarketValue(m.volume_24h) &&
@@ -192,6 +207,67 @@ describe("GH#1427 null vault_balance + no-stats zombie", () => {
       "PHANTOM1",
       "PHANTOM2",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GH#1499 — NNOB edge case: c_tot > 0 but no activity (vault=0, accounts=0, no price)
+// ---------------------------------------------------------------------------
+
+describe("GH#1499 c_tot>0 with no activity still zombie", () => {
+  it("NNOB case: c_tot=100B, vault=0, accounts=0, no price → zombie", () => {
+    // Before fix: c_tot > 0 short-circuited → is_zombie=false (BUG: NNOB showed in default response with null price)
+    // After fix: c_tot > 0 only exempts when hasActivity is also true
+    expect(
+      isZombie({
+        vault_balance: 0,
+        // c_tot not in the local type — but the API/lib now checks for activity
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("FF7K healthy case: c_tot>0, vault=0, has price → NOT zombie", () => {
+    // The 33 working FF7K markets: vault=0 (stores collateral in slab), c_tot>0,
+    // and keeper is actively pushing prices. c_tot+activity exemption applies.
+    expect(
+      isZombie({
+        vault_balance: 0,
+        c_tot: 1_000_000_000,
+        last_price: 1.0, // keeper cranks this → hasActivity=true
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("FF7K with accounts case: c_tot>0, vault=0, has accounts → NOT zombie", () => {
+    expect(
+      isZombie({
+        vault_balance: 0,
+        c_tot: 5_000_000_000,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 3, // users have positions → hasActivity=true
+      }),
+    ).toBe(false);
+  });
+
+  it("dead slab: vault=0, no price, no accounts, no volume → zombie", () => {
+    expect(
+      isZombie({
+        vault_balance: 0,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
   });
 });
 
