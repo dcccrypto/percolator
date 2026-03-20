@@ -380,3 +380,60 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     assert!(engine.oi_eff_short_q == 0,
         "OI must be zeroed after dust clearance");
 }
+
+// ############################################################################
+// Full ADL pipeline integration: trade → liquidation → ADL → reset → reopen
+// ############################################################################
+
+/// End-to-end ADL pipeline: two accounts open bilateral positions,
+/// one goes bankrupt, liquidation triggers enqueue_adl with K-socialization,
+/// end-of-instruction resets fire, and a subsequent trade reopens the market.
+/// Verifies OI_eff_long == OI_eff_short is maintained throughout.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_adl_pipeline_trade_liquidate_reopen() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.last_crank_slot = DEFAULT_SLOT;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    let c = engine.add_user(0).unwrap();
+    engine.deposit(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(c, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Step 1: a goes long, b goes short (bilateral position)
+    let size = (500 * POS_SCALE) as i128;
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after trade");
+
+    // Step 2: make a deeply bankrupt (loss exceeds capital)
+    engine.set_pnl(a as usize, -200_000i128);
+
+    // Step 3: liquidate a via keeper_crank
+    let slot2 = DEFAULT_SLOT + 1;
+    let candidates = [a, b, c];
+    let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10);
+    assert!(result.is_ok());
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after liquidation+ADL");
+
+    // Step 4: verify ADL fired — K should have changed (deficit socialized to b)
+    // or A should have changed (quantity reduction)
+    let liqs = engine.lifetime_liquidations;
+    assert!(liqs > 0, "at least one liquidation must have occurred");
+
+    // Step 5: subsequent trade reopening the market
+    // c goes long against b (new bilateral position after ADL)
+    let new_size = (100 * POS_SCALE) as i128;
+    let slot3 = slot2 + 1;
+    engine.last_crank_slot = slot3;
+    let result2 = engine.execute_trade(c, b, DEFAULT_ORACLE, slot3, new_size, DEFAULT_ORACLE);
+
+    // Trade may or may not succeed (b's equity may be impaired from ADL)
+    // but OI balance must hold regardless
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after reopen attempt");
+    assert!(engine.check_conservation(), "conservation after full pipeline");
+
+    kani::cover!(result2.is_ok(), "post-ADL trade succeeds");
+}

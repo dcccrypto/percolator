@@ -2179,6 +2179,7 @@ impl RiskEngine {
         // Steps 8-9: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
 
         Ok(())
     }
@@ -2210,6 +2211,7 @@ impl RiskEngine {
         // Steps 4-5: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
 
         // Step 7: assert OI balance
         assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after settle");
@@ -2361,13 +2363,19 @@ impl RiskEngine {
             0
         };
 
-        // Charge fee from account a (payer)
+        // Charge fee from both accounts (spec §10.5 step 28)
         if fee > 0 {
             assert!(fee <= MAX_PROTOCOL_FEE_ABS, "execute_trade: fee exceeds MAX_PROTOCOL_FEE_ABS");
             self.charge_fee_to_insurance(a as usize, fee)?;
+            self.charge_fee_to_insurance(b as usize, fee)?;
         }
 
-        // Track LP fees
+        // Track LP fees (both sides' fees)
+        if self.accounts[a as usize].is_lp() {
+            self.accounts[a as usize].fees_earned_total = U128::new(
+                add_u128(self.accounts[a as usize].fees_earned_total.get(), fee)
+            );
+        }
         if self.accounts[b as usize].is_lp() {
             self.accounts[b as usize].fees_earned_total = U128::new(
                 add_u128(self.accounts[b as usize].fees_earned_total.get(), fee)
@@ -2384,6 +2392,9 @@ impl RiskEngine {
         // Steps 16-17: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+
+        // Step 32: recompute r_last if funding-rate inputs changed (spec §10.5)
+        self.recompute_r_last_from_final_state();
 
         // Step 18: assert OI balance (spec §10.4)
         assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after trade");
@@ -2586,6 +2597,7 @@ impl RiskEngine {
         // touch_account_full mutates state even when liquidation doesn't proceed.
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
 
         if result {
             // Assert OI balance (spec §10.5)
@@ -2835,6 +2847,7 @@ impl RiskEngine {
         if self.accounts[idx as usize].position_basis_q == 0 {
             self.schedule_end_of_instruction_resets(&mut ctx)?;
             self.finalize_end_of_instruction_resets(&ctx);
+            self.recompute_r_last_from_final_state();
             return Ok(());
         }
 
@@ -2873,6 +2886,7 @@ impl RiskEngine {
         // Steps 11-12: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
 
         Ok(())
     }
@@ -2920,6 +2934,7 @@ impl RiskEngine {
         // End-of-instruction resets before freeing
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
 
         self.free_slot(idx);
 
