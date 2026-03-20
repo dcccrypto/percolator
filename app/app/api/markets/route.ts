@@ -186,8 +186,9 @@ export async function GET(request: NextRequest) {
       // computeMarketHealthFromStats and the markets page sort/filter.
       // GH#1438: Aligned to strict < via shared isPhantomOpenInterest() helper in lib/phantom-oi.ts
       // so /api/markets and /api/stats are guaranteed to use the same predicate (single source of truth).
-      const accountsCount = (m.total_accounts as number) ?? 0;
-      const vaultBal = (m.vault_balance as number) ?? 0;
+      // GH#1494: coerce NUMERIC (string from Supabase) to number before arithmetic comparisons.
+      const accountsCount = Number(m.total_accounts ?? 0);
+      const vaultBal = Number(m.vault_balance ?? 0);
       const isPhantomOI = isPhantomOpenInterest(accountsCount, vaultBal);
       const displayOiUsd = isPhantomOI ? null : total_open_interest_usd;
 
@@ -207,12 +208,24 @@ export async function GET(request: NextRequest) {
       // We tag them with is_zombie=true and exclude them from the default response
       // (opt-in via ?include_zombie=true). See isZombieMarket() in activeMarketFilter.ts
       // for the two conditions: vault=0 (drained) or vault=null+no-stats (phantom).
+      //
+      // GH#1494: Supabase returns NUMERIC columns (vault_balance, total_open_interest,
+      // volume_24h) as strings at runtime. TypeScript `as number | null` is compile-time
+      // only and does NOT coerce the value. Without Number() coercion, the strict equality
+      // check `vaultBal === 0` in isZombieMarket() compares string "0" to number 0 →
+      // always false → is_zombie is never set to true despite zombieCount=73.
+      // Fix: coerce all NUMERIC fields to number|null before passing to isZombieMarket().
+      const numericOrNull = (v: unknown): number | null => {
+        if (v == null) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
       const is_zombie = isZombieMarket({
-        vault_balance: m.vault_balance as number | null,
-        last_price: m.last_price as number | null,
-        volume_24h: m.volume_24h as number | null,
-        total_open_interest: m.total_open_interest as number | null,
-        total_accounts: m.total_accounts as number | null,
+        vault_balance: numericOrNull(m.vault_balance),
+        last_price: numericOrNull(m.last_price),
+        volume_24h: numericOrNull(m.volume_24h),
+        total_open_interest: numericOrNull(m.total_open_interest),
+        total_accounts: numericOrNull(m.total_accounts),
       });
 
       return {
