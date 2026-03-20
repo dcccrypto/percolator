@@ -27,6 +27,11 @@ import { useMarketInfo } from "@/hooks/useMarketInfo";
 const LEVERAGE_PRESETS = [1, 2, 3, 5, 10];
 const MARGIN_PRESETS = [25, 50, 75, 100];
 
+/** GH#1483: Upper bound for UI leverage display. Clamps Supabase-sourced max_leverage
+ *  to protect against DB corruption/keeper bugs. The Solana program enforces margin
+ *  requirements at execution time regardless of what the UI slider shows. */
+const MAX_DISPLAY_LEVERAGE = 200;
+
 function formatPerc(native: bigint, decimals = 6): string {
   const abs = native < 0n ? -native : native;
   const base = 10n ** BigInt(decimals);
@@ -129,9 +134,12 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   // GH#1480: When initialMarginBps is 0 (Bug #845 uninitialised slab), fall back to
   // Supabase max_leverage which is set correctly at market creation time.
   const maxLeverageFromOnChain = initialMarginBps > 0n ? Math.max(1, Number(10000n / initialMarginBps)) : 0;
-  const maxLeverage = maxLeverageFromOnChain > 0
+  const rawMaxLeverage = maxLeverageFromOnChain > 0
     ? maxLeverageFromOnChain
     : (marketInfo?.max_leverage != null && marketInfo.max_leverage > 0 ? marketInfo.max_leverage : 1);
+  // GH#1483: Clamp to MAX_DISPLAY_LEVERAGE — protects against corrupt DB values.
+  // Program enforces real margin requirements at execution time.
+  const maxLeverage = Math.min(MAX_DISPLAY_LEVERAGE, rawMaxLeverage);
 
   const availableLeverage = useMemo(() => {
     const arr = LEVERAGE_PRESETS.filter((l) => l <= maxLeverage);
