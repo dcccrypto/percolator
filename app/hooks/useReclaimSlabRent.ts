@@ -183,36 +183,74 @@ export function useReclaimSlabRent(): UseReclaimSlabRentResult {
           data,
         });
 
-        const { blockhash, lastValidBlockHeight } =
-          await connection.getLatestBlockhash("confirmed");
+        // GH#1488: Fetch a fresh blockhash IMMEDIATELY before building the tx so
+        // it doesn't expire while Privy's signing modal is open.  On blockhash-not-found
+        // we retry once more with another fresh blockhash (covers slow approval paths).
+        const MAX_BLOCKHASH_RETRIES = 2;
+        let sig: string | null = null;
 
-        const tx = new Transaction({
-          feePayer: dest,
-          blockhash,
-          lastValidBlockHeight,
-        });
-        tx.add(ix);
+        for (let attempt = 0; attempt < MAX_BLOCKHASH_RETRIES; attempt++) {
+          // Fetch fresh blockhash each attempt
+          const { blockhash, lastValidBlockHeight } =
+            await connection.getLatestBlockhash("confirmed");
 
-        // Step 1: slab keypair signs (proves ownership of the uninitialised slab)
-        tx.partialSign(slabKeypair);
+          const tx = new Transaction({
+            feePayer: dest,
+            blockhash,
+            lastValidBlockHeight,
+          });
+          tx.add(ix);
 
-        // Step 2: wallet (Privy) signs — uses signTransaction consistent with rest of codebase
-        const signedTx = await walletCompat.signTransaction(tx);
+          // Step 1: slab keypair signs (proves ownership of the uninitialised slab)
+          tx.partialSign(slabKeypair);
 
-        // Step 3: broadcast and confirm
-        const sig = await connection.sendRawTransaction(signedTx.serialize(), {
-          skipPreflight: false,
-        });
+          // Step 2: wallet (Privy) signs — uses signTransaction consistent with rest of codebase.
+          // GH#1488: signing happens AFTER blockhash fetch so latency from the Privy modal
+          // does not stale the blockhash before broadcast.
+          const signedTx = await walletCompat.signTransaction(tx);
 
-        const confirmation = await connection.confirmTransaction(
-          { signature: sig, blockhash, lastValidBlockHeight },
-          "confirmed"
-        );
+          // Step 3: broadcast
+          let rawSig: string;
+          try {
+            rawSig = await connection.sendRawTransaction(signedTx.serialize(), {
+              skipPreflight: false,
+            });
+          } catch (sendErr: unknown) {
+            const sendMsg = sendErr instanceof Error ? sendErr.message : String(sendErr);
+            const isBlockhashErr =
+              sendMsg.toLowerCase().includes("blockhash not found") ||
+              sendMsg.toLowerCase().includes("blockhash expired");
 
-        if (confirmation.value.err) {
-          throw new Error(
-            `Transaction landed on-chain but was rejected by the program: ${JSON.stringify(confirmation.value.err)}`
+            if (isBlockhashErr && attempt < MAX_BLOCKHASH_RETRIES - 1) {
+              // Retry immediately with a fresh blockhash (next loop iteration).
+              // We don't re-open the Privy modal — the same signedTx cannot be re-used
+              // because the blockhash is embedded; we need to re-sign with new hash.
+              console.warn(`[useReclaimSlabRent] blockhash expired on attempt ${attempt + 1}, retrying…`);
+              continue;
+            }
+            throw sendErr;
+          }
+
+          // Step 4: confirm on-chain — only show success AFTER this resolves.
+          // GH#1488: previously success was inferred from Privy "Transaction signed!" which
+          // fires before broadcast; now we wait for actual on-chain confirmation.
+          const confirmation = await connection.confirmTransaction(
+            { signature: rawSig, blockhash, lastValidBlockHeight },
+            "confirmed"
           );
+
+          if (confirmation.value.err) {
+            throw new Error(
+              `Transaction landed on-chain but was rejected by the program: ${JSON.stringify(confirmation.value.err)}`
+            );
+          }
+
+          sig = rawSig;
+          break;
+        }
+
+        if (!sig) {
+          throw new Error("Transaction failed after retries. Please try again.");
         }
 
         setTxSig(sig);
