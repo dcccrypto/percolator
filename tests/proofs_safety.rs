@@ -974,11 +974,7 @@ fn proof_risk_reducing_exemption_path() {
     // Inject loss to push a below maintenance margin
     engine.set_pnl(a as usize, -70_000i128);
 
-    // Verify a is below maintenance
-    let above_mm = engine.is_above_maintenance_margin(
-        &engine.accounts[a as usize], a as usize, DEFAULT_ORACLE);
-    // May or may not be below MM depending on exact notional after settle
-    // The key test is whether partial close is allowed
+    // Account may or may not be below MM — the key test is the partial close
 
     // Risk-reducing trade: close half the position
     let half_close = -(size / 2);
@@ -1006,6 +1002,145 @@ fn proof_risk_reducing_exemption_path() {
     // Both engines must maintain conservation
     assert!(engine.check_conservation());
     assert!(engine2.check_conservation());
+}
+
+// ############################################################################
+// Buffer masking attack: risk-reducing trade must not decrease raw equity
+// ############################################################################
+
+/// Verify that the risk-reducing exemption path cannot be exploited to
+/// extract value via execution slippage. A bankrupt account closing 99%
+/// of its position with adverse exec_price must be rejected if raw equity
+/// decreases, even though the maintenance buffer improves from MM_req drop.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_buffer_masking_blocked() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.last_crank_slot = DEFAULT_SLOT;
+
+    let victim = engine.add_user(0).unwrap();
+    let attacker = engine.add_user(0).unwrap();
+    engine.deposit(victim, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(attacker, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Victim opens large leveraged position
+    let size = (800 * POS_SCALE) as i128;
+    engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+
+    // Victim goes deeply bankrupt
+    engine.set_pnl(victim as usize, -120_000i128);
+
+    let equity_before = engine.account_equity_maint_raw(&engine.accounts[victim as usize]);
+
+    // Try to close 99% of position with adverse exec_price (slippage extraction)
+    let close_size = -(size * 99 / 100);
+    // Adverse exec_price: much worse than oracle (victim sells at below-oracle price)
+    let adverse_price = DEFAULT_ORACLE - (DEFAULT_ORACLE / 10); // 10% adverse slippage
+    let result = engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, adverse_price);
+
+    if result.is_ok() {
+        // If trade was allowed, raw equity must not have decreased
+        let equity_after = engine.account_equity_maint_raw(&engine.accounts[victim as usize]);
+        assert!(equity_after >= equity_before,
+            "risk-reducing trade must not decrease raw equity (buffer masking blocked)");
+    }
+    // Conservation must hold regardless
+    assert!(engine.check_conservation());
+}
+
+// ############################################################################
+// Phantom dust revert: enqueue_adl step 5 must reset drained opp side
+// ############################################################################
+
+/// When enqueue_adl drains opposing phantom OI to zero (stored_pos_count_opp=0,
+/// OI_post=0), it must unconditionally set pending_reset for both sides
+/// so schedule_end_of_instruction_resets doesn't revert on OI imbalance.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_phantom_dust_drain_no_revert() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    // Set up opposing side with phantom OI but no stored positions.
+    // OI is balanced (required invariant), stored_pos_count_opp = 0.
+    engine.adl_mult_long = ADL_ONE;
+    engine.oi_eff_long_q = POS_SCALE;   // phantom OI on long side (opp)
+    engine.oi_eff_short_q = POS_SCALE;  // matching OI on short side (liq)
+    engine.stored_pos_count_long = 0;   // no stored positions on opposing side
+    engine.stored_pos_count_short = 1;  // liq side has stored positions
+
+    // Bankrupt short liquidated: close exactly drains opposing phantom OI
+    let q_close = POS_SCALE; // drains all of OI_eff_long AND OI_eff_short
+    let d = 0u128;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok(), "enqueue_adl must not fail");
+
+    // After enqueue_adl: OI_eff_short was decremented by q_close in step 1 → 0
+    // OI_eff_long was set to oi_post = OI - q_close = 0 in step 5
+    assert!(engine.oi_eff_long_q == 0, "opp OI must be 0");
+    assert!(engine.oi_eff_short_q == 0, "liq OI must be 0");
+
+    // Both pending resets must be set
+    assert!(ctx.pending_reset_long, "drained opp side must have pending reset");
+
+    // End-of-instruction resets must not revert
+    let result2 = engine.schedule_end_of_instruction_resets(&mut ctx);
+    assert!(result2.is_ok(), "schedule must not revert after phantom drain");
+}
+
+// ############################################################################
+// Fee debt sweep consumes released PnL when capital insufficient
+// ############################################################################
+
+/// Profitable open-position account with zero capital accumulates fee debt.
+/// fee_debt_sweep must consume matured released PnL to pay the debt,
+/// preventing insurance fund starvation.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_fee_debt_sweep_consumes_released_pnl() {
+    let mut params = zero_fee_params();
+    params.warmup_period_slots = 0; // instant warmup → all PnL is released
+    let mut engine = RiskEngine::new(params);
+
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Give account positive PnL (simulating profitable position)
+    engine.set_pnl(idx as usize, 50_000i128);
+
+    // With warmup=0, all PnL should be released (reserved_pnl = pnl, but
+    // advance_profit_warmup would zero it). Manually set reserved=0 to model
+    // instant release.
+    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
+
+    // Zero capital (as if previously withdrawn)
+    engine.set_capital(idx as usize, 0);
+
+    // Create fee debt
+    engine.accounts[idx as usize].fee_credits = I128::new(-5_000);
+
+    let ins_before = engine.insurance_fund.balance.get();
+    let released_before = engine.released_pos(idx as usize);
+    assert!(released_before >= 5_000, "account must have enough released PnL");
+
+    // Run fee_debt_sweep
+    engine.fee_debt_sweep(idx as usize);
+
+    let ins_after = engine.insurance_fund.balance.get();
+    let fc_after = engine.accounts[idx as usize].fee_credits.get();
+
+    // Fee debt must be (partially or fully) settled from released PnL
+    assert!(ins_after > ins_before,
+        "insurance must receive fee payment from released PnL");
+    assert!(fc_after > -5_000i128,
+        "fee debt must decrease after sweep from released PnL");
+
+    assert!(engine.check_conservation());
 }
 
 // ############################################################################

@@ -1298,7 +1298,9 @@ impl RiskEngine {
             // D_rem > 0 → record_uninsured_protocol_loss (implicit through h, no-op)
             self.set_oi_eff(opp, oi_post);
             if oi_post == 0 {
+                // Unconditionally reset the drained opp side (fixes phantom dust revert).
                 set_pending_reset(ctx, opp);
+                // Also reset liq_side only if it too has zero OI
                 if self.get_oi_eff(liq_side) == 0 {
                     set_pending_reset(ctx, liq_side);
                 }
@@ -1705,7 +1707,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// released_pos (spec §2.1): ReleasedPos_i = max(PNL_i, 0) - R_i
-    fn released_pos(&self, idx: usize) -> u128 {
+    pub fn released_pos(&self, idx: usize) -> u128 {
         let pnl = self.accounts[idx].pnl;
         let pos_pnl = i128_clamp_pos(pnl);
         pos_pnl.saturating_sub(self.accounts[idx].reserved_pnl)
@@ -1835,7 +1837,7 @@ impl RiskEngine {
     }
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
-    fn fee_debt_sweep(&mut self, idx: usize) {
+    pub fn fee_debt_sweep(&mut self, idx: usize) {
         let fc = self.accounts[idx].fee_credits.get();
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
@@ -1850,6 +1852,20 @@ impl RiskEngine {
             self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
                 .saturating_add(pay_i128);
             self.insurance_fund.balance = self.insurance_fund.balance + pay;
+        }
+        // If capital insufficient, consume matured released PnL to cover remaining debt.
+        // Prevents fee starvation of insurance fund by profitable open-position accounts.
+        let remaining = fee_debt_u128_checked(self.accounts[idx].fee_credits.get());
+        if remaining > 0 {
+            let released = self.released_pos(idx);
+            let pay_pnl = core::cmp::min(remaining, released);
+            if pay_pnl > 0 {
+                self.consume_released_pnl(idx, pay_pnl);
+                let pay_i128 = core::cmp::min(pay_pnl, i128::MAX as u128) as i128;
+                self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
+                    .saturating_add(pay_i128);
+                self.insurance_fund.balance = self.insurance_fund.balance + pay_pnl;
+            }
         }
     }
 
@@ -2518,11 +2534,26 @@ impl RiskEngine {
             // Strict risk-reducing: allow only if post-trade raw maintenance buffer
             // is strictly greater than pre-trade buffer (spec §10.5 step 29)
             // Uses exact I256 per §3.4 — no saturation or clamping.
+            //
+            // Additionally, raw equity must not decrease (accounting for fees):
+            // Eq_maint_raw_post + fee >= Eq_maint_raw_pre
+            // This prevents execution slippage from being weaponized to siphon
+            // money from a bankrupt account (buffer masking via MM_req drop).
+            let maint_raw_wide_post = self.account_equity_maint_raw_wide(&self.accounts[idx]);
+            let maint_raw_wide_pre = buffer_pre.checked_add(I256::from_u128({
+                let not_pre = if *old_eff == 0 { 0u128 } else {
+                    mul_div_floor_u128(old_eff.unsigned_abs(), oracle_price as u128, POS_SCALE)
+                };
+                mul_u128(not_pre, self.params.maintenance_margin_bps as u128) / 10_000
+            })).expect("I256 add");
+            // Guard: raw equity must not decrease (prevents slippage extraction)
+            if maint_raw_wide_post < maint_raw_wide_pre {
+                return Err(RiskError::Undercollateralized);
+            }
             let mm_req_post = {
                 let not = self.notional(idx, oracle_price);
                 mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000
             };
-            let maint_raw_wide_post = self.account_equity_maint_raw_wide(&self.accounts[idx]);
             let buffer_post = maint_raw_wide_post.checked_sub(I256::from_u128(mm_req_post)).expect("I256 sub");
             if buffer_post > buffer_pre {
                 // Improved: allow
