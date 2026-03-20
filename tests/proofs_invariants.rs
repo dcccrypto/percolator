@@ -375,11 +375,15 @@ fn proof_set_pnl_clamps_reserved_pnl() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    engine.accounts[idx as usize].reserved_pnl = 5000u128;
+    // Set PNL to 5000 first → reserved_pnl = 5000 (reserve-first increase)
+    engine.set_pnl(idx as usize, 5000i128);
+    assert!(engine.accounts[idx as usize].reserved_pnl == 5000u128);
 
+    // Decrease PNL to 3000 → reserve clamped via saturating_sub
     engine.set_pnl(idx as usize, 3000i128);
     assert!(engine.accounts[idx as usize].reserved_pnl == 3000u128);
 
+    // Decrease PNL to -100 → reserve clamped to 0
     engine.set_pnl(idx as usize, -100i128);
     assert!(engine.accounts[idx as usize].reserved_pnl == 0u128);
 }
@@ -429,16 +433,20 @@ fn proof_check_conservation_basic() {
 fn proof_haircut_ratio_no_division_by_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
+    // Empty engine → (1, 1) since pnl_matured_pos_tot == 0
     let (num, den) = engine.haircut_ratio();
     assert!(num == 1u128);
     assert!(den == 1u128);
 
+    // Set pnl_matured_pos_tot (v11.21 uses this as denominator, not pnl_pos_tot)
     engine.pnl_pos_tot = 1000u128;
+    engine.pnl_matured_pos_tot = 1000u128;
     engine.vault = U128::new(2000);
     engine.c_tot = U128::new(500);
     engine.insurance_fund.balance = U128::new(300);
     let (num2, den2) = engine.haircut_ratio();
-    assert!(den2 == 1000u128);
+    assert!(den2 == 1000u128, "denominator must be pnl_matured_pos_tot");
+    // residual = 2000 - 500 - 300 = 1200 > 1000, so h_num = min(1200, 1000) = 1000
     assert!(num2 == 1000u128);
     assert!(num2 <= den2);
 }
