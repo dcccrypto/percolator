@@ -2,17 +2,18 @@
  * PERC-456: Devnet Mirror Mint API
  *
  * POST /api/devnet-mirror-mint
- * Body: { mainnetCA: string }
+ * Body: { mainnetCA: string, walletAddress: string }
  *
  * Given a mainnet token CA, returns an existing or newly-created devnet SPL
  * mint that mirrors the mainnet token's metadata (name, symbol, decimals).
  *
  * Flow:
- * 1. Check `devnet_mints` table for existing mapping → return immediately
- * 2. Validate mainnetCA exists on mainnet (DexScreener / Jupiter)
- * 3. Create a new devnet SPL mint with DEVNET_MINT_AUTHORITY as authority
- * 4. Store mapping in `devnet_mints` table
- * 5. Return { devnetMint, name, symbol, decimals }
+ * 1. Validate walletAddress is present (required, returns 400 if missing)
+ * 2. Check `devnet_mints` table for existing mapping → return immediately
+ * 3. Validate mainnetCA exists on mainnet (DexScreener / Jupiter)
+ * 4. Create a new devnet SPL mint with DEVNET_MINT_AUTHORITY as authority
+ * 5. Store mapping in `devnet_mints` table (with creator_wallet)
+ * 6. Return { devnetMint, name, symbol, decimals }
  *
  * Rate limited by middleware.ts (120 req/min/IP).
  * Only callable on devnet.
@@ -175,10 +176,23 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { mainnetCA } = body as { mainnetCA?: string };
+    const { mainnetCA, walletAddress } = body as { mainnetCA?: string; walletAddress?: string };
 
     if (!mainnetCA) {
       return NextResponse.json({ error: "Missing mainnetCA" }, { status: 400 });
+    }
+
+    // GH#1477: validate walletAddress BEFORE cache-hit early return so the
+    // check applies to both new and existing mirror paths.
+    if (!walletAddress) {
+      return NextResponse.json({ error: "Missing walletAddress" }, { status: 400 });
+    }
+
+    // Validate walletAddress is a valid Solana pubkey
+    try {
+      new PublicKey(walletAddress);
+    } catch {
+      return NextResponse.json({ error: "Invalid walletAddress" }, { status: 400 });
     }
 
     // Reject URLs
@@ -216,6 +230,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Fetch metadata from mainnet
+    // GH#1476: surface individual step errors so Sentry captures the real cause.
     let tokenInfo = await fetchMainnetTokenInfo(mainnetCA);
     if (!tokenInfo) {
       tokenInfo = await fetchJupiterTokenInfo(mainnetCA);
@@ -245,12 +260,33 @@ export async function POST(req: NextRequest) {
     const connection = new Connection(cfg.rpcUrl, "confirmed");
 
     const mintKeypair = Keypair.generate();
-    const lamports = await getMinimumBalanceForRentExemptMint(connection);
+
+    // GH#1476: wrap individual RPC calls so errors propagate with context.
+    let lamports: number;
+    try {
+      lamports = await getMinimumBalanceForRentExemptMint(connection);
+    } catch (e) {
+      Sentry.captureException(e, {
+        tags: { endpoint: "/api/devnet-mirror-mint", step: "getMinimumBalance" },
+        extra: { mainnetCA, walletAddress },
+      });
+      throw e;
+    }
 
     let tx: Transaction | VersionedTransaction = new Transaction();
 
     // Set recentBlockhash and feePayer before signing
-    const { blockhash } = await connection.getLatestBlockhash();
+    let blockhash: string;
+    try {
+      ({ blockhash } = await connection.getLatestBlockhash());
+    } catch (e) {
+      Sentry.captureException(e, {
+        tags: { endpoint: "/api/devnet-mirror-mint", step: "getLatestBlockhash" },
+        extra: { mainnetCA, walletAddress },
+      });
+      throw e;
+    }
+
     (tx as Transaction).recentBlockhash = blockhash;
     (tx as Transaction).feePayer = new PublicKey(mintSigner.publicKey());
 
@@ -279,9 +315,28 @@ export async function POST(req: NextRequest) {
     // sendAndConfirmTransaction cannot be used here because it would re-sign and
     // overwrite the sealed signer's signature, so we use sendRawTransaction instead.
     (tx as Transaction).partialSign(mintKeypair);
-    tx = mintSigner.signTransaction(tx);
-    const sig = await connection.sendRawTransaction(tx.serialize());
-    await connection.confirmTransaction(sig, "confirmed");
+
+    try {
+      tx = mintSigner.signTransaction(tx);
+    } catch (e) {
+      Sentry.captureException(e, {
+        tags: { endpoint: "/api/devnet-mirror-mint", step: "signTransaction" },
+        extra: { mainnetCA, walletAddress },
+      });
+      throw e;
+    }
+
+    let sig: string;
+    try {
+      sig = await connection.sendRawTransaction(tx.serialize());
+      await connection.confirmTransaction(sig, "confirmed");
+    } catch (e) {
+      Sentry.captureException(e, {
+        tags: { endpoint: "/api/devnet-mirror-mint", step: "sendAndConfirm" },
+        extra: { mainnetCA, walletAddress, mintPubkey: mintKeypair.publicKey.toBase58() },
+      });
+      throw e;
+    }
 
     const devnetMint = mintKeypair.publicKey.toBase58();
 
@@ -289,7 +344,8 @@ export async function POST(req: NextRequest) {
     // (TOCTOU: two simultaneous requests can both pass the SELECT check above;
     //  upsert ON CONFLICT (mainnet_ca) DO NOTHING prevents duplicate rows and
     //  avoids a second createMint call winning a race that corrupts the table.)
-    await (supabase as any).from("devnet_mints").upsert(
+    // GH#1476: include creator_wallet so the column constraint is satisfied.
+    const { error: upsertError } = await (supabase as any).from("devnet_mints").upsert(
       {
         mainnet_ca: mainnetCA,
         devnet_mint: devnetMint,
@@ -297,10 +353,19 @@ export async function POST(req: NextRequest) {
         name: tokenInfo.name,
         decimals: tokenInfo.decimals,
         logo_url: tokenInfo.logoUrl ?? null,
-        creator_wallet: null, // Will be set when market is created
+        creator_wallet: walletAddress,
       },
       { onConflict: "mainnet_ca", ignoreDuplicates: true },
     );
+
+    if (upsertError) {
+      Sentry.captureException(upsertError, {
+        tags: { endpoint: "/api/devnet-mirror-mint", step: "upsert" },
+        extra: { mainnetCA, walletAddress, devnetMint },
+      });
+      // Non-fatal: mint was created on-chain. Log and continue — re-SELECT will
+      // return the canonical row even if this upsert lost a race.
+    }
 
     // Re-SELECT the canonical row from DB to handle TOCTOU races (#772):
     // If two concurrent requests both created mints, only one wins the upsert.
