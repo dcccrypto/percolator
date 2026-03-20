@@ -195,6 +195,97 @@ const authorityVerified = new Set<string>();
 // otherwise the Solana runtime rejects with "Provided owner is not allowed" (0x10).
 const slabProgramId = new Map<string, PublicKey>();
 
+/**
+ * Validate critical environment variables at startup (HIGH-001 security fix)
+ *
+ * Performs structured validation of config to catch misconfigurations
+ * before they cause runtime failures or silent degradation.
+ *
+ * Validates:
+ * - RPC_URL: Must be a valid URL (not empty)
+ * - SUPABASE_URL: If set, must be valid URL
+ * - SUPABASE_SERVICE_ROLE_KEY: If SUPABASE_URL set, key must be non-empty (100+ chars)
+ * - API_AUTH_TOKEN: If set, must be non-empty
+ * - HEALTH_AUTH_TOKEN: If set, must be non-empty
+ *
+ * @throws Exits process with code 1 if validation fails
+ */
+function validateEnvironmentConfig(): void {
+  const errors: string[] = [];
+
+  // Validate RPC_URL (critical — cannot crank without valid RPC)
+  const rpcUrl = (process.env.RPC_URL ?? "").trim();
+  if (!rpcUrl) {
+    errors.push("RPC_URL is required but not set or empty. Set RPC_URL to your Solana RPC endpoint.");
+  } else {
+    try {
+      const url = new URL(rpcUrl);
+      if (!url.protocol.match(/^https?:$/)) {
+        errors.push(`RPC_URL must use http or https protocol, got: ${url.protocol}`);
+      }
+    } catch (e) {
+      errors.push(`RPC_URL is not a valid URL: ${rpcUrl}`);
+    }
+  }
+
+  // Validate Supabase configuration (if enabled)
+  const supabaseUrl = (process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
+  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+
+  if (supabaseUrl && !supabaseKey) {
+    errors.push(
+      "SUPABASE_URL is configured but SUPABASE_SERVICE_ROLE_KEY is missing. " +
+      "Either disable Supabase (unset SUPABASE_URL) or provide a service role key.",
+    );
+  }
+
+  if (supabaseUrl) {
+    try {
+      const url = new URL(supabaseUrl);
+      if (!url.protocol.match(/^https?:$/)) {
+        errors.push(`SUPABASE_URL must use http or https protocol, got: ${url.protocol}`);
+      }
+    } catch (e) {
+      errors.push(`SUPABASE_URL is not a valid URL: ${supabaseUrl}`);
+    }
+  }
+
+  if (supabaseUrl && supabaseKey && supabaseKey.length < 100) {
+    errors.push(
+      `SUPABASE_SERVICE_ROLE_KEY appears truncated (${supabaseKey.length} chars, expected 100+). ` +
+      "This usually indicates a copy-paste error.",
+    );
+  }
+
+  // Validate optional auth tokens (should not be empty if set)
+  const apiAuthToken = process.env.API_AUTH_TOKEN?.trim() ?? "";
+  if (process.env.API_AUTH_TOKEN && !apiAuthToken) {
+    errors.push(
+      "API_AUTH_TOKEN is set but empty. Either remove it or provide a token.",
+    );
+  }
+
+  const healthAuthToken = process.env.HEALTH_AUTH_TOKEN?.trim() ?? "";
+  if (process.env.HEALTH_AUTH_TOKEN && !healthAuthToken) {
+    errors.push(
+      "HEALTH_AUTH_TOKEN is set but empty. Either remove it or provide a token.",
+    );
+  }
+
+  // If any validation errors, log them and exit
+  if (errors.length > 0) {
+    console.error("[FATAL] Environment configuration validation failed:");
+    errors.forEach((err, idx) => {
+      console.error(`  ${idx + 1}. ${err}`);
+    });
+    console.error("");
+    console.error("[ACTION] Fix the above environment variables and restart the keeper.");
+    process.exit(1);
+  }
+
+  console.log("[INFO] ✅ Environment configuration validated successfully");
+}
+
 // ── Supabase Auto-Discovery ─────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
@@ -943,6 +1034,9 @@ const slabToMainnetCA = new Map<string, string>();
 
 // ── Main Loop ───────────────────────────────────────────────
 async function main() {
+  // ─── STARTUP: Validate environment configuration (HIGH-001 security fix) ───
+  validateEnvironmentConfig();
+
   log(`Oracle Keeper starting — admin: ${admin.publicKey.toBase58().slice(0, 12)}...`);
   // Redact RPC URL to prevent API key exposure in logs
   const rpcRedacted = (() => {
