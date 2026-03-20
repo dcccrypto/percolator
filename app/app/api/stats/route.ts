@@ -5,7 +5,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/supabase";
-import { isActiveMarket, isSaneMarketValue } from "@/lib/activeMarketFilter";
+import { isActiveMarket, isSaneMarketValue, isZombieMarket } from "@/lib/activeMarketFilter";
 import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { BLOCKED_SLAB_ADDRESSES } from "@/lib/blocklist";
 import type { Database } from "@/lib/database.types";
@@ -232,21 +232,14 @@ export async function GET(request: NextRequest) {
   // /api/markets excludes zombies (vault=0 or null+no-stats) from its `total` field.
   // Previously statsData.length included zombies, causing totalListedMarkets (195) to
   // diverge from /api/markets total (122) by exactly zombieCount (73).
-  // Apply the same zombie predicate used in /api/markets (GH#1420 + GH#1427):
-  //   - vault_balance == 0 (explicitly drained)
-  //   - vault_balance == null AND no sane stats AND total_accounts == 0 (never indexed)
-  const nonZombieListedMarkets = statsData.filter((m) => {
-    const vaultBal = (m as Record<string, unknown>).vault_balance as number | null;
-    const hasNoStats =
-      !isSaneMarketValue(m.last_price) &&
-      !isSaneMarketValue(m.volume_24h) &&
-      !isSaneMarketValue(m.total_open_interest) &&
-      ((m as Record<string, unknown>).total_accounts as number ?? 0) === 0;
-    const isZombie =
-      (vaultBal != null && vaultBal === 0) ||
-      (vaultBal == null && hasNoStats);
-    return !isZombie;
-  });
+  // Uses shared isZombieMarket() helper (GH#1420 + GH#1427 predicate, CodeRabbit #1466).
+  const nonZombieListedMarkets = statsData.filter((m) => !isZombieMarket(m as {
+    vault_balance?: number | null;
+    last_price?: number | null;
+    volume_24h?: number | null;
+    total_open_interest?: number | null;
+    total_accounts?: number | null;
+  }));
 
   return NextResponse.json({
     totalMarkets,

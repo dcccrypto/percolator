@@ -5,7 +5,7 @@ import { parseHeader } from "@percolator/sdk";
 import { getServiceClient } from "@/lib/supabase";
 import { getConfig } from "@/lib/config";
 import * as Sentry from "@sentry/nextjs";
-import { isSaneMarketValue, isActiveMarket } from "@/lib/activeMarketFilter";
+import { isSaneMarketValue, isActiveMarket, isZombieMarket } from "@/lib/activeMarketFilter";
 import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { BLOCKED_SLAB_ADDRESSES as HARDCODED_BLOCKED_MARKETS } from "@/lib/blocklist";
 
@@ -199,30 +199,20 @@ export async function GET(request: NextRequest) {
         sanitizedPrice,
       );
 
-      // GH#1420: Mark zombie markets (vault_balance == 0) so they can be filtered.
+      // GH#1420 + GH#1427: Mark zombie markets using shared isZombieMarket() helper.
+      // (CodeRabbit #1466: extracted from inline predicate in stats route to avoid drift.)
       // Zombie markets have no LP liquidity; their prices are stale/garbage from
       // when the vault drained (e.g. BTC@$148, SOL@$0.60 — prices from months ago).
       // We tag them with is_zombie=true and exclude them from the default response
-      // (opt-in via ?include_zombie=true). vault_balance=0 is strictly zero (fully drained).
-      // Only mark zombie when vault_balance is explicitly 0 — do not treat null/missing
-      // stats rows as drained (CodeRabbit: null-coalesce to 0 misclassifies stats-less markets).
-      //
-      // GH#1427: Also mark as zombie when vault_balance IS null AND all key stats are null
-      // (no last_price, no volume_24h, no total_open_interest, no accounts). These are
-      // phantom markets that have never received data from the indexer — they have explicitly
-      // is_zombie=false from the DB but no evidence of ever being active or having LP capital.
-      // Condition: vault_balance == null AND !isSaneMarketValue on all three price/volume/OI
-      // fields AND total_accounts == 0. This is more conservative than null-coalescing to 0
-      // (which would misclassify markets still being indexed), while still catching the 6
-      // phantom markets reported in GH#1427.
-      const hasNoStats =
-        !isSaneMarketValue(m.last_price as number | null) &&
-        !isSaneMarketValue(m.volume_24h as number | null) &&
-        !isSaneMarketValue(m.total_open_interest as number | null) &&
-        ((m.total_accounts as number) ?? 0) === 0;
-      const is_zombie =
-        (m.vault_balance != null && (m.vault_balance as number) === 0) ||
-        (m.vault_balance == null && hasNoStats);
+      // (opt-in via ?include_zombie=true). See isZombieMarket() in activeMarketFilter.ts
+      // for the two conditions: vault=0 (drained) or vault=null+no-stats (phantom).
+      const is_zombie = isZombieMarket({
+        vault_balance: m.vault_balance as number | null,
+        last_price: m.last_price as number | null,
+        volume_24h: m.volume_24h as number | null,
+        total_open_interest: m.total_open_interest as number | null,
+        total_accounts: m.total_accounts as number | null,
+      });
 
       return {
         ...m,

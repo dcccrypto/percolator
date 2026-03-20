@@ -34,3 +34,35 @@ export function isActiveMarket(row: {
   if (isSaneMarketValue(combinedOI)) return true;
   return false;
 }
+
+/**
+ * Determine if a market row is a "zombie" — has no LP liquidity and no real activity.
+ *
+ * Two zombie conditions (GH#1420 + GH#1427):
+ *   1. vault_balance === 0  → explicitly drained vault, no liquidity.
+ *   2. vault_balance === null AND no sane stats AND total_accounts === 0
+ *      → phantom market that was never indexed or funded.
+ *
+ * SINGLE SOURCE OF TRUTH: used by /api/markets and /api/stats to ensure
+ * consistent zombie exclusion across the platform. Previously duplicated
+ * inline in both routes (CodeRabbit PR #1466 nitpick).
+ */
+export function isZombieMarket(row: {
+  vault_balance?: number | null;
+  last_price?: number | null;
+  volume_24h?: number | null;
+  total_open_interest?: number | null;
+  total_accounts?: number | null;
+}): boolean {
+  const vaultBal = row.vault_balance ?? null;
+  if (vaultBal !== null && vaultBal === 0) return true;
+  if (vaultBal === null) {
+    const hasNoStats =
+      !isSaneMarketValue(row.last_price) &&
+      !isSaneMarketValue(row.volume_24h) &&
+      !isSaneMarketValue(row.total_open_interest) &&
+      (row.total_accounts ?? 0) === 0;
+    if (hasNoStats) return true;
+  }
+  return false;
+}
