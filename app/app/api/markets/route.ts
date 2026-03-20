@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 // requireAuth removed from POST — on-chain admin verification is sufficient
 import { Connection, PublicKey } from "@solana/web3.js";
+import { validateNumericParam } from "@/lib/route-validators";
 import { parseHeader } from "@percolator/sdk";
 import { getServiceClient } from "@/lib/supabase";
 import { getConfig } from "@/lib/config";
@@ -268,9 +269,26 @@ export async function GET(request: NextRequest) {
     const activeTotal = nonZombieOnly.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
 
     // GH#1348: Respect ?limit= query param to avoid returning 100+ markets
+    // GH#1490: Validate limit (must be 1–500) and offset (must be >= 0) using
+    // validateNumericParam() from route-validators.ts. Previously limit=-1/0/999999
+    // all returned the full dataset and non-numeric offset was silently ignored.
+    const MAX_LIMIT = 500;
     const limitParam = request?.nextUrl?.searchParams?.get("limit") ?? null;
+    if (limitParam !== null) {
+      const limitValidation = validateNumericParam(limitParam, { min: 1, max: MAX_LIMIT });
+      if (!limitValidation.valid) return limitValidation.response;
+    }
     const limitNum = limitParam ? parseInt(limitParam, 10) : 0;
-    const limited = limitNum > 0 ? nonZombie.slice(0, limitNum) : nonZombie;
+
+    const offsetParam = request?.nextUrl?.searchParams?.get("offset") ?? null;
+    if (offsetParam !== null) {
+      const offsetValidation = validateNumericParam(offsetParam, { min: 0 });
+      if (!offsetValidation.valid) return offsetValidation.response;
+    }
+    const offsetNum = offsetParam ? parseInt(offsetParam, 10) : 0;
+
+    const paged = offsetNum > 0 ? nonZombie.slice(offsetNum) : nonZombie;
+    const limited = limitNum > 0 ? paged.slice(0, limitNum) : paged;
 
     return NextResponse.json({ total: nonZombie.length, activeTotal, zombieCount, markets: limited }, {
       headers: {
