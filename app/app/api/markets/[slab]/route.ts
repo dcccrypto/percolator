@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PublicKey } from "@solana/web3.js";
 import { getServiceClient } from "@/lib/supabase";
+import { validateSlabParam } from "@/lib/route-validators";
 import { SLUG_ALIASES } from "@/lib/symbol-utils";
 import { isBlockedSlab } from "@/lib/blocklist";
 import * as Sentry from "@sentry/nextjs";
@@ -33,12 +34,23 @@ function isValidPublicKey(s: string): boolean {
  * Accepts either a base58 slab address OR a market slug (e.g. "SOL-PERP", "SOL").
  * When a slug is given, resolves it by matching the `symbol` column (case-insensitive,
  * with optional "-PERP" suffix stripped).
+ * 
+ * MEDIUM-003: Added slab parameter validation.
  */
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ slab: string }> }
 ) {
   const { slab } = await params;
+
+  // Validate slab parameter format (unless it's a slug like "SOL" or "SOL-PERP")
+  // Slugs are 1-6 chars alphanumeric+dash; PublicKey addresses are 43-44 chars base58
+  if (slab.length > 10) {
+    const validation = validateSlabParam(slab);
+    if (!validation.valid) {
+      return validation.response;
+    }
+  }
 
   // GH#1417: Blocked slabs must return 404 even when addressed directly.
   // The bulk /api/markets endpoint already filters via BLOCKED_SLAB_ADDRESSES but

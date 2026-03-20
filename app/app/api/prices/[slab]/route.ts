@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBackendUrl } from "@/lib/config";
+import { validateSlabParam } from "@/lib/route-validators";
 import * as Sentry from "@sentry/nextjs";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +19,8 @@ export const dynamic = "force-dynamic";
  * We compute 24h stats from the history:
  *  - high24h / low24h: max/min price_e6 in the window
  *  - change24h: % change from oldest entry in window vs latest
+ * 
+ * MEDIUM-003: Added slab parameter validation.
  */
 export async function GET(
   _req: NextRequest,
@@ -25,9 +28,17 @@ export async function GET(
 ) {
   try {
     const { slab } = await params;
+
+    // Validate slab parameter format
+    const validation = validateSlabParam(slab);
+    if (!validation.valid) {
+      return validation.response;
+    }
+    const validSlab = validation.slab;
+
     const backendUrl = getBackendUrl();
 
-    const res = await fetch(`${backendUrl}/prices/${slab}`, {
+    const res = await fetch(`${backendUrl}/prices/${validSlab}`, {
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(5000),
     });

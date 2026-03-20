@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { proxyToApi } from "@/lib/api-proxy";
+import { validateSlabParam } from "@/lib/route-validators";
 import { BLOCKED_SLAB_ADDRESSES } from "@/lib/blocklist";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,8 @@ const BLOCKED_MARKET_ADDRESSES: ReadonlySet<string> = new Set([
  *
  * GH#1357: Return 404 for blocklisted slabs instead of proxying to
  * backend which returns 500 for invalid/corrupt slab addresses.
+ * 
+ * MEDIUM-003: Added slab parameter validation.
  */
 export async function GET(
   req: NextRequest,
@@ -31,12 +34,19 @@ export async function GET(
 ) {
   const { slab } = await params;
 
-  if (BLOCKED_MARKET_ADDRESSES.has(slab)) {
+  // Validate slab parameter format
+  const validation = validateSlabParam(slab);
+  if (!validation.valid) {
+    return validation.response;
+  }
+  const validSlab = validation.slab;
+
+  if (BLOCKED_MARKET_ADDRESSES.has(validSlab)) {
     return NextResponse.json(
       { error: "Market not found" },
       { status: 404 }
     );
   }
 
-  return proxyToApi(req, `/funding/${slab}/history`);
+  return proxyToApi(req, `/funding/${validSlab}/history`);
 }
