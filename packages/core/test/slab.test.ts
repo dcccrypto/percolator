@@ -418,3 +418,80 @@ console.log("\n✅ All slab tests passed!");
 
   console.log("✅ V1_LEGACY slab tests passed!");
 }
+
+// ─── V2 slab layout tests (ENGINE_OFF=600, BITMAP_OFF=432) ──────────────────
+// V2 slabs produce identical data sizes to V1D (postBitmap=2) slabs.
+// Disambiguation requires reading version field at offset 8.
+{
+  console.log("\nTesting V2 slab layout (BPF intermediate)...");
+
+  // V2 small slab size = 65088 (same as V1D small)
+  const V2_SIZE = 65_088;
+
+  // Create minimal buffer with version=2 at offset 8
+  const v2buf = Buffer.alloc(V2_SIZE);
+  // Write PERCOLAT magic
+  v2buf.writeBigUInt64LE(0x504552434f4c4154n, 0);
+  // Write version=2 at offset 8
+  v2buf.writeUInt32LE(2, 8);
+
+  // Without data, detectSlabLayout should return V1D (backward compat)
+  const layoutNoData = detectSlabLayout(V2_SIZE);
+  assert(layoutNoData !== null, "detectSlabLayout(65088) without data should return non-null");
+  assert(layoutNoData!.version === 1, `Without data, version should be 1 (V1D), got ${layoutNoData!.version}`);
+  assert(layoutNoData!.engineOff === 424, `Without data, engineOff should be 424 (V1D), got ${layoutNoData!.engineOff}`);
+  console.log("  ✓ detectSlabLayout without data returns V1D (backward compat)");
+
+  // With data containing version=2, should return V2 layout
+  const layoutV2 = detectSlabLayout(V2_SIZE, v2buf);
+  assert(layoutV2 !== null, "detectSlabLayout with V2 data should return non-null");
+  assert(layoutV2!.version === 2, `With V2 data, version should be 2, got ${layoutV2!.version}`);
+  assert(layoutV2!.engineOff === 600, `V2 engineOff should be 600, got ${layoutV2!.engineOff}`);
+  assert(layoutV2!.engineBitmapOff === 432, `V2 engineBitmapOff should be 432, got ${layoutV2!.engineBitmapOff}`);
+  assert(layoutV2!.accountSize === 248, `V2 accountSize should be 248, got ${layoutV2!.accountSize}`);
+  assert(layoutV2!.maxAccounts === 256, `V2 maxAccounts should be 256, got ${layoutV2!.maxAccounts}`);
+  console.log("  ✓ detectSlabLayout with V2 data returns version=2 layout");
+
+  // V2 should have no mark_price, long_oi, short_oi, emergency fields
+  assert(layoutV2!.engineMarkPriceOff === -1, "V2 should have no mark_price");
+  assert(layoutV2!.engineLongOiOff === -1, "V2 should have no long_oi");
+  assert(layoutV2!.engineShortOiOff === -1, "V2 should have no short_oi");
+  assert(layoutV2!.engineEmergencyOiModeOff === -1, "V2 should have no emergency OI mode");
+  assert(layoutV2!.engineEmergencyStartSlotOff === -1, "V2 should have no emergency start slot");
+  assert(layoutV2!.engineLastBreakerSlotOff === -1, "V2 should have no last breaker slot");
+  console.log("  ✓ V2 layout correctly reports missing fields as -1");
+
+  // V2 engine field offsets should match specification
+  assert(layoutV2!.engineCurrentSlotOff === 352, "V2 currentSlot offset");
+  assert(layoutV2!.engineFundingIndexOff === 360, "V2 fundingIndex offset");
+  assert(layoutV2!.engineTotalOiOff === 408, "V2 totalOI offset");
+  assert(layoutV2!.engineCTotOff === 424, "V2 cTot offset");
+  assert(layoutV2!.engineLiqCursorOff === 456, "V2 liqCursor offset");
+  assert(layoutV2!.engineNetLpPosOff === 504, "V2 netLpPos offset");
+  assert(layoutV2!.engineLpMaxAbsOff === 536, "V2 lpMaxAbs offset");
+  assert(layoutV2!.engineLpMaxAbsSweepOff === 552, "V2 lpMaxAbsSweep offset");
+  console.log("  ✓ V2 engine field offsets match specification");
+
+  // With data containing version=1 (V1D), should still return V1D
+  const v1dBuf = Buffer.alloc(V2_SIZE);
+  v1dBuf.writeBigUInt64LE(0x504552434f4c4154n, 0);
+  v1dBuf.writeUInt32LE(1, 8);
+  const layoutV1D = detectSlabLayout(V2_SIZE, v1dBuf);
+  assert(layoutV1D !== null, "detectSlabLayout with V1D data should return non-null");
+  assert(layoutV1D!.version === 1, `With V1D data, version should be 1, got ${layoutV1D!.version}`);
+  assert(layoutV1D!.engineOff === 424, `With V1D data, engineOff should be 424, got ${layoutV1D!.engineOff}`);
+  console.log("  ✓ detectSlabLayout with version=1 data returns V1D layout");
+
+  // V2 large slab size = 1025568 (same as V1D large)
+  const V2_LARGE_SIZE = 1_025_568;
+  const v2LargeBuf = Buffer.alloc(64); // minimal for version read
+  v2LargeBuf.writeBigUInt64LE(0x504552434f4c4154n, 0);
+  v2LargeBuf.writeUInt32LE(2, 8);
+  const layoutV2Large = detectSlabLayout(V2_LARGE_SIZE, v2LargeBuf);
+  assert(layoutV2Large !== null, "detectSlabLayout for V2 large should return non-null");
+  assert(layoutV2Large!.version === 2, `V2 large version should be 2, got ${layoutV2Large!.version}`);
+  assert(layoutV2Large!.maxAccounts === 4096, `V2 large maxAccounts should be 4096, got ${layoutV2Large!.maxAccounts}`);
+  console.log("  ✓ V2 large slab (1025568) detected correctly");
+
+  console.log("✅ V2 slab layout tests passed!");
+}

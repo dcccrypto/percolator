@@ -8,6 +8,7 @@ import {
   slabDataSizeV1,
   type SlabTierKey,
 } from "../src/solana/discovery.js";
+import { detectSlabLayout, SLAB_TIERS_V2 } from "../src/solana/slab.js";
 
 // ============================================================================
 // SLAB_TIERS constants
@@ -249,5 +250,105 @@ describe("SLAB_TIERS_V1D_LEGACY (GH#1237)", () => {
     for (let i = 1; i < sizes.length; i++) {
       expect(sizes[i]).toBeGreaterThan(sizes[i - 1]);
     }
+  });
+});
+
+// ============================================================================
+// SLAB_TIERS_V2 — V2 BPF intermediate layout (ENGINE_OFF=600, BITMAP_OFF=432)
+// V2 sizes overlap with V1D (postBitmap=2) — disambiguation via version field.
+// ============================================================================
+
+describe("SLAB_TIERS_V2", () => {
+  it("is exported from slab.ts", () => {
+    expect(SLAB_TIERS_V2).toBeDefined();
+  });
+
+  it("has small and large tiers", () => {
+    expect(Object.keys(SLAB_TIERS_V2)).toEqual(["small", "large"]);
+  });
+
+  it("small tier: 256 accounts, dataSize=65088", () => {
+    expect(SLAB_TIERS_V2.small.maxAccounts).toBe(256);
+    expect(SLAB_TIERS_V2.small.dataSize).toBe(65_088);
+  });
+
+  it("large tier: 4096 accounts, dataSize=1025568", () => {
+    expect(SLAB_TIERS_V2.large.maxAccounts).toBe(4096);
+    expect(SLAB_TIERS_V2.large.dataSize).toBe(1_025_568);
+  });
+
+  it("V2 small size matches V1D small size (disambiguation needed)", () => {
+    expect(SLAB_TIERS_V2.small.dataSize).toBe(SLAB_TIERS_V1D.small.dataSize);
+  });
+
+  it("V2 large size matches V1D large size (disambiguation needed)", () => {
+    expect(SLAB_TIERS_V2.large.dataSize).toBe(SLAB_TIERS_V1D.large.dataSize);
+  });
+});
+
+// ============================================================================
+// V2 detectSlabLayout — version-field disambiguation
+// ============================================================================
+
+describe("detectSlabLayout V2 disambiguation", () => {
+  function makeMinimalSlab(version: number, size: number): Uint8Array {
+    const buf = new Uint8Array(Math.max(size, 12));
+    const dv = new DataView(buf.buffer);
+    // PERCOLAT magic (little-endian)
+    dv.setBigUint64(0, 0x504552434f4c4154n, true);
+    dv.setUint32(8, version, true);
+    return buf;
+  }
+
+  it("returns V2 layout when data has version=2 and size matches V1D", () => {
+    const data = makeMinimalSlab(2, 65_088);
+    const layout = detectSlabLayout(65_088, data);
+    expect(layout).not.toBeNull();
+    expect(layout!.version).toBe(2);
+    expect(layout!.engineOff).toBe(600);
+    expect(layout!.engineBitmapOff).toBe(432);
+  });
+
+  it("returns V1D layout when data has version=1 and size matches V1D", () => {
+    const data = makeMinimalSlab(1, 65_088);
+    const layout = detectSlabLayout(65_088, data);
+    expect(layout).not.toBeNull();
+    expect(layout!.version).toBe(1);
+    expect(layout!.engineOff).toBe(424);
+  });
+
+  it("returns V1D layout when no data is provided (backward compat)", () => {
+    const layout = detectSlabLayout(65_088);
+    expect(layout).not.toBeNull();
+    expect(layout!.version).toBe(1);
+    expect(layout!.engineOff).toBe(424);
+  });
+
+  it("V2 layout has correct missing-field markers", () => {
+    const data = makeMinimalSlab(2, 65_088);
+    const layout = detectSlabLayout(65_088, data)!;
+    expect(layout.engineMarkPriceOff).toBe(-1);
+    expect(layout.engineLongOiOff).toBe(-1);
+    expect(layout.engineShortOiOff).toBe(-1);
+    expect(layout.engineEmergencyOiModeOff).toBe(-1);
+    expect(layout.engineEmergencyStartSlotOff).toBe(-1);
+    expect(layout.engineLastBreakerSlotOff).toBe(-1);
+  });
+
+  it("V2 large slab (4096 accounts) detected correctly", () => {
+    const data = makeMinimalSlab(2, 1_025_568);
+    const layout = detectSlabLayout(1_025_568, data);
+    expect(layout).not.toBeNull();
+    expect(layout!.version).toBe(2);
+    expect(layout!.maxAccounts).toBe(4096);
+    expect(layout!.engineOff).toBe(600);
+  });
+
+  it("V0 sizes are not affected by data parameter", () => {
+    // V0 small = 62808
+    const data = makeMinimalSlab(2, 62_808); // even with version=2, V0 size takes priority
+    const layout = detectSlabLayout(62_808, data);
+    expect(layout).not.toBeNull();
+    expect(layout!.version).toBe(0);
   });
 });
