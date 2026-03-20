@@ -119,7 +119,9 @@ const CONFIGS = {
       large: "FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD",    // 4096 slots (confirmed working)
     } satisfies Record<string, string>,
     // PERC-356: Test USDC mint for auto-fund on wallet connect
-    testUsdcMint: process.env.NEXT_PUBLIC_TEST_USDC_MINT ?? "DvH13uxzTzo1xVFwkbJ6YASkZWs6bm3vFDH4xu7kUYTs",
+    testUsdcMint:
+      process.env.NEXT_PUBLIC_TEST_USDC_MINT?.trim() ||
+      "EqDqqRzRwA5xnZYu7oJ6LfJbcFuwkTKs7KBSTu2xaG66",
   },
 } as const;
 
