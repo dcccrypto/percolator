@@ -131,12 +131,18 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   const tradingFeeBps = params?.tradingFeeBps ?? 30n;
   // Clamp to minimum 1 — if initialMarginBps > 10000 (>100% margin), integer division yields
   // 0 which breaks the slider (min=1 > max=0) and causes the "1x and 0x simultaneously" bug.
-  // GH#1480: When initialMarginBps is 0 (Bug #845 uninitialised slab), fall back to
-  // Supabase max_leverage which is set correctly at market creation time.
+  // GH#1480: When initialMarginBps is 0 (Bug #845 uninitialised slab), on-chain gives 0 — use Supabase.
+  // GH#1486: When on-chain is lower than Supabase (e.g. MHH: on-chain=1x, Supabase=20x), use Supabase.
   const maxLeverageFromOnChain = initialMarginBps > 0n ? Math.max(1, Number(10000n / initialMarginBps)) : 0;
-  const rawMaxLeverage = maxLeverageFromOnChain > 0
-    ? maxLeverageFromOnChain
-    : (marketInfo?.max_leverage != null && marketInfo.max_leverage > 0 ? marketInfo.max_leverage : 1);
+  // GH#1486: Prefer Supabase max_leverage when it exceeds on-chain value.
+  // MHH market has initialMarginBps=10000 (100% margin) giving 1x on-chain, but
+  // Supabase correctly records max_leverage=20. Always use max(on-chain, supabase)
+  // so neither source silently under-caps the slider.
+  const supabaseLeverage = marketInfo?.max_leverage != null && marketInfo.max_leverage > 0 ? marketInfo.max_leverage : 0;
+  const rawMaxLeverage = Math.max(
+    maxLeverageFromOnChain > 0 ? maxLeverageFromOnChain : 0,
+    supabaseLeverage,
+  ) || 1;
   // GH#1483: Clamp to MAX_DISPLAY_LEVERAGE — protects against corrupt DB values.
   // Program enforces real margin requirements at execution time.
   const maxLeverage = Math.min(MAX_DISPLAY_LEVERAGE, rawMaxLeverage);
