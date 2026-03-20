@@ -130,8 +130,11 @@ export async function POST(req: NextRequest) {
         sig = await pubConn.requestAirdrop(walletPk, SOL_AIRDROP_AMOUNT);
         await pubConn.confirmTransaction(sig, "confirmed");
       } catch (airdropErr) {
+        // GH#1474: fall back to toString() when .message is empty
         const msg =
-          airdropErr instanceof Error ? airdropErr.message : "Airdrop failed";
+          airdropErr instanceof Error
+            ? airdropErr.message || airdropErr.toString() || "Airdrop failed"
+            : String(airdropErr) || "Airdrop failed";
         // Detect Solana devnet RPC rate-limit responses.
         // The public devnet faucet returns "429 Too Many Requests", "airdrop request limit",
         // or similar strings when the wallet or IP has exceeded the daily drip.
@@ -341,12 +344,11 @@ export async function POST(req: NextRequest) {
     Sentry.captureException(error, {
       tags: { endpoint: "/api/faucet", method: "POST" },
     });
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Internal server error",
-      },
-      { status: 500 },
-    );
+    // GH#1474: ensure error is never empty string — fall back to toString() or generic message
+    const errorMsg =
+      error instanceof Error
+        ? error.message || error.toString() || "Internal server error"
+        : String(error) || "Internal server error";
+    return NextResponse.json({ error: errorMsg }, { status: 500 });
   }
 }

@@ -8,6 +8,7 @@
  * - USDC amount constant
  * - SOL airdrop path dispatching
  * - USDC sealed-signer path: on-chain authority check returns 400 (not 500)
+ * - GH#1474: error field is never empty string (fallback to toString/generic)
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -240,6 +241,44 @@ describe("/api/faucet route", () => {
       const rateLimited = isRateLimit(errMsg);
       const statusCode = rateLimited ? 429 : 500;
       expect(statusCode).toBe(429);
+    });
+  });
+
+  describe("GH#1474: error response is never empty string", () => {
+    // Mirrors the error serialisation logic in the catch handler and SOL airdrop catch.
+    const serializeError = (error: unknown): string => {
+      if (error instanceof Error) {
+        return error.message || error.toString() || "Internal server error";
+      }
+      return String(error) || "Internal server error";
+    };
+
+    it("returns message when Error has non-empty message", () => {
+      const e = new Error("something went wrong");
+      expect(serializeError(e)).toBe("something went wrong");
+    });
+
+    it("falls back to toString() when Error.message is empty string", () => {
+      const e = new Error("");
+      // Error.toString() returns "Error" when message is empty
+      expect(serializeError(e)).toBe("Error");
+    });
+
+    it("returns generic message when Error.message and toString both empty", () => {
+      const e = new Error("");
+      // Override toString to simulate degenerate case
+      e.toString = () => "";
+      expect(serializeError(e)).toBe("Internal server error");
+    });
+
+    it("stringifies non-Error throws (e.g. string literal throws)", () => {
+      const thrown = "authority_mismatch";
+      expect(serializeError(thrown)).toBe("authority_mismatch");
+    });
+
+    it("handles null/undefined thrown values without returning empty", () => {
+      expect(serializeError(null)).toBe("null");
+      expect(serializeError(undefined)).toBe("undefined");
     });
   });
 });
