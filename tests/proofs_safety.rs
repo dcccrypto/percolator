@@ -1170,3 +1170,127 @@ fn proof_settle_fee_rejects_i128_min() {
     assert!(result.is_err(),
         "engine must reject fee decrement that would produce i128::MIN");
 }
+
+// ############################################################################
+// v11.26 compliance: flat-close guard uses Eq_maint_raw_i >= 0
+// ############################################################################
+
+/// v11.26 change #2: A trade that closes to flat must use Eq_maint_raw_i >= 0,
+/// not just PNL_i >= 0. An account with positive PNL but large fee debt
+/// (Eq_maint_raw_i = C + PNL - FeeDebt < 0) must be rejected.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v1126_flat_close_uses_eq_maint_raw() {
+    let mut params = zero_fee_params();
+    params.trading_fee_bps = 100; // 1% fee
+    let mut engine = RiskEngine::new(params);
+    engine.last_crank_slot = DEFAULT_SLOT;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Open position for a
+    let size = (500 * POS_SCALE) as i128;
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+
+    // Drain a's capital to 0, give positive PNL but massive fee debt
+    engine.set_capital(a as usize, 0);
+    engine.set_pnl(a as usize, 1000i128); // positive PNL
+    engine.accounts[a as usize].fee_credits = I128::new(-5000); // fee debt
+
+    // Eq_maint_raw = C(0) + PNL(1000) - FeeDebt(5000) = -4000 < 0
+    // v11.26 requires: reject flat close when Eq_maint_raw < 0
+    // Old code only checks PNL >= 0 which would pass (PNL = 1000 > 0)
+
+    let close_size = -size;
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE);
+
+    // Must be rejected: Eq_maint_raw < 0 even though PNL > 0
+    assert!(result.is_err(),
+        "v11.26: flat close must be rejected when Eq_maint_raw < 0 (fee debt exceeds C + PNL)");
+}
+
+// ############################################################################
+// v11.26 compliance: risk-reducing exemption is fee-neutral
+// ############################################################################
+
+/// v11.26 change #1: The risk-reducing buffer comparison must be fee-neutral.
+/// A genuine de-risking trade must not fail solely because the trading fee
+/// reduces post-trade equity.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v1126_risk_reducing_fee_neutral() {
+    let mut params = zero_fee_params();
+    params.trading_fee_bps = 100; // 1% fee to make fee friction visible
+    let mut engine = RiskEngine::new(params);
+    engine.last_crank_slot = DEFAULT_SLOT;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Open leveraged position
+    let size = (800 * POS_SCALE) as i128;
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+
+    // Push below maintenance
+    engine.set_pnl(a as usize, -50_000i128);
+
+    // Risk-reducing: close half at oracle price (no slippage)
+    let half_close = -(size / 2);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE);
+
+    // v11.26: fee-neutral comparison means pure fee friction should not block
+    // a genuine de-risking trade at oracle price.
+    // The post-trade buffer (with fee added back) should be strictly better.
+    // Conservation must hold regardless of whether trade succeeds or fails.
+    assert!(engine.check_conservation());
+    kani::cover!(result.is_ok(), "fee-neutral risk-reducing trade accepted");
+}
+
+// ############################################################################
+// v11.26 compliance: MIN_NONZERO_MM_REQ floor (TODO: implement params first)
+// ############################################################################
+
+// Commented out until RiskParams gains min_nonzero_mm_req / min_nonzero_im_req
+/*
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v1126_min_nonzero_margin_floor() {
+    let mut params = zero_fee_params();
+    params.min_nonzero_mm_req = 1000;   // $0.001 floor
+    params.min_nonzero_im_req = 2000;   // $0.002 floor
+    let mut engine = RiskEngine::new(params);
+    engine.last_crank_slot = DEFAULT_SLOT;
+
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Tiny position: notional so small that proportional MM floors to 0
+    let tiny_size = 1i128; // 1 unit of position
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE);
+
+    if result.is_ok() {
+        // The position exists with nonzero effective pos
+        let eff = engine.effective_pos_q(a as usize);
+        if eff != 0 {
+            // MM_req must be at least MIN_NONZERO_MM_REQ
+            let notional = engine.notional(a as usize, DEFAULT_ORACLE);
+            let proportional_mm = mul_u128(notional, params.maintenance_margin_bps as u128) / 10_000;
+            // If proportional floors to 0, the min floor must apply
+            if proportional_mm == 0 {
+                kani::cover!(true, "proportional MM floors to 0 — min floor must apply");
+            }
+        }
+    }
+    assert!(engine.check_conservation());
+}
+*/

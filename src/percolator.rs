@@ -58,7 +58,7 @@ pub const MAX_ABS_FUNDING_BPS_PER_SLOT: i64 = 10_000;
 pub const MAX_VAULT_TVL: u128 = 10_000_000_000_000_000;
 pub const MAX_POSITION_ABS_Q: u128 = 100_000_000_000_000;
 pub const MAX_ACCOUNT_NOTIONAL: u128 = 100_000_000_000_000_000_000;
-pub const MAX_TRADE_SIZE_Q: u128 = 200_000_000_000_000;
+pub const MAX_TRADE_SIZE_Q: u128 = MAX_POSITION_ABS_Q; // spec §1.4
 pub const MAX_OI_SIDE_Q: u128 = 100_000_000_000_000;
 pub const MAX_MATERIALIZED_ACCOUNTS: u64 = 1_000_000;
 pub const MAX_ACCOUNT_POSITIVE_PNL: u128 = 100_000_000_000_000_000_000_000_000_000_000;
@@ -2402,7 +2402,7 @@ impl RiskEngine {
         self.enforce_post_trade_margin(
             a as usize, b as usize, oracle_price,
             &old_eff_a, &new_eff_a, &old_eff_b, &new_eff_b,
-            buffer_pre_a, buffer_pre_b,
+            buffer_pre_a, buffer_pre_b, fee,
         )?;
 
         // Steps 16-17: end-of-instruction resets
@@ -2486,9 +2486,10 @@ impl RiskEngine {
         new_eff_b: &i128,
         buffer_pre_a: I256,
         buffer_pre_b: I256,
+        fee: u128,
     ) -> Result<()> {
-        self.enforce_one_side_margin(a, oracle_price, old_eff_a, new_eff_a, buffer_pre_a)?;
-        self.enforce_one_side_margin(b, oracle_price, old_eff_b, new_eff_b, buffer_pre_b)?;
+        self.enforce_one_side_margin(a, oracle_price, old_eff_a, new_eff_a, buffer_pre_a, fee)?;
+        self.enforce_one_side_margin(b, oracle_price, old_eff_b, new_eff_b, buffer_pre_b, fee)?;
         Ok(())
     }
 
@@ -2499,10 +2500,13 @@ impl RiskEngine {
         old_eff: &i128,
         new_eff: &i128,
         buffer_pre: I256,
+        fee: u128,
     ) -> Result<()> {
         if *new_eff == 0 {
-            // Flat: PnL must be >= 0 after settle_losses (steps 25-26)
-            if self.accounts[idx].pnl < 0 {
+            // v11.26 §10.5 step 29: flat-close guard uses exact Eq_maint_raw_i >= 0
+            // (not just PNL >= 0). Prevents flat exits with negative net wealth from fee debt.
+            let maint_raw = self.account_equity_maint_raw_wide(&self.accounts[idx]);
+            if maint_raw.is_negative() {
                 return Err(RiskError::Undercollateralized);
             }
             return Ok(());
@@ -2531,32 +2535,42 @@ impl RiskEngine {
         } else if self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price) {
             // Maintenance healthy: allow
         } else if strictly_reducing {
-            // Strict risk-reducing: allow only if post-trade raw maintenance buffer
-            // is strictly greater than pre-trade buffer (spec §10.5 step 29)
-            // Uses exact I256 per §3.4 — no saturation or clamping.
-            //
-            // Additionally, raw equity must not decrease (accounting for fees):
-            // Eq_maint_raw_post + fee >= Eq_maint_raw_pre
-            // This prevents execution slippage from being weaponized to siphon
-            // money from a bankrupt account (buffer masking via MM_req drop).
+            // v11.26 §10.5 step 29: strict risk-reducing exemption (fee-neutral).
+            // Both conditions must hold in exact widened I256:
+            // 1. Fee-neutral buffer improves: (Eq_maint_raw_post + fee) - MM_req_post > buffer_pre
+            // 2. Fee-neutral shortfall does not worsen: min(Eq_maint_raw_post + fee, 0) >= min(Eq_maint_raw_pre, 0)
             let maint_raw_wide_post = self.account_equity_maint_raw_wide(&self.accounts[idx]);
-            let maint_raw_wide_pre = buffer_pre.checked_add(I256::from_u128({
-                let not_pre = if *old_eff == 0 { 0u128 } else {
-                    mul_div_floor_u128(old_eff.unsigned_abs(), oracle_price as u128, POS_SCALE)
-                };
-                mul_u128(not_pre, self.params.maintenance_margin_bps as u128) / 10_000
-            })).expect("I256 add");
-            // Guard: raw equity must not decrease (prevents slippage extraction)
-            if maint_raw_wide_post < maint_raw_wide_pre {
-                return Err(RiskError::Undercollateralized);
-            }
+            let fee_wide = I256::from_u128(fee);
+
+            // Fee-neutral post equity and buffer
+            let maint_raw_fee_neutral = maint_raw_wide_post.checked_add(fee_wide).expect("I256 add");
             let mm_req_post = {
                 let not = self.notional(idx, oracle_price);
                 mul_u128(not, self.params.maintenance_margin_bps as u128) / 10_000
             };
-            let buffer_post = maint_raw_wide_post.checked_sub(I256::from_u128(mm_req_post)).expect("I256 sub");
-            if buffer_post > buffer_pre {
-                // Improved: allow
+            let buffer_post_fee_neutral = maint_raw_fee_neutral.checked_sub(I256::from_u128(mm_req_post)).expect("I256 sub");
+
+            // Recover pre-trade raw equity from buffer_pre + MM_req_pre
+            let mm_req_pre = {
+                let not_pre = if *old_eff == 0 { 0u128 } else {
+                    mul_div_floor_u128(old_eff.unsigned_abs(), oracle_price as u128, POS_SCALE)
+                };
+                mul_u128(not_pre, self.params.maintenance_margin_bps as u128) / 10_000
+            };
+            let maint_raw_pre = buffer_pre.checked_add(I256::from_u128(mm_req_pre)).expect("I256 add");
+
+            // Condition 1: fee-neutral buffer strictly improves
+            let cond1 = buffer_post_fee_neutral > buffer_pre;
+
+            // Condition 2: fee-neutral shortfall below zero does not worsen
+            // min(post + fee, 0) >= min(pre, 0)
+            let zero = I256::from_i128(0);
+            let shortfall_post = if maint_raw_fee_neutral < zero { maint_raw_fee_neutral } else { zero };
+            let shortfall_pre = if maint_raw_pre < zero { maint_raw_pre } else { zero };
+            let cond2 = shortfall_post >= shortfall_pre;
+
+            if cond1 && cond2 {
+                // Both conditions met: allow
             } else {
                 return Err(RiskError::Undercollateralized);
             }
@@ -2630,10 +2644,9 @@ impl RiskEngine {
         self.finalize_end_of_instruction_resets(&ctx);
         self.recompute_r_last_from_final_state();
 
-        if result {
-            // Assert OI balance (spec §10.5)
-            assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after liquidation");
-        }
+        // Assert OI balance unconditionally (spec §10.6 step 10)
+        // touch_account_full mutates side state even when liquidation doesn't proceed.
+        assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after liquidation");
         Ok(result)
     }
 
