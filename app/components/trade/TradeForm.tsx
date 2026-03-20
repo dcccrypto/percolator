@@ -138,7 +138,7 @@ export const TradeForm: FC<{ slabAddress: string }> = ({ slabAddress }) => {
   // MHH market has initialMarginBps=10000 (100% margin) giving 1x on-chain, but
   // Supabase correctly records max_leverage=20. Always use max(on-chain, supabase)
   // so neither source silently under-caps the slider.
-  const supabaseLeverage = marketInfo?.max_leverage != null && marketInfo.max_leverage > 0 ? marketInfo.max_leverage : 0;
+  const supabaseLeverage = Number(marketInfo?.max_leverage) || 0;
   const rawMaxLeverage = Math.max(
     maxLeverageFromOnChain > 0 ? maxLeverageFromOnChain : 0,
     supabaseLeverage,

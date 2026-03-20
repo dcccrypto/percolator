@@ -235,6 +235,7 @@ export async function GET(request: NextRequest) {
   // Uses shared isZombieMarket() helper (GH#1420 + GH#1427 predicate, CodeRabbit #1466).
   const nonZombieListedMarkets = statsData.filter((m) => !isZombieMarket(m as {
     vault_balance?: number | null;
+    c_tot?: number | null;
     last_price?: number | null;
     volume_24h?: number | null;
     total_open_interest?: number | null;

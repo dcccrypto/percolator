@@ -170,7 +170,8 @@ function MarketsPageInner() {
       // when no Supabase record exists (new market not yet indexed).
       const stats = statsMap.get(addr) || null;
       const onChainMaxLev = d.params.initialMarginBps > 0n ? Math.floor(10000 / Number(d.params.initialMarginBps)) : 0;
-      const rawLev = (stats?.max_leverage != null && stats.max_leverage > 0) ? stats.max_leverage : onChainMaxLev;
+      const supabaseLev = Number(stats?.max_leverage ?? 0);
+      const rawLev = (supabaseLev > 0) ? supabaseLev : (onChainMaxLev > 0 ? onChainMaxLev : 10);
       const maxLev = Math.min(MAX_DISPLAY_LEVERAGE, rawLev);
       const oracleMode = detectOracleMode(d.config);
       const isAdminOracle = oracleMode === "hyperp" || oracleMode === "admin";
@@ -183,7 +184,7 @@ function MarketsPageInner() {
       if (seenSlabs.has(slabAddr)) continue;
       // Use Supabase fields for display
       const mint = stats.mint_address ?? "";
-      const maxLev = Math.min(MAX_DISPLAY_LEVERAGE, stats.max_leverage ?? 10);
+      const maxLev = Math.min(MAX_DISPLAY_LEVERAGE, Number(stats.max_leverage) || 10);
       // Without on-chain data, we can't detect oracle mode — use Supabase oracle_authority hint
       const isAdminOracle = stats.oracle_authority != null && stats.oracle_authority !== "";
       result.push({
@@ -250,9 +251,11 @@ function MarketsPageInner() {
         !isSaneMarketValue(m.supabase?.volume_24h) &&
         !isSaneMarketValue(m.supabase?.total_open_interest) &&
         accountsCount === 0;
-      const isZombie =
-        (m.supabase?.vault_balance != null && m.supabase.vault_balance === 0) ||
-        (m.supabase?.vault_balance == null && hasNoStats);
+      // If c_tot > 0, market has real on-chain collateral — not a zombie
+      const cTot = m.supabase?.c_tot ?? 0;
+      const isZombie = cTot > 0 ? false :
+        ((m.supabase?.vault_balance != null && m.supabase.vault_balance === 0) ||
+        (m.supabase?.vault_balance == null && hasNoStats));
 
       // If we have Supabase stats, use isActiveMarket with zombie + phantom OI suppression
       if (m.supabase) {

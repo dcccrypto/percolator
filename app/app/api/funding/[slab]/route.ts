@@ -48,5 +48,16 @@ export async function GET(
     );
   }
 
-  return proxyToApi(req, `/funding/${validSlab}`);
+  const response = await proxyToApi(req, `/funding/${validSlab}`);
+
+  // GH#1602: If backend returns 500 (e.g. zombie slab with corrupt data),
+  // return 404 instead of propagating the 500 to the client.
+  if (response.status >= 500) {
+    return NextResponse.json(
+      { error: "Market not found or data unavailable" },
+      { status: 404 }
+    );
+  }
+
+  return response;
 }
