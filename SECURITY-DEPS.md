@@ -62,6 +62,17 @@ Verified linting still passes with the override.
   version that drops `bigint-buffer`, upgrade immediately.
 - **Decision:** ACCEPT — no actionable fix available, effective risk is low.
 
+### h3 <1.15.9 — SSE Injection + Path Traversal (MODERATE) — MITIGATED
+
+- **Advisory:** GHSA-4hxc-9384-m385 (SSE Event Injection via `\r`), GHSA-72gr-qfp7-vwhw (Double Decoding Path Traversal in serveStatic)
+- **Path:** `@privy-io/react-auth → @walletconnect/ethereum-provider → @walletconnect/keyvaluestorage → unstorage → h3`
+- **Patched versions:** ≥1.15.9
+- **Risk assessment:** LOW effective risk despite MODERATE CVSS
+  - `h3` arrives via `@walletconnect/keyvaluestorage` which uses `unstorage` for client-side key-value storage only — NOT as an HTTP server.
+  - Both vulnerable surfaces (`serveStatic` path traversal, SSE injection) require an HTTP server context that is never instantiated in this dep chain.
+- **Mitigation:** pnpm override set to `>=1.15.9` (PR #1505, GH#1504). h3 1.15.9 resolves both advisories.
+- **Decision:** RESOLVED via override — PR #1505.
+
 ### ajv <8.18.0 — ReDoS with `$data` option (MODERATE)
 
 - **Advisory:** GHSA-2g4f-4pwh-qvx6
