@@ -233,7 +233,16 @@ export async function GET(request: NextRequest) {
   // Previously statsData.length included zombies, causing totalListedMarkets (195) to
   // diverge from /api/markets total (122) by exactly zombieCount (73).
   // Uses shared isZombieMarket() helper (GH#1420 + GH#1427 predicate, CodeRabbit #1466).
-  const nonZombieListedMarkets = statsData.filter((m) => !isZombieMarket(m as {
+  //
+  // GH#1515: Use phantomAwareData (price-sanitized) instead of statsData (raw) here.
+  // /api/markets runs isZombieMarket with sanitizedPrice (capped at $1M via sanitizePrice).
+  // /api/stats was running isZombieMarket with raw last_price from statsData — a market
+  // with a stale DB price > $1M passes isSaneMarketValue() (< 1e18 ✓) → hasActivity=true
+  // → escapes zombie detection → counted in totalListedMarkets here, but /api/markets
+  // sanitizePrice() nulls that price → hasActivity=false → zombie → excluded from total.
+  // Fix: pass phantomAwareData (which already caps last_price at $1M via GH#1430 logic)
+  // so the zombie check uses the same effective price as /api/markets.
+  const nonZombieListedMarkets = phantomAwareData.filter((m) => !isZombieMarket(m as {
     vault_balance?: number | null;
     c_tot?: number | null;
     last_price?: number | null;

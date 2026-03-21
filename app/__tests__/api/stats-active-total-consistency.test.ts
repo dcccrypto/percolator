@@ -304,3 +304,105 @@ describe("GH#1430 — fixed stats count aligns with /api/markets sanitizePrice l
     expect(countActive(phantomAwareDataFixed([row]))).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GH#1515 — totalListedMarkets off-by-one: zombie check uses raw vs sanitized price
+// ---------------------------------------------------------------------------
+describe("GH#1515 — nonZombieListedMarkets must use price-sanitized data (phantomAwareData)", () => {
+  /**
+   * Simulates the isZombieMarket hasActivity check as in activeMarketFilter.ts.
+   * A market with vault=null, accounts=0, and no stats is zombie UNLESS hasActivity.
+   * hasActivity = isSaneMarketValue(last_price) || isSaneMarketValue(volume_24h) || accounts > 0
+   */
+  function isZombieMarket(row: {
+    vault_balance?: number | null;
+    c_tot?: number | null;
+    last_price?: number | null;
+    volume_24h?: number | null;
+    total_open_interest?: number | null;
+    total_accounts?: number | null;
+  }): boolean {
+    const vaultBal = row.vault_balance ?? null;
+    const cTot = row.c_tot ?? null;
+    const hasActivity =
+      isSaneMarketValue(row.last_price) ||
+      isSaneMarketValue(row.volume_24h) ||
+      (row.total_accounts ?? 0) > 0;
+    if (cTot !== null && cTot > 0 && hasActivity) return false;
+    if (vaultBal !== null && vaultBal === 0) return true;
+    if (vaultBal === null) {
+      const hasNoStats =
+        !isSaneMarketValue(row.last_price) &&
+        !isSaneMarketValue(row.volume_24h) &&
+        (row.total_accounts ?? 0) === 0;
+      if (hasNoStats) return true;
+    }
+    return false;
+  }
+
+  // A market whose raw DB price is > $1M (stale) but everything else is empty.
+  // vault=null, accounts=0, no volume, no OI — should be zombie.
+  const stalePriceMarket: StatsRow = {
+    slab_address: "stale-price-slab",
+    last_price: 7_900_000_000, // $7.9B stale oracle price (> $1M cap but < 1e18)
+    volume_24h: 0,
+    trade_count_24h: 0,
+    total_open_interest: 0,
+    open_interest_long: 0,
+    open_interest_short: 0,
+    vault_balance: null,
+    c_tot: null,
+    total_accounts: 0,
+    decimals: 6,
+    stats_updated_at: null,
+  };
+
+  it("BUG (was): raw last_price $7.9B passes isSaneMarketValue → hasActivity=true → NOT zombie", () => {
+    // Documents the bug: statsData (raw) → not zombie → counted in totalListedMarkets
+    expect(isSaneMarketValue(stalePriceMarket.last_price!)).toBe(true); // passes < 1e18 check
+    expect(isZombieMarket(stalePriceMarket as Parameters<typeof isZombieMarket>[0])).toBe(false);
+    // This caused the off-by-one: stats counted it, markets excluded it
+  });
+
+  it("FIX: after phantomAwareData price cap, $7.9B → zeroed → hasActivity=false → IS zombie", () => {
+    // Reproduces the fix: phantomAwareData zeroes all stats (incl. last_price) for phantom markets
+    // (vault=null, accounts=0 → isPhantom=true → last_price set to 0, not null).
+    // Key: isSaneMarketValue(0) = false → hasActivity=false → hasNoStats=true (vault=null) → zombie.
+    const processed = phantomAwareDataFixed([stalePriceMarket]);
+    const priceAfterSanitize = (processed[0] as StatsRow).last_price;
+    // Phantom path zeroes the field (0), not nulls it. 0 is also not sane.
+    expect(isSaneMarketValue(priceAfterSanitize ?? null)).toBe(false); // not a live price
+    expect(isZombieMarket(processed[0] as Parameters<typeof isZombieMarket>[0])).toBe(true);
+    // Correctly excluded from nonZombieListedMarkets → totalListedMarkets matches /api/markets
+  });
+
+  it("FIX: valid-price market (< $1M) remains non-zombie after sanitize", () => {
+    const validMarket: StatsRow = {
+      ...stalePriceMarket,
+      slab_address: "valid-slab",
+      last_price: 42.5,
+      vault_balance: 5_000_000,
+      total_accounts: 3,
+    };
+    const processed = phantomAwareDataFixed([validMarket]);
+    expect((processed[0] as StatsRow).last_price).toBe(42.5);
+    expect(isZombieMarket(processed[0] as Parameters<typeof isZombieMarket>[0])).toBe(false);
+  });
+
+  it("FIX: market with only stale price but no vault/accounts is correctly zombie after fix", () => {
+    // Ensures the broader set of stale-price-only markets all become zombie
+    const prices = [1_000_001, 5_000_000, 7_900_000_000, 999_999_999_999];
+    for (const last_price of prices) {
+      const row: StatsRow = {
+        ...stalePriceMarket,
+        slab_address: `slab-${last_price}`,
+        last_price,
+      };
+      const processed = phantomAwareDataFixed([row]);
+      expect(
+        isZombieMarket(processed[0] as Parameters<typeof isZombieMarket>[0]),
+        `price=${last_price} should be zombie after sanitize`,
+      ).toBe(true);
+    }
+  });
+});
