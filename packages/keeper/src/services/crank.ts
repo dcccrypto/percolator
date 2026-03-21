@@ -49,6 +49,12 @@ interface MarketCrankState {
    * Unlike permanentlySkipped (0x4), this is re-checked on each discovery cycle.
    */
   foreignOracleSkipped?: boolean;
+  /**
+   * PERC-1254: Hyperp-mode market (indexFeedId=all-zeros) where authority_price_e6=0 on-chain
+   * and fetchPrice returned null — cranking would cause OracleInvalid (0xc).
+   * Reset to false once a price push succeeds or on-chain price is non-zero.
+   */
+  hyperpNoPriceSkipped?: boolean;
 }
 
 /** Process items in batches with delay between batches.
@@ -160,6 +166,12 @@ export class CrankService {
           state.foreignOracleSkipped = false;
           logger.debug("Re-checking foreign oracle skip on rediscovery", { slabAddress: key });
         }
+        // PERC-1254: Reset hyperpNoPriceSkipped on re-discovery so we retry fetchPrice.
+        // Oracle data may have become available since the last skip (e.g. DEX pool created).
+        if (state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = false;
+          logger.debug("PERC-1254: Re-checking Hyperp no-price skip on rediscovery", { slabAddress: key });
+        }
         // PERC-381: Only re-enable permanently skipped (0x4) markets after a long cooldown
         // to avoid crank→skip→rediscover→re-enable→crank thrash loop on stale slabs.
         // Cooldown increases exponentially with skip count (1h, 2h, 4h, ... capped at 24h).
@@ -247,6 +259,7 @@ export class CrankService {
 
       // PERC-204: Bundle oracle price push with crank tx (eliminates separate oracle tx round-trip)
       // Only push if we are the oracle authority for this market
+      let pricePushQueued = false;
       if (this.isAdminOracle(market) && keypair.publicKey.equals(market.config.oracleAuthority)) {
         try {
           // PERC-465: Use mainnetCA if available (devnet mirror mint markets), else collateralMint.
@@ -262,11 +275,41 @@ export class CrankService {
               keypair.publicKey, market.slabAddress,
             ]);
             instructions.push(buildIx({ programId, keys: pushKeys, data: pushData }));
+            pricePushQueued = true;
           }
         } catch (priceErr) {
           // Non-fatal: price fetch failed, crank will still run with existing on-chain price
           logger.warn("Price push skipped (bundled)", { slabAddress, error: priceErr instanceof Error ? priceErr.message : String(priceErr) });
         }
+      }
+
+      // PERC-1254: Hyperp-mode guard — only applies to admin-oracle markets where the keeper
+      // IS the oracle authority (already confirmed above).  indexFeedId = all-zeros means the
+      // program reads authority_price_e6 as the oracle price.  If no price push succeeded this
+      // cycle AND the on-chain authority_price_e6 is still 0 (never been set), the KeeperCrank
+      // instruction will return OracleInvalid (0xc).  Skip the crank to avoid the failure
+      // cascade.  The market will be retried every interval, so it becomes crankable as
+      // soon as fetchPrice returns a valid price and the push succeeds.
+      // Use toBytes() for the zero-check so this works with both real PublicKey objects and mocks.
+      const isHyperpMode = this.isAdminOracle(market) &&
+        keypair.publicKey.equals(market.config.oracleAuthority) &&
+        market.config.indexFeedId.toBytes().every((b: number) => b === 0);
+      if (isHyperpMode && !pricePushQueued && (market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0)) {
+        if (!state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = true;
+          logger.warn("PERC-1254: Skipping Hyperp-mode market — no price available and on-chain authority_price_e6=0. " +
+            "Cranking would cause OracleInvalid (0xc). Will retry when fetchPrice succeeds.", {
+            slabAddress,
+            oracleAuthority: market.config.oracleAuthority.toBase58(),
+            lastEffectivePriceE6: market.config.lastEffectivePriceE6.toString(),
+          });
+        }
+        return false;
+      }
+      // Clear the flag once we have a price (either freshly pushed or already on-chain)
+      if (state.hyperpNoPriceSkipped && (pricePushQueued || (market.config.authorityPriceE6 ?? BigInt(0)) > BigInt(0))) {
+        state.hyperpNoPriceSkipped = false;
+        logger.info("PERC-1254: Hyperp market now has a price — resuming cranks", { slabAddress });
       }
 
       // Crank instruction
@@ -368,6 +411,7 @@ export class CrankService {
   // NEW: split skipped into categories
   let skippedPermanent = 0;
   let skippedForeignOracle = 0;
+  let skippedHyperpNoPrice = 0;
   let skippedFailures = 0;
   let skippedNotDue = 0;
 
@@ -402,6 +446,29 @@ export class CrankService {
       skippedForeignOracle++;
       continue;
     }
+    // PERC-1254: Live Hyperp-no-price check.
+    // Condition: admin-oracle market where keeper IS the authority, indexFeedId=all-zeros
+    // (Hyperp mode), and on-chain authority_price_e6 is still 0.  Sending KeeperCrank in
+    // this state causes OracleInvalid (0xc).  Skip eagerly — crankMarket() would return
+    // false and the batch counts it as failed rather than skipped.
+    // The flag (state.hyperpNoPriceSkipped) is set here for the first time on new markets
+    // so crankMarket's guard also short-circuits on subsequent calls.
+    {
+      const isHyperpAdminOwner =
+        this.isAdminOracle(state.market) &&
+        keeperKey.equals(state.market.config.oracleAuthority) &&
+        state.market.config.indexFeedId.toBytes().every((b: number) => b === 0);
+      const onChainPriceZero = (state.market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0);
+      if (isHyperpAdminOwner && onChainPriceZero) {
+        if (!state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = true;
+          logger.debug("crankAll: Hyperp-mode market with zero authority_price_e6 — skipping to prevent OracleInvalid (0xc)", { slabAddress });
+        }
+        skippedHyperpNoPrice++;
+        continue;
+      }
+    }
+
     if (state.consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
       skippedFailures++;
       continue;
@@ -414,7 +481,7 @@ export class CrankService {
   }
 
   // NEW: meaningful accounting check
-  const skipped = skippedPermanent + skippedForeignOracle + skippedFailures + skippedNotDue;
+  const skipped = skippedPermanent + skippedForeignOracle + skippedHyperpNoPrice + skippedFailures + skippedNotDue;
   const total = this.markets.size;
   const accounted = toCrank.length + skipped;
 
@@ -425,6 +492,7 @@ export class CrankService {
       skipped,
       skippedPermanent,
       skippedForeignOracle,
+      skippedHyperpNoPrice,
       skippedFailures,
       skippedNotDue,
     });
