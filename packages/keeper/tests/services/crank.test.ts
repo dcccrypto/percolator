@@ -444,6 +444,164 @@ describe('CrankService', () => {
     });
   });
 
+  describe('GH#1508: foreign oracle skip (OracleInvalid 0xc prevention)', () => {
+    it('should skip admin-oracle market where keeper is not the oracle authority and set foreignOracleSkipped', async () => {
+      const slabAddress = 'MarketFO1111111111111111111111111111111';
+      const FOREIGN_AUTHORITY = 'ForeignAuth111111111111111111111111111111';
+      const mockMarket = {
+        slabAddress: { toBase58: () => slabAddress },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'MintFO11111111111111111111111111111111' },
+          // Non-default oracleAuthority (admin oracle), but NOT equal to keeper key.
+          // isAdminOracle() checks !oracleAuthority.equals(PublicKey.default) → oracleAuthority.equals(default)=false → !false=true → isAdminOracle
+          // crankMarket() checks keypair.publicKey.equals(oracleAuthority) → we override loadKeypair below to return equals: () => false
+          oracleAuthority: {
+            toBase58: () => FOREIGN_AUTHORITY,
+            equals: (other: any) => false, // not equal to PublicKey.default OR keeper key
+          },
+          indexFeedId: { toBytes: () => new Uint8Array(32) },
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'AdminFO11111111111111111111111111111111' } },
+      };
+
+      // Override loadKeypair so keypair.publicKey.equals(oracleAuthority) returns false (foreign key)
+      vi.mocked(shared.loadKeypair).mockReturnValueOnce({
+        publicKey: {
+          toBase58: () => 'KeeperKey111111111111111111111111111111',
+          equals: (other: any) => false, // keeper key does NOT match the foreign oracle authority
+        },
+        secretKey: new Uint8Array(64),
+      } as any);
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
+      await crankService.discover();
+
+      const result = await crankService.crankMarket(slabAddress);
+
+      expect(result).toBe(false);
+      // Should NOT have submitted a transaction
+      expect(shared.sendWithRetryKeeper).not.toHaveBeenCalled();
+
+      const state = crankService.getMarkets().get(slabAddress)!;
+      expect(state.foreignOracleSkipped).toBe(true);
+      // Should not increment failure counters — this is an intentional skip, not a failure
+      expect(state.failureCount).toBe(0);
+      expect(state.consecutiveFailures).toBe(0);
+    });
+
+    it('should reset foreignOracleSkipped on rediscovery so oracle authority changes are picked up', async () => {
+      const slabAddress = 'MarketFO2111111111111111111111111111111';
+      const FOREIGN_AUTHORITY = 'ForeignAuth211111111111111111111111111111';
+      const mockMarket = {
+        slabAddress: { toBase58: () => slabAddress },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'MintFO21111111111111111111111111111111' },
+          oracleAuthority: {
+            toBase58: () => FOREIGN_AUTHORITY,
+            equals: (other: any) => false,
+          },
+          indexFeedId: { toBytes: () => new Uint8Array(32) },
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'AdminFO21111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
+      await crankService.discover();
+
+      // Override loadKeypair so keeper is NOT the oracle authority → foreignOracleSkipped set
+      vi.mocked(shared.loadKeypair).mockReturnValueOnce({
+        publicKey: { toBase58: () => 'KeeperKey211111111111111111111111111111', equals: () => false },
+        secretKey: new Uint8Array(64),
+      } as any);
+
+      await crankService.crankMarket(slabAddress);
+
+      const state = crankService.getMarkets().get(slabAddress)!;
+      expect(state.foreignOracleSkipped).toBe(true);
+
+      // Rediscovery should reset the flag so the next crankMarket call re-evaluates
+      await crankService.discover();
+      expect(state.foreignOracleSkipped).toBe(false);
+    });
+
+    it('should NOT skip admin-oracle market where keeper IS the oracle authority', async () => {
+      const slabAddress = 'MarketOwnOracle1111111111111111111111111';
+      const mockMarket = {
+        slabAddress: { toBase58: () => slabAddress },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'MintOwn1111111111111111111111111111111' },
+          // Non-default oracleAuthority (admin oracle), equals keeper key
+          oracleAuthority: {
+            toBase58: () => '11111111111111111111111111111111',
+            equals: () => true, // keeper IS the oracle authority
+          },
+          indexFeedId: { toBytes: () => new Uint8Array(32) },
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'AdminOwn1111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
+      await crankService.discover();
+
+      vi.mocked(shared.sendWithRetryKeeper).mockResolvedValue('sig-own-oracle');
+      const result = await crankService.crankMarket(slabAddress);
+
+      expect(result).toBe(true);
+      expect(shared.sendWithRetryKeeper).toHaveBeenCalled();
+
+      const state = crankService.getMarkets().get(slabAddress)!;
+      expect(state.foreignOracleSkipped).toBeUndefined();
+      expect(state.successCount).toBe(1);
+    });
+
+    it('crankAll should count foreignOracleSkipped markets in skipped total', async () => {
+      const slabForeign = 'MarketFO3111111111111111111111111111111';
+      const slabNormal = 'MarketNorm111111111111111111111111111111';
+      const mockForeignMarket = {
+        slabAddress: { toBase58: () => slabForeign },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'MintFO31111111111111111111111111111111' },
+          oracleAuthority: { toBase58: () => 'ForeignAuth31111111111111111111111111111', equals: () => false },
+          indexFeedId: { toBytes: () => new Uint8Array(32) },
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'AdminFO31111111111111111111111111111111' } },
+      };
+      const mockNormalMarket = {
+        slabAddress: { toBase58: () => slabNormal },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'MintNorm1111111111111111111111111111111' },
+          oracleAuthority: { toBase58: () => '11111111111111111111111111111111', equals: () => true },
+          indexFeedId: { toBytes: () => new Uint8Array(32) },
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'AdminNorm111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([mockForeignMarket, mockNormalMarket] as any);
+      await crankService.discover();
+
+      // Pre-mark the foreign oracle market as skipped (as crankMarket would do)
+      const foreignState = crankService.getMarkets().get(slabForeign)!;
+      foreignState.foreignOracleSkipped = true;
+
+      vi.mocked(shared.sendWithRetryKeeper).mockResolvedValue('sig-normal');
+      const result = await crankService.crankAll();
+
+      // Normal market cranked; foreign oracle market skipped → skipped >= 1
+      expect(result.skipped).toBeGreaterThanOrEqual(1);
+      expect(result.success).toBe(1);
+    });
+  });
+
   describe('start and stop', () => {
     it('should start timer and perform initial discovery', async () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([]);

@@ -42,6 +42,13 @@ interface MarketCrankState {
    * This field stores the original mainnet CA so Jupiter/DexScreener lookups use the right address.
    */
   mainnetCA?: string;
+  /**
+   * GH#1508: Admin-oracle market where the keeper is NOT the oracle authority.
+   * The market owner must push prices themselves — we can't crank without a valid oracle price.
+   * Cranking these causes OracleInvalid (0xc) errors. Skip until authority changes.
+   * Unlike permanentlySkipped (0x4), this is re-checked on each discovery cycle.
+   */
+  foreignOracleSkipped?: boolean;
 }
 
 /** Process items in batches with delay between batches.
@@ -147,6 +154,12 @@ export class CrankService {
         const state = this.markets.get(key)!;
         state.market = market;
         state.missingDiscoveryCount = 0;
+        // GH#1508: Reset foreignOracleSkipped on re-discovery — oracle authority may have changed.
+        // crankMarket() will re-check and re-set it if the keeper is still not the authority.
+        if (state.foreignOracleSkipped) {
+          state.foreignOracleSkipped = false;
+          logger.debug("Re-checking foreign oracle skip on rediscovery", { slabAddress: key });
+        }
         // PERC-381: Only re-enable permanently skipped (0x4) markets after a long cooldown
         // to avoid crank→skip→rediscover→re-enable→crank thrash loop on stale slabs.
         // Cooldown increases exponentially with skip count (1h, 2h, 4h, ... capped at 24h).
@@ -211,6 +224,23 @@ export class CrankService {
       const connection = getConnection();
       const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
       const programId = market.programId;
+
+      // GH#1508: Skip admin-oracle markets where we are NOT the oracle authority.
+      // Cranking without a valid oracle price causes OracleInvalid (0xc). The market
+      // owner must push prices themselves; the keeper has no authority here.
+      if (this.isAdminOracle(market) && !keypair.publicKey.equals(market.config.oracleAuthority)) {
+        if (!state.foreignOracleSkipped) {
+          state.foreignOracleSkipped = true;
+          logger.warn("Skipping admin-oracle market — keeper is not the oracle authority (would cause OracleInvalid 0xc). " +
+            "The market creator must push prices. Suppressing further crank attempts.", {
+            slabAddress,
+            oracleAuthority: market.config.oracleAuthority.toBase58(),
+            keeperKey: keypair.publicKey.toBase58(),
+            programId: programId.toBase58(),
+          });
+        }
+        return false;
+      }
 
       // PERC-204: Build all instructions into a single transaction bundle
       const instructions = [];
@@ -337,6 +367,7 @@ export class CrankService {
 
   // NEW: split skipped into categories
   let skippedPermanent = 0;
+  let skippedForeignOracle = 0;
   let skippedFailures = 0;
   let skippedNotDue = 0;
 
@@ -347,6 +378,11 @@ export class CrankService {
   for (const [slabAddress, state] of this.markets) {
     if (state.permanentlySkipped) {
       skippedPermanent++;
+      continue;
+    }
+    // GH#1508: Skip admin-oracle markets where keeper is not the oracle authority
+    if (state.foreignOracleSkipped) {
+      skippedForeignOracle++;
       continue;
     }
     if (state.consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
@@ -361,7 +397,7 @@ export class CrankService {
   }
 
   // NEW: meaningful accounting check
-  const skipped = skippedPermanent + skippedFailures + skippedNotDue;
+  const skipped = skippedPermanent + skippedForeignOracle + skippedFailures + skippedNotDue;
   const total = this.markets.size;
   const accounted = toCrank.length + skipped;
 
@@ -371,6 +407,7 @@ export class CrankService {
       toCrank: toCrank.length,
       skipped,
       skippedPermanent,
+      skippedForeignOracle,
       skippedFailures,
       skippedNotDue,
     });
