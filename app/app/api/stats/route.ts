@@ -265,11 +265,17 @@ export async function GET(request: NextRequest) {
   const nonZombieCount = statsData.length - nonZombieListedMarkets.length;
 
   return NextResponse.json({
-    totalMarkets,
+    // GH#1529: totalMarkets is now aligned with /api/markets total (non-zombie, non-blocked).
+    // Previously totalMarkets=69 was the active-market subset (at least one sane stat),
+    // which diverged from totalListedMarkets=168 without any documented distinction.
+    // totalListedMarkets (deprecated alias) is kept for backward compat.
+    // activeMarkets exposes the previous totalMarkets value for internal tooling.
+    totalMarkets: nonZombieListedMarkets.length,
+    activeMarkets: totalMarkets,
     // #1172: totalListedMarkets includes all non-blocked, non-zombie markets.
-    // totalMarkets counts only "active" markets (at least one sane stat).
     // GH#1465: Previously this was statsData.length (included zombies), diverging
     // from /api/markets total. Now aligned by applying the same zombie filter.
+    // GH#1529: Deprecated — use totalMarkets (now identical). Kept for compatibility.
     totalListedMarkets: nonZombieListedMarkets.length,
     totalVolume24h,
     totalOpenInterest,
