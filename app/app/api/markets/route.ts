@@ -220,10 +220,17 @@ export async function GET(request: NextRequest) {
         const n = Number(v);
         return Number.isFinite(n) ? n : null;
       };
+      // GH#1506: Use sanitizedPrice (already capped at MAX_SANE_PRICE_USD=$1M) for the
+      // zombie check instead of numericOrNull(m.last_price). Raw DB prices can be stale
+      // garbage values that pass isSaneMarketValue (< 1e18) but exceed the display cap.
+      // NNOB had a stale raw last_price > $1M in DB — sanitizePrice nulled it for output,
+      // but passing numericOrNull(m.last_price) to isZombieMarket() made hasActivity=true
+      // → c_tot>0 exemption fired → is_zombie=false, even though the API returned null.
+      // Using sanitizedPrice keeps the zombie check consistent with what consumers receive.
       const is_zombie = isZombieMarket({
         vault_balance: numericOrNull(m.vault_balance),
         c_tot: numericOrNull(m.c_tot),
-        last_price: numericOrNull(m.last_price),
+        last_price: sanitizedPrice,
         volume_24h: numericOrNull(m.volume_24h),
         total_open_interest: numericOrNull(m.total_open_interest),
         total_accounts: numericOrNull(m.total_accounts),
