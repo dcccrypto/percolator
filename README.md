@@ -29,20 +29,23 @@ Capital is senior. Profit is junior. A single global ratio determines how much p
 ```
 Residual  = max(0, V - C_tot - I)
 
-              min(Residual, PNL_pos_tot)
-    h     =  --------------------------
-                    PNL_pos_tot
+              min(Residual, PNL_matured_pos_tot)
+    h     =  ----------------------------------
+                    PNL_matured_pos_tot
 ```
 
-If fully backed, `h = 1`. If stressed, `h < 1`. Every profitable account sees the same fraction:
+If fully backed, `h = 1`. If stressed, `h < 1`. Every profitable account sees the same fraction of its *released* profit:
 
 ```
-effective_pnl_i = floor(max(PNL_i, 0) * h)
+ReleasedPos_i   = max(PNL_i, 0) - R_i
+effective_pnl_i = floor(ReleasedPos_i * h)
 ```
+
+Fresh profit sits in a per-account reserve `R_i` and converts to released (matured) profit through a warmup period. Only matured profit enters the haircut denominator (`PNL_matured_pos_tot`) and the per-account effective PnL. This is the core oracle-manipulation defense — an attacker who spikes a price sees their unrealized gain locked in `R_i`, excluded from both the ratio and their withdrawable amount, until the warmup window passes.
 
 No rankings, no queue priority, no first-come advantage. The floor rounding is conservative — the sum of all effective PnL never exceeds what exists in the vault.
 
-Profit converts to withdrawable capital through warmup, bounded by `h`. When the system is stressed, `h` falls and less converts. When losses settle or buffers recover, `h` rises. Self-healing.
+When the system is stressed, `h` falls and less converts. When losses settle or buffers recover, `h` rises. Self-healing.
 
 Flat accounts are always protected — `h` only gates profit extraction, never touches deposited capital.
 
@@ -102,6 +105,17 @@ A/K fairness is exact for open-position economics. H fairness is exact only for 
 ## Open Source
 
 Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
+
+146 Kani proofs across 6 files verify arithmetic, instruction safety, conservation invariants, lazy A/K semantics, liveness, and risk bounds:
+
+```
+tests/proofs_arithmetic.rs    — 20 proofs (U256/U512 division, floor/ceil, signed ops)
+tests/proofs_instructions.rs  — 35 proofs (deposit, withdraw, trade, liquidation, ADL)
+tests/proofs_invariants.rs    — 26 proofs (conservation, OI balance, aggregate tracking)
+tests/proofs_lazy_ak.rs       — 14 proofs (A/K composition, epoch reset, deficit socialization)
+tests/proofs_liveness.rs      — 11 proofs (drain→reset→normal progress, side reopening)
+tests/proofs_safety.rs        — 40 proofs (margin enforcement, haircut bounds, seniority)
+```
 
 ```bash
 cargo install --locked kani-verifier
