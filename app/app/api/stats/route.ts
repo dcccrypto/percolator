@@ -234,22 +234,35 @@ export async function GET(request: NextRequest) {
   // diverge from /api/markets total (122) by exactly zombieCount (73).
   // Uses shared isZombieMarket() helper (GH#1420 + GH#1427 predicate, CodeRabbit #1466).
   //
-  // GH#1515: Use phantomAwareData (price-sanitized) instead of statsData (raw) here.
-  // /api/markets runs isZombieMarket with sanitizedPrice (capped at $1M via sanitizePrice).
-  // /api/stats was running isZombieMarket with raw last_price from statsData — a market
-  // with a stale DB price > $1M passes isSaneMarketValue() (< 1e18 ✓) → hasActivity=true
-  // → escapes zombie detection → counted in totalListedMarkets here, but /api/markets
-  // sanitizePrice() nulls that price → hasActivity=false → zombie → excluded from total.
-  // Fix: pass phantomAwareData (which already caps last_price at $1M via GH#1430 logic)
-  // so the zombie check uses the same effective price as /api/markets.
-  const nonZombieListedMarkets = phantomAwareData.filter((m) => !isZombieMarket(m as {
-    vault_balance?: number | null;
-    c_tot?: number | null;
-    last_price?: number | null;
-    volume_24h?: number | null;
-    total_open_interest?: number | null;
-    total_accounts?: number | null;
-  }));
+  // GH#1518: Use price-cap-only data for the zombie filter — NOT phantomAwareData.
+  // PR#1516 switched from statsData → phantomAwareData, but phantomAwareData zeroes ALL
+  // stat fields (price, volume, OI) for phantom markets. isZombieMarket() then sees no
+  // activity for 9 markets that /api/markets considers non-zombie (because they have
+  // c_tot > 0 AND real activity in their raw data). /api/markets only applies a $1M
+  // price cap (via sanitizePrice) before isZombieMarket(), not a full phantom zero-out.
+  // Fix: mirror /api/markets exactly — apply only the $1M price cap and numeric coercion
+  // before isZombieMarket(), preserving volume/OI/accounts for the activity check.
+  const numericOrNull = (v: unknown): number | null => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const nonZombieListedMarkets = statsData.filter((m) => {
+    const raw = m as Record<string, unknown>;
+    const rawPrice = numericOrNull(raw.last_price);
+    const sanitizedPrice = (rawPrice != null && rawPrice > 0 && rawPrice <= MAX_SANE_PRICE_FOR_ACTIVE)
+      ? rawPrice
+      : null;
+    return !isZombieMarket({
+      vault_balance: numericOrNull(raw.vault_balance),
+      c_tot: numericOrNull(raw.c_tot),
+      last_price: sanitizedPrice,
+      volume_24h: numericOrNull(raw.volume_24h),
+      total_open_interest: numericOrNull(raw.total_open_interest),
+      total_accounts: numericOrNull(raw.total_accounts),
+    });
+  });
+  const nonZombieCount = statsData.length - nonZombieListedMarkets.length;
 
   return NextResponse.json({
     totalMarkets,
