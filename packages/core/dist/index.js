@@ -2267,8 +2267,8 @@ function computeMeteoraDlmmPriceE6(data) {
     throw new Error(`Meteora DLMM data too short: ${data.length} < ${METEORA_DLMM_MIN_LEN}`);
   }
   const dv3 = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const binStep = dv3.getUint16(74, true);
-  const activeId = dv3.getInt32(77, true);
+  const binStep = dv3.getUint16(73, true);
+  const activeId = dv3.getInt32(76, true);
   if (binStep === 0) return 0n;
   const SCALE = 1000000000000000000n;
   const base = SCALE + BigInt(binStep) * SCALE / 10000n;
