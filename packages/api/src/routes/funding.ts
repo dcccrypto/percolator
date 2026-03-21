@@ -114,10 +114,12 @@ export function fundingRoutes(): Hono {
     if (!slab) return c.json({ error: "slab required" }, 400);
 
     try {
-      // Fetch current funding rate from market_stats
+      // GH#1511: Fetch funding stats + market metadata in a single query via
+      // markets_with_stats view so we can populate metadata.symbol and
+      // metadata.last_price. Falls back gracefully if market row is missing.
       const { data: stats, error: statsError } = await getSupabase()
-        .from("market_stats")
-        .select("funding_rate, net_lp_pos")
+        .from("markets_with_stats")
+        .select("funding_rate, net_lp_pos, symbol, last_price")
         .eq("slab_address", slab)
         .single();
 
@@ -170,6 +172,13 @@ export function fundingRoutes(): Hono {
         fundingIndexQpbE6: h.funding_index_qpb_e6,
       }));
 
+      // GH#1511: Sanitize last_price from markets_with_stats — same ceiling used
+      // in /api/markets to guard against unscaled admin-set test prices.
+      const MAX_SANE_PRICE_USD = 1_000_000;
+      const rawLastPrice = Number(stats.last_price ?? 0);
+      const sanitizedLastPrice =
+        rawLastPrice > 0 && rawLastPrice <= MAX_SANE_PRICE_USD ? rawLastPrice : null;
+
       return c.json({
         slabAddress: slab,
         currentRateBpsPerSlot: rateBps,
@@ -179,6 +188,11 @@ export function fundingRoutes(): Hono {
         netLpPosition,
         last24hHistory,
         metadata: {
+          // GH#1511: Populate symbol and last_price from markets_with_stats.
+          // Previously these fields were always null — the route only joined
+          // market_stats, which has no symbol or price columns.
+          symbol: stats.symbol ?? null,
+          last_price: sanitizedLastPrice,
           dataPoints24h: last24hHistory.length,
           explanation: {
             rateBpsPerSlot: "Funding rate in basis points per slot (1 bps = 0.01%)",

@@ -289,6 +289,54 @@ export async function GET(request: NextRequest) {
     const nonZombieOnly = sanitized.filter((m) => !(m as Record<string, unknown>).is_zombie);
     const activeTotal = nonZombieOnly.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
 
+    // GH#1512: Apply search filter — case-insensitive substring match on symbol or name.
+    const searchParam = request?.nextUrl?.searchParams?.get("search") ?? null;
+    const searchTrimmed = searchParam ? searchParam.trim() : null;
+    const searchFiltered = searchTrimmed
+      ? nonZombie.filter((m) => {
+          const sym = ((m as Record<string, unknown>).symbol as string | null) ?? "";
+          const name = ((m as Record<string, unknown>).name as string | null) ?? "";
+          const q = searchTrimmed.toLowerCase();
+          return sym.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+        })
+      : nonZombie;
+
+    // GH#1512: Apply oracle_mode filter.
+    const oracleModeParam = request?.nextUrl?.searchParams?.get("oracle_mode") ?? null;
+    const oracleModeFiltered = oracleModeParam
+      ? searchFiltered.filter(
+          (m) => ((m as Record<string, unknown>).oracle_mode as string | null) === oracleModeParam,
+        )
+      : searchFiltered;
+
+    // GH#1512: Apply sort + order. Supported sort keys: symbol, last_price, volume_24h,
+    // total_open_interest_usd, funding_rate. Default: no sort (DB order).
+    const sortParam = request?.nextUrl?.searchParams?.get("sort") ?? null;
+    const orderParam = (request?.nextUrl?.searchParams?.get("order") ?? "asc").toLowerCase();
+    const sortDir = orderParam === "desc" ? -1 : 1;
+    const SORTABLE_FIELDS = new Set([
+      "symbol",
+      "last_price",
+      "volume_24h",
+      "total_open_interest_usd",
+      "funding_rate",
+    ]);
+    const sorted =
+      sortParam && SORTABLE_FIELDS.has(sortParam)
+        ? [...oracleModeFiltered].sort((a, b) => {
+            const av = (a as Record<string, unknown>)[sortParam] ?? null;
+            const bv = (b as Record<string, unknown>)[sortParam] ?? null;
+            // Nulls last regardless of order direction.
+            if (av === null && bv === null) return 0;
+            if (av === null) return 1;
+            if (bv === null) return -1;
+            if (typeof av === "string" && typeof bv === "string") {
+              return sortDir * av.localeCompare(bv);
+            }
+            return sortDir * ((av as number) - (bv as number));
+          })
+        : oracleModeFiltered;
+
     // GH#1348: Respect ?limit= query param to avoid returning 100+ markets
     // GH#1490: Validate limit (must be 1–500) and offset (must be >= 0) using
     // validateNumericParam() from route-validators.ts. Previously limit=-1/0/999999
@@ -311,10 +359,10 @@ export async function GET(request: NextRequest) {
       offsetNum = offsetValidation.value;
     }
 
-    const paged = offsetNum > 0 ? nonZombie.slice(offsetNum) : nonZombie;
+    const paged = offsetNum > 0 ? sorted.slice(offsetNum) : sorted;
     const limited = limitNum > 0 ? paged.slice(0, limitNum) : paged;
 
-    return NextResponse.json({ total: nonZombie.length, activeTotal, zombieCount, markets: limited }, {
+    return NextResponse.json({ total: sorted.length, activeTotal, zombieCount, markets: limited }, {
       headers: {
         "Cache-Control": "public, s-maxage=10, stale-while-revalidate=30",
       },
