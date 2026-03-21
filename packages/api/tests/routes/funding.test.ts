@@ -50,6 +50,8 @@ describe("funding routes", () => {
       const mockStats = {
         funding_rate: 10,
         net_lp_pos: "1000000",
+        symbol: null,
+        last_price: null,
       };
 
       const mockHistory = [
@@ -81,6 +83,8 @@ describe("funding routes", () => {
       const mockStats = {
         funding_rate: 100, // 100 bps per slot = 1% per slot
         net_lp_pos: "0",
+        symbol: null,
+        last_price: null,
       };
 
       mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
@@ -128,6 +132,8 @@ describe("funding routes", () => {
       const mockStats = {
         funding_rate: 0,
         net_lp_pos: "0",
+        symbol: null,
+        last_price: null,
       };
 
       mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
@@ -148,6 +154,8 @@ describe("funding routes", () => {
       const mockStats = {
         funding_rate: -50,
         net_lp_pos: "-500000",
+        symbol: null,
+        last_price: null,
       };
 
       mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
@@ -161,6 +169,109 @@ describe("funding routes", () => {
       expect(data.currentRateBpsPerSlot).toBe(-50);
       expect(data.hourlyRatePercent).toBe(-45);
       expect(data.dailyRatePercent).toBe(-1080);
+    });
+
+    describe("GH#1511: metadata.symbol and metadata.last_price must be populated", () => {
+      it("returns symbol and last_price when market has data", async () => {
+        const mockStats = {
+          funding_rate: 5,
+          net_lp_pos: "1000000",
+          symbol: "WENDYS",
+          last_price: 0.000099,
+        };
+
+        mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
+        vi.mocked(getFundingHistorySince).mockResolvedValue([]);
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/11111111111111111111111111111111");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.metadata.symbol).toBe("WENDYS");
+        expect(data.metadata.last_price).toBeCloseTo(0.000099);
+      });
+
+      it("returns null symbol when market row has no symbol", async () => {
+        const mockStats = {
+          funding_rate: 5,
+          net_lp_pos: "0",
+          symbol: null,
+          last_price: 45000,
+        };
+
+        mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
+        vi.mocked(getFundingHistorySince).mockResolvedValue([]);
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/11111111111111111111111111111111");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.metadata.symbol).toBeNull();
+        expect(data.metadata.last_price).toBe(45000);
+      });
+
+      it("sanitizes last_price above $1M to null (corrupt admin-set price)", async () => {
+        const mockStats = {
+          funding_rate: 5,
+          net_lp_pos: "0",
+          symbol: "CORRUPT",
+          last_price: 7_902_953_782_213.77,
+        };
+
+        mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
+        vi.mocked(getFundingHistorySince).mockResolvedValue([]);
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/11111111111111111111111111111111");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.metadata.symbol).toBe("CORRUPT");
+        expect(data.metadata.last_price).toBeNull();
+      });
+
+      it("sanitizes zero last_price to null", async () => {
+        const mockStats = {
+          funding_rate: 0,
+          net_lp_pos: "0",
+          symbol: "ZERO",
+          last_price: 0,
+        };
+
+        mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
+        vi.mocked(getFundingHistorySince).mockResolvedValue([]);
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/11111111111111111111111111111111");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.metadata.last_price).toBeNull();
+      });
+
+      it("metadata always contains dataPoints24h and explanation fields", async () => {
+        const mockStats = {
+          funding_rate: 1,
+          net_lp_pos: "0",
+          symbol: "TEST",
+          last_price: 100,
+        };
+
+        mockSupabase.single.mockResolvedValue({ data: mockStats, error: null });
+        vi.mocked(getFundingHistorySince).mockResolvedValue([]);
+
+        const app = fundingRoutes();
+        const res = await app.request("/funding/11111111111111111111111111111111");
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.metadata).toHaveProperty("dataPoints24h");
+        expect(data.metadata).toHaveProperty("explanation");
+        expect(data.metadata).toHaveProperty("symbol");
+        expect(data.metadata).toHaveProperty("last_price");
+      });
     });
   });
 
