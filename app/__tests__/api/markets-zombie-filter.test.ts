@@ -2,6 +2,9 @@
  * GH#1420: Zombie markets (vault_balance=0) should be excluded from /api/markets by default.
  * GH#1419: Stale volume_24h (stats_updated_at > 48h ago) should be excluded from /api/stats totals.
  * GH#1427: Markets with null vault_balance AND all null stats should also be zombie.
+ * GH#1502: NNOB zombie regression — phantom OI (total_open_interest>0 with accounts=0) must not
+ *          count as "hasActivity" in the c_tot exemption check. NNOB: vault=0, c_tot=100B,
+ *          accounts=0, no price, but stale DB OI → should still be zombie.
  *
  * Unit tests for the filtering logic (not full route integration — uses helpers extracted from route).
  */
@@ -33,20 +36,22 @@ function isZombie(m: MarketRow): boolean {
   // GH#1499: c_tot > 0 only exempts when there is corroborating activity.
   // FF7K markets: vault=0, c_tot>0, has price → hasActivity=true → not zombie.
   // NNOB: vault=0, c_tot>0, no price, no accounts → hasActivity=false → zombie.
+  //
+  // GH#1502: OI intentionally excluded from hasActivity — per GH#1290, OI with no accounts
+  // is phantom (stale slab data). Only price or real accounts prove a market is genuinely live.
   const hasActivity =
     isSaneMarketValue(m.last_price) ||
     isSaneMarketValue(m.volume_24h) ||
-    isSaneMarketValue(m.total_open_interest) ||
     (m.total_accounts ?? 0) > 0;
 
   if (cTot !== null && cTot > 0 && hasActivity) return false;
 
   if (vaultBal !== null && vaultBal === 0) return true;
   if (vaultBal === null) {
+    // GH#1502: OI excluded — phantom OI (accounts=0) must not prevent zombie classification.
     const hasNoStats =
       !isSaneMarketValue(m.last_price) &&
       !isSaneMarketValue(m.volume_24h) &&
-      !isSaneMarketValue(m.total_open_interest) &&
       ((m.total_accounts ?? 0) === 0);
     if (hasNoStats) return true;
   }
@@ -161,16 +166,30 @@ describe("GH#1427 null vault_balance + no-stats zombie", () => {
     ).toBe(false);
   });
 
-  it("does NOT mark null vault_balance + has OI as zombie", () => {
+  it("does NOT mark null vault_balance + has OI with accounts as zombie", () => {
+    // OI only counts when accounts > 0 (GH#1502: phantom OI guard).
     expect(
       isZombie({
         vault_balance: null,
         last_price: null,
         volume_24h: null,
         total_open_interest: 1_000_000,
-        total_accounts: 1,
+        total_accounts: 1, // real account → not phantom
       }),
     ).toBe(false);
+  });
+
+  it("marks null vault_balance + OI only (no accounts) as zombie (GH#1502 phantom OI)", () => {
+    // OI with zero accounts is phantom — must NOT prevent zombie classification.
+    expect(
+      isZombie({
+        vault_balance: null,
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: 1_000_000,
+        total_accounts: 0, // phantom OI: no real positions
+      }),
+    ).toBe(true);
   });
 
   it("does NOT mark null vault_balance + has accounts as zombie", () => {
@@ -212,9 +231,10 @@ describe("GH#1427 null vault_balance + no-stats zombie", () => {
 
 // ---------------------------------------------------------------------------
 // GH#1499 — NNOB edge case: c_tot > 0 but no activity (vault=0, accounts=0, no price)
+// GH#1502 — NNOB regression: phantom OI in hasActivity kept NNOB out of zombie list
 // ---------------------------------------------------------------------------
 
-describe("GH#1499 c_tot>0 with no activity still zombie", () => {
+describe("GH#1499 + GH#1502 c_tot>0 with no real activity still zombie", () => {
   it("NNOB case: c_tot=100B, vault=0, accounts=0, no price → zombie", () => {
     // Before fix: c_tot > 0 short-circuited → is_zombie=false (BUG: NNOB showed in default response with null price)
     // After fix: c_tot > 0 only exempts when hasActivity is also true
@@ -225,6 +245,23 @@ describe("GH#1499 c_tot>0 with no activity still zombie", () => {
         last_price: null,
         volume_24h: null,
         total_open_interest: null,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("GH#1502 NNOB regression: c_tot=100B, vault=0, accounts=0, phantom OI → zombie", () => {
+    // PR#1501 fixed the c_tot > 0 exemption but hasActivity still included
+    // isSaneMarketValue(total_open_interest). NNOB has stale DB OI (non-zero phantom)
+    // → hasActivity=true → c_tot>0 exemption fired → is_zombie=false (BUG).
+    // Fix (GH#1502): OI excluded from hasActivity when accounts=0 (phantom OI per GH#1290).
+    expect(
+      isZombie({
+        vault_balance: 0,
+        c_tot: 100_000_000_000, // NNOB: 100B micro-USDC
+        last_price: null,
+        volume_24h: null,
+        total_open_interest: 500_000, // stale phantom OI — should NOT trigger activity
         total_accounts: 0,
       }),
     ).toBe(true);
