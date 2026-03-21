@@ -66,6 +66,8 @@ fn test_params() -> RiskParams {
         fee_split_protocol_bps: 3333,
         fee_split_creator_bps: 3333,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 
@@ -104,6 +106,8 @@ fn test_params_with_floor() -> RiskParams {
         fee_split_protocol_bps: 3333,
         fee_split_creator_bps: 3333,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 
@@ -142,6 +146,8 @@ fn test_params_with_maintenance_fee() -> RiskParams {
         fee_split_protocol_bps: 3333,
         fee_split_creator_bps: 3333,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 
@@ -6202,6 +6208,8 @@ fn params_for_inline_kani() -> RiskParams {
         fee_split_protocol_bps: 0,
         fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 

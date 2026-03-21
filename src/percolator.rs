@@ -383,6 +383,19 @@ pub struct RiskParams {
     pub fee_split_creator_bps: u64,
     /// Utilization-based fee multiplier ceiling (bps above base). 0 = disabled.
     pub fee_utilization_surge_bps: u64,
+
+    // ========================================
+    // Margin Floors (spec §9.1)
+    // ========================================
+    /// Absolute floor for maintenance margin requirement.
+    /// MM_req_i = max(proportional, min_nonzero_mm_req).
+    /// Prevents microscopic positions from evading margin enforcement when
+    /// proportional notional floors to zero. Set to 0 to disable.
+    pub min_nonzero_mm_req: u128,
+    /// Absolute floor for initial margin requirement.
+    /// IM_req_i = max(proportional, min_nonzero_im_req).
+    /// Must be strictly > min_nonzero_mm_req when both are non-zero.
+    pub min_nonzero_im_req: u128,
 }
 
 impl RiskParams {
@@ -400,6 +413,13 @@ impl RiskParams {
         }
         // Initial margin must be >= maintenance margin
         if self.initial_margin_bps < self.maintenance_margin_bps {
+            return Err(RiskError::Overflow);
+        }
+        // Margin floors: if both non-zero, MM floor must be strictly less than IM floor (spec §9.1)
+        if self.min_nonzero_mm_req > 0
+            && self.min_nonzero_im_req > 0
+            && self.min_nonzero_mm_req >= self.min_nonzero_im_req
+        {
             return Err(RiskError::Overflow);
         }
         // max_accounts must be > 0 and within physical slab size
@@ -1822,13 +1842,19 @@ impl RiskEngine {
             let _ =
                 self.settle_maintenance_fee_best_effort_for_crank(idx as u16, self.current_slot);
 
-            // Dust predicate: must have zero position, capital, reserved, and non-positive pnl
+            // Dust predicate: must have zero position, reserved, and non-positive pnl.
+            // Capital: reclaim when C_i == 0 OR 0 < C_i < MIN_INITIAL_DEPOSIT (spec §2.6).
             {
                 let account = &self.accounts[idx];
                 if !account.position_size.is_zero() {
                     continue;
                 }
-                if !account.capital.is_zero() {
+                // Spec §2.6: skip only if C_i >= MIN_INITIAL_DEPOSIT (not just nonzero).
+                // Dust capital (0 < C_i < min_initial_deposit) is swept to insurance below.
+                // Use new_account_fee as the minimum deposit floor (dcccrypto equivalent of min_initial_deposit)
+                if account.capital.get() >= self.params.new_account_fee.get()
+                    && !account.capital.is_zero()
+                {
                     continue;
                 }
                 if account.reserved_pnl != 0 {
@@ -1837,6 +1863,14 @@ impl RiskEngine {
                 if account.pnl.is_positive() {
                     continue;
                 }
+            }
+
+            // Sweep dust capital into insurance fund before freeing (spec §2.6)
+            let dust_cap = self.accounts[idx].capital.get();
+            if dust_cap > 0 {
+                self.set_capital(idx, 0);
+                self.insurance_fund.balance =
+                    U128::new(add_u128(self.insurance_fund.balance.get(), dust_cap));
             }
 
             // If flat, funding is irrelevant — snap to global so dust can be collected.
@@ -3654,7 +3688,11 @@ impl RiskEngine {
         ) / 1_000_000;
 
         // Price-based margin requirement
-        let margin_required = mul_u128(position_value, bps as u128) / 10_000;
+        let proportional = mul_u128(position_value, bps as u128) / 10_000;
+
+        // Spec §9.1: apply absolute margin floor (maintenance floor applies to MTM check).
+        let floor = self.params.min_nonzero_mm_req;
+        let margin_required = core::cmp::max(proportional, floor);
 
         // Position-based margin requirement (coin-margined perps).
         // When oracle price is small, the price-based check undercounts.
@@ -4048,7 +4086,14 @@ impl RiskEngine {
             } else {
                 self.params.maintenance_margin_bps
             };
-            let margin_required = mul_u128(position_value, margin_bps as u128) / 10_000;
+            let proportional_margin = mul_u128(position_value, margin_bps as u128) / 10_000;
+            // Spec §9.1: apply absolute margin floor if position is non-flat.
+            let floor = if user_risk_increasing {
+                self.params.min_nonzero_im_req
+            } else {
+                self.params.min_nonzero_mm_req
+            };
+            let margin_required = core::cmp::max(proportional_margin, floor);
             if user_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
@@ -4102,7 +4147,14 @@ impl RiskEngine {
             } else {
                 self.params.maintenance_margin_bps
             };
-            let margin_required = mul_u128(position_value, margin_bps as u128) / 10_000;
+            let proportional_margin = mul_u128(position_value, margin_bps as u128) / 10_000;
+            // Spec §9.1: apply absolute margin floor for non-flat positions.
+            let floor = if lp_risk_increasing {
+                self.params.min_nonzero_im_req
+            } else {
+                self.params.min_nonzero_mm_req
+            };
+            let margin_required = core::cmp::max(proportional_margin, floor);
             if lp_equity <= margin_required {
                 return Err(RiskError::Undercollateralized);
             }
@@ -4602,6 +4654,8 @@ mod skew_rebate_tests {
             fee_split_protocol_bps: 0,
             fee_split_creator_bps: 10_000,
             fee_utilization_surge_bps: 0,
+            min_nonzero_mm_req: 0,
+            min_nonzero_im_req: 0,
         };
         RiskEngine::new(params)
     }
