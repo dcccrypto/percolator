@@ -373,6 +373,13 @@ export class CrankService {
 
   const MAX_CONSECUTIVE_FAILURES = 10;
 
+  // GH#1251: Load the keeper key once here so we can check authority live.
+  // We re-evaluate foreign oracle authority at crankAll time rather than relying on
+  // state.foreignOracleSkipped.  After discover() resets the flag, crankMarket() would
+  // return false (and set failed++) instead of skipped.  Checking here means those markets
+  // are categorised as skipped before they even enter the crank queue.
+  const keeperKey = loadKeypair(process.env.CRANK_KEYPAIR!).publicKey;
+
   const toCrank: string[] = [];
 
   for (const [slabAddress, state] of this.markets) {
@@ -380,8 +387,18 @@ export class CrankService {
       skippedPermanent++;
       continue;
     }
-    // GH#1508: Skip admin-oracle markets where keeper is not the oracle authority
-    if (state.foreignOracleSkipped) {
+    // GH#1251: Live authority check — covers both the steady-state case (flag already set)
+    // and the post-discover() window where the flag was just reset.
+    // Any admin-oracle market where the keeper is NOT the oracle authority is always skipped.
+    if (
+      this.isAdminOracle(state.market) &&
+      !keeperKey.equals(state.market.config.oracleAuthority)
+    ) {
+      // Keep the flag in sync so crankMarket() also fast-paths correctly.
+      if (!state.foreignOracleSkipped) {
+        state.foreignOracleSkipped = true;
+        logger.debug("crankAll: re-skipping foreign oracle market (flag was reset by discover)", { slabAddress });
+      }
       skippedForeignOracle++;
       continue;
     }
