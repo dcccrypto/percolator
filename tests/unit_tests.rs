@@ -4459,6 +4459,136 @@ fn test_zero_fee_bps_means_no_fee() {
     );
 }
 
+/// Regression test for fee calculation based on position size, not notional
+/// Before fix: fee = notional * fee_bps / 10_000 (small for low-price tokens)
+/// After fix: fee = abs_size * fee_bps / 10_000 (correct for coin-margined perpetuals)
+#[test]
+fn test_fee_based_on_position_size_not_notional() {
+    let mut params = default_params();
+    params.trading_fee_bps = 10; // 0.1% fee
+    params.maintenance_margin_bps = 100;
+    params.initial_margin_bps = 100;
+    params.warmup_period_slots = 0;
+    params.max_crank_staleness_slots = u64::MAX;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // Deposit enough capital
+    engine.deposit(user_idx, 1_000_000_000_000, 0).unwrap(); // Large deposit
+    engine.accounts[lp_idx as usize].capital = U128::new(1_000_000_000_000);
+    engine.vault += 1_000_000_000_000;
+    engine.c_tot = U128::new(2_000_000_000_000);
+
+    let oracle_price = 1u64; // Very low price ($0.000001)
+
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    // Execute trade: large position size, low price
+    // size = 1_000_000_000 (1B units)
+    // notional = 1_000_000_000 * 1 / 1_000_000 = 1_000 (very small)
+    // abs_size = 1_000_000_000
+    // Old fee: 1_000 * 10 / 10_000 = 1 (wrong - too small)
+    // New fee: 1_000_000_000 * 10 / 10_000 = 1_000_000 (correct)
+    let size: i128 = 1_000_000_000;
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, size)
+        .unwrap();
+
+    let insurance_after = engine.insurance_fund.balance.get();
+    let fee_charged = insurance_after - insurance_before;
+
+    // Fee should be based on position size, not notional
+    let expected_fee = (1_000_000_000u128 * 10u128).div_ceil(10_000);
+    assert_eq!(
+        fee_charged, expected_fee,
+        "Fee must be based on position size ({}), not notional. Expected {}, got {}",
+        1_000_000_000, expected_fee, fee_charged
+    );
+}
+
+/// Regression test for haircut calculation including isolated_balance
+/// Before fix: residual = vault - c_tot - balance (excluded isolated_balance)
+/// After fix: residual = vault - c_tot - (balance + isolated_balance)
+#[test]
+fn test_haircut_includes_isolated_balance() {
+    let mut params = default_params();
+    params.trading_fee_bps = 0;
+    params.maintenance_margin_bps = 100;
+    params.initial_margin_bps = 100;
+    params.warmup_period_slots = 0;
+    params.max_crank_staleness_slots = u64::MAX;
+
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    // Setup capital
+    engine.deposit(user_idx, 1_000_000_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(1_000_000_000);
+    engine.vault += 1_000_000_000;
+    engine.c_tot = U128::new(2_000_000_000);
+
+    // Add isolated balance to insurance fund
+    engine.insurance_fund.isolated_balance = U128::new(500_000_000);
+
+    // Create positive PnL that would trigger haircut without isolated_balance
+    // vault = 2B, c_tot = 2B, balance = 0, isolated_balance = 500M
+    // residual = 2B - 2B - (0 + 500M) = -500M (negative, so haircut applies)
+    // pnl_pos_tot = 1B (set below)
+    // Without fix: residual = 2B - 2B - 0 = 0, no haircut
+    // With fix: residual = -500M, haircut = min(-500M, 1B) = -500M, but since negative, effective 0?
+
+    // Actually, to test, need pnl_pos_tot > residual with isolated, but not without.
+
+    // Set pnl_pos_tot to 1B
+    engine.pnl_pos_tot = U128::new(1_000_000_000);
+
+    // Check haircut ratio
+    let (h_num, h_den) = engine.haircut_ratio();
+
+    // With isolated_balance included, residual = 0 - 500M = -500M
+    // h_num = min(-500M, 1B) = -500M, but since haircut is for positive, wait.
+
+    // Haircut is for junior profits when residual < pnl_pos_tot
+    // If residual < 0, then h_num = residual (negative), but actually haircut_ratio returns (min(residual, pnl), pnl)
+
+    // If residual = -500M, pnl = 1B, h_num = -500M, h_den = 1B
+    // But effective haircut is max(0, h_num)/h_den
+
+    // To test, perhaps check that with isolated_balance, haircut is applied when it wouldn't be without.
+
+    // Let's set vault to 2.5B, c_tot = 2B, balance=0, isolated=0.5B
+    // residual = 2.5B - 2B - 0.5B = 0
+    // pnl_pos_tot = 1B
+    // Without isolated: residual = 2.5B - 2B - 0 = 0.5B, h_num = min(0.5B, 1B) = 0.5B
+    // With isolated: h_num = min(0, 1B) = 0
+    // So haircut changes from 0.5B/1B = 50% to 0/1B = 0%
+
+    // Yes.
+
+    engine.vault = U128::new(2_500_000_000);
+    engine.c_tot = U128::new(2_000_000_000);
+    engine.insurance_fund.balance = U128::new(0);
+    engine.insurance_fund.isolated_balance = U128::new(500_000_000);
+    engine.pnl_pos_tot = U128::new(1_000_000_000);
+
+    let (h_num, h_den) = engine.haircut_ratio();
+
+    // With fix, residual = 2.5B - 2B - 0.5B = 0
+    // h_num = min(0, 1B) = 0
+    assert_eq!(h_num, 0, "Haircut should include isolated_balance, making residual=0");
+    assert_eq!(h_den, 1_000_000_000, "Denominator should be pnl_pos_tot");
+
+    // Without isolated_balance (simulate old bug)
+    let residual_old = engine.vault.get().saturating_sub(engine.c_tot.get()).saturating_sub(engine.insurance_fund.balance.get());
+    let h_num_old = core::cmp::min(residual_old, engine.pnl_pos_tot.get());
+    assert_eq!(h_num_old, 500_000_000, "Old calculation would give different haircut");
+}
+
 /// Regression test for Review Finding [1]: warmup cap overwithdrawing
 /// When mark settlement increases PnL, warmup must restart per spec §5.4.
 /// Without the fix, stale slope * elapsed could exceed original PnL entitlement.
