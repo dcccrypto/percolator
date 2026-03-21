@@ -252,3 +252,94 @@ describe("isSaneMarketValue with string inputs (defensive)", () => {
     expect(numericOrNull("0") === 0).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// GH#1506 — stale raw DB price > MAX_SANE_PRICE_USD must not prevent zombie classification
+// ---------------------------------------------------------------------------
+/**
+ * Simulate the sanitizePrice display cap: any price > $1M is nulled for output.
+ * The route passes sanitizedPrice (already nulled) to isZombieMarket — not the
+ * raw DB value. Before the fix, numericOrNull(m.last_price) was used, which kept
+ * the stale large price as a "sane" value, causing hasActivity=true.
+ */
+function sanitizePrice(v: number | null | undefined): number | null {
+  const MAX_SANE_PRICE_USD = 1_000_000;
+  if (v == null) return null;
+  if (!Number.isFinite(v) || v <= 0 || v > MAX_SANE_PRICE_USD) return null;
+  return v;
+}
+
+describe("GH#1506 zombie check uses sanitizedPrice, not raw DB price", () => {
+  it("NNOB: raw DB price > $1M → sanitized=null → is_zombie=true", () => {
+    // NNOB has a stale admin-oracle raw price e.g. 12_000_000 (> $1M cap).
+    // sanitizePrice nulls it for display. The zombie check must use the sanitized
+    // value so that hasActivity=false and the c_tot>0 exemption does NOT fire.
+    const rawLastPrice = 12_000_000; // garbage stale DB value
+    const sanitizedLastPrice = sanitizePrice(rawLastPrice); // → null
+    expect(sanitizedLastPrice).toBeNull();
+
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 100_000_000_000,
+        last_price: sanitizedLastPrice, // null (display-layer capped)
+        volume_24h: 0,
+        total_open_interest: 0,
+        total_accounts: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("NNOB: passing raw DB price instead of sanitized causes is_zombie=false (documents the bug)", () => {
+    // This test documents WHY the fix is needed — raw price passes isSaneMarketValue
+    // even though it will be nulled for display. Do NOT regress to this behaviour.
+    const rawLastPrice = 12_000_000;
+    expect(isSaneMarketValue(rawLastPrice)).toBe(true); // raw value looks "sane" (< 1e18)
+
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 100_000_000_000,
+        last_price: rawLastPrice, // BUG: raw value → hasActivity=true → not zombie
+        volume_24h: 0,
+        total_open_interest: 0,
+        total_accounts: 0,
+      }),
+    ).toBe(false); // confirms the bug that GH#1506 fixed
+  });
+
+  it("FF7K healthy market: sanitizedPrice valid → hasActivity=true → NOT zombie", () => {
+    // Normal FF7K market with a good keeper price (< $1M) — should never be zombie.
+    const rawLastPrice = 1.05; // $1.05 USDC-based market
+    const sanitizedLastPrice = sanitizePrice(rawLastPrice); // → 1.05
+    expect(sanitizedLastPrice).toBe(1.05);
+
+    expect(
+      isZombieMarket({
+        vault_balance: 0,
+        c_tot: 1_000_000_000,
+        last_price: sanitizedLastPrice,
+        volume_24h: 0,
+        total_open_interest: 0,
+        total_accounts: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("market with stale $2M price but vault>0 — not zombie (vault drives it)", () => {
+    // Vault > 0 means LP liquidity exists regardless of price. Not zombie.
+    const sanitizedLastPrice = sanitizePrice(2_000_000); // → null (> $1M)
+    expect(sanitizedLastPrice).toBeNull();
+
+    expect(
+      isZombieMarket({
+        vault_balance: 5_000_000_000, // vault > 0
+        c_tot: 1_000_000_000,
+        last_price: sanitizedLastPrice, // null
+        volume_24h: 0,
+        total_open_interest: 0,
+        total_accounts: 0,
+      }),
+    ).toBe(false);
+  });
+});
