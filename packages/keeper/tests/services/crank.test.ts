@@ -685,6 +685,178 @@ describe('CrankService', () => {
     });
   });
 
+  describe('PERC-1254: Hyperp-mode markets with zero oracle price', () => {
+    it('should skip Hyperp market with authorityPriceE6=0 and no fetchPrice result (not count as failed)', async () => {
+      // Regression: Small/256-slot Hyperp markets (indexFeedId=all-zeros, authorityPriceE6=0)
+      // where fetchPrice returns null cause OracleInvalid (0xc) if cranked.
+      // They must be skipped, not failed.
+      vi.mocked(shared.sendWithRetryKeeper).mockResolvedValue('mock-sig');
+
+      const slabHyperp = 'HyperpZero1111111111111111111111111111111';
+      const slabNormal = 'Normal111111111111111111111111111111111';
+
+      // Use valid 32-byte all-zeros key (SystemProgram) for ZERO_KEY
+      const ZERO_BYTES = new Uint8Array(32); // all zeros
+      const KEEPER_PUBKEY_STR = '11111111111111111111111111111112'; // valid base58 non-default
+
+      vi.mocked(shared.loadKeypair).mockReturnValue({
+        publicKey: {
+          toBase58: () => KEEPER_PUBKEY_STR,
+          equals: (other: any) => other?.toBase58?.() === KEEPER_PUBKEY_STR,
+        },
+        secretKey: new Uint8Array(64),
+      } as any);
+
+      // Mock oracleAuthority that matches keeper key
+      const keeperOracleAuth = {
+        toBase58: () => KEEPER_PUBKEY_STR,
+        equals: (other: any) => {
+          // equals(PublicKey.default) → false (isAdminOracle = true)
+          // equals(keeperPublicKey) → true
+          if (other?.toBase58) return other.toBase58() === KEEPER_PUBKEY_STR;
+          return false;
+        },
+      };
+
+      const hyperpMarket = {
+        slabAddress: { toBase58: () => slabHyperp, equals: (o: any) => false },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'Mint1111111111111111111111111111111111' },
+          // indexFeedId all-zeros → isHyperpMode = true (via toBytes() check)
+          indexFeedId: { toBytes: () => ZERO_BYTES, equals: (o: any) => false },
+          oracleAuthority: keeperOracleAuth, // keeper is the authority
+          authorityPriceE6: BigInt(0), // never pushed → OracleInvalid if cranked
+          lastEffectivePriceE6: BigInt(1_000_000),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin111111111111111111111111111111111' } },
+      };
+
+      const normalMarket = {
+        slabAddress: { toBase58: () => slabNormal, equals: (o: any) => false },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'Mint2111111111111111111111111111111111' },
+          // indexFeedId all-zeros → isHyperpMode = true BUT authorityPriceE6 > 0 → safe to crank
+          indexFeedId: { toBytes: () => ZERO_BYTES, equals: (o: any) => false },
+          oracleAuthority: keeperOracleAuth, // keeper is authority, has a price on-chain
+          authorityPriceE6: BigInt(50_000_000), // already set on-chain
+          lastEffectivePriceE6: BigInt(50_000_000),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin211111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([hyperpMarket as any, normalMarket as any]);
+
+      // fetchPrice returns null (no DEX data for either market)
+      mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
+
+      await crankService.discover();
+
+      const result = await crankService.crankAll();
+
+      // Hyperp no-price market → skipped (not failed)
+      expect(result.failed).toBe(0);
+      // Normal market with existing on-chain price (authorityPriceE6 > 0) should crank successfully
+      expect(result.success).toBeGreaterThanOrEqual(1);
+
+      // Flag should be set on hyperp zero-price market
+      const hyperpState = crankService.getMarkets().get(slabHyperp)!;
+      expect(hyperpState.hyperpNoPriceSkipped).toBe(true);
+    });
+
+    it('PERC-1254: should crank Hyperp market once fetchPrice returns a valid price', async () => {
+      vi.mocked(shared.sendWithRetryKeeper).mockResolvedValue('mock-sig');
+
+      const slabHyperp = 'HyperpWithPrice111111111111111111111111';
+      const ZERO_BYTES = new Uint8Array(32);
+      const KEEPER_PUBKEY_STR2 = '11111111111111111111111111111112';
+
+      const keeperOracleAuth2 = {
+        toBase58: () => KEEPER_PUBKEY_STR2,
+        equals: (other: any) => {
+          if (other?.toBase58) return other.toBase58() === KEEPER_PUBKEY_STR2;
+          return false;
+        },
+      };
+
+      vi.mocked(shared.loadKeypair).mockReturnValue({
+        publicKey: {
+          toBase58: () => KEEPER_PUBKEY_STR2,
+          equals: (other: any) => other?.toBase58?.() === KEEPER_PUBKEY_STR2,
+        },
+        secretKey: new Uint8Array(64),
+      } as any);
+
+      const hyperpMarket = {
+        slabAddress: { toBase58: () => slabHyperp, equals: (o: any) => false },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'Mint3111111111111111111111111111111111' },
+          indexFeedId: { toBytes: () => ZERO_BYTES, equals: (o: any) => false },
+          oracleAuthority: keeperOracleAuth2,
+          authorityPriceE6: BigInt(0),
+          lastEffectivePriceE6: BigInt(1_000_000),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin311111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([hyperpMarket as any]);
+
+      // First cycle: no price
+      mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
+      await crankService.discover();
+      const result1 = await crankService.crankAll();
+      expect(result1.failed).toBe(0);
+      const stateAfterSkip = crankService.getMarkets().get(slabHyperp)!;
+      expect(stateAfterSkip.hyperpNoPriceSkipped).toBe(true);
+
+      // Second cycle: price available — should clear flag and crank
+      mockOracleService.fetchPrice = vi.fn().mockResolvedValue({ priceE6: BigInt(75_000_000) });
+      // Simulate discovery reset (as discover() does)
+      stateAfterSkip.hyperpNoPriceSkipped = false;
+
+      const result2 = await crankService.crankMarket(slabHyperp);
+      expect(result2).toBe(true);
+      const stateAfterCrank = crankService.getMarkets().get(slabHyperp)!;
+      expect(stateAfterCrank.hyperpNoPriceSkipped).toBeFalsy();
+    });
+
+    it('PERC-1254: should reset hyperpNoPriceSkipped flag on rediscovery', async () => {
+      const slabHyperp = 'HyperpReset1111111111111111111111111111';
+      const ZERO_BYTES3 = new Uint8Array(32);
+
+      const hyperpMarket = {
+        slabAddress: { toBase58: () => slabHyperp, equals: (o: any) => false },
+        programId: { toBase58: () => '11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'Mint4111111111111111111111111111111111' },
+          indexFeedId: { toBytes: () => ZERO_BYTES3, equals: (o: any) => false },
+          oracleAuthority: { toBase58: () => '11111111111111111111111111111111', equals: () => false },
+          authorityPriceE6: BigInt(0),
+          lastEffectivePriceE6: BigInt(1_000_000),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin411111111111111111111111111111111' } },
+      };
+
+      vi.mocked(core.discoverMarkets).mockResolvedValue([hyperpMarket as any]);
+      await crankService.discover();
+
+      // Manually set the skip flag (simulating previous crankMarket() cycle)
+      const state = crankService.getMarkets().get(slabHyperp)!;
+      state.hyperpNoPriceSkipped = true;
+
+      // Re-run discovery — flag should be reset
+      await crankService.discover();
+      const stateAfter = crankService.getMarkets().get(slabHyperp)!;
+      expect(stateAfter.hyperpNoPriceSkipped).toBe(false);
+    });
+  });
+
   describe('start and stop', () => {
     it('should start timer and perform initial discovery', async () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([]);
