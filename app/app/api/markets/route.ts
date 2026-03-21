@@ -314,12 +314,26 @@ export async function GET(request: NextRequest) {
     const sortParam = request?.nextUrl?.searchParams?.get("sort") ?? null;
     const orderParam = (request?.nextUrl?.searchParams?.get("order") ?? "asc").toLowerCase();
     const sortDir = orderParam === "desc" ? -1 : 1;
+    // GH#1524: Expanded sortable field set to include all fields callers actually use.
+    // Previously only 5 fields were allowlisted; sort=total_open_interest, sort=mark_price,
+    // and sort=created_at all silently fell through to the else branch (no sort applied),
+    // causing asc == desc == no-sort for those fields.
     const SORTABLE_FIELDS = new Set([
       "symbol",
       "last_price",
+      "mark_price",
+      "index_price",
       "volume_24h",
+      "volume_24h_usd",
+      "total_open_interest",
       "total_open_interest_usd",
       "funding_rate",
+      "created_at",
+      "stats_updated_at",
+      "trade_count_24h",
+      "insurance_fund",
+      "insurance_balance",
+      "total_accounts",
     ]);
     const sorted =
       sortParam && SORTABLE_FIELDS.has(sortParam)
