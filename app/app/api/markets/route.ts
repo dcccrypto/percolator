@@ -9,6 +9,30 @@ import * as Sentry from "@sentry/nextjs";
 import { isSaneMarketValue, isActiveMarket, isZombieMarket } from "@/lib/activeMarketFilter";
 import { isPhantomOpenInterest } from "@/lib/phantom-oi";
 import { BLOCKED_SLAB_ADDRESSES as HARDCODED_BLOCKED_MARKETS } from "@/lib/blocklist";
+import { SLUG_ALIASES } from "@/lib/symbol-utils";
+
+/**
+ * GH#1526: Map frontend oracle_mode filter values to DB-stored values.
+ * The UI displays "manual" and "live feed" but the DB stores "admin" and "hyperp".
+ * Without this map the filter returns 0 results for any value except "admin".
+ */
+const ORACLE_MODE_FRONTEND_TO_DB: Record<string, string> = {
+  manual: "admin",
+  live_feed: "hyperp",
+  // Pass-through values (already DB canonical)
+  admin: "admin",
+  hyperp: "hyperp",
+  pyth: "pyth",
+};
+
+/**
+ * GH#1527: Build a reverse lookup from mint address → well-known ticker symbol.
+ * Used to make search match "SOL" even when DB stores symbol="So111111".
+ * Derived from SLUG_ALIASES (single source of truth).
+ */
+const MINT_TO_KNOWN_SYMBOL: Map<string, string> = new Map(
+  Object.entries(SLUG_ALIASES).map(([symbol, mint]) => [mint, symbol]),
+);
 
 /**
  * Maximum valid funding rate in bps/slot (matches on-chain guard).
@@ -290,23 +314,51 @@ export async function GET(request: NextRequest) {
     const activeTotal = nonZombieOnly.filter((m) => isActiveMarket(m as Parameters<typeof isActiveMarket>[0])).length;
 
     // GH#1512: Apply search filter — case-insensitive substring match on symbol or name.
+    // GH#1527: Also resolve the query against SLUG_ALIASES so searching "SOL" matches
+    // markets whose DB symbol is a truncated address (e.g. "So111111") but whose
+    // mint_address or mainnet_ca is the SOL mint. This bridges the gap between the
+    // human-readable token names shown in the UI (via token-metadata enrichment) and
+    // the raw DB values that the search runs against.
     const searchParam = request?.nextUrl?.searchParams?.get("search") ?? null;
     const searchTrimmed = searchParam ? searchParam.trim() : null;
     const searchFiltered = searchTrimmed
-      ? nonZombie.filter((m) => {
-          const sym = ((m as Record<string, unknown>).symbol as string | null) ?? "";
-          const name = ((m as Record<string, unknown>).name as string | null) ?? "";
+      ? (() => {
           const q = searchTrimmed.toLowerCase();
-          return sym.toLowerCase().includes(q) || name.toLowerCase().includes(q);
-        })
+          // Collect mint addresses whose well-known symbol matches the query
+          // (e.g. q="sol" matches MINT_TO_KNOWN_SYMBOL entry "SOL" → So111...112)
+          const matchingMints = new Set<string>();
+          for (const [mint, knownSymbol] of MINT_TO_KNOWN_SYMBOL) {
+            if (knownSymbol.toLowerCase().includes(q)) {
+              matchingMints.add(mint);
+            }
+          }
+          return nonZombie.filter((m) => {
+            const sym = ((m as Record<string, unknown>).symbol as string | null) ?? "";
+            const name = ((m as Record<string, unknown>).name as string | null) ?? "";
+            // Direct DB field match (existing behaviour — handles WENDYS, etc.)
+            if (sym.toLowerCase().includes(q) || name.toLowerCase().includes(q)) return true;
+            // GH#1527: Known-symbol match via mint_address or mainnet_ca
+            const mintAddress = ((m as Record<string, unknown>).mint_address as string | null) ?? "";
+            const mainnetCa = ((m as Record<string, unknown>).mainnet_ca as string | null) ?? "";
+            if (matchingMints.has(mintAddress) || matchingMints.has(mainnetCa)) return true;
+            return false;
+          });
+        })()
       : nonZombie;
 
     // GH#1512: Apply oracle_mode filter.
+    // GH#1526: Map frontend display values ("manual", "live_feed") to DB canonical
+    // values ("admin", "hyperp") before filtering. Previously the filter did an exact
+    // match, so passing "manual" or "live_feed" (the values the UI uses) always returned
+    // 0 results because the DB stores "admin" and "hyperp" respectively.
     const oracleModeParam = request?.nextUrl?.searchParams?.get("oracle_mode") ?? null;
     const oracleModeFiltered = oracleModeParam
-      ? searchFiltered.filter(
-          (m) => ((m as Record<string, unknown>).oracle_mode as string | null) === oracleModeParam,
-        )
+      ? (() => {
+          const dbValue = ORACLE_MODE_FRONTEND_TO_DB[oracleModeParam] ?? oracleModeParam;
+          return searchFiltered.filter(
+            (m) => ((m as Record<string, unknown>).oracle_mode as string | null) === dbValue,
+          );
+        })()
       : searchFiltered;
 
     // GH#1512: Apply sort + order. Supported sort keys: symbol, last_price, volume_24h,
