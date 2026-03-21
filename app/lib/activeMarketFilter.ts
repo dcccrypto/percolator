@@ -54,8 +54,16 @@ export function isActiveMarket(row: {
  * activity — a live price (keeper is cranking) OR real accounts (users have positions).
  * Without either, c_tot is legacy collateral in a dead slab and should be zombie.
  *
+ * GH#1502 edge case — phantom OI in hasActivity:
+ * NNOB showed is_zombie=false even after PR#1501 because its raw DB total_open_interest
+ * was a non-zero stale value (phantom OI per GH#1290). The hasActivity check included
+ * isSaneMarketValue(total_open_interest), which was true for NNOB → hasActivity=true
+ * → c_tot>0 && hasActivity → return false (not zombie). But per GH#1290, OI without
+ * any accounts is phantom by definition (StatsCollector invariant). Fix: only count
+ * OI as activity when total_accounts > 0 — i.e. real users have positions.
+ *
  * FF7K keeper markets (33 of 34): vault=0, c_tot>0, have prices → hasActivity=true → not zombie ✓
- * NNOB (the outlier): vault=0, c_tot>0, no price, no accounts → hasActivity=false → zombie ✓
+ * NNOB (the outlier): vault=0, c_tot>0, no price, no accounts, phantom OI → hasActivity=false → zombie ✓
  *
  * SINGLE SOURCE OF TRUTH: used by /api/markets and /api/stats to ensure
  * consistent zombie exclusion across the platform. Previously duplicated
@@ -72,12 +80,17 @@ export function isZombieMarket(row: {
   const vaultBal = row.vault_balance ?? null;
   const cTot = row.c_tot ?? null;
 
-  // Compute whether this market has any live activity — price, volume, OI, or
-  // real user accounts. Used to validate the c_tot exemption (GH#1499).
+  // Compute whether this market has any live activity — price, volume, or real accounts.
+  // Used to validate the c_tot exemption (GH#1499).
+  //
+  // GH#1502: OI is intentionally excluded from hasActivity. Per GH#1290, OI without any
+  // accounts is phantom (stale slab data). NNOB had non-zero raw total_open_interest but
+  // zero accounts — including OI here caused hasActivity=true → c_tot>0 exemption fired
+  // → is_zombie=false even though no keeper or users exist. Only price (oracle is cranking)
+  // or accounts (users have positions) prove a market is genuinely live.
   const hasActivity =
     isSaneMarketValue(row.last_price) ||
     isSaneMarketValue(row.volume_24h) ||
-    isSaneMarketValue(row.total_open_interest) ||
     (row.total_accounts ?? 0) > 0;
 
   // If on-chain collateral total (c_tot) is positive AND there is corroborating activity,
@@ -91,10 +104,12 @@ export function isZombieMarket(row: {
 
   if (vaultBal !== null && vaultBal === 0) return true;
   if (vaultBal === null) {
+    // GH#1502: OI intentionally excluded from hasNoStats check (same logic as hasActivity above).
+    // OI without accounts is phantom per GH#1290 — a null-vault market with phantom OI
+    // and no real price or users should still be zombie.
     const hasNoStats =
       !isSaneMarketValue(row.last_price) &&
       !isSaneMarketValue(row.volume_24h) &&
-      !isSaneMarketValue(row.total_open_interest) &&
       (row.total_accounts ?? 0) === 0;
     if (hasNoStats) return true;
   }
