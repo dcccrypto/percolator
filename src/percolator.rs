@@ -1137,11 +1137,12 @@ impl RiskEngine {
         if pnl_pos_tot == 0 {
             return (1, 1);
         }
+        let total_insurance = self.insurance_fund.balance.get() + self.insurance_fund.isolated_balance.get();
         let residual = self
             .vault
             .get()
             .saturating_sub(self.c_tot.get())
-            .saturating_sub(self.insurance_fund.balance.get());
+            .saturating_sub(total_insurance);
         let h_num = core::cmp::min(residual, pnl_pos_tot);
         (h_num, pnl_pos_tot)
     }
@@ -3919,12 +3920,13 @@ impl RiskEngine {
 
         // Calculate fee using dynamic fee model (tiered + utilization surge)
         // Falls back to flat trading_fee_bps when fee_tier2_threshold == 0
+        let abs_size = saturating_abs_i128(exec_size) as u128;
         let notional =
-            mul_u128(saturating_abs_i128(exec_size) as u128, exec_price as u128) / 1_000_000;
+            mul_u128(abs_size, exec_price as u128) / 1_000_000;
         let fee_bps = self.compute_dynamic_fee_bps(notional);
-        let fee = if notional > 0 && fee_bps > 0 {
+        let fee = if abs_size > 0 && fee_bps > 0 {
             // Ceiling division: ensures at least 1 atomic unit fee for any real trade
-            mul_u128(notional, fee_bps as u128).div_ceil(10_000)
+            mul_u128(abs_size, fee_bps as u128).div_ceil(10_000)
         } else {
             0
         };
@@ -4027,11 +4029,12 @@ impl RiskEngine {
         let (h_num, h_den) = if projected_pnl_pos_tot == 0 {
             (1u128, 1u128)
         } else {
+            let total_insurance = self.insurance_fund.balance.get() + self.insurance_fund.isolated_balance.get();
             let residual = self
                 .vault
                 .get()
                 .saturating_sub(self.c_tot.get())
-                .saturating_sub(self.insurance_fund.balance.get());
+                .saturating_sub(total_insurance);
             (
                 core::cmp::min(residual, projected_pnl_pos_tot),
                 projected_pnl_pos_tot,
