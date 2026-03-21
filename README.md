@@ -106,17 +106,6 @@ A/K fairness is exact for open-position economics. H fairness is exact only for 
 
 Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
 
-146 Kani proofs across 6 files verify arithmetic, instruction safety, conservation invariants, lazy A/K semantics, liveness, and risk bounds:
-
-```
-tests/proofs_arithmetic.rs    — 20 proofs (U256/U512 division, floor/ceil, signed ops)
-tests/proofs_instructions.rs  — 35 proofs (deposit, withdraw, trade, liquidation, ADL)
-tests/proofs_invariants.rs    — 26 proofs (conservation, OI balance, aggregate tracking)
-tests/proofs_lazy_ak.rs       — 14 proofs (A/K composition, epoch reset, deficit socialization)
-tests/proofs_liveness.rs      — 11 proofs (drain→reset→normal progress, side reopening)
-tests/proofs_safety.rs        — 40 proofs (margin enforcement, haircut bounds, seniority)
-```
-
 ```bash
 cargo install --locked kani-verifier
 cargo kani setup
