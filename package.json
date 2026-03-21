@@ -58,7 +58,7 @@
       "rollup": "4.59.0",
       "serialize-javascript": "7.0.4",
       "undici": ">=7.24.0",
-      "h3": ">=1.15.6",
+      "h3": ">=1.15.9",
       "socket.io-parser": ">=4.2.6",
       "flatted": ">=3.4.0"
     }
