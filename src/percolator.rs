@@ -416,7 +416,8 @@ impl RiskParams {
             return Err(RiskError::Overflow);
         }
         // Margin floors: if both non-zero, MM floor must be strictly less than IM floor (spec §9.1)
-        if self.min_nonzero_mm_req > 0 && self.min_nonzero_im_req > 0
+        if self.min_nonzero_mm_req > 0
+            && self.min_nonzero_im_req > 0
             && self.min_nonzero_mm_req >= self.min_nonzero_im_req
         {
             return Err(RiskError::Overflow);
@@ -4653,8 +4654,8 @@ mod skew_rebate_tests {
             fee_split_protocol_bps: 0,
             fee_split_creator_bps: 10_000,
             fee_utilization_surge_bps: 0,
-        min_nonzero_mm_req: 0,
-        min_nonzero_im_req: 0,
+            min_nonzero_mm_req: 0,
+            min_nonzero_im_req: 0,
         };
         RiskEngine::new(params)
     }
