@@ -194,6 +194,8 @@ fn params_regime_a() -> RiskParams {
         fee_split_protocol_bps: 0,
         fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 
@@ -229,6 +231,8 @@ fn params_regime_b() -> RiskParams {
         fee_split_protocol_bps: 0,
         fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
     }
 }
 
