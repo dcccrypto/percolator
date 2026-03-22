@@ -1727,10 +1727,18 @@ fn proof_audit2_funding_rate_clamped() {
     kani::assume(extreme_rate > MAX_ABS_FUNDING_BPS_PER_SLOT || extreme_rate < -MAX_ABS_FUNDING_BPS_PER_SLOT);
     engine.set_funding_rate_for_next_interval(extreme_rate);
 
-    // The stored rate must be clamped
+    // The stored rate must be clamped to exactly the bound, preserving sign
     let stored = engine.funding_rate_bps_per_slot_last;
     assert!(stored.abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT,
         "stored rate must be clamped to MAX_ABS_FUNDING_BPS_PER_SLOT");
+    // Verify exact clamping: sign preserved, magnitude = MAX
+    if extreme_rate > MAX_ABS_FUNDING_BPS_PER_SLOT {
+        assert!(stored == MAX_ABS_FUNDING_BPS_PER_SLOT,
+            "positive overflow must clamp to +MAX");
+    } else {
+        assert!(stored == -MAX_ABS_FUNDING_BPS_PER_SLOT,
+            "negative overflow must clamp to -MAX");
+    }
 
     // accrue_market_to must succeed (not abort)
     let slot2 = DEFAULT_SLOT + 1;
@@ -1839,15 +1847,40 @@ fn proof_audit3_checked_u128_mul_i128_no_panic_at_boundary() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_audit3_compute_trade_pnl_no_panic_at_boundary() {
-    // Verify compute_trade_pnl never panics for small symbolic inputs.
-    // The i128::MIN negate-panic fix is structurally identical to
-    // checked_u128_mul_i128 (same bound change applied to both).
-    // This proof exercises the negative code path with bounded values.
+    // compute_trade_pnl internally calls checked_u128_mul_i128 then divides
+    // by POS_SCALE. The i128::MIN panic fix lives in checked_u128_mul_i128
+    // (proven by proof_audit3_checked_u128_mul_i128_no_panic_at_boundary).
+    //
+    // This proof verifies compute_trade_pnl never panics over the full
+    // i8 input space. The i8 range [-128, 127] covers both signs and
+    // exercises the sign-dispatch, multiplication, and division paths.
+    // The 2^127 boundary is covered by the checked_u128_mul_i128 proof.
+    //
+    // Additionally, we verify structural properties:
+    // 1. Zero size always returns Ok(0)
+    // 2. Zero price_diff always returns Ok(0)
+    // 3. Signs are consistent: positive*positive >= 0, negative*positive <= 0
+
     let size_q: i8 = kani::any();
     let price_diff: i8 = kani::any();
-    kani::assume(size_q != 0 && price_diff != 0);
-    // Must never panic — may return Ok or Err
-    let _ = compute_trade_pnl(size_q as i128, price_diff as i128);
+
+    let result = compute_trade_pnl(size_q as i128, price_diff as i128);
+
+    // Must never panic — only Ok or Err
+    if size_q == 0 || price_diff == 0 {
+        // Zero input must return Ok(0)
+        assert!(result.is_ok());
+        assert!(result.unwrap() == 0, "zero input must produce zero PnL");
+    } else if let Ok(pnl) = result {
+        // Sign consistency: pnl must agree with sign of (size_q * price_diff)
+        let input_positive = (size_q > 0) == (price_diff > 0);
+        if input_positive {
+            assert!(pnl >= 0, "same-sign inputs must produce non-negative PnL");
+        } else {
+            assert!(pnl <= 0, "opposite-sign inputs must produce non-positive PnL");
+        }
+    }
+    // Err is acceptable for overflow — just must not panic
 }
 
 // ============================================================================
@@ -1864,79 +1897,171 @@ fn proof_audit4_init_in_place_canonical() {
     let params = zero_fee_params();
     let mut engine = RiskEngine::new(params);
 
-    // Dirty the engine state to simulate non-zeroed memory
+    // Dirty EVERY engine state field to simulate non-zeroed memory
     engine.vault = U128::new(999);
     engine.insurance_fund.balance = U128::new(777);
+    engine.insurance_fund.fee_revenue = U128::new(666);
     engine.c_tot = U128::new(555);
     engine.pnl_pos_tot = 333;
+    engine.pnl_matured_pos_tot = 222;
+    engine.current_slot = 42;
+    engine.funding_rate_bps_per_slot_last = -99;
+    engine.last_crank_slot = 77;
+    engine.liq_cursor = 3;
+    engine.gc_cursor = 2;
+    engine.crank_cursor = 1;
+    engine.sweep_start_idx = 5;
+    engine.last_full_sweep_start_slot = 88;
+    engine.last_full_sweep_completed_slot = 77;
+    engine.lifetime_liquidations = 100;
     engine.adl_mult_long = 42;
+    engine.adl_mult_short = 43;
     engine.adl_coeff_long = 100;
+    engine.adl_coeff_short = 200;
     engine.adl_epoch_long = 7;
+    engine.adl_epoch_short = 8;
+    engine.adl_epoch_start_k_long = 300;
+    engine.adl_epoch_start_k_short = 400;
+    engine.oi_eff_long_q = 1000;
+    engine.oi_eff_short_q = 2000;
     engine.side_mode_long = SideMode::DrainOnly;
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.stored_pos_count_long = 10;
+    engine.stored_pos_count_short = 11;
+    engine.stale_account_count_long = 3;
+    engine.stale_account_count_short = 4;
+    engine.phantom_dust_bound_long_q = 50;
+    engine.phantom_dust_bound_short_q = 60;
     engine.num_used_accounts = 10;
     engine.materialized_account_count = 5;
-    engine.oi_eff_long_q = 1000;
     engine.last_oracle_price = 9999;
+    engine.last_market_slot = 55;
+    engine.funding_price_sample_last = 777;
+    engine.insurance_floor = 12345;
+    engine.next_account_id = 99;
+    engine.free_head = u16::MAX; // break the freelist
 
-    // Re-initialize
+    // Re-initialize — must fully reset all fields
     engine.init_in_place(params);
 
-    // All aggregates must be zero
+    // ---- Vault / insurance ----
     assert!(engine.vault.get() == 0);
     assert!(engine.insurance_fund.balance.get() == 0);
+    assert!(engine.insurance_fund.fee_revenue.get() == 0);
+
+    // ---- Aggregates ----
     assert!(engine.c_tot.get() == 0);
     assert!(engine.pnl_pos_tot == 0);
     assert!(engine.pnl_matured_pos_tot == 0);
 
-    // Side state reset
+    // ---- Slots / cursors ----
+    assert!(engine.current_slot == 0);
+    assert!(engine.funding_rate_bps_per_slot_last == 0);
+    assert!(engine.last_crank_slot == 0);
+    assert!(engine.liq_cursor == 0);
+    assert!(engine.gc_cursor == 0);
+    assert!(engine.crank_cursor == 0);
+    assert!(engine.sweep_start_idx == 0);
+    assert!(engine.last_full_sweep_start_slot == 0);
+    assert!(engine.last_full_sweep_completed_slot == 0);
+    assert!(engine.lifetime_liquidations == 0);
+
+    // ---- ADL / side state ----
     assert!(engine.adl_mult_long == ADL_ONE);
     assert!(engine.adl_mult_short == ADL_ONE);
     assert!(engine.adl_coeff_long == 0);
     assert!(engine.adl_coeff_short == 0);
     assert!(engine.adl_epoch_long == 0);
     assert!(engine.adl_epoch_short == 0);
+    assert!(engine.adl_epoch_start_k_long == 0);
+    assert!(engine.adl_epoch_start_k_short == 0);
     assert!(engine.oi_eff_long_q == 0);
     assert!(engine.oi_eff_short_q == 0);
     assert!(engine.side_mode_long == SideMode::Normal);
     assert!(engine.side_mode_short == SideMode::Normal);
+    assert!(engine.stored_pos_count_long == 0);
+    assert!(engine.stored_pos_count_short == 0);
+    assert!(engine.stale_account_count_long == 0);
+    assert!(engine.stale_account_count_short == 0);
+    assert!(engine.phantom_dust_bound_long_q == 0);
+    assert!(engine.phantom_dust_bound_short_q == 0);
 
-    // Account tracking reset
+    // ---- Account tracking ----
     assert!(engine.num_used_accounts == 0);
     assert!(engine.materialized_account_count == 0);
     assert!(engine.last_oracle_price == 0);
+    assert!(engine.last_market_slot == 0);
+    assert!(engine.funding_price_sample_last == 0);
+    assert!(engine.insurance_floor == 0);
+    assert!(engine.next_account_id == 0);
 
-    // Freelist integrity: head is 0, chain covers all slots
+    // ---- Used bitmap: all zeroed ----
+    let mut any_used = false;
+    for i in 0..MAX_ACCOUNTS {
+        if engine.is_used(i) { any_used = true; }
+    }
+    assert!(!any_used, "no accounts must be marked used after init");
+
+    // ---- Freelist integrity ----
     assert!(engine.free_head == 0);
-    // Last slot points to sentinel
-    assert!(engine.next_free[MAX_ACCOUNTS - 1] == u16::MAX);
+    // Walk the entire freelist and verify it covers all MAX_ACCOUNTS slots
+    let mut visited = 0u32;
+    let mut cur = engine.free_head;
+    while cur != u16::MAX && (visited as usize) < MAX_ACCOUNTS {
+        assert!((cur as usize) < MAX_ACCOUNTS, "freelist entry out of bounds");
+        cur = engine.next_free[cur as usize];
+        visited += 1;
+    }
+    assert!(visited as usize == MAX_ACCOUNTS, "freelist must cover all slots");
+    assert!(cur == u16::MAX, "freelist must terminate with sentinel");
 }
 
-/// Proof: deposit to an already-used slot does not corrupt the freelist.
-/// materialize_at (called by deposit for missing accounts) must detect
-/// that the slot is already allocated and not double-materialize.
-/// Since materialize_at is private, we test via deposit on an existing account.
+/// Proof: freelist integrity after materialize_at via deposit.
+/// Allocates slots via add_user (freelist pop) and deposit-materialize
+/// (freelist search-and-remove). Verifies that the freelist correctly
+/// accounts for all free slots after both allocation paths.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_audit4_materialize_at_freelist_integrity() {
-    let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(100);
+    let params = zero_fee_params();
     let mut engine = RiskEngine::new(params);
 
-    // Allocate slot 0 via add_user and deposit
-    let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 100, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.is_used(idx as usize));
+    // add_user pops slot 0 from freelist head
+    let idx0 = engine.add_user(0).unwrap();
+    assert!(idx0 == 0);
+    assert!(engine.is_used(0));
 
-    let num_used_before = engine.num_used_accounts;
-    let mat_before = engine.materialized_account_count;
-
-    // Second deposit to the same slot must succeed (top-up, not re-materialize)
-    // and must NOT increment materialized_account_count
-    let result = engine.deposit(idx, 50, DEFAULT_ORACLE, DEFAULT_SLOT);
+    // Deposit-materialize on slot 2 removes it from freelist interior
+    // (slot 2 is in the freelist: head→1→2→3→sentinel)
+    let result = engine.deposit(2, 1000, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(result.is_ok());
-    assert!(engine.num_used_accounts == num_used_before);
+    assert!(engine.is_used(2));
+    assert!(engine.num_used_accounts == 2);
+    assert!(engine.materialized_account_count == 2); // add_user + deposit both increment
+
+    // Freelist should now be: head→1→3→sentinel (0 and 2 removed)
+    assert!(engine.free_head == 1);
+    assert!(engine.next_free[1] == 3);
+    assert!(engine.next_free[3] == u16::MAX);
+
+    // Verify deposit top-up on existing account does NOT re-materialize
+    let mat_before = engine.materialized_account_count;
+    let used_before = engine.num_used_accounts;
+    engine.deposit(2, 500, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     assert!(engine.materialized_account_count == mat_before);
+    assert!(engine.num_used_accounts == used_before);
+
+    // Free slot 0, verify it returns to freelist head
+    engine.free_slot(idx0);
+    assert!(!engine.is_used(0));
+    assert!(engine.free_head == 0);
+    assert!(engine.num_used_accounts == 1);
+
+    // Re-materialize slot 0 via deposit — must work
+    let result2 = engine.deposit(0, 1000, DEFAULT_ORACLE, DEFAULT_SLOT);
+    assert!(result2.is_ok());
+    assert!(engine.is_used(0));
 }
 
 /// Proof: top_up_insurance_fund never panics and enforces MAX_VAULT_TVL.
@@ -1988,13 +2113,28 @@ fn proof_audit4_deposit_fee_credits_time_monotonicity() {
     // Set current_slot to 100
     engine.current_slot = 100;
 
-    // Deposit at slot 99 must fail
+    let vault_before = engine.vault.get();
+    let ins_before = engine.insurance_fund.balance.get();
+    let credits_before = engine.accounts[idx as usize].fee_credits.get();
+
+    // Deposit at slot 99 must fail — time regression
     let result = engine.deposit_fee_credits(idx, 1000, 99);
     assert!(result.is_err(), "must reject time regression");
+
+    // State must be completely unchanged on failure
+    assert!(engine.vault.get() == vault_before, "vault unchanged on rejected deposit");
+    assert!(engine.insurance_fund.balance.get() == ins_before, "insurance unchanged");
+    assert!(engine.accounts[idx as usize].fee_credits.get() == credits_before, "credits unchanged");
+    assert!(engine.current_slot == 100, "current_slot unchanged on rejection");
 
     // Deposit at slot 100 (equal) must succeed
     let result2 = engine.deposit_fee_credits(idx, 1000, 100);
     assert!(result2.is_ok());
+
+    // Deposit at slot 200 (forward) must succeed
+    let result3 = engine.deposit_fee_credits(idx, 500, 200);
+    assert!(result3.is_ok());
+    assert!(engine.current_slot == 200, "current_slot must advance");
 }
 
 /// Proof: deposit_fee_credits uses checked arithmetic, not saturating.

@@ -1610,19 +1610,24 @@ fn proof_audit2_deposit_materializes_missing_account() {
 fn proof_audit2_deposit_rejects_below_min_initial_for_missing() {
     // Per spec §10.3 step 2: deposit below MIN_INITIAL_DEPOSIT on a
     // missing account must fail.
-    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut params = zero_fee_params();
+    params.min_initial_deposit = U128::new(1000);
+    let mut engine = RiskEngine::new(params);
     assert!(!engine.is_used(0));
 
     let min_dep = engine.params.min_initial_deposit.get();
-    if min_dep == 0 {
-        return; // can't test sub-threshold if threshold is 0
-    }
-    let amount = min_dep - 1;
+    assert!(min_dep == 1000); // sanity: threshold is non-trivial
 
-    let result = engine.deposit(0, amount, DEFAULT_ORACLE, DEFAULT_SLOT);
+    // Symbolic amount strictly below threshold
+    let amount: u16 = kani::any();
+    kani::assume((amount as u128) < min_dep);
+
+    let result = engine.deposit(0, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(result.is_err(), "deposit below MIN_INITIAL_DEPOSIT must fail for missing account");
     // Account must NOT be materialized
     assert!(!engine.is_used(0), "account must not be materialized on failed deposit");
+    // Vault must be unchanged
+    assert!(engine.vault.get() == 0, "vault must not change on rejected deposit");
 }
 
 #[kani::proof]
@@ -1658,23 +1663,53 @@ fn proof_audit4_add_user_atomic_on_failure() {
     params.new_account_fee = U128::new(100);
     let mut engine = RiskEngine::new(params);
 
-    // Fill up all account slots (fee_payment must match new_account_fee)
+    // --- Path 1: failure via "no free slots" ---
     for _ in 0..MAX_ACCOUNTS {
         engine.add_user(100).unwrap();
     }
 
     let vault_before = engine.vault.get();
     let ins_before = engine.insurance_fund.balance.get();
+    let c_tot_before = engine.c_tot.get();
 
-    // Next add_user must fail (no free slots)
     let result = engine.add_user(100);
     assert!(result.is_err());
 
-    // Vault and insurance must be unchanged
     assert!(engine.vault.get() == vault_before,
-        "vault must not change on failed add_user");
+        "vault must not change on failed add_user (no slots)");
     assert!(engine.insurance_fund.balance.get() == ins_before,
-        "insurance must not change on failed add_user");
+        "insurance must not change on failed add_user (no slots)");
+    assert!(engine.c_tot.get() == c_tot_before,
+        "c_tot must not change on failed add_user (no slots)");
+}
+
+/// Proof: add_user atomicity on MAX_VAULT_TVL failure path.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_audit4_add_user_atomic_on_tvl_failure() {
+    let mut params = zero_fee_params();
+    params.new_account_fee = U128::new(100);
+    let mut engine = RiskEngine::new(params);
+
+    // Set vault just below MAX_VAULT_TVL so fee would push it over
+    engine.vault = U128::new(MAX_VAULT_TVL - 99);
+    engine.insurance_fund.balance = U128::new(MAX_VAULT_TVL - 99);
+
+    let vault_before = engine.vault.get();
+    let ins_before = engine.insurance_fund.balance.get();
+    let used_before = engine.num_used_accounts;
+
+    // fee_payment=100 would push vault to MAX_VAULT_TVL+1 — must fail
+    let result = engine.add_user(100);
+    assert!(result.is_err());
+
+    assert!(engine.vault.get() == vault_before,
+        "vault must not change on MAX_VAULT_TVL rejection");
+    assert!(engine.insurance_fund.balance.get() == ins_before,
+        "insurance must not change on MAX_VAULT_TVL rejection");
+    assert!(engine.num_used_accounts == used_before,
+        "num_used_accounts must not change on MAX_VAULT_TVL rejection");
 }
 
 /// Proof: deposit_fee_credits enforces MAX_VAULT_TVL.
