@@ -3271,7 +3271,7 @@ fn set_pending_reset(ctx: &mut InstructionContext, side: Side) {
 
 /// Multiply a u128 by an i128 returning i128 (checked).
 /// Computes u128 * i128 → i128. Used for A_side * delta_p in accrue_market_to.
-fn checked_u128_mul_i128(a: u128, b: i128) -> Result<i128> {
+pub fn checked_u128_mul_i128(a: u128, b: i128) -> Result<i128> {
     if a == 0 || b == 0 {
         return Ok(0i128);
     }
@@ -3284,10 +3284,10 @@ fn checked_u128_mul_i128(a: u128, b: i128) -> Result<i128> {
     // a * abs_b may overflow u128, use wide arithmetic
     let product = U256::from_u128(a).checked_mul(U256::from_u128(abs_b))
         .ok_or(RiskError::Overflow)?;
-    // Check if product fits in i128::MAX as u128
-    let max_mag = if negative { (i128::MAX as u128) + 1 } else { i128::MAX as u128 };
+    // Bound to i128::MAX magnitude for both signs. Excludes i128::MIN (which is
+    // forbidden throughout the engine) and avoids -(i128::MIN) negate panic.
     match product.try_into_u128() {
-        Some(v) if v <= max_mag => {
+        Some(v) if v <= i128::MAX as u128 => {
             if negative {
                 Ok(-(v as i128))
             } else {
@@ -3300,7 +3300,7 @@ fn checked_u128_mul_i128(a: u128, b: i128) -> Result<i128> {
 
 /// Compute trade PnL: floor_div_signed_conservative(size_q * price_diff, POS_SCALE)
 /// Uses native i128 arithmetic (spec §1.5.1 shows trade slippage fits in i128).
-fn compute_trade_pnl(size_q: i128, price_diff: i128) -> Result<i128> {
+pub fn compute_trade_pnl(size_q: i128, price_diff: i128) -> Result<i128> {
     if size_q == 0 || price_diff == 0 {
         return Ok(0i128);
     }
@@ -3329,8 +3329,10 @@ fn compute_trade_pnl(size_q: i128, price_diff: i128) -> Result<i128> {
         } else {
             q
         };
+        // Bound to i128::MAX magnitude to avoid -(i128::MIN) negate panic.
+        // i128::MIN is forbidden throughout the engine.
         match mag.try_into_u128() {
-            Some(v) if v <= (i128::MAX as u128) + 1 => {
+            Some(v) if v <= i128::MAX as u128 => {
                 Ok(-(v as i128))
             }
             _ => Err(RiskError::Overflow),

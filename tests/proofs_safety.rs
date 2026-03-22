@@ -1805,3 +1805,47 @@ fn proof_audit2_positive_overflow_no_false_liquidation() {
     assert!(above_im,
         "massively over-collateralized account must pass IM check");
 }
+
+// ############################################################################
+// AUDIT ROUND 3, ISSUE #3: i128::MIN negate panic in checked_u128_mul_i128
+// ############################################################################
+
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_audit3_checked_u128_mul_i128_no_panic_at_boundary() {
+    // When a * |b| = 2^127, the old code would cast to i128::MIN then
+    // negate, triggering a panic. Fixed: reject as Overflow instead.
+    // Test: a=2^127, b=-1 → product magnitude = 2^127 = i128::MIN territory.
+    let a = (i128::MAX as u128) + 1; // 2^127
+    let b = -1i128;
+    let result = checked_u128_mul_i128(a, b);
+    // Must not panic. Must return Err(Overflow) since result would be i128::MIN
+    // which is forbidden throughout the engine.
+    assert!(result.is_err(), "must return Err, not panic, at i128::MIN boundary");
+
+    // a=1, b=-i128::MAX → product = i128::MAX, valid negative
+    let result2 = checked_u128_mul_i128(1, -i128::MAX);
+    assert!(result2.is_ok(), "-(i128::MAX) must be valid");
+    assert!(result2.unwrap() == -i128::MAX);
+
+    // a=1, b=i128::MAX → valid positive
+    let result3 = checked_u128_mul_i128(1, i128::MAX);
+    assert!(result3.is_ok());
+    assert!(result3.unwrap() == i128::MAX);
+}
+
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_audit3_compute_trade_pnl_no_panic_at_boundary() {
+    // Verify compute_trade_pnl never panics for small symbolic inputs.
+    // The i128::MIN negate-panic fix is structurally identical to
+    // checked_u128_mul_i128 (same bound change applied to both).
+    // This proof exercises the negative code path with bounded values.
+    let size_q: i8 = kani::any();
+    let price_diff: i8 = kani::any();
+    kani::assume(size_q != 0 && price_diff != 0);
+    // Must never panic — may return Ok or Err
+    let _ = compute_trade_pnl(size_q as i128, price_diff as i128);
+}
