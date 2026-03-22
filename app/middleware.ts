@@ -181,13 +181,9 @@ function _isBlocked(clientIp: string): boolean {
 // returns 500 for them).
 //
 // Evaluated once at module load (Edge Runtime cold start), not per request.
-const _blockedFundingSlabSet: ReadonlySet<string> = new Set([
-  ...BLOCKED_SLAB_ADDRESSES,
-  ...(process.env.BLOCKED_MARKET_ADDRESSES ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
-]);
+// GH#1539: BLOCKED_SLAB_ADDRESSES already includes BLOCKED_MARKET_ADDRESSES entries
+// (via lib/blocklist.ts unified set). No manual re-parse needed here.
+const _blockedFundingSlabSet: ReadonlySet<string> = BLOCKED_SLAB_ADDRESSES;
 // Matches /api/funding/<slab> and /api/funding/<slab>/history
 const _fundingSlabRe = /^\/api\/funding\/([^/]+)(\/history)?$/;
 // Matches /api/open-interest/<slab> (GH#1390)
