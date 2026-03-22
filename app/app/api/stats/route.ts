@@ -264,14 +264,26 @@ export async function GET(request: NextRequest) {
   });
   const nonZombieCount = statsData.length - nonZombieListedMarkets.length;
 
+  // GH#1535: Expose activeTotal matching /api/markets activeTotal exactly.
+  // /api/markets activeTotal = zombie-excluded non-blocked markets that pass isActiveMarket()
+  // (i.e. at least one sane stat: price, volume, or OI — after sanitizePrice cap).
+  // /api/stats activeMarkets (69) uses the phantom-aware subset (stricter: phantom zeroing
+  // before isActiveMarket), which is a subset of the zombie-filtered set.
+  // Both values are valid but measure different things. Exposing activeTotal here gives
+  // consumers a single consistent field name across both endpoints.
+  // Computed from nonZombieListedMarkets (already zombie-filtered + price-cap-sanitized).
+  const activeTotal = nonZombieListedMarkets.filter(isActiveMarket).length;
+
   return NextResponse.json({
     // GH#1529: totalMarkets is now aligned with /api/markets total (non-zombie, non-blocked).
     // Previously totalMarkets=69 was the active-market subset (at least one sane stat),
     // which diverged from totalListedMarkets=168 without any documented distinction.
     // totalListedMarkets (deprecated alias) is kept for backward compat.
     // activeMarkets exposes the previous totalMarkets value for internal tooling.
+    // GH#1535: activeTotal matches /api/markets activeTotal (zombie-excluded + isActiveMarket).
     totalMarkets: nonZombieListedMarkets.length,
     activeMarkets: totalMarkets,
+    activeTotal,
     // #1172: totalListedMarkets includes all non-blocked, non-zombie markets.
     // GH#1465: Previously this was statsData.length (included zombies), diverging
     // from /api/markets total. Now aligned by applying the same zombie filter.

@@ -9,7 +9,7 @@ import { computeMarketHealth, computeMarketHealthFromStats, sanitizeOnChainValue
 import { HealthBadge } from "@/components/market/HealthBadge";
 import { formatTokenAmount } from "@/lib/format";
 import { getSupabase } from "@/lib/supabase";
-import { isSaneMarketValue } from "@/lib/activeMarketFilter";
+import { isSaneMarketValue, isZombieMarket } from "@/lib/activeMarketFilter";
 import type { Database } from "@/lib/database.types";
 
 type MarketWithStats = Database['public']['Views']['markets_with_stats']['Row'];
@@ -225,26 +225,45 @@ function MarketsPageInner() {
   // but drop the isActiveMarket() gate for non-zombie markets. All 168 non-zombie
   // markets are shown; markets with no price display "—" in the price column.
   // On-chain-only markets (no Supabase row) are still excluded to match /api/markets.
+  //
+  // GH#1536: Previous inline zombie check had three bugs vs the API:
+  //   1. Missing Number() coercion for Supabase NUMERIC columns (returned as strings).
+  //      `vault_balance === 0` compares "0" (string) to 0 (number) → always false →
+  //      zombie markets slip through. This caused UI=171 vs API=168 (3 zombie markets
+  //      with vault_balance="0" not being excluded). GH#1494 pattern.
+  //   2. total_open_interest included in hasNoStats, violating GH#1502 fix (OI without
+  //      accounts is phantom → don't count as activity → always treat as hasNoStats=true
+  //      for vault=null markets). isZombieMarket() already implements the correct logic.
+  //   3. Duplicate of shared isZombieMarket() logic, creating drift risk.
+  // Fix: use isZombieMarket() from activeMarketFilter.ts with explicit Number() coercion.
   const activeMarkets = useMemo(() => {
+    // GH#1536: Coerce NUMERIC (string from Supabase) → number | null before
+    // isZombieMarket(). TypeScript's `as number | null` is compile-time only.
+    const numericOrNull = (v: unknown): number | null => {
+      if (v == null) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    // GH#1536: Use sanitizedPrice for zombie check (mirrors /api/markets GH#1506 fix).
+    // Raw DB prices > $1M are stale garbage; sanitizePrice nulls them for output but
+    // passing raw to isZombieMarket() can make hasActivity=true → not zombie (wrong).
+    const sanitizePrice = (v: unknown): number | null => {
+      const n = numericOrNull(v);
+      if (n == null || n <= 0 || n > MAX_SANE_PRICE_USD) return null;
+      return n;
+    };
     return effectiveMarkets.filter((m) => {
-      const accountsCount = m.supabase?.total_accounts ?? 0;
-
-      // GH#1445: Zombie definition mirrors isZombieMarket() in activeMarketFilter.ts.
-      // Zombie = vault explicitly 0 (drained LP) OR vault null with no real stats.
-      const hasNoStats =
-        !isSaneMarketValue(m.supabase?.last_price) &&
-        !isSaneMarketValue(m.supabase?.volume_24h) &&
-        !isSaneMarketValue(m.supabase?.total_open_interest) &&
-        accountsCount === 0;
-      // If c_tot > 0 AND there is corroborating activity, market has real collateral — not zombie.
-      const cTot = m.supabase?.c_tot ?? 0;
-      const isZombie = (cTot > 0 && !hasNoStats) ? false :
-        ((m.supabase?.vault_balance != null && m.supabase.vault_balance === 0) ||
-        (m.supabase?.vault_balance == null && hasNoStats));
-
       // GH#1531: Show all non-zombie Supabase markets — counter matches /api/markets total.
       if (m.supabase) {
-        return !isZombie;
+        const zombie = isZombieMarket({
+          vault_balance: numericOrNull(m.supabase.vault_balance),
+          c_tot: numericOrNull(m.supabase.c_tot),
+          last_price: sanitizePrice(m.supabase.last_price),
+          volume_24h: numericOrNull(m.supabase.volume_24h),
+          total_open_interest: numericOrNull(m.supabase.total_open_interest),
+          total_accounts: numericOrNull(m.supabase.total_accounts),
+        });
+        return !zombie;
       }
 
       // GH#1346: On-chain-only markets (no Supabase stats) are NOT shown —
