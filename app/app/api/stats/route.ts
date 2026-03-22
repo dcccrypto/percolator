@@ -76,15 +76,9 @@ export async function GET(request: NextRequest) {
   // GH#1218: filter blocked slabs before aggregating — mirrors /api/markets behaviour.
   // Previously this endpoint had no blocklist filter, allowing corrupt markets (e.g. NL
   // with 9e12 raw OI → $89.2M false open interest) to pollute global stats.
-  const BLOCKED_MARKET_ADDRESSES: ReadonlySet<string> = new Set([
-    ...BLOCKED_SLAB_ADDRESSES,
-    ...(process.env.BLOCKED_MARKET_ADDRESSES ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  ]);
+  // GH#1539: Use unified BLOCKED_SLAB_ADDRESSES (includes env var overrides).
   const statsData = (statsRes.data ?? []).filter(
-    (m) => !BLOCKED_MARKET_ADDRESSES.has((m as Record<string, unknown>).slab_address as string ?? ""),
+    (m) => !BLOCKED_SLAB_ADDRESSES.has((m as Record<string, unknown>).slab_address as string ?? ""),
   );
 
   // GH#1337: Suppress phantom OI before counting active markets.

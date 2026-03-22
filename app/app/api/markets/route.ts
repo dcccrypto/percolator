@@ -126,14 +126,9 @@ function sanitizePrice(v: number | null | undefined, field?: string, slabAddress
 }
 
 // #868: Blocklist for markets with corrupt state or wrong oracle_authority (e.g. issue #837).
-// Hardcoded list lives in @/lib/blockedMarkets; env var adds runtime overrides.
-const BLOCKED_MARKET_ADDRESSES: ReadonlySet<string> = new Set([
-  ...HARDCODED_BLOCKED_MARKETS,
-  ...(process.env.BLOCKED_MARKET_ADDRESSES ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean),
-]);
+// GH#1539: Now uses the unified BLOCKED_SLAB_ADDRESSES from lib/blocklist.ts which
+// includes both hardcoded addresses and env var overrides. No local merge needed.
+const BLOCKED_MARKET_ADDRESSES = HARDCODED_BLOCKED_MARKETS;
 
 export const dynamic = "force-dynamic";
 

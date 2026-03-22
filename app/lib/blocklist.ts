@@ -1,16 +1,19 @@
 /**
- * Client-side blocklist for known-bad / stale market slab addresses.
+ * Blocklist for known-bad / stale market slab addresses.
  *
- * These are markets that have been blocked in the API route
- * (app/api/markets/route.ts HARDCODED_BLOCKED_MARKETS) but whose rows
- * are still visible via the Supabase anon client in
- * markets_with_stats. Any hook or page that queries the view directly
- * MUST filter these out before rendering or aggregating values.
+ * SINGLE SOURCE OF TRUTH for both server-side API routes and client-side UI.
+ * All hardcoded addresses live here. Runtime overrides come from the
+ * NEXT_PUBLIC_BLOCKED_MARKET_ADDRESSES env var (comma-separated), which is
+ * readable by both server and client code.
  *
- * Keep in sync with the server-side HARDCODED_BLOCKED_MARKETS set in
- * app/api/markets/route.ts.
+ * GH#1539: Previously the API routes also read BLOCKED_MARKET_ADDRESSES (server-only
+ * env var) while the UI only read this hardcoded set, causing a count mismatch
+ * (e.g. 170 UI vs 168 API). Fix: unified env var with NEXT_PUBLIC_ prefix so both
+ * sides see the same blocklist.
  */
-export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
+
+/** Hardcoded blocked slab addresses. */
+const HARDCODED_BLOCKED_SLABS: readonly string[] = [
   // Stale SOL/USD slab — on-chain slab no longer exists; shows $100 last_price
   // causing "Failed to load market" on click. Blocked via PR #1179.
   "BxJPaMaCfEGTBsjZ8wfj3Yfzf4wpasmxKAEvqZZRcGPP",
@@ -58,6 +61,32 @@ export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
   // /api/open-interest/8eFFEFBY returns 200 with raw phantom data. Block to return 404.
   // Also covers /api/funding/8eFFEFBY which was returning 200 with stale zero-rate data.
   "8eFFEFBY3HHbBgzxJJP5hyxdzMNMAumnYNhkWXErBM4c",
+];
+
+/**
+ * Combined blocklist: hardcoded + NEXT_PUBLIC_BLOCKED_MARKET_ADDRESSES env var.
+ *
+ * GH#1539: Both API routes and client-side UI use this single set, eliminating
+ * the server-only BLOCKED_MARKET_ADDRESSES env var that caused count drift.
+ * Migrate any existing BLOCKED_MARKET_ADDRESSES values to
+ * NEXT_PUBLIC_BLOCKED_MARKET_ADDRESSES for parity.
+ */
+export const BLOCKED_SLAB_ADDRESSES: ReadonlySet<string> = new Set([
+  ...HARDCODED_BLOCKED_SLABS,
+  ...(
+    (typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_BLOCKED_MARKET_ADDRESSES : undefined) ?? ""
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+  // GH#1539 backwards compat: also read the old server-only env var so API routes
+  // don't lose overrides until deployment configs are migrated.
+  ...(
+    (typeof process !== "undefined" ? process.env?.BLOCKED_MARKET_ADDRESSES : undefined) ?? ""
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
 ]);
 
 /**
