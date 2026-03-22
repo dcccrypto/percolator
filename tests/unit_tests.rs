@@ -4580,13 +4580,23 @@ fn test_haircut_includes_isolated_balance() {
 
     // With fix, residual = 2.5B - 2B - 0.5B = 0
     // h_num = min(0, 1B) = 0
-    assert_eq!(h_num, 0, "Haircut should include isolated_balance, making residual=0");
+    assert_eq!(
+        h_num, 0,
+        "Haircut should include isolated_balance, making residual=0"
+    );
     assert_eq!(h_den, 1_000_000_000, "Denominator should be pnl_pos_tot");
 
     // Without isolated_balance (simulate old bug)
-    let residual_old = engine.vault.get().saturating_sub(engine.c_tot.get()).saturating_sub(engine.insurance_fund.balance.get());
+    let residual_old = engine
+        .vault
+        .get()
+        .saturating_sub(engine.c_tot.get())
+        .saturating_sub(engine.insurance_fund.balance.get());
     let h_num_old = core::cmp::min(residual_old, engine.pnl_pos_tot.get());
-    assert_eq!(h_num_old, 500_000_000, "Old calculation would give different haircut");
+    assert_eq!(
+        h_num_old, 500_000_000,
+        "Old calculation would give different haircut"
+    );
 }
 
 /// Regression test for Review Finding [1]: warmup cap overwithdrawing
