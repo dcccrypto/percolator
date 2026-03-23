@@ -907,17 +907,10 @@ impl RiskEngine {
 
         if new_eff_pos_q == 0 {
             self.set_position_basis_q(idx, 0i128);
-            // Reset to canonical zero-position defaults anchored to discarded side's epoch (spec §4.6, §2.1.1)
+            // Reset to canonical zero-position defaults (spec §2.4)
             self.accounts[idx].adl_a_basis = ADL_ONE;
             self.accounts[idx].adl_k_snap = 0i128;
-            if old_basis > 0 {
-                self.accounts[idx].adl_epoch_snap = self.adl_epoch_long;
-            } else if old_basis < 0 {
-                self.accounts[idx].adl_epoch_snap = self.adl_epoch_short;
-            } else {
-                // Was already flat — anchor to epoch 0 (spec §2.1.1)
-                self.accounts[idx].adl_epoch_snap = 0;
-            }
+            self.accounts[idx].adl_epoch_snap = 0;
         } else {
             let side = side_of_i128(new_eff_pos_q).expect("attach: nonzero must have side");
             self.set_position_basis_q(idx, new_eff_pos_q);
@@ -1727,9 +1720,13 @@ impl RiskEngine {
     }
 
     /// is_above_maintenance_margin (spec §9.1): Eq_net_i > MM_req_i
-    /// MM_req_i = max(proportional, MIN_NONZERO_MM_REQ)
+    /// Per spec §9.1: if eff == 0 then MM_req = 0; else MM_req = max(proportional, MIN_NONZERO_MM_REQ)
     pub fn is_above_maintenance_margin(&self, account: &Account, idx: usize, oracle_price: u64) -> bool {
         let eq_net = self.account_equity_net(account, oracle_price);
+        let eff = self.effective_pos_q(idx);
+        if eff == 0 {
+            return eq_net > 0;
+        }
         let not = self.notional(idx, oracle_price);
         let proportional = mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000);
         let mm_req = core::cmp::max(proportional, self.params.min_nonzero_mm_req);
@@ -1738,11 +1735,15 @@ impl RiskEngine {
     }
 
     /// is_above_initial_margin (spec §9.1): exact Eq_init_raw_i >= IM_req_i
-    /// IM_req_i = max(proportional, MIN_NONZERO_IM_REQ)
+    /// Per spec §9.1: if eff == 0 then IM_req = 0; else IM_req = max(proportional, MIN_NONZERO_IM_REQ)
     /// Per spec §3.4: MUST use exact raw equity, not clamped Eq_init_net_i,
     /// so negative raw equity is distinguishable from zero.
     pub fn is_above_initial_margin(&self, account: &Account, idx: usize, oracle_price: u64) -> bool {
         let eq_init_raw = self.account_equity_init_raw(account, idx);
+        let eff = self.effective_pos_q(idx);
+        if eff == 0 {
+            return eq_init_raw >= 0;
+        }
         let not = self.notional(idx, oracle_price);
         let proportional = mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
         let im_req = core::cmp::max(proportional, self.params.min_nonzero_im_req);
@@ -1908,8 +1909,8 @@ impl RiskEngine {
             self.set_capital(idx, cap - pay);
             // pay <= debt = |fee_credits|, so fee_credits + pay <= 0: no overflow
             let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
-            self.accounts[idx].fee_credits = self.accounts[idx].fee_credits
-                .saturating_add(pay_i128);
+            self.accounts[idx].fee_credits = I128::new(self.accounts[idx].fee_credits.get()
+                .checked_add(pay_i128).expect("fee_debt_sweep: pay <= debt guarantees no overflow"));
             self.insurance_fund.balance = self.insurance_fund.balance + pay;
         }
         // Per spec §7.5: unpaid fee debt remains as local fee_credits until
@@ -2006,7 +2007,13 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        let idx = self.alloc_slot()?;
+        let idx = match self.alloc_slot() {
+            Ok(i) => i,
+            Err(e) => {
+                self.materialized_account_count -= 1;
+                return Err(e);
+            }
+        };
 
         // Commit vault/insurance only after all checks pass
         let excess = fee_payment.saturating_sub(required_fee);
@@ -2075,7 +2082,13 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        let idx = self.alloc_slot()?;
+        let idx = match self.alloc_slot() {
+            Ok(i) => i,
+            Err(e) => {
+                self.materialized_account_count -= 1;
+                return Err(e);
+            }
+        };
 
         // Commit vault/insurance only after all checks pass
         let excess = fee_payment.saturating_sub(required_fee);
