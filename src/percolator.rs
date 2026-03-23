@@ -1225,6 +1225,9 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // Allocate slot first — all fallible checks before state mutations (atomicity)
+        let idx = self.alloc_slot()?;
+
         // Bug #4 fix: Compute excess payment to credit to user capital
         let excess = fee_payment.saturating_sub(required_fee);
 
@@ -1233,9 +1236,6 @@ impl RiskEngine {
         self.vault += fee_payment;
         self.insurance_fund.balance += required_fee;
         self.insurance_fund.fee_revenue += required_fee;
-
-        // Allocate slot and assign unique ID
-        let idx = self.alloc_slot()?;
         let account_id = self.next_account_id;
         self.next_account_id = self.next_account_id.saturating_add(1);
 
@@ -1286,6 +1286,9 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // Allocate slot first — all fallible checks before state mutations (atomicity)
+        let idx = self.alloc_slot()?;
+
         // Bug #4 fix: Compute excess payment to credit to LP capital
         let excess = fee_payment.saturating_sub(required_fee);
 
@@ -1294,9 +1297,6 @@ impl RiskEngine {
         self.vault += fee_payment;
         self.insurance_fund.balance += required_fee;
         self.insurance_fund.fee_revenue += required_fee;
-
-        // Allocate slot and assign unique ID
-        let idx = self.alloc_slot()?;
         let account_id = self.next_account_id;
         self.next_account_id = self.next_account_id.saturating_add(1);
 
@@ -1570,21 +1570,37 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
         }
+        // Time monotonicity
+        if now_slot < self.current_slot {
+            return Err(RiskError::Unauthorized);
+        }
+        // Cap at outstanding debt to enforce fee_credits <= 0 invariant
+        let debt = neg_i128_to_u128(
+            core::cmp::min(self.accounts[idx as usize].fee_credits.get(), 0)
+        );
+        let capped = amount.min(debt);
+        if capped == 0 {
+            return Ok(()); // no debt to pay off
+        }
+        if capped > i128::MAX as u128 {
+            return Err(RiskError::Overflow);
+        }
+        // Checked arithmetic for vault/insurance
+        let new_vault = self.vault.get().checked_add(capped)
+            .ok_or(RiskError::Overflow)?;
+        let new_ins = self.insurance_fund.balance.get().checked_add(capped)
+            .ok_or(RiskError::Overflow)?;
+        let new_rev = self.insurance_fund.fee_revenue.get().checked_add(capped)
+            .ok_or(RiskError::Overflow)?;
+        let new_credits = self.accounts[idx as usize].fee_credits
+            .checked_add(capped as i128)
+            .ok_or(RiskError::Overflow)?;
+        // All checks passed — commit state
         self.current_slot = now_slot;
-
-        // Wrapper transferred tokens into vault
-        self.vault += amount;
-
-        // Pre-fund: insurance receives the amount now.
-        // When credits are later spent during fee settlement, no further
-        // insurance booking occurs (coupon semantics).
-        self.insurance_fund.balance += amount;
-        self.insurance_fund.fee_revenue += amount;
-
-        // Credit the account
-        self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
-            .fee_credits
-            .saturating_add(amount as i128);
+        self.vault = U128::new(new_vault);
+        self.insurance_fund.balance = U128::new(new_ins);
+        self.insurance_fund.fee_revenue = U128::new(new_rev);
+        self.accounts[idx as usize].fee_credits = new_credits;
 
         Ok(())
     }
@@ -1835,11 +1851,6 @@ impl RiskEngine {
                 continue;
             }
 
-            // NEVER garbage collect LP accounts - they are essential for market operation
-            if self.accounts[idx].is_lp() {
-                continue;
-            }
-
             // Best-effort fee settle so accounts with tiny capital get drained in THIS sweep.
             let _ =
                 self.settle_maintenance_fee_best_effort_for_crank(idx as u16, self.current_slot);
@@ -1900,6 +1911,58 @@ impl RiskEngine {
         }
 
         num_to_free as u32
+    }
+
+    // ========================================
+    // Permissionless account reclamation (spec §10.7 + §2.6)
+    // ========================================
+
+    /// reclaim_empty_account(i) — permissionless O(1) empty/dust-account recycling.
+    /// MUST NOT call accrue_market_to, MUST NOT mutate side state,
+    /// MUST NOT materialize any account.
+    pub fn reclaim_empty_account(&mut self, idx: u16) -> Result<()> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let account = &self.accounts[idx as usize];
+
+        // Preconditions: must have zero position
+        if !account.position_size.is_zero() {
+            return Err(RiskError::Undercollateralized);
+        }
+        // C_i must be 0 or dust (< new_account_fee)
+        if account.capital.get() >= self.params.new_account_fee.get()
+            && !account.capital.is_zero()
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+        if !account.pnl.is_zero() {
+            return Err(RiskError::Undercollateralized);
+        }
+        if account.reserved_pnl != 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        if account.fee_credits.get() > 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        // Sweep dust capital into insurance
+        let dust_cap = self.accounts[idx as usize].capital.get();
+        if dust_cap > 0 {
+            self.set_capital(idx as usize, 0);
+            self.insurance_fund.balance += dust_cap;
+        }
+
+        // Forgive uncollectible fee debt
+        if self.accounts[idx as usize].fee_credits.get() < 0 {
+            self.accounts[idx as usize].fee_credits = I128::ZERO;
+        }
+
+        // Free the slot
+        self.free_slot(idx);
+
+        Ok(())
     }
 
     // ========================================
@@ -2822,7 +2885,16 @@ impl RiskEngine {
         if self.funding_frozen {
             return;
         }
-        self.funding_rate_bps_per_slot_last = new_rate_bps_per_slot;
+        // Spec §5.5: clamp to configured max to prevent liveness lockup in accrue_market_to
+        let max_abs = self.params.funding_premium_max_bps_per_slot;
+        let clamped = if new_rate_bps_per_slot > max_abs {
+            max_abs
+        } else if new_rate_bps_per_slot < -max_abs {
+            -max_abs
+        } else {
+            new_rate_bps_per_slot
+        };
+        self.funding_rate_bps_per_slot_last = clamped;
     }
 
     /// Convenience: Set rate then accrue in one call.
@@ -4433,12 +4505,13 @@ impl RiskEngine {
     /// Adds tokens to both vault and insurance fund.
     /// Returns true if the top-up brings insurance above the risk reduction threshold.
     pub fn top_up_insurance_fund(&mut self, amount: u128) -> Result<bool> {
-        // Add to vault
-        self.vault = U128::new(add_u128(self.vault.get(), amount));
-
-        // Add to insurance fund
-        self.insurance_fund.balance =
-            U128::new(add_u128(self.insurance_fund.balance.get(), amount));
+        // Checked arithmetic to prevent silent overflow
+        let new_vault = self.vault.get().checked_add(amount)
+            .ok_or(RiskError::Overflow)?;
+        let new_ins = self.insurance_fund.balance.get().checked_add(amount)
+            .ok_or(RiskError::Overflow)?;
+        self.vault = U128::new(new_vault);
+        self.insurance_fund.balance = U128::new(new_ins);
 
         // Return whether we're now above the force-realize threshold
         let above_threshold = self.insurance_fund.balance > self.params.risk_reduction_threshold;

@@ -668,7 +668,9 @@ fn test_lp_warmup_with_negative_pnl() {
 #[test]
 fn test_funding_positive_rate_longs_pay_shorts() {
     // T1: Positive funding → longs pay shorts
-    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let mut params = default_params();
+    params.funding_premium_max_bps_per_slot = 10_000; // Allow test rates up to 10000 bps
+    let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
 
@@ -734,7 +736,9 @@ fn test_funding_positive_rate_longs_pay_shorts() {
 #[test]
 fn test_funding_negative_rate_shorts_pay_longs() {
     // T2: Negative funding → shorts pay longs
-    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let mut params = default_params();
+    params.funding_premium_max_bps_per_slot = 10_000; // Allow test rates up to 10000 bps
+    let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
 
@@ -3913,7 +3917,8 @@ fn test_dust_negative_fee_credits_gc() {
 }
 
 #[test]
-fn test_lp_never_gc() {
+fn test_lp_gc_when_empty() {
+    // Per audit fix: empty LP accounts with zero capital/PnL/position are reclaimable (spec §2.6)
     let mut params = params_for_inline_tests();
     params.maintenance_fee_per_slot = U128::new(1);
     let mut engine = RiskEngine::new(params);
@@ -3928,22 +3933,13 @@ fn test_lp_never_gc() {
 
     assert!(engine.is_used(lp_idx as usize));
 
-    // Crank many times — LP should never be GC'd
-    for slot in 1..=10 {
-        let outcome = engine
-            .keeper_crank(lp_idx, slot * 100, ORACLE_100K, 0, false)
-            .unwrap();
-        assert_eq!(
-            outcome.num_gc_closed,
-            0,
-            "LP must not be garbage collected (slot {})",
-            slot * 100
-        );
-    }
-
+    // After crank, empty LP should be GC'd
+    let outcome = engine
+        .keeper_crank(lp_idx, 100, ORACLE_100K, 0, false)
+        .unwrap();
     assert!(
-        engine.is_used(lp_idx as usize),
-        "LP account must still exist"
+        outcome.num_gc_closed > 0 || !engine.is_used(lp_idx as usize),
+        "Empty LP must be reclaimable per audit fix"
     );
 }
 
@@ -3956,8 +3952,8 @@ fn test_maintenance_fee_paid_from_fee_credits_is_coupon_not_revenue() {
     let user_idx = engine.add_user(0).unwrap();
     engine.deposit(user_idx, 1_000_000, 1).unwrap();
 
-    // Add 100 fee credits (test-only helper — no vault/insurance)
-    engine.deposit_fee_credits(user_idx, 100, 1).unwrap();
+    // Add 100 fee credits via test-only helper (bypasses debt cap)
+    engine.add_fee_credits(user_idx, 100).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].fee_credits.get(), 100);
 
     let rev_before = engine.insurance_fund.fee_revenue.get();
@@ -4000,8 +3996,8 @@ fn test_maintenance_fee_splits_credits_coupon_capital_to_insurance() {
     engine.deposit(user_idx, 50, 1).unwrap();
     assert_eq!(engine.accounts[user_idx as usize].capital.get(), 40);
 
-    // Add 30 fee credits (test-only)
-    engine.deposit_fee_credits(user_idx, 30, 1).unwrap();
+    // Add 30 fee credits via test-only helper (bypasses debt cap)
+    engine.add_fee_credits(user_idx, 30).unwrap();
 
     let rev_before = engine.insurance_fund.fee_revenue.get();
 
@@ -4032,6 +4028,9 @@ fn test_deposit_fee_credits_updates_vault_and_insurance() {
     let mut engine = RiskEngine::new(params_for_inline_tests());
     let user_idx = engine.add_user(0).unwrap();
 
+    // Give account 500 units of fee debt first (fee_credits <= 0 invariant)
+    engine.accounts[user_idx as usize].fee_credits = I128::new(-500);
+
     let vault_before = engine.vault.get();
     let ins_before = engine.insurance_fund.balance.get();
     let rev_before = engine.insurance_fund.fee_revenue.get();
@@ -4055,8 +4054,8 @@ fn test_deposit_fee_credits_updates_vault_and_insurance() {
     );
     assert_eq!(
         engine.accounts[user_idx as usize].fee_credits.get(),
-        500,
-        "fee_credits must increase"
+        0,
+        "fee_credits must be zero after paying off debt"
     );
 }
 
@@ -4695,7 +4694,9 @@ fn test_warmup_resets_when_mark_increases_pnl() {
 /// Spec §4.2 requires all PnL modifications to use set_pnl helper.
 #[test]
 fn test_funding_settlement_maintains_pnl_pos_tot() {
-    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let mut params = default_params();
+    params.funding_premium_max_bps_per_slot = 10_000; // Allow test rates up to 10000 bps
+    let mut engine = Box::new(RiskEngine::new(params));
     let user_idx = engine.add_user(0).unwrap();
     let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
 
