@@ -410,8 +410,9 @@ fn i128_clamp_pos(v: i128) -> u128 {
 // ============================================================================
 
 impl RiskEngine {
-    /// Create a new risk engine
-    pub fn new(params: RiskParams) -> Self {
+    /// Validate configuration parameters (spec §2.2.1).
+    /// Panics on invalid configuration to prevent deployment with unsafe params.
+    fn validate_params(params: &RiskParams) {
         assert!(
             params.maintenance_margin_bps < params.initial_margin_bps,
             "maintenance_margin_bps must be strictly less than initial_margin_bps"
@@ -420,6 +421,31 @@ impl RiskEngine {
             params.min_nonzero_mm_req < params.min_nonzero_im_req,
             "min_nonzero_mm_req must be strictly less than min_nonzero_im_req"
         );
+        assert!(
+            (params.max_accounts as usize) <= MAX_ACCOUNTS && params.max_accounts > 0,
+            "max_accounts must be in 1..=MAX_ACCOUNTS"
+        );
+        assert!(
+            params.initial_margin_bps <= 10_000,
+            "initial_margin_bps must be <= 10_000"
+        );
+        assert!(
+            params.maintenance_margin_bps <= 10_000,
+            "maintenance_margin_bps must be <= 10_000"
+        );
+        assert!(
+            params.trading_fee_bps <= 10_000,
+            "trading_fee_bps must be <= 10_000"
+        );
+        assert!(
+            params.liquidation_fee_bps <= 10_000,
+            "liquidation_fee_bps must be <= 10_000"
+        );
+    }
+
+    /// Create a new risk engine
+    pub fn new(params: RiskParams) -> Self {
+        Self::validate_params(&params);
         let mut engine = Self {
             vault: U128::ZERO,
             insurance_fund: InsuranceFund {
@@ -482,14 +508,7 @@ impl RiskEngine {
     /// Initialize in place (for Solana BPF zero-copy).
     /// Fully canonicalizes all state — safe even on non-zeroed memory.
     pub fn init_in_place(&mut self, params: RiskParams) {
-        assert!(
-            params.maintenance_margin_bps < params.initial_margin_bps,
-            "maintenance_margin_bps must be strictly less than initial_margin_bps"
-        );
-        assert!(
-            params.min_nonzero_mm_req < params.min_nonzero_im_req,
-            "min_nonzero_mm_req must be strictly less than min_nonzero_im_req"
-        );
+        Self::validate_params(&params);
         self.vault = U128::ZERO;
         self.insurance_fund = InsuranceFund { balance: U128::ZERO };
         self.params = params;
@@ -2714,6 +2733,12 @@ impl RiskEngine {
         oracle_price: u64,
         policy: LiquidationPolicy,
     ) -> Result<bool> {
+        // Bounds and existence check BEFORE touch_account_full to prevent
+        // market-state mutation (accrue_market_to) on missing accounts.
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Ok(false);
+        }
+
         let mut ctx = InstructionContext::new();
 
         // Per spec §10.6 step 3: touch_account_full before the liquidation routine.
@@ -2960,16 +2985,17 @@ impl RiskEngine {
                 let eff = self.effective_pos_q(cidx);
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                        // Determine policy from hint (untrusted)
-                        let policy = self.validate_keeper_hint(candidate_idx, eff, hint);
-                        if let Some(p) = policy {
-                            match self.liquidate_at_oracle_internal(candidate_idx, now_slot, oracle_price, p, &mut ctx) {
-                                Ok(true) => { num_liquidations += 1; }
-                                Ok(false) => {}
-                                Err(e) => return Err(e),
-                            }
+                        // Keeper hints are untrusted advisory. An ExactPartial hint
+                        // that fails the post-partial health check (spec §9.4 step 14)
+                        // would return Err after mutating state, reverting the entire
+                        // crank. To prevent griefing, keeper_crank always uses FullClose.
+                        // External callers wanting partial liquidation use
+                        // liquidate_at_oracle() directly.
+                        match self.liquidate_at_oracle_internal(candidate_idx, now_slot, oracle_price, LiquidationPolicy::FullClose, &mut ctx) {
+                            Ok(true) => { num_liquidations += 1; }
+                            Ok(false) => {}
+                            Err(e) => return Err(e),
                         }
-                        // If hint invalid → no liquidation action for this candidate
                     }
                 }
             }

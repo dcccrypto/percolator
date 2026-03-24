@@ -265,3 +265,100 @@ fn proof_fee_debt_sweep_checked_arithmetic() {
     // Conservation: total capital moved from account to insurance
     assert!(engine.check_conservation());
 }
+
+// ############################################################################
+// FIX 5: keeper_crank always uses FullClose (no partial hint griefing)
+// ############################################################################
+
+/// keeper_crank with a syntactically valid ExactPartial hint must not revert.
+/// The hint is ignored — keeper_crank always uses FullClose internally.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_ignores_partial_hint() {
+    let mut engine = RiskEngine::new(default_params());
+
+    // Create two accounts for a trade
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+
+    engine.deposit(a, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Open a position: a long, b short
+    let size = 100 * POS_SCALE as i128;
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+
+    // Crash oracle to make 'a' liquidatable
+    let crash_oracle = 500u64;
+
+    // Submit a syntactically valid but economically invalid partial hint
+    // (tiny close that won't restore health)
+    let bad_hint = Some(LiquidationPolicy::ExactPartial(POS_SCALE as u128));
+
+    // keeper_crank must NOT revert — it ignores the partial hint and uses FullClose
+    let candidates = [(a, bad_hint)];
+    let result = engine.keeper_crank(DEFAULT_SLOT + 1, crash_oracle, &candidates, 10);
+    assert!(result.is_ok(), "keeper_crank must not revert on bad partial hint");
+}
+
+// ############################################################################
+// FIX 6: liquidate_at_oracle rejects missing accounts before touch
+// ############################################################################
+
+/// liquidate_at_oracle on a missing account must return Ok(false) without
+/// mutating market state (no accrue_market_to side effects).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_liquidate_missing_account_no_market_mutation() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let slot_before = engine.current_slot;
+    let oracle_before = engine.last_oracle_price;
+
+    // Call liquidate on an unused slot
+    let result = engine.liquidate_at_oracle(0, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose);
+    assert!(matches!(result, Ok(false)), "must return Ok(false) for missing account");
+
+    // Market state must not have been mutated
+    assert!(engine.current_slot == slot_before, "current_slot must not change");
+    assert!(engine.last_oracle_price == oracle_before, "last_oracle_price must not change");
+}
+
+// ############################################################################
+// FIX 7: config validation — max_accounts <= MAX_ACCOUNTS
+// ############################################################################
+
+/// new() with max_accounts > MAX_ACCOUNTS must panic.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+#[kani::should_panic]
+fn proof_config_rejects_oversized_max_accounts() {
+    let mut params = zero_fee_params();
+    params.max_accounts = (MAX_ACCOUNTS as u64) + 1;
+    let _engine = RiskEngine::new(params);
+}
+
+/// new() with max_accounts == 0 must panic.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+#[kani::should_panic]
+fn proof_config_rejects_zero_max_accounts() {
+    let mut params = zero_fee_params();
+    params.max_accounts = 0;
+    let _engine = RiskEngine::new(params);
+}
+
+/// new() with BPS > 10_000 must panic.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+#[kani::should_panic]
+fn proof_config_rejects_invalid_bps() {
+    let mut params = zero_fee_params();
+    params.initial_margin_bps = 10_001;
+    let _engine = RiskEngine::new(params);
+}
