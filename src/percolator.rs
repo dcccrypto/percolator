@@ -3335,6 +3335,77 @@ impl RiskEngine {
     }
 
     // ========================================================================
+    // close_account_resolved (resolved/frozen market path)
+    // ========================================================================
+
+    /// Close an account in a resolved/frozen market where touch_account_full
+    /// would overflow (ADL state frozen, K may be at boundary values).
+    /// Skips accrue_market_to and settle_side_effects entirely.
+    /// Precondition: caller has verified market is in resolved state.
+    ///
+    /// Unlike close_account, this handles accounts with open positions and
+    /// nonzero PnL by settling/absorbing them before returning capital.
+    pub fn close_account_resolved(&mut self, idx: u16) -> Result<u128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Step 1: Zero position with proper stored_pos_count tracking
+        if self.accounts[idx as usize].position_basis_q != 0 {
+            self.set_position_basis_q(idx as usize, 0);
+            self.accounts[idx as usize].adl_a_basis = ADL_ONE;
+            self.accounts[idx as usize].adl_k_snap = 0;
+            self.accounts[idx as usize].adl_epoch_snap = 0;
+        }
+
+        // Step 2: Settle losses from principal (C covers negative PnL)
+        self.settle_losses(idx as usize);
+
+        // Step 3: Absorb any remaining negative PnL as protocol loss
+        if self.accounts[idx as usize].pnl < 0 {
+            assert!(self.accounts[idx as usize].pnl != i128::MIN,
+                "close_account_resolved: i128::MIN pnl");
+            let loss = self.accounts[idx as usize].pnl.unsigned_abs();
+            self.absorb_protocol_loss(loss);
+            self.set_pnl(idx as usize, 0);
+        }
+
+        // Step 4: Convert any positive PnL to capital (unconditional — no warmup
+        // in resolved market). Uses haircut ratio so winners share any deficit.
+        if self.accounts[idx as usize].pnl > 0 {
+            let pos_pnl = self.accounts[idx as usize].pnl as u128;
+            // Release all reserves (bypass warmup — market is resolved)
+            self.set_reserved_pnl(idx as usize, 0);
+            // Compute haircutted payout before consuming
+            let (h_num, h_den) = self.haircut_ratio();
+            let y = if h_den == 0 { pos_pnl } else {
+                wide_mul_div_floor_u128(pos_pnl, h_num, h_den)
+            };
+            // Consume all released PnL (now fully released after set_reserved_pnl(0))
+            self.consume_released_pnl(idx as usize, pos_pnl);
+            let new_cap = add_u128(self.accounts[idx as usize].capital.get(), y);
+            self.set_capital(idx as usize, new_cap);
+        }
+
+        // Step 5: Forgive fee debt (safe: position and PnL are zero)
+        if self.accounts[idx as usize].fee_credits.get() < 0 {
+            self.accounts[idx as usize].fee_credits = I128::ZERO;
+        }
+
+        // Step 6: Return capital
+        let capital = self.accounts[idx as usize].capital;
+        if capital > self.vault {
+            return Err(RiskError::InsufficientBalance);
+        }
+        self.vault = self.vault - capital;
+        self.set_capital(idx as usize, 0);
+
+        self.free_slot(idx);
+
+        Ok(capital.get())
+    }
+
+    // ========================================================================
     // Permissionless account reclamation (spec §10.7 + §2.6)
     // ========================================================================
 

@@ -2413,3 +2413,88 @@ fn test_property_54_unilateral_exact_drain_reset() {
     }
 }
 
+// ============================================================================
+// close_account_resolved
+// ============================================================================
+
+#[test]
+fn test_close_account_resolved_flat_no_pnl() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 50_000, 1000, 100).unwrap();
+
+    let returned = engine.close_account_resolved(idx).unwrap();
+    assert_eq!(returned, 50_000);
+    assert!(!engine.is_used(idx as usize));
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn test_close_account_resolved_with_position_and_loss() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 500_000, 1000, 100).unwrap();
+    engine.deposit(b, 500_000, 1000, 100).unwrap();
+
+    // Open position
+    let size = (100 * POS_SCALE) as i128;
+    engine.execute_trade(a, b, 1000, 100, size, 1000).unwrap();
+
+    // Inject loss
+    engine.set_pnl(a as usize, -100_000i128);
+
+    let cap_before = engine.accounts[a as usize].capital.get();
+    let returned = engine.close_account_resolved(a).unwrap();
+
+    // Capital reduced by settled loss, rest returned
+    assert!(returned < cap_before);
+    assert!(!engine.is_used(a as usize));
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn test_close_account_resolved_with_positive_pnl() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 500_000, 1000, 100).unwrap();
+    engine.deposit(b, 500_000, 1000, 100).unwrap();
+
+    let size = (100 * POS_SCALE) as i128;
+    engine.execute_trade(a, b, 1000, 100, size, 1000).unwrap();
+
+    // Inject profit (with reserved PnL from set_pnl)
+    engine.set_pnl(a as usize, 50_000i128);
+
+    let cap_before = engine.accounts[a as usize].capital.get();
+    let returned = engine.close_account_resolved(a).unwrap();
+
+    // Capital should increase from converted profit (possibly haircutted)
+    assert!(returned >= cap_before, "capital must include converted profit");
+    assert!(!engine.is_used(a as usize));
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn test_close_account_resolved_with_fee_debt() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 50_000, 1000, 100).unwrap();
+
+    // Inject fee debt
+    engine.accounts[idx as usize].fee_credits = I128::new(-5000);
+
+    let returned = engine.close_account_resolved(idx).unwrap();
+    assert_eq!(returned, 50_000, "fee debt forgiven, full capital returned");
+    assert!(!engine.is_used(idx as usize));
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn test_close_account_resolved_unused_slot_rejected() {
+    let mut engine = RiskEngine::new(default_params());
+    let result = engine.close_account_resolved(0);
+    assert_eq!(result, Err(RiskError::AccountNotFound));
+}
+
