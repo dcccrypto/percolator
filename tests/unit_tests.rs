@@ -85,6 +85,7 @@ fn default_params() -> RiskParams {
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 0,
         min_nonzero_im_req: 0,
+        insurance_floor: percolator::U128::ZERO,
     }
 }
 
@@ -2008,6 +2009,7 @@ fn test_dust_killswitch_forces_full_close() {
     params.maintenance_margin_bps = 500;
     params.liquidation_buffer_bps = 100;
     params.min_liquidation_abs = U128::new(5_000_000); // 5 units minimum
+    params.liquidation_fee_cap = U128::new(10_000_000); // cap >= min_abs (spec §1.4)
 
     let mut engine = Box::new(RiskEngine::new(params));
 
@@ -2294,6 +2296,7 @@ fn test_compute_liquidation_close_amount_basic() {
 fn test_compute_liquidation_dust_kill() {
     let mut params = default_params();
     params.min_liquidation_abs = U128::new(9_000_000); // 9 units minimum (so after partial, remaining < 9 triggers kill)
+    params.liquidation_fee_cap = U128::new(10_000_000); // cap >= min_abs (spec §1.4)
 
     let mut engine = Box::new(RiskEngine::new(params));
     let user = engine.add_user(0).unwrap();
@@ -3727,6 +3730,7 @@ fn params_for_inline_tests() -> RiskParams {
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 0,
         min_nonzero_im_req: 0,
+        insurance_floor: percolator::U128::ZERO,
     }
 }
 

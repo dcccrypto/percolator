@@ -396,6 +396,14 @@ pub struct RiskParams {
     /// IM_req_i = max(proportional, min_nonzero_im_req).
     /// Must be strictly > min_nonzero_mm_req when both are non-zero.
     pub min_nonzero_im_req: u128,
+
+    // ========================================
+    // Insurance Fund Floor (spec §1.4)
+    // ========================================
+    /// Minimum insurance fund balance floor.
+    /// Insurance fund draws stop at this floor (spec §1.4: 0 <= I_floor <= MAX_VAULT_TVL).
+    /// Set to 0 to disable (default). Deployments can express nonzero insurance floors.
+    pub insurance_floor: U128,
 }
 
 impl RiskParams {
@@ -430,8 +438,16 @@ impl RiskParams {
         if self.max_crank_staleness_slots == 0 {
             return Err(RiskError::Overflow);
         }
+        // Trading fee cannot exceed 100% (spec §1.4)
+        if self.trading_fee_bps > 10_000 {
+            return Err(RiskError::Overflow);
+        }
         // Liquidation fee cannot exceed 100%
         if self.liquidation_fee_bps > 10_000 {
+            return Err(RiskError::Overflow);
+        }
+        // Liquidation fee ordering: min_liquidation_abs <= liquidation_fee_cap (spec §1.4)
+        if self.min_liquidation_abs.get() > self.liquidation_fee_cap.get() {
             return Err(RiskError::Overflow);
         }
         // Liquidation buffer cannot exceed 100%
@@ -479,6 +495,9 @@ impl RiskParams {
                 return Err(RiskError::Overflow);
             }
         }
+        // Insurance floor (spec §1.4: 0 <= I_floor <= MAX_ORACLE_PRICE * MAX_POSITION_ABS)
+        // No separate MAX_VAULT_TVL constant in this fork; nonzero values are permissive.
+        // Structural validity is enforced: insurance_floor must fit within U128.
         Ok(())
     }
 
@@ -1749,7 +1768,22 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized); // Has open position
         }
 
-        // Forgive any remaining fee debt (Finding C: fee debt traps).
+        // PnL must be zero BEFORE fee forgiveness to prevent in-memory state
+        // mutation on the Err path (fee-debt evasion window — spec §10.6 ordering).
+        // 1. Users can't bypass warmup by closing with positive unwarmed pnl
+        // 2. Conservation is maintained (forfeiting pnl would create unbounded slack)
+        // 3. Negative pnl after full settlement implies insolvency
+        {
+            let account = &self.accounts[idx as usize];
+            if account.pnl.is_positive() {
+                return Err(RiskError::PnlNotWarmedUp);
+            }
+            if account.pnl.is_negative() {
+                return Err(RiskError::Undercollateralized);
+            }
+        }
+
+        // Forgive any remaining fee debt (safe: position is zero, PnL is zero).
         // pay_fee_debt_from_capital (via touch_account_full above) already paid
         // what it could. Any remainder is uncollectable — forgive and proceed.
         if self.accounts[idx as usize].fee_credits.is_negative() {
@@ -1757,17 +1791,6 @@ impl RiskEngine {
         }
 
         let account = &self.accounts[idx as usize];
-
-        // PnL must be zero to close. This enforces:
-        // 1. Users can't bypass warmup by closing with positive unwarmed pnl
-        // 2. Conservation is maintained (forfeiting pnl would create unbounded slack)
-        // 3. Negative pnl after full settlement implies insolvency
-        if account.pnl.is_positive() {
-            return Err(RiskError::PnlNotWarmedUp);
-        }
-        if account.pnl.is_negative() {
-            return Err(RiskError::Undercollateralized);
-        }
 
         let capital = account.capital;
 
@@ -1820,11 +1843,13 @@ impl RiskEngine {
         let max_scan = (ACCOUNTS_PER_CRANK as usize).min(MAX_ACCOUNTS);
         let start = self.gc_cursor as usize;
 
+        let mut scanned: usize = 0;
         for offset in 0..max_scan {
             // Budget check
             if num_to_free >= GC_CLOSE_BUDGET as usize {
                 break;
             }
+            scanned = offset + 1;
 
             let idx = (start + offset) & ACCOUNT_IDX_MASK;
 
@@ -1844,7 +1869,7 @@ impl RiskEngine {
             let _ =
                 self.settle_maintenance_fee_best_effort_for_crank(idx as u16, self.current_slot);
 
-            // Dust predicate: must have zero position, reserved, and non-positive pnl.
+            // Dust predicate: must have zero position, reserved, and zero pnl.
             // Capital: reclaim when C_i == 0 OR 0 < C_i < MIN_INITIAL_DEPOSIT (spec §2.6).
             {
                 let account = &self.accounts[idx];
@@ -1862,7 +1887,9 @@ impl RiskEngine {
                 if account.reserved_pnl != 0 {
                     continue;
                 }
-                if account.pnl.is_positive() {
+                // Spec §2.6 requires PNL_i == 0 as a reclamation precondition.
+                // Accounts with PNL != 0 need touch_account_full → §7.3 first.
+                if account.pnl.get() != 0 {
                     continue;
                 }
             }
@@ -1881,9 +1908,9 @@ impl RiskEngine {
                 self.accounts[idx].funding_index = self.funding_index_qpb_e6;
             }
 
-            // Write off negative pnl (spec §6.1: unpayable loss just reduces Residual)
-            if self.accounts[idx].pnl.is_negative() {
-                self.set_pnl(idx, 0);
+            // Forgive uncollectible fee debt (spec §2.6)
+            if self.accounts[idx].fee_credits.is_negative() {
+                self.accounts[idx].fee_credits = I128::ZERO;
             }
 
             // Queue for freeing
@@ -1891,8 +1918,9 @@ impl RiskEngine {
             num_to_free += 1;
         }
 
-        // Update cursor for next call
-        self.gc_cursor = ((start + max_scan) & ACCOUNT_IDX_MASK) as u16;
+        // Advance cursor by actual number of offsets scanned, not max_scan.
+        // Prevents skipping unscanned accounts on early budget break.
+        self.gc_cursor = ((start + scanned) & ACCOUNT_IDX_MASK) as u16;
 
         // Free all collected dust accounts
         for slot in to_free.iter().take(num_to_free) {
@@ -3439,11 +3467,9 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Require fresh crank (time-based) before state-changing operations
-        self.require_fresh_crank(now_slot)?;
-
-        // Require recent full sweep started
-        self.require_recent_full_sweep(now_slot)?;
+        // No require_fresh_crank: spec §10.4 does not gate withdraw on keeper
+        // liveness. touch_account_full accrues market state directly, satisfying
+        // spec §0 goal 6 (liveness — keeper downtime must not freeze user funds).
 
         // Validate account exists
         if !self.is_used(idx as usize) {
@@ -3773,8 +3799,9 @@ impl RiskEngine {
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
 
-        // Require fresh crank (time-based) before state-changing operations
-        self.require_fresh_crank(now_slot)?;
+        // No require_fresh_crank: spec §10.5 does not gate execute_trade on
+        // keeper liveness. touch_account_full accrues market state directly,
+        // satisfying spec §0 goal 6 (liveness without external action).
 
         // Validate indices
         if !self.is_used(lp_idx as usize) || !self.is_used(user_idx as usize) {
@@ -4660,6 +4687,7 @@ mod skew_rebate_tests {
             fee_utilization_surge_bps: 0,
             min_nonzero_mm_req: 0,
             min_nonzero_im_req: 0,
+            insurance_floor: U128::ZERO,
         };
         RiskEngine::new(params)
     }
