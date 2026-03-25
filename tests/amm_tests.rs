@@ -36,6 +36,7 @@ fn default_params() -> RiskParams {
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 0,
         min_nonzero_im_req: 0,
+        insurance_floor: percolator::U128::ZERO,
     }
 }
 
