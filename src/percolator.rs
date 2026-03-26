@@ -434,6 +434,10 @@ impl RiskParams {
         if self.max_accounts == 0 || self.max_accounts > MAX_ACCOUNTS as u64 {
             return Err(RiskError::Overflow);
         }
+        // warmup_period_slots must be non-zero — zero bypasses oracle manipulation delay (spec Goal 1)
+        if self.warmup_period_slots == 0 {
+            return Err(RiskError::Overflow);
+        }
         // max_crank_staleness_slots must be non-zero (u64::MAX = disable mode is allowed)
         if self.max_crank_staleness_slots == 0 {
             return Err(RiskError::Overflow);

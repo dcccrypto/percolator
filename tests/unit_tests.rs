@@ -2534,7 +2534,7 @@ fn test_batched_adl_profit_exclusion() {
     params.liquidation_buffer_bps = 0; // No buffer
     params.liquidation_fee_bps = 0; // No fee for cleaner math
     params.max_crank_staleness_slots = u64::MAX;
-    params.warmup_period_slots = 0; // Instant warmup for this test
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid) // Instant warmup for this test
 
     let mut engine = Box::new(RiskEngine::new(params));
     set_insurance(&mut engine, 100_000);
@@ -2650,7 +2650,7 @@ fn test_batched_adl_conservation_basic() {
     // This is a simpler regression test to verify batched ADL works.
     let mut params = default_params();
     params.max_crank_staleness_slots = u64::MAX;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
 
     let mut engine = Box::new(RiskEngine::new(params));
     set_insurance(&mut engine, 100_000);
@@ -2705,7 +2705,7 @@ fn test_two_phase_liquidation_priority_and_sweep() {
     params.liquidation_buffer_bps = 0;
     params.liquidation_fee_bps = 0;
     params.max_crank_staleness_slots = u64::MAX;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
 
     let mut engine = Box::new(RiskEngine::new(params));
     set_insurance(&mut engine, 1_000_000);
@@ -2902,7 +2902,7 @@ fn test_window_liquidation_many_liquidatable() {
     let mut params = default_params();
     params.maintenance_margin_bps = 500; // 5%
     params.max_crank_staleness_slots = u64::MAX;
-    params.warmup_period_slots = 0; // Instant warmup
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid) // Instant warmup
 
     let mut engine = Box::new(RiskEngine::new(params));
     set_insurance(&mut engine, 10_000_000);
@@ -3252,7 +3252,7 @@ fn test_force_realize_updates_lp_aggregates() {
 fn test_withdrawals_blocked_during_pending_unblocked_after() {
     let mut params = default_params();
     params.risk_reduction_threshold = U128::new(0);
-    params.warmup_period_slots = 0; // Instant warmup
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid) // Instant warmup
     let mut engine = Box::new(RiskEngine::new(params));
 
     // Fund insurance
@@ -4182,7 +4182,7 @@ fn test_finding_l_new_position_requires_initial_margin() {
     params.maintenance_margin_bps = 500; // 5%
     params.initial_margin_bps = 1000; // 10%
     params.trading_fee_bps = 0; // No fee for cleaner math
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4234,7 +4234,7 @@ fn test_position_flip_margin_check() {
     params.maintenance_margin_bps = 500; // 5%
     params.initial_margin_bps = 1000; // 10%
     params.trading_fee_bps = 0;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4309,7 +4309,7 @@ fn test_lp_position_flip_margin_check() {
     params.maintenance_margin_bps = 500; // 5%
     params.initial_margin_bps = 1000; // 10%
     params.trading_fee_bps = 0;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4385,7 +4385,7 @@ fn test_micro_trade_fee_not_zero() {
     params.trading_fee_bps = 10; // 0.1% fee
     params.maintenance_margin_bps = 100; // 1% for easy math
     params.initial_margin_bps = 100;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4429,7 +4429,7 @@ fn test_zero_fee_bps_means_no_fee() {
     params.trading_fee_bps = 0; // Fee-free trading
     params.maintenance_margin_bps = 100;
     params.initial_margin_bps = 100;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4472,7 +4472,7 @@ fn test_fee_based_on_position_size_not_notional() {
     params.trading_fee_bps = 10; // 0.1% fee
     params.maintenance_margin_bps = 100;
     params.initial_margin_bps = 100;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -4522,7 +4522,7 @@ fn test_haircut_includes_isolated_balance() {
     params.trading_fee_bps = 0;
     params.maintenance_margin_bps = 100;
     params.initial_margin_bps = 100;
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.max_crank_staleness_slots = u64::MAX;
 
     let mut engine = Box::new(RiskEngine::new(params));
@@ -5048,6 +5048,21 @@ fn test_validate_zero_crank_staleness_rejected() {
     let mut p = default_params();
     p.max_crank_staleness_slots = 0;
     assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_zero_warmup_period_rejected() {
+    // GH#1731: warmup_period_slots=0 bypasses oracle manipulation delay — must be rejected
+    let mut p = default_params();
+    p.warmup_period_slots = 0;
+    assert_eq!(p.validate(), Err(RiskError::Overflow));
+}
+
+#[test]
+fn test_validate_nonzero_warmup_period_allowed() {
+    let mut p = default_params();
+    p.warmup_period_slots = 1;
+    assert!(p.validate().is_ok());
 }
 
 #[test]
@@ -5668,7 +5683,7 @@ fn test_warmup_leverage_cap_enforced() {
 #[test]
 fn test_execute_trade_uses_dynamic_fee_tiers() {
     let mut params = default_params();
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.trading_fee_bps = 5; // Tier 1: 0.05%
     params.fee_tier2_bps = 8; // Tier 2: 0.08%
     params.fee_tier3_bps = 12; // Tier 3: 0.12%
@@ -5735,7 +5750,7 @@ fn test_execute_trade_uses_dynamic_fee_tiers() {
 #[test]
 fn test_execute_trade_utilization_surge() {
     let mut params = default_params();
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.trading_fee_bps = 10; // 0.10% base
     params.fee_utilization_surge_bps = 20; // max 0.20% surge at 100% utilization
     params.fee_tier2_threshold = 0; // No tiers (flat + surge only)
@@ -5796,7 +5811,7 @@ fn test_execute_trade_utilization_surge() {
 #[test]
 fn test_execute_trade_tier3_fee() {
     let mut params = default_params();
-    params.warmup_period_slots = 0;
+    params.warmup_period_slots = 1; // Instant warmup (minimum valid)
     params.trading_fee_bps = 5;
     params.fee_tier2_bps = 8;
     params.fee_tier3_bps = 15;
