@@ -6072,15 +6072,25 @@ fn test_offset_check_for_tests() {
         744,
         "used bitmap offset changed -- update SBF_ENGINE_OFF+744 in integration tests"
     );
-    #[cfg(not(feature = "small"))]
+    #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
         1256,
         "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1256 in integration tests"
     );
     #[cfg(feature = "small")]
-    assert_eq!(offset_of!(RiskEngine, num_used_accounts), 776, "small feature: num_used_accounts offset differs (MAX_ACCOUNTS=256 → next_free is 512 bytes)");
-    #[cfg(not(feature = "small"))]
+    assert_eq!(
+        offset_of!(RiskEngine, num_used_accounts),
+        776,
+        "small feature: num_used_accounts offset differs (MAX_ACCOUNTS=256 → bitmap=32 bytes)"
+    );
+    #[cfg(feature = "medium")]
+    assert_eq!(
+        offset_of!(RiskEngine, num_used_accounts),
+        872,
+        "medium feature: num_used_accounts offset differs (MAX_ACCOUNTS=1024 → bitmap=128 bytes)"
+    );
+    #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
         9472,
@@ -6091,6 +6101,12 @@ fn test_offset_check_for_tests() {
         offset_of!(RiskEngine, accounts),
         1312,
         "small feature: accounts offset differs (MAX_ACCOUNTS=256 → next_free is 512 bytes)"
+    );
+    #[cfg(feature = "medium")]
+    assert_eq!(
+        offset_of!(RiskEngine, accounts),
+        2944,
+        "medium feature: accounts offset differs (MAX_ACCOUNTS=1024 → next_free is 2048 bytes)"
     );
 }
 
