@@ -121,12 +121,10 @@ use wide_math::{
 // Core Data Structures
 // ============================================================================
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccountKind {
-    User = 0,
-    LP = 1,
-}
+// AccountKind as plain u8 — eliminates UB risk from invalid enum discriminants
+// when casting raw slab bytes to &Account via zero-copy. u8 has no invalid
+// representations, so &*(ptr as *const Account) is always sound.
+// pub enum AccountKind { User = 0, LP = 1 }  // replaced by constants below
 
 /// Side mode for OI sides (spec §2.4)
 #[repr(u8)]
@@ -158,7 +156,7 @@ impl InstructionContext {
 pub struct Account {
     pub account_id: u64,
     pub capital: U128,
-    pub kind: AccountKind,
+    pub kind: u8,  // 0 = User, 1 = LP (was AccountKind enum)
 
     /// Realized PnL (i128, spec §2.1)
     pub pnl: i128,
@@ -200,12 +198,15 @@ pub struct Account {
 }
 
 impl Account {
+    pub const KIND_USER: u8 = 0;
+    pub const KIND_LP: u8 = 1;
+
     pub fn is_lp(&self) -> bool {
-        matches!(self.kind, AccountKind::LP)
+        self.kind == Self::KIND_LP
     }
 
     pub fn is_user(&self) -> bool {
-        matches!(self.kind, AccountKind::User)
+        self.kind == Self::KIND_USER
     }
 }
 
@@ -213,7 +214,7 @@ fn empty_account() -> Account {
     Account {
         account_id: 0,
         capital: U128::ZERO,
-        kind: AccountKind::User,
+        kind: Account::KIND_USER,
         pnl: 0i128,
         reserved_pnl: 0u128,
         warmup_started_at_slot: 0,
@@ -769,7 +770,7 @@ impl RiskEngine {
 
         // Initialize per spec §2.5
         self.accounts[idx as usize] = Account {
-            kind: AccountKind::User,
+            kind: Account::KIND_USER,
             account_id,
             capital: U128::ZERO,
             pnl: 0i128,
@@ -2179,7 +2180,7 @@ impl RiskEngine {
         self.next_account_id = self.next_account_id.saturating_add(1);
 
         self.accounts[idx as usize] = Account {
-            kind: AccountKind::User,
+            kind: Account::KIND_USER,
             account_id,
             capital: U128::new(excess),
             pnl: 0i128,
@@ -2254,7 +2255,7 @@ impl RiskEngine {
         self.next_account_id = self.next_account_id.saturating_add(1);
 
         self.accounts[idx as usize] = Account {
-            kind: AccountKind::LP,
+            kind: Account::KIND_LP,
             account_id,
             capital: U128::new(excess),
             pnl: 0i128,
