@@ -1386,6 +1386,21 @@ impl RiskEngine {
     }
     }
 
+    /// Public entry-point for the end-of-instruction lifecycle
+    /// (spec §10.0 steps 4-7 / §10.8 steps 9-12).
+    ///
+    /// Runs schedule_end_of_instruction_resets, finalize, and
+    /// recompute_r_last_from_final_state in the canonical order.
+    /// Callers that bypass `keeper_crank` (e.g. the resolved-market
+    /// settlement crank) must invoke this before returning.
+    pub fn run_end_of_instruction_lifecycle(&mut self) -> Result<()> {
+        let mut ctx = InstructionContext::new();
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state();
+        Ok(())
+    }
+
     // ========================================================================
     // absorb_protocol_loss (spec §4.7)
     // ========================================================================
@@ -2105,30 +2120,9 @@ impl RiskEngine {
 
     /// Internal maintenance fee settle — checked arithmetic, no margin check.
     fn settle_maintenance_fee_internal(&mut self, idx: usize, now_slot: u64) -> Result<()> {
-        let fee_per_slot = self.params.maintenance_fee_per_slot.get();
-        if fee_per_slot == 0 {
-            self.accounts[idx].last_fee_slot = now_slot;
-            return Ok(());
-        }
-
-        let last = self.accounts[idx].last_fee_slot;
-        let dt = now_slot.saturating_sub(last);
-        if dt == 0 {
-            return Ok(());
-        }
-
-        // fee = dt * fee_per_slot, clamped to MAX_PROTOCOL_FEE_ABS
-        let fee = (dt as u128)
-            .checked_mul(fee_per_slot)
-            .map(|f| core::cmp::min(f, MAX_PROTOCOL_FEE_ABS))
-            .unwrap_or(MAX_PROTOCOL_FEE_ABS);
-
+        // §8.2: recurring maintenance fees disabled in this revision.
+        // Stamp last_fee_slot monotonically per §8.2 item 4 — no economic effect.
         self.accounts[idx].last_fee_slot = now_slot;
-
-        if fee > 0 {
-            self.charge_fee_to_insurance(idx, fee)?;
-        }
-
         Ok(())
     }
 
