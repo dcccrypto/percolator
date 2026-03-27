@@ -6050,3 +6050,58 @@ fn test_execute_trade_updates_twap() {
         "execute_trade must set twap_last_slot to trade slot"
     );
 }
+
+#[test]
+fn test_offset_check_for_tests() {
+    println!("vault: {}", std::mem::offset_of!(RiskEngine, vault));
+    println!("used: {}", std::mem::offset_of!(RiskEngine, used));
+    println!("num_used_accounts: {}", std::mem::offset_of!(RiskEngine, num_used_accounts));
+    println!("accounts: {}", std::mem::offset_of!(RiskEngine, accounts));
+    println!("RiskEngine size: {}", std::mem::size_of::<RiskEngine>());
+    
+    use std::mem::offset_of;
+    // These assertions match the SBF_ENGINE_OFF=600 offsets in integration tests
+    // If any of these fail, the integration test helpers need updating
+    // Updated for percolator@cf35789 (PERC-8093): +48 bytes in RiskParams (min_nonzero_mm_req, min_nonzero_im_req, insurance_floor)
+    assert_eq!(offset_of!(RiskEngine, used), 744, "used bitmap offset changed -- update SBF_ENGINE_OFF+744 in integration tests");
+    assert_eq!(offset_of!(RiskEngine, num_used_accounts), 1256, "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1256 in integration tests");
+    assert_eq!(offset_of!(RiskEngine, accounts), 9472, "accounts offset changed -- update SBF_ENGINE_OFF+9472 in integration tests");
+}
+
+#[test]
+fn test_all_offsets_for_integration_tests() {
+    use std::mem::offset_of;
+    println!("=== RiskEngine layout ===");
+    println!("vault: {}", offset_of!(RiskEngine, vault));
+    println!("insurance_fund: {}", offset_of!(RiskEngine, insurance_fund));
+    println!("params: {}", offset_of!(RiskEngine, params));
+    println!("current_slot: {}", offset_of!(RiskEngine, current_slot));
+    println!("c_tot: {}", offset_of!(RiskEngine, c_tot));
+    println!("pnl_pos_tot: {}", offset_of!(RiskEngine, pnl_pos_tot));
+    println!("total_open_interest: {}", offset_of!(RiskEngine, total_open_interest));
+    println!("long_oi: {}", offset_of!(RiskEngine, long_oi));
+    println!("short_oi: {}", offset_of!(RiskEngine, short_oi));
+    println!("used: {}", offset_of!(RiskEngine, used));
+    println!("num_used_accounts: {}", offset_of!(RiskEngine, num_used_accounts));
+    println!("accounts: {}", offset_of!(RiskEngine, accounts));
+    println!("RiskEngine size: {}", std::mem::size_of::<RiskEngine>());
+}
+
+#[test]
+fn test_account_field_offsets() {
+    use std::mem::offset_of;
+    println!("=== Account layout ===");
+    println!("account_id: {}", offset_of!(Account, account_id));
+    println!("capital: {}", offset_of!(Account, capital));
+    println!("kind: {}", offset_of!(Account, kind));
+    println!("pnl: {}", offset_of!(Account, pnl));
+    println!("reserved_pnl: {}", offset_of!(Account, reserved_pnl));
+    println!("warmup_started_at_slot: {}", offset_of!(Account, warmup_started_at_slot));
+    println!("warmup_slope_per_step: {}", offset_of!(Account, warmup_slope_per_step));
+    println!("position_size: {}", offset_of!(Account, position_size));
+    println!("entry_price: {}", offset_of!(Account, entry_price));
+    println!("funding_index: {}", offset_of!(Account, funding_index));
+    println!("fee_credits: {}", offset_of!(Account, fee_credits));
+    println!("last_fee_slot: {}", offset_of!(Account, last_fee_slot));
+    println!("Account size: {}", std::mem::size_of::<Account>());
+}
