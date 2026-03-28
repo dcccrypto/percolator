@@ -957,69 +957,34 @@ fn proof_close_account_resolved_flat_returns_capital() {
 // Maintenance fee: conservation, fee debt, validate_params
 // ############################################################################
 
-/// Conservation holds after maintenance fee charging with symbolic dt.
-/// Uses default_params (maintenance_fee_per_slot=1).
+/// Spec §8.2: maintenance fees disabled — touch does NOT charge fees or create
+/// fee debt, even with nonzero maintenance_fee_per_slot and symbolic dt.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_maintenance_fee_conservation() {
-    let mut engine = RiskEngine::new(default_params()); // fee_per_slot = 1
+fn proof_maintenance_fee_disabled() {
+    let mut params = zero_fee_params();
+    params.maintenance_fee_per_slot = U128::new(100);
+    let mut engine = RiskEngine::new(params);
 
-    let a = engine.add_user(1000).unwrap();
+    let a = engine.add_user(0).unwrap();
     engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = DEFAULT_SLOT;
 
-    // Symbolic dt (1..1000)
+    let cap_before = engine.accounts[a as usize].capital.get();
+    let fc_before = engine.accounts[a as usize].fee_credits.get();
+
     let dt: u16 = kani::any();
     kani::assume(dt >= 1 && dt <= 1000);
 
     let slot2 = DEFAULT_SLOT + (dt as u64);
     let result = engine.touch_account_full(a as usize, DEFAULT_ORACLE, slot2);
     assert!(result.is_ok());
-    assert!(engine.check_conservation(),
-        "conservation must hold after maintenance fee with symbolic dt");
-}
 
-/// Fee debt accumulates when capital is zero and maintenance_fee_per_slot > 0.
-/// Equity must decrease from the fee debt.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_maintenance_fee_debt_accumulates() {
-    let mut params = zero_fee_params();
-    params.maintenance_fee_per_slot = U128::new(100);
-    let mut engine = RiskEngine::new(params);
-
-    let a = engine.add_user(0).unwrap();
-    engine.deposit(a, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.last_market_slot = DEFAULT_SLOT;
-
-    // Zero capital so fee becomes debt
-    engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].last_fee_slot = DEFAULT_SLOT;
-
-    // Advance 10 slots → fee = 10 * 100 = 1000, all becomes debt
-    let slot2 = DEFAULT_SLOT + 10;
-    let result = engine.touch_account_full(a as usize, DEFAULT_ORACLE, slot2);
-    assert!(result.is_ok());
-
-    // fee_credits must be negative (fee debt)
-    let fc = engine.accounts[a as usize].fee_credits.get();
-    assert!(fc < 0, "fee_credits must be negative when capital insufficient");
-    assert!(fc <= -1000, "fee debt must be at least 1000 (10 * 100)");
-
+    assert_eq!(engine.accounts[a as usize].capital.get(), cap_before,
+        "maintenance fees disabled: capital must not change");
+    assert_eq!(engine.accounts[a as usize].fee_credits.get(), fc_before,
+        "maintenance fees disabled: fee_credits must not change");
     assert!(engine.check_conservation());
-}
-
-/// validate_params rejects maintenance_fee_per_slot > MAX_PROTOCOL_FEE_ABS.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-#[kani::should_panic]
-fn proof_config_rejects_excessive_fee_per_slot() {
-    let mut params = zero_fee_params();
-    params.maintenance_fee_per_slot = U128::new(MAX_PROTOCOL_FEE_ABS + 1);
-    let _ = RiskEngine::new(params);
 }

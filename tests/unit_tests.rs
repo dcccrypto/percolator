@@ -81,17 +81,17 @@ fn test_engine_creation() {
 }
 
 #[test]
-#[should_panic(expected = "maintenance_margin_bps must be strictly less than initial_margin_bps")]
-fn test_params_require_mm_lt_im() {
+fn test_params_allow_mm_eq_im() {
+    // Spec §1.4: maintenance_bps <= initial_bps (non-strict, equal is valid)
     let mut params = default_params();
     params.maintenance_margin_bps = 1000;
-    params.initial_margin_bps = 1000; // equal => should panic
-    let _ = RiskEngine::new(params);
+    params.initial_margin_bps = 1000;
+    let _ = RiskEngine::new(params); // must not panic
 }
 
 #[test]
-#[should_panic(expected = "maintenance_margin_bps must be strictly less than initial_margin_bps")]
-fn test_params_require_mm_lt_im_greater() {
+#[should_panic(expected = "maintenance_margin_bps must be <= initial_margin_bps")]
+fn test_params_require_mm_le_im() {
     let mut params = default_params();
     params.maintenance_margin_bps = 1500;
     params.initial_margin_bps = 1000; // mm > im => should panic
@@ -651,9 +651,9 @@ fn test_keeper_crank_same_slot_not_advanced() {
 }
 
 #[test]
-fn test_keeper_crank_caller_touch_charges_fee() {
-    // Spec §8.2: maintenance fees enabled — keeper crank charges accrued fees.
-    let mut engine = RiskEngine::new(default_params()); // maintenance_fee_per_slot = 1
+fn test_keeper_crank_caller_touch_no_fee() {
+    // Spec §8.2: maintenance fees disabled — keeper crank does not charge fees.
+    let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
     let slot = 1u64;
     engine.current_slot = slot;
@@ -662,21 +662,14 @@ fn test_keeper_crank_caller_touch_charges_fee() {
     engine.deposit(caller, 10_000, oracle, slot).expect("deposit");
 
     let capital_before = engine.accounts[caller as usize].capital.get();
-    let ins_before = engine.insurance_fund.balance.get();
 
-    // Advance 199 slots and crank (dt=199, fee=199*1=199)
     let slot2 = 200u64;
     let outcome = engine.keeper_crank(slot2, oracle, &[(caller, None)], 64, 0i64).expect("crank");
     assert!(outcome.advanced);
 
     let capital_after = engine.accounts[caller as usize].capital.get();
-    let ins_after = engine.insurance_fund.balance.get();
-    // Capital should decrease by fee, insurance should increase
-    assert!(capital_after < capital_before,
-        "maintenance fee must reduce capital");
-    assert!(ins_after > ins_before,
-        "maintenance fee must increase insurance");
-    assert!(engine.check_conservation());
+    assert_eq!(capital_after, capital_before,
+        "maintenance fees disabled: capital must not change");
 }
 
 // ============================================================================
@@ -994,9 +987,9 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 }
 
 #[test]
-fn test_maintenance_fee_charges_on_touch() {
-    // Spec §8.2: maintenance fees enabled — touch charges accrued fees.
-    let mut engine = RiskEngine::new(default_params()); // maintenance_fee_per_slot = 1
+fn test_maintenance_fee_disabled_on_touch() {
+    // Spec §8.2: maintenance fees disabled — touch does not charge fees.
+    let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
     let slot = 1u64;
     engine.current_slot = slot;
@@ -1005,19 +998,18 @@ fn test_maintenance_fee_charges_on_touch() {
     engine.deposit(idx, 10_000, oracle, slot).expect("deposit");
 
     let capital_before = engine.accounts[idx as usize].capital.get();
+    let fc_before = engine.accounts[idx as usize].fee_credits.get();
 
-    // Advance 500 slots and touch (fee = 500 * 1 = 500)
     let slot2 = 501u64;
     engine.keeper_crank(slot2, oracle, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i64).expect("crank");
     engine.touch_account_full(idx as usize, oracle, slot2).expect("touch");
 
     let capital_after = engine.accounts[idx as usize].capital.get();
-    assert!(capital_after < capital_before,
-        "maintenance fee must reduce capital on touch");
-    // With fee_per_slot=1, dt=500, fee=500. Capital should decrease by 500.
-    assert_eq!(capital_before - capital_after, 500,
-        "fee must equal dt * fee_per_slot");
-    assert!(engine.check_conservation());
+    let fc_after = engine.accounts[idx as usize].fee_credits.get();
+    assert_eq!(capital_after, capital_before,
+        "maintenance fees disabled: capital must not change");
+    assert_eq!(fc_after, fc_before,
+        "maintenance fees disabled: fee_credits must not change");
 }
 
 #[test]
@@ -1719,10 +1711,10 @@ fn test_trade_at_reasonable_size_succeeds() {
 // ============================================================================
 
 #[test]
-fn test_maintenance_fee_large_dt_clamps() {
-    // Large dt * fee_per_slot overflows → clamped to MAX_PROTOCOL_FEE_ABS
+fn test_maintenance_fee_disabled_large_dt_succeeds() {
+    // Spec §8.2: maintenance fees disabled — even extreme fee params with large dt succeed.
     let mut params = default_params();
-    params.maintenance_fee_per_slot = U128::new(MAX_PROTOCOL_FEE_ABS); // max valid
+    params.maintenance_fee_per_slot = U128::new(MAX_PROTOCOL_FEE_ABS);
     let mut engine = RiskEngine::new(params);
     let oracle = 1000u64;
     let slot = 1u64;
@@ -1737,11 +1729,9 @@ fn test_maintenance_fee_large_dt_clamps() {
     engine.last_oracle_price = oracle;
     engine.funding_price_sample_last = oracle;
 
-    // dt * fee_per_slot overflows u128, but fee clamps to MAX_PROTOCOL_FEE_ABS.
-    // Capital (10M) < MAX_PROTOCOL_FEE_ABS, so all capital swept + fee_credits goes negative.
+    // With fees disabled, this must succeed (no fee charge)
     let result = engine.keeper_crank(far_slot, oracle, &[(a, None)], 64, 0i64);
-    assert!(result.is_ok(), "clamped fee must not overflow");
-    assert!(engine.check_conservation());
+    assert!(result.is_ok(), "maintenance fees disabled — large dt must not fail");
 }
 
 // ============================================================================
@@ -2046,8 +2036,9 @@ fn test_gc_still_protects_positive_fee_credits() {
 // ============================================================================
 
 #[test]
-fn test_maintenance_fee_charges_and_sweeps_capital() {
-    // maintenance_fee_per_slot=100, dt=50 → fee=5000. Capital=10000 → sweeps 5000.
+fn test_maintenance_fee_disabled_no_capital_sweep() {
+    // Spec §8.2: maintenance fees disabled — even with nonzero fee_per_slot param,
+    // no fees are charged (the engine ignores the param).
     let mut params = default_params();
     params.maintenance_fee_per_slot = U128::new(100);
     params.new_account_fee = U128::ZERO;
@@ -2062,15 +2053,12 @@ fn test_maintenance_fee_charges_and_sweeps_capital() {
     engine.last_market_slot = slot;
     engine.accounts[a as usize].last_fee_slot = slot;
 
-    // Advance 50 slots → fee = 50 * 100 = 5000
     let touch_slot = slot + 50;
     let result = engine.touch_account_full(a as usize, oracle, touch_slot);
     assert!(result.is_ok());
 
     let cap_after = engine.accounts[a as usize].capital.get();
-    // Capital reduced by fee: 10000 - 5000 = 5000
-    assert_eq!(cap_after, 5_000, "capital must decrease by maintenance fee");
-    assert!(engine.check_conservation());
+    assert_eq!(cap_after, 10_000, "capital unchanged: fees disabled per spec §8.2");
 }
 
 // ============================================================================

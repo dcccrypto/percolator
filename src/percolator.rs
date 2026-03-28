@@ -452,8 +452,8 @@ impl RiskEngine {
 
         // Margin ordering: 0 < maintenance_bps < initial_bps <= 10_000 (spec §1.4)
         assert!(
-            params.maintenance_margin_bps < params.initial_margin_bps,
-            "maintenance_margin_bps must be strictly less than initial_margin_bps"
+            params.maintenance_margin_bps <= params.initial_margin_bps,
+            "maintenance_margin_bps must be <= initial_margin_bps (spec §1.4)"
         );
         assert!(
             params.initial_margin_bps <= 10_000,
@@ -517,8 +517,14 @@ impl RiskEngine {
         );
     }
 
-    /// Create a new risk engine
+    /// Create a new risk engine (spec §2.7).
+    /// `init_slot` and `init_oracle_price` are required per spec §2.7.
     pub fn new(params: RiskParams) -> Self {
+        Self::new_with_market(params, 0, 0)
+    }
+
+    /// Create a new risk engine with explicit market initialization (spec §2.7).
+    pub fn new_with_market(params: RiskParams, init_slot: u64, init_oracle_price: u64) -> Self {
         Self::validate_params(&params);
         let mut engine = Self {
             vault: U128::ZERO,
@@ -526,7 +532,7 @@ impl RiskEngine {
                 balance: U128::ZERO,
             },
             params,
-            current_slot: 0,
+            current_slot: init_slot,
             funding_rate_bps_per_slot_last: 0,
             last_crank_slot: 0,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
@@ -559,9 +565,9 @@ impl RiskEngine {
             phantom_dust_bound_long_q: 0u128,
             phantom_dust_bound_short_q: 0u128,
             materialized_account_count: 0,
-            last_oracle_price: 0,
-            last_market_slot: 0,
-            funding_price_sample_last: 0,
+            last_oracle_price: init_oracle_price,
+            last_market_slot: init_slot,
+            funding_price_sample_last: init_oracle_price,
             insurance_floor: params.insurance_floor.get(),
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
@@ -579,14 +585,14 @@ impl RiskEngine {
         engine
     }
 
-    /// Initialize in place (for Solana BPF zero-copy).
+    /// Initialize in place (for Solana BPF zero-copy, spec §2.7).
     /// Fully canonicalizes all state — safe even on non-zeroed memory.
-    pub fn init_in_place(&mut self, params: RiskParams) {
+    pub fn init_in_place(&mut self, params: RiskParams, init_slot: u64, init_oracle_price: u64) {
         Self::validate_params(&params);
         self.vault = U128::ZERO;
         self.insurance_fund = InsuranceFund { balance: U128::ZERO };
         self.params = params;
-        self.current_slot = 0;
+        self.current_slot = init_slot;
         self.funding_rate_bps_per_slot_last = 0;
         self.last_crank_slot = 0;
         self.max_crank_staleness_slots = params.max_crank_staleness_slots;
@@ -619,9 +625,9 @@ impl RiskEngine {
         self.phantom_dust_bound_long_q = 0;
         self.phantom_dust_bound_short_q = 0;
         self.materialized_account_count = 0;
-        self.last_oracle_price = 0;
-        self.last_market_slot = 0;
-        self.funding_price_sample_last = 0;
+        self.last_oracle_price = init_oracle_price;
+        self.last_market_slot = init_slot;
+        self.funding_price_sample_last = init_oracle_price;
         self.insurance_floor = params.insurance_floor.get();
         self.used = [0; BITMAP_WORDS];
         self.num_used_accounts = 0;
@@ -2161,32 +2167,10 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Internal maintenance fee settle (spec §8.2).
+    /// Internal maintenance fee settle (spec §8.2: disabled in this revision).
+    /// Stamps last_fee_slot for slot-tracking consistency. No economic effect.
     fn settle_maintenance_fee_internal(&mut self, idx: usize, now_slot: u64) -> Result<()> {
-        let fee_per_slot = self.params.maintenance_fee_per_slot.get();
-        if fee_per_slot == 0 {
-            self.accounts[idx].last_fee_slot = now_slot;
-            return Ok(());
-        }
-
-        let last = self.accounts[idx].last_fee_slot;
-        let dt = now_slot.saturating_sub(last);
-        if dt == 0 {
-            return Ok(());
-        }
-
-        // fee = dt * fee_per_slot, clamped to MAX_PROTOCOL_FEE_ABS
-        let fee = (dt as u128)
-            .checked_mul(fee_per_slot)
-            .map(|f| core::cmp::min(f, MAX_PROTOCOL_FEE_ABS))
-            .unwrap_or(MAX_PROTOCOL_FEE_ABS);
-
         self.accounts[idx].last_fee_slot = now_slot;
-
-        if fee > 0 {
-            self.charge_fee_to_insurance(idx, fee)?;
-        }
-
         Ok(())
     }
 
@@ -3261,8 +3245,9 @@ impl RiskEngine {
             Some(LiquidationPolicy::ExactPartial(q_close_q)) => {
                 let abs_eff = eff.unsigned_abs();
                 // Bounds check: 0 < q_close_q < abs(eff)
+                // Spec §11.1 rule 3: invalid hint → no liquidation action (None)
                 if *q_close_q == 0 || *q_close_q >= abs_eff {
-                    return Some(LiquidationPolicy::FullClose);
+                    return None;
                 }
 
                 // Stateless pre-flight: predict post-partial maintenance health.
@@ -3280,7 +3265,7 @@ impl RiskEngine {
                 let eq_raw_wide = self.account_equity_maint_raw_wide(account);
                 let predicted_eq = match eq_raw_wide.checked_sub(I256::from_u128(liq_fee)) {
                     Some(v) => v,
-                    None => return Some(LiquidationPolicy::FullClose),
+                    None => return None,
                 };
 
                 // 3. Predict post-partial MM_req
@@ -3294,8 +3279,9 @@ impl RiskEngine {
                 };
 
                 // 4. Health check: predicted_eq > predicted_mm_req
+                // Spec §11.1 rule 3: failed pre-flight → no liquidation action (None)
                 if predicted_eq <= I256::from_u128(predicted_mm_req) {
-                    return Some(LiquidationPolicy::FullClose);
+                    return None;
                 }
 
                 Some(LiquidationPolicy::ExactPartial(*q_close_q))

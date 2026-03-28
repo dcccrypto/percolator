@@ -923,7 +923,6 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
 #[kani::solver(cadical)]
 fn proof_trading_loss_seniority() {
     let mut params = zero_fee_params();
-    params.maintenance_fee_per_slot = U128::new(100);
     let mut engine = RiskEngine::new(params);
 
     let a = engine.add_user(0).unwrap();
@@ -931,20 +930,19 @@ fn proof_trading_loss_seniority() {
 
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = DEFAULT_SLOT;
-    engine.accounts[a as usize].last_fee_slot = DEFAULT_SLOT;
 
     // Give account negative PnL (trading loss)
     engine.set_pnl(a as usize, -8_000i128);
 
-    // Advance 50 slots → fee = 100 * 50 = 5000
+    // Advance 50 slots — settle_losses runs during touch
     let touch_slot = DEFAULT_SLOT + 50;
     let _ = engine.touch_account_full(a as usize, DEFAULT_ORACLE, touch_slot);
 
     let pnl_after = engine.accounts[a as usize].pnl;
 
-    // Assert: PnL is zero (trading loss fully settled before fee sweep)
+    // Assert: PnL is zero (trading loss fully settled from principal)
     assert!(pnl_after >= 0,
-        "trading loss must be fully settled before fee debt sweep");
+        "trading loss must be fully settled from principal");
 }
 
 // ############################################################################
@@ -1149,7 +1147,9 @@ fn proof_fee_debt_sweep_consumes_released_pnl() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_settle_fee_rejects_i128_min() {
+fn proof_touch_succeeds_with_extreme_fee_credits() {
+    // Spec §8.2: maintenance fees disabled — even with fee_credits near i128::MIN,
+    // touch succeeds because no maintenance fee is charged.
     let mut params = zero_fee_params();
     params.maintenance_fee_per_slot = U128::new(1);
     let mut engine = RiskEngine::new(params);
@@ -1159,17 +1159,14 @@ fn proof_settle_fee_rejects_i128_min() {
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = DEFAULT_SLOT;
 
-    // Set fee_credits to -(i128::MAX), the lowest valid value.
-    // Zero capital so fee shortfall goes entirely to fee_credits.
-    // Advancing 1 slot with fee_per_slot=1 would push fee_credits to i128::MIN.
     engine.set_capital(a as usize, 0);
     engine.accounts[a as usize].fee_credits = I128::new(-(i128::MAX));
     engine.accounts[a as usize].last_fee_slot = DEFAULT_SLOT;
 
     let result = engine.touch_account_full(a as usize, DEFAULT_ORACLE, DEFAULT_SLOT + 1);
-    // Engine must reject: fee_credits would become i128::MIN
-    assert!(result.is_err(),
-        "engine must reject fee decrement that would produce i128::MIN");
+    // With fees disabled, touch must succeed even with extreme fee_credits
+    assert!(result.is_ok(),
+        "touch must succeed — maintenance fees disabled per spec §8.2");
 }
 
 // ############################################################################
@@ -1930,7 +1927,7 @@ fn proof_audit4_init_in_place_canonical() {
     engine.free_head = u16::MAX; // break the freelist
 
     // Re-initialize — must fully reset all fields
-    engine.init_in_place(params);
+    engine.init_in_place(params, 0, 0);
 
     // ---- Vault / insurance ----
     assert!(engine.vault.get() == 0);
