@@ -156,7 +156,8 @@ fn test_e2e_complete_user_journey() {
 #[test]
 #[cfg(feature = "test")]
 fn test_e2e_funding_complete_cycle() {
-    // Scenario: Users trade, funding accrues over time, positions flip
+    // Scenario: Users trade, positive funding rate accrues (longs pay shorts),
+    // then positions flip. Verifies funding actually changes account PnL.
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
     let _ = engine.top_up_insurance_fund(50_000, 0);
@@ -176,40 +177,51 @@ fn test_e2e_funding_complete_cycle() {
         .execute_trade(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
         .unwrap();
 
-    // Advance time and accrue funding with a positive rate (longs pay shorts)
+    // Record capital before funding (settle_losses converts PnL to capital changes,
+    // so we track capital, not PnL directly)
+    let alice_cap_before = engine.accounts[alice as usize].capital.get();
+    let bob_cap_before = engine.accounts[bob as usize].capital.get();
+
+    // Store a positive funding rate: longs pay shorts (500 bps/slot)
+    // keeper_crank stores r_last = 500 via recompute_r_last_from_final_state
+    engine.advance_slot(1);
+    let slot1 = engine.current_slot;
+    engine.keeper_crank(slot1, oracle_price, &[], 64, 500i64).unwrap();
+
+    // Now r_last = 500. Advance time so next accrue_market_to applies funding.
     engine.advance_slot(20);
+    let slot2 = engine.current_slot;
 
-    // Run keeper_crank to advance
-    let slot = engine.current_slot;
-    let _ = engine.keeper_crank(slot, oracle_price, &[], 64, 0i64);
+    // This crank accrues the market (which applies 20 slots of funding at rate 500)
+    // then touches both accounts (settle_side_effects realizes the K delta into PnL,
+    // then settle_losses transfers negative PnL from capital)
+    engine.keeper_crank(slot2, oracle_price,
+        &[(alice, None), (bob, None)], 64, 500i64).unwrap();
 
-    // Advance more time for funding to accrue
-    engine.advance_slot(20);
+    let alice_cap_after = engine.accounts[alice as usize].capital.get();
+    let bob_cap_after = engine.accounts[bob as usize].capital.get();
 
-    // Accrue market with funding
-    let slot = engine.current_slot;
-    engine.accrue_market_to(slot, oracle_price).unwrap();
+    // Alice (long) paid funding → capital decreased (loss settled from principal)
+    assert!(alice_cap_after < alice_cap_before,
+        "positive rate: long capital must decrease from funding (before={}, after={})",
+        alice_cap_before, alice_cap_after);
 
-    // Settle effects for both
-    engine.settle_side_effects(alice as usize).unwrap();
-    engine.settle_side_effects(bob as usize).unwrap();
+    // Bob (short) received funding → PnL positive, but it goes to reserved_pnl
+    // (warmup). Bob's capital stays the same but PnL + reserved goes up.
+    // Check that bob didn't lose capital like alice did.
+    assert!(bob_cap_after >= bob_cap_before,
+        "positive rate: short capital must not decrease from funding (before={}, after={})",
+        bob_cap_before, bob_cap_after);
 
-    let _alice_pnl = engine.accounts[alice as usize].pnl;
-    let _bob_pnl = engine.accounts[bob as usize].pnl;
+    // Net check: alice lost more capital than bob (funding is zero-sum at K level,
+    // but floor rounding means payers lose weakly more than receivers gain)
+    let alice_loss = alice_cap_before - alice_cap_after;
+    assert!(alice_loss > 0, "alice must have lost capital from funding");
 
-    // Alice (long) paid funding, so negative PnL
-    // Bob (short) received funding, so positive PnL
-    // (With 50 bps/slot rate * 20 slots, the K coefficients should reflect this)
-    // The exact values depend on the A/K mechanism, but the sign should be correct:
-    // funding_rate > 0 means longs pay -> K_long decreases, K_short increases
-
-    // Conservation should still hold
     assert!(engine.check_conservation(), "Conservation after funding");
 
     // === Positions Flip ===
-
     let slot = engine.current_slot;
-    crank(&mut engine, slot, oracle_price);
 
     // Alice closes long and opens short (total -200 base)
     engine
@@ -223,4 +235,61 @@ fn test_e2e_funding_complete_cycle() {
     assert!(bob_eff > 0, "Bob should now be long");
 
     assert!(engine.check_conservation(), "Conservation after position flip");
+}
+
+#[test]
+#[cfg(feature = "test")]
+fn test_e2e_negative_funding_rate() {
+    // Negative funding rate: shorts pay longs
+
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let _ = engine.top_up_insurance_fund(50_000, 0);
+
+    let alice = engine.add_user(0).unwrap();
+    let bob = engine.add_user(0).unwrap();
+
+    let oracle_price: u64 = 100;
+
+    engine.deposit(alice, 200_000, oracle_price, 0).unwrap();
+    engine.deposit(bob, 200_000, oracle_price, 0).unwrap();
+
+    crank(&mut engine, 0, oracle_price);
+
+    // Alice long, Bob short
+    engine
+        .execute_trade(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
+        .unwrap();
+
+    let alice_cap_before = engine.accounts[alice as usize].capital.get();
+    let bob_cap_before = engine.accounts[bob as usize].capital.get();
+
+    // Store negative rate: shorts pay longs (-500 bps/slot)
+    engine.advance_slot(1);
+    let slot1 = engine.current_slot;
+    engine.keeper_crank(slot1, oracle_price, &[], 64, -500i64).unwrap();
+
+    // Advance and settle
+    engine.advance_slot(20);
+    let slot2 = engine.current_slot;
+    engine.keeper_crank(slot2, oracle_price,
+        &[(alice, None), (bob, None)], 64, -500i64).unwrap();
+
+    let alice_cap_after = engine.accounts[alice as usize].capital.get();
+    let bob_cap_after = engine.accounts[bob as usize].capital.get();
+
+    // Negative rate: shorts pay, longs receive
+    // Bob (short) paid funding → capital decreased (loss settled from principal)
+    assert!(bob_cap_after < bob_cap_before,
+        "negative rate: short capital must decrease (before={}, after={})",
+        bob_cap_before, bob_cap_after);
+
+    // Alice (long) received → capital must not decrease
+    assert!(alice_cap_after >= alice_cap_before,
+        "negative rate: long capital must not decrease (before={}, after={})",
+        alice_cap_before, alice_cap_after);
+
+    let bob_loss = bob_cap_before - bob_cap_after;
+    assert!(bob_loss > 0, "bob must have lost capital from negative funding");
+
+    assert!(engine.check_conservation(), "Conservation with negative funding");
 }
