@@ -285,7 +285,7 @@ fn proof_keeper_crank_bad_partial_falls_back_to_full() {
     engine.deposit(b, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = 100 * POS_SCALE as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Crash oracle to make 'a' liquidatable
     let crash_oracle = 500u64;
@@ -293,7 +293,7 @@ fn proof_keeper_crank_bad_partial_falls_back_to_full() {
     // Tiny partial — won't restore health, pre-flight should reject → FullClose
     let bad_hint = Some(LiquidationPolicy::ExactPartial(POS_SCALE as u128));
     let candidates = [(a, bad_hint)];
-    let result = engine.keeper_crank(DEFAULT_SLOT + 1, crash_oracle, &candidates, 10);
+    let result = engine.keeper_crank(DEFAULT_SLOT + 1, crash_oracle, &candidates, 10, 0i64);
     assert!(result.is_ok(), "keeper_crank must not revert on bad partial hint");
 
     // Account should have been fully closed (FullClose fallback)
@@ -316,7 +316,7 @@ fn proof_liquidate_missing_account_no_market_mutation() {
     let oracle_before = engine.last_oracle_price;
 
     // Call liquidate on an unused slot
-    let result = engine.liquidate_at_oracle(0, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose);
+    let result = engine.liquidate_at_oracle(0, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose, 0i64);
     assert!(matches!(result, Ok(false)), "must return Ok(false) for missing account");
 
     // Market state must not have been mutated
@@ -405,7 +405,7 @@ fn proof_close_account_pnl_check_before_fee_forgive() {
     // close_account: touch will be no-op for fees (capital=0),
     // do_profit_conversion: released = max(5000,0) - 5000 = 0, so skip.
     // PnL check: pnl > 0 → Err(PnlNotWarmedUp)
-    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
     assert!(result.is_err(), "close_account must reject when pnl > 0");
 
     // fee_credits must NOT have been zeroed by forgiveness (PnL check is first)
@@ -438,7 +438,7 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
 
     // Open a tiny position (1 unit of basis)
     let tiny = 1i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Trigger an ADL that sets a_long to a value that would truncate the position to 0.
     // The simplest way: directly manipulate adl_mult_long to 0 (below MIN_A_SIDE).
@@ -476,7 +476,7 @@ fn proof_keeper_hint_none_returns_none() {
 
     // Open a position so eff != 0
     let size: i128 = (POS_SCALE as i128) * 10;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let eff = engine.effective_pos_q(a as usize);
     assert!(eff != 0);
@@ -498,7 +498,7 @@ fn proof_keeper_hint_fullclose_passthrough() {
     engine.deposit(b, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size: i128 = (POS_SCALE as i128) * 10;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let eff = engine.effective_pos_q(a as usize);
     let hint = Some(LiquidationPolicy::FullClose);
@@ -639,7 +639,7 @@ fn proof_withdraw_no_crank_gate() {
 
     // last_crank_slot is 0, now_slot is far ahead. Must still succeed.
     let far_slot = DEFAULT_SLOT + 100_000;
-    let result = engine.withdraw(idx, 1_000, DEFAULT_ORACLE, far_slot);
+    let result = engine.withdraw(idx, 1_000, DEFAULT_ORACLE, far_slot, 0i64);
     assert!(result.is_ok(), "withdraw must not require fresh crank (spec §0 goal 6)");
 }
 
@@ -658,7 +658,7 @@ fn proof_trade_no_crank_gate() {
     // last_crank_slot is 0, now_slot is far ahead. Must still succeed.
     let far_slot = DEFAULT_SLOT + 100_000;
     let size: i128 = POS_SCALE as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, far_slot, size, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, far_slot, size, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok(), "trade must not require fresh crank (spec §0 goal 6)");
 }
 
@@ -748,7 +748,7 @@ fn proof_validate_hint_preflight_conservative() {
 
     // Open position
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject loss to make a underwater
     engine.set_pnl(a as usize, -800_000i128);
@@ -770,7 +770,7 @@ fn proof_validate_hint_preflight_conservative() {
         // Run actual liquidation via keeper_crank
         let slot2 = DEFAULT_SLOT + 1;
         let candidates = [(a, Some(LiquidationPolicy::ExactPartial(q)))];
-        let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10);
+        let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10, 0i64);
 
         // Crank must succeed (step 14 must pass if pre-flight said OK)
         assert!(result.is_ok(), "keeper_crank must succeed when pre-flight approved ExactPartial");
@@ -804,7 +804,7 @@ fn proof_validate_hint_preflight_oracle_shift() {
 
     // Open position at DEFAULT_ORACLE (1000)
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject loss to make a underwater
     engine.set_pnl(a as usize, -800_000i128);
@@ -831,7 +831,7 @@ fn proof_validate_hint_preflight_oracle_shift() {
         let candidates = [(a, Some(LiquidationPolicy::ExactPartial(q)))];
         // Crank uses the shifted oracle — touch will run settle_side_effects
         // producing nonzero pnl_delta from K-pair settlement
-        let result = engine.keeper_crank(slot2, crank_oracle, &candidates, 10);
+        let result = engine.keeper_crank(slot2, crank_oracle, &candidates, 10, 0i64);
 
         assert!(result.is_ok(),
             "keeper_crank must succeed when pre-flight approved ExactPartial (oracle-shifted)");
@@ -889,7 +889,7 @@ fn proof_close_account_resolved_with_loss_conserves() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic loss
     let loss: u32 = kani::any();
@@ -916,7 +916,7 @@ fn proof_close_account_resolved_with_profit_conserves() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic profit
     let profit: u32 = kani::any();

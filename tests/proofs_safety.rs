@@ -44,7 +44,7 @@ fn bounded_withdraw_conservation() {
     let amount: u32 = kani::any();
     kani::assume(amount > 0 && amount <= deposit);
 
-    let result = engine.withdraw(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.withdraw(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
     kani::cover!(result.is_ok(), "withdraw Ok path reachable");
     if result.is_ok() {
         assert!(engine.check_conservation());
@@ -70,7 +70,7 @@ fn bounded_trade_conservation() {
 
     // Symbolic trade size (reasonable range to stay within margin)
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
 
     // If trade succeeds (margin allows), conservation must hold
     if result.is_ok() {
@@ -101,7 +101,7 @@ fn bounded_haircut_ratio_bounded() {
     engine.c_tot = U128::new(c_tot_val as u128);
     engine.insurance_fund.balance = U128::new(ins_val as u128);
     engine.pnl_pos_tot = ppt_val as u128;
-    engine.pnl_matured_pos_tot = matured_val as u128; // v11.31: haircut denominator
+    engine.pnl_matured_pos_tot = matured_val as u128; // v12.0.2: haircut denominator
 
     let (h_num, h_den) = engine.haircut_ratio();
 
@@ -198,13 +198,13 @@ fn bounded_margin_withdrawal() {
 
     let withdraw_amt: u32 = kani::any();
     kani::assume(withdraw_amt > 0 && withdraw_amt <= deposit_amt);
-    let result = engine.withdraw(a, withdraw_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.withdraw(a, withdraw_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
     assert!(result.is_ok());
     assert!(engine.check_conservation());
 
     let remaining = engine.accounts[a as usize].capital.get();
     if remaining < u128::MAX {
-        let result2 = engine.withdraw(a, remaining + 1, DEFAULT_ORACLE, DEFAULT_SLOT);
+        let result2 = engine.withdraw(a, remaining + 1, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
         assert!(result2.is_err());
     }
 }
@@ -242,7 +242,7 @@ fn proof_deposit_then_withdraw_roundtrip() {
     engine.deposit(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
-    let result = engine.withdraw(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.withdraw(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
     assert!(result.is_ok());
     assert!(engine.accounts[idx as usize].capital.get() == 0);
     assert!(engine.check_conservation());
@@ -283,7 +283,7 @@ fn proof_close_account_returns_capital() {
 
     assert!(engine.check_conservation());
 
-    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok());
     let returned = result.unwrap();
     assert!(returned == 50_000);
@@ -303,7 +303,7 @@ fn proof_trade_pnl_is_zero_sum_algebraic() {
     engine.deposit(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok(), "trade must succeed with sufficient margin");
 
     // After a trade, PnL must be zero-sum across the two counterparties
@@ -768,15 +768,15 @@ fn proof_withdraw_simulation_preserves_residual() {
 
     // Trade so a has a position (exercises the margin-check + haircut path)
     let size_q = POS_SCALE as i128;
-    engine.execute_trade(a, b, 100, 1, size_q, 100).unwrap();
+    engine.execute_trade(a, b, 100, 1, size_q, 100, 0i64).unwrap();
 
     // Record haircut before actual withdraw
     let (h_num_before, h_den_before) = engine.haircut_ratio();
     let conservation_before = engine.check_conservation();
     assert!(conservation_before, "conservation must hold before withdraw");
 
-    // Call the real engine.withdraw()
-    let result = engine.withdraw(a, 1_000, 100, 1);
+    // Call the real engine.withdraw(, 0i64)
+    let result = engine.withdraw(a, 1_000, 100, 1, 0i64);
     assert!(result.is_ok(), "withdraw of 1000 from 10M capital must succeed");
 
     let (h_num_after, h_den_after) = engine.haircut_ratio();
@@ -815,7 +815,7 @@ fn proof_funding_rate_validated_before_storage() {
     engine.funding_rate_bps_per_slot_last = bad_rate;
 
     // The stored rate should be clamped or validated
-    let result = engine.keeper_crank(1, 100, &[(a, None)], 1);
+    let result = engine.keeper_crank(1, 100, &[(a, None)], 1, 0i64);
 
     if result.is_ok() {
         let stored = engine.funding_rate_bps_per_slot_last;
@@ -825,7 +825,7 @@ fn proof_funding_rate_validated_before_storage() {
 
     // Reset to valid rate and verify protocol works
     engine.funding_rate_bps_per_slot_last = 0;
-    let result2 = engine.keeper_crank(2, 100, &[(a, None)], 1);
+    let result2 = engine.keeper_crank(2, 100, &[(a, None)], 1, 0i64);
     assert!(result2.is_ok(),
         "protocol must not be bricked by a previous bad funding rate input");
 }
@@ -903,13 +903,13 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
 
     // Near-max leverage long for a
     let size = (480 * POS_SCALE) as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok());
 
     // Crash price to trigger liquidation
     let crash_price = 890u64;
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.liquidate_at_oracle(a, slot2, crash_price, LiquidationPolicy::FullClose);
+    let result = engine.liquidate_at_oracle(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i64);
     // Liquidation must not revert due to min_liquidation_abs
     assert!(result.is_ok(), "min_liquidation_abs must not block liquidation");
     assert!(engine.check_conservation(), "conservation must hold after liquidation with min_abs");
@@ -969,7 +969,7 @@ fn proof_risk_reducing_exemption_path() {
 
     // Open leveraged long for a (8x)
     let size = (800 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject loss to push a below maintenance margin
     engine.set_pnl(a as usize, -70_000i128);
@@ -978,7 +978,7 @@ fn proof_risk_reducing_exemption_path() {
 
     // Risk-reducing trade: close half the position
     let half_close = -(size / 2);
-    let reduce_result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE);
+    let reduce_result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i64);
 
     // Risk-increasing trade: double the position
     let increase = size;
@@ -989,9 +989,9 @@ fn proof_risk_reducing_exemption_path() {
     let b2 = engine2.add_user(0).unwrap();
     engine2.deposit(a2, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine2.deposit(b2, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine2.execute_trade(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine2.execute_trade(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
     engine2.set_pnl(a2 as usize, -70_000i128);
-    let increase_result = engine2.execute_trade(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, increase, DEFAULT_ORACLE);
+    let increase_result = engine2.execute_trade(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, increase, DEFAULT_ORACLE, 0i64);
 
     // Risk-reducing must succeed, risk-increasing must be rejected
     assert!(reduce_result.is_ok(), "risk-reducing trade must be accepted");
@@ -1026,7 +1026,7 @@ fn proof_buffer_masking_blocked() {
 
     // Victim opens large leveraged position
     let size = (800 * POS_SCALE) as i128;
-    engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Victim goes deeply bankrupt
     engine.set_pnl(victim as usize, -120_000i128);
@@ -1037,7 +1037,7 @@ fn proof_buffer_masking_blocked() {
     let close_size = -(size * 99 / 100);
     // Adverse exec_price: much worse than oracle (victim sells at below-oracle price)
     let adverse_price = DEFAULT_ORACLE - (DEFAULT_ORACLE / 10); // 10% adverse slippage
-    let result = engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, adverse_price);
+    let result = engine.execute_trade(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, adverse_price, 0i64);
 
     if result.is_ok() {
         // If trade was allowed, raw equity must not have decreased
@@ -1173,10 +1173,10 @@ fn proof_settle_fee_rejects_i128_min() {
 }
 
 // ############################################################################
-// v11.31 compliance: flat-close guard uses Eq_maint_raw_i >= 0
+// v12.0.2 compliance: flat-close guard uses Eq_maint_raw_i >= 0
 // ############################################################################
 
-/// v11.31 change #2: A trade that closes to flat must use Eq_maint_raw_i >= 0,
+/// v12.0.2 change #2: A trade that closes to flat must use Eq_maint_raw_i >= 0,
 /// not just PNL_i >= 0. An account with positive PNL but large fee debt
 /// (Eq_maint_raw_i = C + PNL - FeeDebt < 0) must be rejected.
 #[kani::proof]
@@ -1195,7 +1195,7 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
 
     // Open position for a
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Drain a's capital to 0, give positive PNL but massive fee debt
     engine.set_capital(a as usize, 0);
@@ -1203,22 +1203,22 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
     engine.accounts[a as usize].fee_credits = I128::new(-5000); // fee debt
 
     // Eq_maint_raw = C(0) + PNL(1000) - FeeDebt(5000) = -4000 < 0
-    // v11.31 requires: reject flat close when Eq_maint_raw < 0
+    // v12.0.2 requires: reject flat close when Eq_maint_raw < 0
     // Old code only checks PNL >= 0 which would pass (PNL = 1000 > 0)
 
     let close_size = -size;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE, 0i64);
 
     // Must be rejected: Eq_maint_raw < 0 even though PNL > 0
     assert!(result.is_err(),
-        "v11.31: flat close must be rejected when Eq_maint_raw < 0 (fee debt exceeds C + PNL)");
+        "v12.0.2: flat close must be rejected when Eq_maint_raw < 0 (fee debt exceeds C + PNL)");
 }
 
 // ############################################################################
-// v11.31 compliance: risk-reducing exemption is fee-neutral
+// v12.0.2 compliance: risk-reducing exemption is fee-neutral
 // ############################################################################
 
-/// v11.31 change #1: The risk-reducing buffer comparison must be fee-neutral.
+/// v12.0.2 change #1: The risk-reducing buffer comparison must be fee-neutral.
 /// A genuine de-risking trade must not fail solely because the trading fee
 /// reduces post-trade equity.
 #[kani::proof]
@@ -1237,16 +1237,16 @@ fn proof_v1126_risk_reducing_fee_neutral() {
 
     // Open leveraged position
     let size = (800 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Push below maintenance
     engine.set_pnl(a as usize, -50_000i128);
 
     // Risk-reducing: close half at oracle price (no slippage)
     let half_close = -(size / 2);
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i64);
 
-    // v11.31: fee-neutral comparison means pure fee friction should not block
+    // v12.0.2: fee-neutral comparison means pure fee friction should not block
     // a genuine de-risking trade at oracle price.
     // The post-trade buffer (with fee added back) should be strictly better.
     // Conservation must hold regardless of whether trade succeeds or fails.
@@ -1255,7 +1255,7 @@ fn proof_v1126_risk_reducing_fee_neutral() {
 }
 
 // ############################################################################
-// v11.31 compliance: MIN_NONZERO_MM_REQ floor (TODO: implement params first)
+// v12.0.2 compliance: MIN_NONZERO_MM_REQ floor (TODO: implement params first)
 // ############################################################################
 
 // Uncommented: RiskParams now has min_nonzero_mm_req / min_nonzero_im_req
@@ -1276,7 +1276,7 @@ fn proof_v1126_min_nonzero_margin_floor() {
 
     // Tiny position: notional so small that proportional MM floors to 0
     let tiny_size = 1i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i64);
 
     // With min_nonzero_im_req = 2000, even a tiny position needs IM >= 2000.
     // Account a has 100_000 capital which exceeds 2000, so trade should succeed.
@@ -1286,7 +1286,7 @@ fn proof_v1126_min_nonzero_margin_floor() {
 }
 
 // ############################################################################
-// v11.31 §2.6: flat-dust reclamation (GC sweeps 0 < C_i < MIN_INITIAL_DEPOSIT)
+// v12.0.2 §2.6: flat-dust reclamation (GC sweeps 0 < C_i < MIN_INITIAL_DEPOSIT)
 // ############################################################################
 
 /// A flat account with 0 < C_i < MIN_INITIAL_DEPOSIT, zero PnL/basis/reserved,
@@ -1349,11 +1349,11 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     // Both deposit enough for trading
     engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0).unwrap();
+    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
 
     // Open positions: a long, b short
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Capture h before oracle spike
     let (h_num_before, h_den_before) = engine.haircut_ratio();
@@ -1361,7 +1361,7 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     // Oracle spikes up — a has fresh unrealized profit
     let spike_oracle: u64 = 1_500;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank(slot2, spike_oracle, &[(a, None), (b, None)], 64).unwrap();
+    engine.keeper_crank(slot2, spike_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
 
     // After touch, a has positive PnL but it's reserved (R_i > 0)
     let pnl_a = engine.accounts[a as usize].pnl;
@@ -1390,7 +1390,7 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     // (d) Withdrawal of any profit portion must fail (only capital is available)
     // Try to withdraw more than original capital
     let slot3 = slot2;
-    let withdraw_result = engine.withdraw(a, 500_001, spike_oracle, slot3);
+    let withdraw_result = engine.withdraw(a, 500_001, spike_oracle, slot3, 0i64);
     assert!(withdraw_result.is_err(),
         "must not be able to withdraw unreserved profit");
 
@@ -1414,7 +1414,7 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
     // a deposits minimal capital, b deposits large
     engine.deposit(a, 20_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0).unwrap();
+    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
 
     // Open position: a long 100 units at oracle=1000
 
@@ -1422,12 +1422,12 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
     // IM_req = max(100_000 * 10%, MIN_NONZERO_IM_REQ) = 10_000
     // MM_req = max(100_000 * 5%, MIN_NONZERO_MM_REQ) = 5_000
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Oracle moves up — a gains profit that is reserved
     let new_oracle: u64 = 1_100;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank(slot2, new_oracle, &[(a, None), (b, None)], 64).unwrap();
+    engine.keeper_crank(slot2, new_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
 
     // a now has fresh PnL from price increase. This PnL is reserved.
     let pnl_a = engine.accounts[a as usize].pnl;
@@ -1461,7 +1461,7 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
 
     // Advance warmup partially (not enough to fully release)
     let slot3 = slot2 + 50; // half of warmup_period_slots=100
-    engine.keeper_crank(slot3, new_oracle, &[(a, None)], 64).unwrap();
+    engine.keeper_crank(slot3, new_oracle, &[(a, None)], 64, 0i64).unwrap();
 
     let eq_maint_after_warmup = engine.account_equity_maint_raw(&engine.accounts[a as usize]);
     // Pure warmup release on unchanged PNL_i must not reduce Eq_maint_raw
@@ -1489,13 +1489,13 @@ fn proof_property_56_exact_raw_im_approval() {
     // Deposit just enough for the test
     engine.deposit(a, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0).unwrap();
+    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
 
     // a has C=1, no PnL, no fees. Eq_init_raw = 1.
     // MIN_NONZERO_IM_REQ = 2, so any nonzero position requires IM >= 2.
     // A trade with even 1 unit of position means IM_req >= 2 > 1 = Eq_init_raw.
     let tiny_size = POS_SCALE as i128; // 1 unit
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i64);
     assert!(result.is_err(),
         "trade must be rejected: Eq_init_raw (1) < MIN_NONZERO_IM_REQ (2)");
 
@@ -1640,11 +1640,11 @@ fn proof_audit_k_pair_chronology_not_inverted() {
 
     engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0).unwrap();
+    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
 
     // Open long for a, short for b
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     let pnl_a_before = engine.accounts[a as usize].pnl;
     let pnl_b_before = engine.accounts[b as usize].pnl;
@@ -1652,7 +1652,7 @@ fn proof_audit_k_pair_chronology_not_inverted() {
     // Oracle rises — favorable for long (a), unfavorable for short (b)
     let high_oracle = 1_200u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64).unwrap();
+    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
 
     // a (long) must gain PnL when oracle rises
     assert!(engine.accounts[a as usize].pnl > pnl_a_before,
@@ -1688,7 +1688,7 @@ fn proof_audit2_close_account_structural_safety() {
     let v_before = engine.vault.get();
 
     // close_account on a flat account with no position
-    let result = engine.close_account(a, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let result = engine.close_account(a, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok(), "flat zero-PnL account must close");
 
     let capital_returned = result.unwrap();
@@ -1718,11 +1718,11 @@ fn proof_audit2_funding_rate_clamped() {
 
     engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0).unwrap();
+    engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
 
     // Open positions so funding has effect
     let size_q = (10 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Set an extreme out-of-range funding rate directly
     let extreme_rate: i64 = kani::any();
@@ -1731,7 +1731,7 @@ fn proof_audit2_funding_rate_clamped() {
 
     // accrue_market_to must succeed (not abort) even with extreme rate
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &[(a, None), (b, None)], 64);
+    let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &[(a, None), (b, None)], 64, 0i64);
     assert!(result.is_ok(), "accrue_market_to must not abort after extreme rate");
 }
 
@@ -2302,7 +2302,7 @@ fn bounded_trade_conservation_with_fees() {
     assert!(engine.check_conservation(), "pre-trade conservation");
 
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
 
     assert!(engine.check_conservation(),
         "conservation must hold after trade with nonzero fees");
@@ -2330,7 +2330,7 @@ fn proof_partial_liquidation_can_succeed() {
     engine.deposit(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Moderate price drop — a is slightly underwater but has enough equity
     // for a partial close to restore health
@@ -2341,7 +2341,7 @@ fn proof_partial_liquidation_can_succeed() {
     let q_close = (400 * POS_SCALE) as u128;
     let partial_hint = Some(LiquidationPolicy::ExactPartial(q_close));
     let candidates = [(a, partial_hint)];
-    let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10);
+    let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10, 0i64);
     assert!(result.is_ok());
 
     // The partial liquidation should have succeeded (not fallen back to full close)
@@ -2373,7 +2373,7 @@ fn proof_sign_flip_trade_conserves() {
 
     // a goes long 100, b goes short 100
     let size1 = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size1, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size1, DEFAULT_ORACLE, 0i64).unwrap();
     assert!(engine.effective_pos_q(a as usize) > 0, "a is long");
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
 
@@ -2381,7 +2381,7 @@ fn proof_sign_flip_trade_conserves() {
     // b buys 200 → goes from short 100 to long 100
     let size2 = (200 * POS_SCALE) as i128;
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.execute_trade(b, a, DEFAULT_ORACLE, slot2, size2, DEFAULT_ORACLE);
+    let result = engine.execute_trade(b, a, DEFAULT_ORACLE, slot2, size2, DEFAULT_ORACLE, 0i64);
 
     if result.is_ok() {
         assert!(engine.effective_pos_q(a as usize) < 0, "a flipped to short");
@@ -2415,7 +2415,7 @@ fn proof_close_account_fee_forgiveness_bounded() {
     let i_before = engine.insurance_fund.balance.get();
 
     // close_account should succeed: position=0, pnl=0, capital=1 < min_deposit=2
-    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok(), "close_account must succeed for dust account with fee debt");
 
     // Fee debt forgiven — account freed
@@ -2457,7 +2457,7 @@ fn bounded_trade_conservation_symbolic_size() {
     kani::assume(size_units >= 1 && size_units <= 500);
     let size_q = (size_units as i128) * (POS_SCALE as i128);
 
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
 
     assert!(engine.check_conservation(),
         "conservation must hold for symbolic trade size");
@@ -2487,13 +2487,13 @@ fn proof_convert_released_pnl_conservation() {
 
     // Open positions
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
     assert!(engine.check_conservation(), "pre-conversion conservation");
 
     // Oracle goes up → a has positive PnL
     let high_oracle = 1_200u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64).unwrap();
+    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
 
     // With warmup_period_slots=0, touch already set reserved_pnl=0 → all PnL released
     let released = engine.released_pos(a as usize);
@@ -2506,7 +2506,7 @@ fn proof_convert_released_pnl_conservation() {
         // Symbolic conversion amount: 1..=released
         let x_req: u32 = kani::any();
         kani::assume(x_req >= 1 && (x_req as u128) <= released);
-        let result = engine.convert_released_pnl(a, x_req as u128, high_oracle, slot2 + 1);
+        let result = engine.convert_released_pnl(a, x_req as u128, high_oracle, slot2 + 1, 0i64);
         if result.is_ok() {
             assert!(engine.check_conservation(),
                 "conservation must hold after convert_released_pnl");
@@ -2541,7 +2541,7 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
 
     // Open leveraged position
     let size = (400 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject symbolic PnL: from heavily underwater to modestly above water
     let pnl_val: i32 = kani::any();
@@ -2550,7 +2550,7 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
 
     // Risk-reducing trade: close half
     let half_close = -(size / 2);
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i64);
 
     // Conservation must always hold regardless of accept/reject
     assert!(engine.check_conservation(),
@@ -2584,12 +2584,12 @@ fn proof_convert_released_pnl_exercises_conversion() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Oracle up → a has positive PnL
     let high_oracle = 1_500u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64).unwrap();
+    engine.keeper_crank(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
 
     // Verify the account still has a position (not flat — won't early-return at step 4)
     assert!(engine.accounts[a as usize].position_basis_q != 0,
@@ -2602,7 +2602,7 @@ fn proof_convert_released_pnl_exercises_conversion() {
     let cap_before = engine.accounts[a as usize].capital.get();
 
     // Convert all released profit
-    let result = engine.convert_released_pnl(a, released, high_oracle, slot2 + 1);
+    let result = engine.convert_released_pnl(a, released, high_oracle, slot2 + 1, 0i64);
     assert!(result.is_ok(), "conversion must succeed for healthy account with released profit");
 
     // Capital must have increased (the actual conversion happened)

@@ -190,11 +190,11 @@ fn inductive_withdraw_preserves_accounting() {
     engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Run keeper_crank to satisfy fresh-crank requirement for withdraw
-    let _ = engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0);
+    let _ = engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64);
 
     let w: u32 = kani::any();
     kani::assume(w >= 1 && w <= dep);
-    let result = engine.withdraw(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.withdraw(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
     if result.is_ok() {
         assert!(engine.check_conservation());
     }
@@ -407,7 +407,7 @@ fn proof_haircut_ratio_no_division_by_zero() {
     assert!(num == 1u128);
     assert!(den == 1u128);
 
-    // Set pnl_matured_pos_tot (v11.31 uses this as denominator, not pnl_pos_tot)
+    // Set pnl_matured_pos_tot (v12.0.2 uses this as denominator, not pnl_pos_tot)
     engine.pnl_pos_tot = 1000u128;
     engine.pnl_matured_pos_tot = 1000u128;
     engine.vault = U128::new(2000);
@@ -482,7 +482,7 @@ fn proof_side_mode_gating() {
     engine.side_mode_long = SideMode::DrainOnly;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
     assert!(result == Err(RiskError::SideBlocked));
 
     engine.side_mode_long = SideMode::Normal;
@@ -490,7 +490,7 @@ fn proof_side_mode_gating() {
     engine.stale_account_count_short = 1;
 
     let neg_size = -(POS_SCALE as i128);
-    let result2 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, neg_size, DEFAULT_ORACLE);
+    let result2 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, neg_size, DEFAULT_ORACLE, 0i64);
     assert!(result2 == Err(RiskError::SideBlocked));
 }
 
@@ -520,7 +520,7 @@ fn proof_account_equity_net_nonnegative() {
     kani::assume(pnl_val as i32 > i16::MIN as i32);
     engine.set_pnl(a as usize, pnl_val as i128);
 
-    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v11.31)
+    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.0.2)
     let matured: u16 = kani::any();
     kani::assume(matured <= 20_000);
     engine.pnl_matured_pos_tot = core::cmp::min(matured as u128, engine.pnl_pos_tot);

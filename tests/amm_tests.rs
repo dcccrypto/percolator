@@ -43,7 +43,7 @@ fn pos_q(qty: i64) -> i128 {
 /// Helper: crank to make trades/withdrawals work
 #[cfg(feature = "test")]
 fn crank(engine: &mut RiskEngine, slot: u64, oracle_price: u64) {
-    let _ = engine.keeper_crank(slot, oracle_price, &[], 64);
+    let _ = engine.keeper_crank(slot, oracle_price, &[], 64, 0i64);
 }
 
 // ============================================================================
@@ -77,7 +77,7 @@ fn test_e2e_complete_user_journey() {
 
     // Alice goes long 50 base, Bob takes the other side (short)
     engine
-        .execute_trade(alice, bob, oracle_price, 0, pos_q(50), oracle_price)
+        .execute_trade(alice, bob, oracle_price, 0, pos_q(50), oracle_price, 0i64)
         .unwrap();
 
     // Check effective positions
@@ -128,7 +128,7 @@ fn test_e2e_complete_user_journey() {
         let neg_pos = alice_pos.checked_neg().unwrap();
         let slot = engine.current_slot;
         engine
-            .execute_trade(alice, bob, new_price, slot, neg_pos, new_price)
+            .execute_trade(alice, bob, new_price, slot, neg_pos, new_price, 0i64)
             .unwrap();
     }
 
@@ -143,7 +143,7 @@ fn test_e2e_complete_user_journey() {
     let alice_cap = engine.accounts[alice as usize].capital.get();
     if alice_cap > 1000 {
         let slot = engine.current_slot;
-        engine.withdraw(alice, 1000, new_price, slot).unwrap();
+        engine.withdraw(alice, 1000, new_price, slot, 0i64).unwrap();
     }
 
     assert!(engine.check_conservation(), "Conservation after withdrawal");
@@ -173,7 +173,7 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice goes long, Bob goes short
     engine
-        .execute_trade(alice, bob, oracle_price, 0, pos_q(100), oracle_price)
+        .execute_trade(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
         .unwrap();
 
     // Advance time and accrue funding with a positive rate (longs pay shorts)
@@ -181,7 +181,7 @@ fn test_e2e_funding_complete_cycle() {
 
     // Run keeper_crank to advance
     let slot = engine.current_slot;
-    let _ = engine.keeper_crank(slot, oracle_price, &[], 64);
+    let _ = engine.keeper_crank(slot, oracle_price, &[], 64, 0i64);
 
     // Advance more time for funding to accrue
     engine.advance_slot(20);
@@ -213,7 +213,7 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice closes long and opens short (total -200 base)
     engine
-        .execute_trade(alice, bob, oracle_price, slot, pos_q(-200), oracle_price)
+        .execute_trade(alice, bob, oracle_price, slot, pos_q(-200), oracle_price, 0i64)
         .unwrap();
 
     // Now Alice is short and Bob is long

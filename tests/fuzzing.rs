@@ -501,7 +501,7 @@ impl FuzzState {
                 let vault_before = self.engine.vault;
 
                 let now_slot = self.engine.current_slot;
-                let result = self.engine.withdraw(idx, *amount, oracle, now_slot);
+                let result = self.engine.withdraw(idx, *amount, oracle, now_slot, 0i64);
 
                 match result {
                     Ok(()) => {
@@ -596,7 +596,7 @@ impl FuzzState {
 
                 let result =
                     self.engine
-                        .execute_trade(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price);
+                        .execute_trade(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i64);
 
                 match result {
                     Ok(_) => {
@@ -1079,7 +1079,7 @@ proptest! {
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw(user_idx, withdraw_amount, DEFAULT_ORACLE, 0);
+        let result = engine.withdraw(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i64);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1108,7 +1108,7 @@ proptest! {
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw(user_idx, amount, DEFAULT_ORACLE, 0);
+            let _ = engine.withdraw(user_idx, amount, DEFAULT_ORACLE, 0, 0i64);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1140,7 +1140,7 @@ fn conservation_after_trade_and_funding_regression() {
 
     // Execute trade to create positions
     engine
-        .execute_trade(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE)
+        .execute_trade(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i64)
         .unwrap();
 
     // Accrue market with funding
@@ -1196,7 +1196,7 @@ fn harness_rollback_simulation_test() {
     let expected_pnl = engine.accounts[user_idx as usize].pnl;
 
     // Try to withdraw more than available - will fail
-    let result = engine.withdraw(user_idx, 999_999, DEFAULT_ORACLE, slot);
+    let result = engine.withdraw(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i64);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"

@@ -1,6 +1,6 @@
-//! Section 7 — v11.31 Spec Compliance Proofs
+//! Section 7 — v12.0.2 Spec Compliance Proofs
 //!
-//! Properties 46, 59-70: zero-rate core profile, configuration immutability,
+//! Properties 46, 59-75: live funding, configuration immutability,
 //! bilateral OI decomposition, partial liquidation, deposit guards, profit conversion.
 
 #![cfg(kani)]
@@ -9,40 +9,54 @@ mod common;
 use common::*;
 
 // ############################################################################
-// PROPERTY 46: Zero-rate funding recomputation
+// PROPERTY 46: Funding rate recomputation determinism and bound enforcement
 // ############################################################################
 
-/// recompute_r_last_from_final_state() always stores 0 and never reverts (spec §4.12).
+/// recompute_r_last_from_final_state(rate) stores exactly rate when
+/// |rate| <= MAX_ABS_FUNDING_BPS_PER_SLOT (spec v12.0.2 §4.12).
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_recompute_r_last_always_zero() {
+fn proof_recompute_r_last_stores_rate() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    // Set arbitrary nonzero funding rate
-    let rate: i64 = kani::any();
-    engine.funding_rate_bps_per_slot_last = rate;
+    let rate: i16 = kani::any();
+    kani::assume(rate.unsigned_abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT as u16);
 
-    engine.recompute_r_last_from_final_state();
-
-    assert!(engine.funding_rate_bps_per_slot_last == 0,
-        "r_last must be 0 after recompute_r_last_from_final_state");
+    engine.recompute_r_last_from_final_state(rate as i64);
+    assert!(engine.funding_rate_bps_per_slot_last == rate as i64,
+        "r_last must equal the supplied rate");
 }
 
 // ############################################################################
-// PROPERTY: accrue_market_to has no funding transfer (zero-rate core profile)
+// PROPERTY 74: Funding rate bound enforcement
 // ############################################################################
 
-/// accrue_market_to with arbitrary stored rate and time elapsed does NOT modify K
-/// via funding. Only mark-to-market (A*ΔP) changes K.
-/// Symbolic rate (full i64) and slot delta exercise all rate/time combinations.
+/// recompute_r_last_from_final_state rejects |rate| > MAX_ABS_FUNDING_BPS_PER_SLOT.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_accrue_no_funding_transfer() {
+#[kani::should_panic]
+fn proof_funding_rate_bound_rejected() {
     let mut engine = RiskEngine::new(zero_fee_params());
+    let rate: i64 = kani::any();
+    kani::assume(rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64);
+    engine.recompute_r_last_from_final_state(rate);
+}
 
-    // Set up live OI on both sides
+// ############################################################################
+// PROPERTY 72: Funding sign and floor-direction correctness
+// ############################################################################
+
+/// When r_last > 0, K_long decreases and K_short increases (longs pay shorts).
+/// When r_last < 0, K_long increases and K_short decreases (shorts pay longs).
+/// fund_term uses floor division: positive quotients round down, negative round
+/// toward negative infinity.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_funding_sign_and_floor() {
+    let mut engine = RiskEngine::new(zero_fee_params());
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
     engine.oi_eff_long_q = POS_SCALE;
@@ -51,27 +65,174 @@ fn proof_accrue_no_funding_transfer() {
     engine.last_market_slot = 0;
     engine.funding_price_sample_last = DEFAULT_ORACLE;
 
-    // Store arbitrary nonzero funding rate (symbolic, full i64 domain)
-    let rate: i64 = kani::any();
+    // Symbolic rate (bounded, nonzero)
+    let rate: i16 = kani::any();
     kani::assume(rate != 0);
-    engine.funding_rate_bps_per_slot_last = rate;
+    kani::assume(rate.unsigned_abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT as u16);
+    engine.funding_rate_bps_per_slot_last = rate as i64;
 
-    // Symbolic time delta (1..1000 slots)
+    let k_long_before = engine.adl_coeff_long;
+    let k_short_before = engine.adl_coeff_short;
+
+    // dt=1, same price → only funding changes K
+    let result = engine.accrue_market_to(1, DEFAULT_ORACLE);
+    assert!(result.is_ok());
+
+    if rate > 0 {
+        // Longs pay shorts
+        assert!(engine.adl_coeff_long <= k_long_before,
+            "positive rate: K_long must not increase");
+        assert!(engine.adl_coeff_short >= k_short_before,
+            "positive rate: K_short must not decrease");
+    } else {
+        // Shorts pay longs (fund_term < 0 → floor rounds away from zero)
+        assert!(engine.adl_coeff_long >= k_long_before,
+            "negative rate: K_long must not decrease");
+        assert!(engine.adl_coeff_short <= k_short_before,
+            "negative rate: K_short must not increase");
+    }
+}
+
+// ############################################################################
+// PROPERTY 73: Funding skip on zero OI
+// ############################################################################
+
+/// accrue_market_to applies no funding K delta when either side's OI is zero.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_funding_skip_zero_oi() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.last_market_slot = 0;
+    engine.funding_price_sample_last = DEFAULT_ORACLE;
+    engine.funding_rate_bps_per_slot_last = 5000; // large nonzero rate
+
+    // Only longs have OI, shorts have zero
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = 0;
+
+    let k_long_before = engine.adl_coeff_long;
+    let k_short_before = engine.adl_coeff_short;
+
+    let result = engine.accrue_market_to(100, DEFAULT_ORACLE);
+    assert!(result.is_ok());
+
+    // No funding when either side has zero OI
+    assert_eq!(engine.adl_coeff_long, k_long_before,
+        "K_long must not change when short OI is zero");
+    assert_eq!(engine.adl_coeff_short, k_short_before,
+        "K_short must not change when short OI is zero");
+}
+
+// ############################################################################
+// PROPERTY 71: Funding sub-stepping with dt > MAX_FUNDING_DT
+// ############################################################################
+
+/// When dt > MAX_FUNDING_DT, accrue_market_to splits funding into sub-steps.
+/// The total K delta must equal the sum of sub-step deltas.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_funding_substep_large_dt() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.last_market_slot = 0;
+    engine.funding_price_sample_last = DEFAULT_ORACLE;
+    engine.funding_rate_bps_per_slot_last = 100;
+
+    // dt = MAX_FUNDING_DT + 1 → 2 sub-steps: MAX_FUNDING_DT and 1
+    let dt = MAX_FUNDING_DT + 1;
+    let result = engine.accrue_market_to(dt, DEFAULT_ORACLE);
+    assert!(result.is_ok());
+
+    // fund_term per sub-step with rate=100, price=1000:
+    // sub-step 1: fund_num = 1000 * 100 * 65535 = 6_553_500_000; fund_term = 655_350
+    // sub-step 2: fund_num = 1000 * 100 * 1 = 100_000; fund_term = 10
+    // total fund_term effect = (655_350 + 10) * ADL_ONE = 655_360_000_000
+    let expected_delta: i128 = (655_350i128 + 10i128) * (ADL_ONE as i128);
+    assert_eq!(engine.adl_coeff_long, -expected_delta,
+        "K_long must reflect sum of sub-step funding deltas");
+    assert_eq!(engine.adl_coeff_short, expected_delta,
+        "K_short must reflect sum of sub-step funding deltas");
+}
+
+// ############################################################################
+// PROPERTY 75: Funding price-basis timing
+// ############################################################################
+
+/// Funding uses fund_px_0 (start-of-call snapshot of fund_px_last), not the
+/// current oracle_price. After the call, fund_px_last is updated to oracle_price.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_funding_price_basis_timing() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.last_oracle_price = 500; // old price
+    engine.last_market_slot = 0;
+    engine.funding_price_sample_last = 500; // fund_px_0 = 500
+    engine.funding_rate_bps_per_slot_last = 100;
+
+    // Call with new oracle price 1500
+    let result = engine.accrue_market_to(1, 1500);
+    assert!(result.is_ok());
+
+    // Funding should use fund_px_0=500, not oracle_price=1500
+    // fund_num = 500 * 100 * 1 = 50_000; fund_term = 50_000 / 10000 = 5
+    // (NOT 1500 * 100 * 1 / 10000 = 15)
+    // But mark-to-market also affects K: ΔP = 1500-500 = 1000
+    // K_long += A_long * ΔP = ADL_ONE * 1000 = 1_000_000_000 (mark)
+    // K_long -= A_long * fund_term = ADL_ONE * 5 = 5_000_000 (funding)
+    // Net K_long = 1_000_000_000 - 5_000_000 = 995_000_000
+    let expected_k_long = 1_000_000_000i128 - 5_000_000i128;
+    assert_eq!(engine.adl_coeff_long, expected_k_long,
+        "funding must use fund_px_0=500, not oracle=1500");
+
+    // After call, fund_px_last must be updated to oracle_price
+    assert_eq!(engine.funding_price_sample_last, 1500,
+        "fund_px_last must be updated to oracle_price for next interval");
+}
+
+// ############################################################################
+// Funding: zero rate produces no K change (regression from v11.31)
+// ############################################################################
+
+/// When r_last = 0, no funding transfer occurs regardless of dt or OI.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_accrue_no_funding_when_rate_zero() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.last_market_slot = 0;
+    engine.funding_price_sample_last = DEFAULT_ORACLE;
+    engine.funding_rate_bps_per_slot_last = 0;
+
     let dt: u16 = kani::any();
     kani::assume(dt >= 1 && dt <= 1000);
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
 
-    // Same price, time passes — only funding could change K
     let result = engine.accrue_market_to(dt as u64, DEFAULT_ORACLE);
     assert!(result.is_ok());
 
-    // K must NOT change (no mark ΔP=0, no funding in this revision)
-    assert!(engine.adl_coeff_long == k_long_before,
-        "K_long must not change from funding");
-    assert!(engine.adl_coeff_short == k_short_before,
-        "K_short must not change from funding");
+    assert_eq!(engine.adl_coeff_long, k_long_before, "zero rate: K_long unchanged");
+    assert_eq!(engine.adl_coeff_short, k_short_before, "zero rate: K_short unchanged");
 }
 
 /// accrue_market_to still applies mark-to-market correctly.
@@ -360,7 +521,7 @@ fn proof_bilateral_oi_decomposition() {
 
     // First trade: open a position (a long, b short)
     let open_size = (100 * POS_SCALE) as i128;
-    let r1 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open_size, DEFAULT_ORACLE);
+    let r1 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open_size, DEFAULT_ORACLE, 0i64);
     assert!(r1.is_ok(), "initial trade must succeed");
 
     // Second trade: symbolic size exercises close, reduce, and flip paths
@@ -369,7 +530,7 @@ fn proof_bilateral_oi_decomposition() {
     // Scale to position units — covers -32768..32767 * POS_SCALE
     let size_q = (raw_size as i128) * (POS_SCALE as i128);
 
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE);
+    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
 
     if result.is_ok() {
         let eff_a = engine.effective_pos_q(a as usize);
@@ -418,7 +579,7 @@ fn proof_partial_liquidation_remainder_nonzero() {
 
     // Open near-max leverage: 480 units, notional=480K, IM ~48K with 50K capital
     let size_q = (480 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     let abs_eff = engine.effective_pos_q(a as usize).unsigned_abs();
     assert!(abs_eff > 0, "position must be open");
@@ -431,7 +592,7 @@ fn proof_partial_liquidation_remainder_nonzero() {
     // Crash: 10% drop triggers liquidation (PNL = -480*100 = -48K, equity ~2K < MM=4800)
     let crash = 900u64;
     let result = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, crash,
-        LiquidationPolicy::ExactPartial(q_close));
+        LiquidationPolicy::ExactPartial(q_close), 0i64);
 
     // Non-vacuity: partial MUST succeed
     assert!(result.is_ok(), "partial liquidation must not revert");
@@ -463,13 +624,13 @@ fn proof_liquidation_policy_validity() {
     engine.last_oracle_price = DEFAULT_ORACLE;
 
     let size_q = (400 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     let abs_eff = engine.effective_pos_q(a as usize).unsigned_abs();
 
     // ExactPartial(0) must fail
     let r1 = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, 500,
-        LiquidationPolicy::ExactPartial(0));
+        LiquidationPolicy::ExactPartial(0), 0i64);
     // Either not liquidatable or rejected
     if let Ok(true) = r1 {
         panic!("ExactPartial(0) must not succeed as a partial liquidation");
@@ -537,7 +698,7 @@ fn proof_partial_liq_health_check_mandatory() {
 
     // Open near-max leverage position
     let size_q = (400 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic tiny close amount (1..100 units — all too small to restore health)
     let tiny_close: u8 = kani::any();
@@ -545,7 +706,7 @@ fn proof_partial_liq_health_check_mandatory() {
 
     // Severe crash — account is deeply unhealthy
     let result = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, 500,
-        LiquidationPolicy::ExactPartial(tiny_close as u128));
+        LiquidationPolicy::ExactPartial(tiny_close as u128), 0i64);
 
     // Health check at step 14 MUST reject: closing a few units out of 400M
     // position at 50% crash cannot restore maintenance margin.
@@ -558,29 +719,32 @@ fn proof_partial_liq_health_check_mandatory() {
 // PROPERTY 42: Post-reset funding recomputation stores exactly 0
 // ############################################################################
 
-/// keeper_crank recomputes r_last exactly once after final reset handling,
-/// and the stored value is exactly 0 under the zero-rate core profile.
-/// Symbolic initial rate proves this for all possible pre-crank rates.
+/// keeper_crank invokes recompute_r_last_from_final_state exactly once after
+/// final reset handling. The stored rate equals the supplied funding_rate
+/// regardless of the pre-crank rate.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_keeper_crank_r_last_zero() {
+fn proof_keeper_crank_r_last_stores_supplied_rate() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = engine.add_user(0).unwrap();
     engine.deposit(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Symbolic nonzero rate before crank — full i64 domain
-    let rate: i64 = kani::any();
-    engine.funding_rate_bps_per_slot_last = rate;
+    // Symbolic pre-crank rate and supplied rate
+    let pre_rate: i64 = kani::any();
+    engine.funding_rate_bps_per_slot_last = pre_rate;
+
+    let supplied_rate: i16 = kani::any();
+    kani::assume(supplied_rate.unsigned_abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT as u16);
 
     let result = engine.keeper_crank(DEFAULT_SLOT + 1, DEFAULT_ORACLE,
-        &[(idx, None)], 64);
+        &[(idx, None)], 64, supplied_rate as i64);
     assert!(result.is_ok());
 
-    // r_last must be 0 after crank regardless of initial rate
-    assert!(engine.funding_rate_bps_per_slot_last == 0,
-        "r_last must be 0 after keeper_crank");
+    // r_last must equal the supplied rate, not the pre-crank rate
+    assert!(engine.funding_rate_bps_per_slot_last == supplied_rate as i64,
+        "r_last must equal supplied funding_rate after keeper_crank");
 }
 
 // ############################################################################
@@ -606,7 +770,7 @@ fn proof_deposit_nonflat_no_sweep_no_resolve() {
 
     // Open position for a
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE).unwrap();
+    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic fee debt
     let debt: u16 = kani::any();

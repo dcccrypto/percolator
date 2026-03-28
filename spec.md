@@ -1,7 +1,7 @@
-# Risk Engine Spec (Source of Truth) — v11.31
+# Risk Engine Spec (Source of Truth) — v12.0.2
 
 **Combined Single-Document Native 128-bit Revision  
-(Off-Chain Shortlist Keeper / Flat-Only Auto-Conversion / Full-Local-PnL Maintenance / Explicit Zero-Rate Funding Core Profile / Immutable Configuration / Unencumbered-Flat Deposit Sweep / Mandatory Post-Partial Local Health Check Edition)**
+(Off-Chain Shortlist Keeper / Flat-Only Auto-Conversion / Full-Local-PnL Maintenance / Live Premium-Based Funding / Immutable Configuration / Unencumbered-Flat Deposit Sweep / Mandatory Post-Partial Local Health Check Edition)**
 
 **Design:** Protected Principal + Junior Profit Claims + Lazy A/K Side Indices (Native 128-bit Base-10 Scaling)  
 **Status:** implementation source-of-truth (normative language: MUST / MUST NOT / SHOULD / MAY)  
@@ -10,13 +10,14 @@
 
 This is a single combined spec. It supersedes prior delta-style revisions by restating the full current design in one document and replacing the earlier integrated on-chain barrier-scan keeper mode with a minimal on-chain exact-revalidation crank that assumes candidate discovery is performed off chain by permissionless keepers.
 
-## Change summary from v11.30
+## Change summary from v12.0.1
 
-This revision makes two substantive clarifications and one test-suite correction.
+This patch release preserves v12.0.1's live premium-based funding design and fixes the following non-minor specification issues.
 
-1. **Partial-liquidation local maintenance restoration is now mandatory even when `enqueue_adl` schedules a pending reset.** §9.4 now requires the post-step local maintenance-health check to run unconditionally on the current post-partial state. Once a reset is scheduled, the instruction still skips any *further live-OI-dependent* work, but a successful partial liquidation may no longer bypass its own local health-restoration check.
-2. **Exact-drain reset semantics are clarified without changing the reachable ADL state machine.** §5.6 now states explicitly that, under the maintained `OI_eff_long == OI_eff_short` invariant, the nested liq-side reset guards inside the opposing-zero branches are currently tautological and are retained only as defensive structure.
-3. **Test Property 54 is rephrased to match reachable states.** The impossible unilateral-drain scenario is replaced with a symmetric exact-drain reset test that verifies the required pending resets are scheduled whenever `enqueue_adl` reaches an opposing-zero branch and that subsequent operations cannot underflow against zero authoritative OI.
+1. **Funding sign, floor direction, and lazy-settlement conservation are now explicit for both rate signs.** §§1.6, 5.4, and 12 now state the exact `fund_term` sign behavior for `r_last > 0` versus `r_last < 0`, and they make the conservative floor semantics explicit in both directions.
+2. **Funding price-basis timing is now stated normatively.** §§2.2 and 5.4 now say explicitly that funding over the elapsed interval uses the start-of-call snapshot `fund_px_0 = fund_px_last`, i.e. the previous interval's closing funding-price sample, and only then rolls `fund_px_last` forward to the current oracle price for the next interval.
+3. **The engine/wrapper boundary for funding-rate provenance is now precise.** §§0, 4.12, 5.5, 10, and 12 now distinguish the engine's enforceable duties (ordering, bound validation, storage) from the deployment wrapper's separate obligation to source the supplied rate from final post-reset state.
+4. **Raw funding-numerator bounds are now explicit.** §§1.6, 1.7, and 5.4 now make the checked arithmetic and numeric fit of `fund_px_0 * r_last * dt_sub` explicit, including the intermediate bound before division by `10_000`.
 
 ## 0. Security goals (normative)
 
@@ -50,7 +51,7 @@ The engine MUST provide the following properties.
 
 14. **Loss seniority over protocol fees:** When a trade, deposit, or non-bankruptcy liquidation realizes trading losses for an account, those losses are senior to protocol fee collection from that same local capital state.
 
-15. **Instruction-final funding anti-retroactivity:** If an instruction mutates any funding-rate input, the stored next-interval `r_last` MUST correspond to the instruction's final post-reset state, not any intermediate state.
+15. **Instruction-final funding anti-retroactivity:** The engine MUST expose instruction-final ordering such that a deployment wrapper can inject the next-interval `r_last` only after final post-reset state is known. For compliant deployments, if an instruction mutates any funding-rate input or wrapper state used to compute funding, the wrapper-supplied stored `r_last` MUST correspond to that instruction's final post-reset state, not any intermediate state.
 
 16. **Deterministic overflow handling:** Any arithmetic condition that is not proven unreachable by the spec's numeric bounds MUST have a deterministic fail-safe or bounded fallback path. Silent wrap, unchecked panic, or undefined truncation are forbidden.
 
@@ -140,15 +141,15 @@ The following interpretation is normative for dust accounting:
 
 The engine MUST satisfy all of the following.
 
-1. All products involving `A_side`, `K_side`, `k_snap_i`, `basis_pos_q_i`, `effective_pos_q(i)`, `price`, funding deltas, or ADL deltas MUST use checked arithmetic.
-2. This revision has no live funding-transfer loop because `r_last` is permanently zero under §4.12. Implementations MAY therefore omit interval sub-stepping inside `accrue_market_to`. Any future revision that re-enables nonzero funding MUST split `dt` into internal sub-steps with `dt <= MAX_FUNDING_DT`.
+1. All products involving `A_side`, `K_side`, `k_snap_i`, `basis_pos_q_i`, `effective_pos_q(i)`, `price`, the raw funding numerator `fund_px_0 * r_last * dt_sub` (including each checked multiplication used to build it from the start-of-call funding-price snapshot), funding deltas, or ADL deltas MUST use checked arithmetic.
+2. When `r_last != 0` and the accrual interval `dt > 0`, `accrue_market_to` MUST split `dt` into consecutive sub-steps each of length `dt_sub <= MAX_FUNDING_DT`, with any shorter remainder last. Mark-to-market MUST be applied once before the funding sub-step loop, not inside it. Each funding sub-step MUST use the same start-of-call funding-price snapshot `fund_px_0 = fund_px_last`, with any current-oracle update written only after the loop.
 3. The conservation check `V >= C_tot + I` and any Residual computation MUST use checked `u128` addition for `C_tot + I`. Overflow is an invariant violation.
 4. Signed division with positive denominator MUST use the exact helper in §4.8.
 5. Positive ceiling division MUST use the exact helper in §4.8.
 6. Warmup-cap computation `w_slope_i * elapsed` MUST use `saturating_mul_u128_u64` or a formally equivalent min-preserving construction.
 7. Every decrement of `stored_pos_count_*`, `stale_account_count_*`, or `phantom_dust_bound_*_q` MUST use checked subtraction. Underflow indicates corruption and MUST fail conservatively.
 8. Every increment of `stored_pos_count_*`, `phantom_dust_bound_*_q`, `C_tot`, `PNL_pos_tot`, or `PNL_matured_pos_tot` MUST use checked addition and MUST enforce the relevant configured bound.
-9. This revision has no live funding-transfer branch. Any future revision that re-enables nonzero funding MUST derive funding from the payer side first so that rounding cannot mint positive aggregate claims.
+9. Funding sub-steps MUST use the same `fund_term` value for both the long-side and short-side `K` deltas, and `fund_term` itself MUST be computed with `floor_div_signed_conservative`. Positive non-integral funding quotients therefore round down toward zero, while negative non-integral funding quotients round down away from zero toward negative infinity. Because individual account settlement also uses `wide_signed_mul_div_floor_from_k_pair` (mathematical floor), payer-side claims are realized weakly more negative than theoretical and receiver-side claims weakly less positive than theoretical, so aggregate claims cannot be minted by rounding in either sign.
 10. `K_side` is cumulative across epochs. Under the 128-bit limits here, K-side overflow is practically impossible within realistic lifetimes, but implementations MUST still use checked arithmetic and revert on `i128` overflow.
 11. Same-epoch or epoch-mismatch `pnl_delta` MUST evaluate the signed numerator `(abs(basis_pos) * K_diff)` in an exact wide intermediate before division by `(a_basis * POS_SCALE)` and MUST use `wide_signed_mul_div_floor_from_k_pair` from §4.8.
 12. Any exact helper of the form `floor(a * b / d)` or `ceil(a * b / d)` required by this spec MUST return the exact quotient even when the exact product `a * b` exceeds native `u128`, provided the exact final quotient fits in the destination type.
@@ -166,12 +167,16 @@ The engine MUST satisfy all of the following.
 
 By clamping constants to base-10 metrics, on-chain persistent state fits natively in 128-bit registers without truncation.
 
-Under the zero-rate core profile, the funding-specific bounds below are retained only to justify the future-compatible state shape; no funding transfer occurs in this revision.
+Under live funding, the following bounds are active and exercised during every executed nonzero-rate funding sub-step.
+
+The numeric bounds (raw funding numerator ≈ `6.55 × 10^20`, max `fund_term` magnitude ≈ `6.55 × 10^16`, funding payer max step ≈ `6.55 × 10^22`, funding receiver numerator ≈ `6.55 × 10^28`) are unchanged in substance — they already prove the arithmetic fits, and the previously implicit raw funding-numerator bound is now stated explicitly.
 
 - Effective-position numerator: `MAX_POSITION_ABS_Q * ADL_ONE = 10^14 * 10^6 = 10^20`
 - Notional / trade-notional numerator: `MAX_POSITION_ABS_Q * MAX_ORACLE_PRICE = 10^14 * 10^12 = 10^26`
 - Trade slippage numerator: `MAX_TRADE_SIZE_Q * MAX_ORACLE_PRICE = 10^26`, which fits inside signed 128-bit
 - Mark term max step: `ADL_ONE * MAX_ORACLE_PRICE = 10^18`
+- Raw funding numerator max: `MAX_ORACLE_PRICE * MAX_ABS_FUNDING_BPS_PER_SLOT * MAX_FUNDING_DT ≈ 6.55 × 10^20`
+- `fund_term` max magnitude: `MAX_ORACLE_PRICE * MAX_ABS_FUNDING_BPS_PER_SLOT * MAX_FUNDING_DT / 10_000 ≈ 6.55 × 10^16`
 - Funding payer max step: `ADL_ONE * (MAX_ORACLE_PRICE * MAX_ABS_FUNDING_BPS_PER_SLOT * MAX_FUNDING_DT / 10_000) ≈ 6.55 × 10^22`
 - Funding receiver numerator: `6.55 × 10^22 * ADL_ONE ≈ 6.55 × 10^28`
 - `A_old * OI_post`: `10^6 * 10^14 = 10^20`
@@ -223,8 +228,8 @@ The engine stores at least:
 - `current_slot: u64`
 - `P_last: u64`
 - `slot_last: u64`
-- `r_last: i64`
-- `fund_px_last: u64`
+- `r_last: i64` — signed funding rate in basis points per slot, stored at the end of each standard-lifecycle instruction for use in the next interval's `accrue_market_to`. Positive means longs pay shorts. Bounded by `|r_last| <= MAX_ABS_FUNDING_BPS_PER_SLOT`.
+- `fund_px_last: u64` — funding-price sample stored at the end of the most recent successful `accrue_market_to`. During a later `accrue_market_to(now_slot, oracle_price)`, funding over the elapsed interval intentionally uses the start-of-call snapshot of this field, and only after that elapsed-interval funding is processed does the engine update `fund_px_last = oracle_price` for the next interval.
 - `A_long: u128`
 - `A_short: u128`
 - `K_long: i128`
@@ -260,7 +265,7 @@ The engine MUST also store, or deterministically derive from immutable configura
 - `MIN_NONZERO_MM_REQ`
 - `MIN_NONZERO_IM_REQ`
 
-This revision has **no separate `fee_revenue` state** and **no live recurring maintenance-fee accumulator**. All explicit fee proceeds and direct fee-credit repayments accrue into `I`, and §4.12 fully determines `r_last` without any additional funding-rate parameters.
+This revision has **no separate `fee_revenue` state** and **no live recurring maintenance-fee accumulator**. All explicit fee proceeds and direct fee-credit repayments accrue into `I`. The funding rate `r_last` is externally supplied by the deployment wrapper at the end of each standard-lifecycle instruction via the parameterized helper of §4.12.
 
 Global invariants:
 
@@ -276,6 +281,8 @@ All configuration values that affect economics or liveness are immutable for the
 No external instruction in this revision may change `T`, `trading_fee_bps`, `maintenance_bps`, `initial_bps`, `liquidation_fee_bps`, `liquidation_fee_cap`, `min_liquidation_abs`, `MIN_INITIAL_DEPOSIT`, `MIN_NONZERO_MM_REQ`, `MIN_NONZERO_IM_REQ`, `I_floor`, or any other parameter fixed by §§1.4, 2.2, and 4.12.
 
 A deployment that wishes to change any such value MUST migrate to a new market instance or future revision that defines an explicit safe update procedure. In particular, this revision has no runtime parameter-update instruction.
+
+The funding rate `r_last` is not a configured parameter — it is recomputed by the deployment wrapper at the end of each standard-lifecycle instruction. The `MAX_ABS_FUNDING_BPS_PER_SLOT` bound is an engine constant and is immutable.
 
 ### 2.3 Materialized-account capacity
 
@@ -755,28 +762,34 @@ This helper MUST NOT mutate `PNL_i`, `PNL_pos_tot`, `PNL_matured_pos_tot`, or an
 2. `loss_rem = use_insurance_buffer(loss_abs)`
 3. if `loss_rem > 0`, `record_uninsured_protocol_loss(loss_rem)`
 
-### 4.12 Funding-rate recomputation helper
+### 4.12 Funding-rate injection helper
 
-This revision defines a fully explicit consensus funding profile: the **zero-rate core profile**.
+The engine MUST define:
 
-The engine MUST define the pure helper:
+- `recompute_r_last_from_final_state(externally_computed_rate: i64)`
 
-- `recompute_r_last_from_final_state()`
+It MUST:
 
-It MUST read only the final post-reset state of the current instruction and MUST store the next-interval rate for this revision as:
+1. require `|externally_computed_rate| <= MAX_ABS_FUNDING_BPS_PER_SLOT`
+2. store `r_last = externally_computed_rate`
 
-1. read the final post-reset state only; intermediate pre-reset state MUST be ignored
-2. store `r_last = 0`
+The rate is computed by the deployment wrapper, not by the engine. The engine's only obligation is to validate the bound and store the value. The engine cannot verify that the supplied rate was actually derived from final post-reset state; that provenance is a separate deployment-wrapper compliance obligation.
 
-No other result is compliant in this revision.
+Deployment wrappers that implement premium-based funding SHOULD compute the rate as:
+
+- `clamp(premium_bps * k_bps / (100 * horizon_slots), -max_bps_per_slot, max_bps_per_slot)`
+
+where `premium_bps = (mark_price - index_price) * 10000 / index_price` with validated positive `index_price`, `k_bps` is a multiplier (`100 = 1.00×`), `horizon_slots > 0` converts the premium to a per-slot rate, and `max_bps_per_slot` is the wrapper-side cap with `0 <= max_bps_per_slot <= MAX_ABS_FUNDING_BPS_PER_SLOT`. Positive rate means longs pay shorts. Markets without a mark/index distinction SHOULD pass `0`.
 
 Consequences:
 
-- `|r_last| <= MAX_ABS_FUNDING_BPS_PER_SLOT` holds trivially
-- repeated invocations are idempotent
-- no compliant state transition in this revision can produce a nonzero `r_last`
-- this revision has **no live funding-transfer branch**; any future nonzero-funding transfer arithmetic is outside the normative implementation surface of this document and MUST be introduced only by a future revision with a fully explicit formula and tests
-- `fund_px_last` remains deterministic metadata and MUST equal the oracle price from the most recent successful `accrue_market_to`
+- `|r_last| <= MAX_ABS_FUNDING_BPS_PER_SLOT` holds by construction
+- repeated invocations with the same input are idempotent
+- for compliant deployments, the anti-retroactivity requirement of §5.5 is preserved: the stored rate reflects the state at the end of the instruction, applied during the next interval
+- the engine does not verify rate provenance beyond the bound check; sourcing the input from final post-reset state is a deployment-wrapper obligation
+
+In §10, any reference to `wrapper_computed_rate` is schematic shorthand for this deployment-wrapper output. For compliant deployments it is computed from the instruction's final post-reset state, but the engine core does not derive or verify that provenance internally.
+
 ---
 
 ## 5. Unified A/K side-index mechanics
@@ -880,34 +893,44 @@ The `epoch_snap_i + 1 == epoch_s` precondition is justified by the invariant of 
 
 Before any operation that depends on current market state, the engine MUST call `accrue_market_to(now_slot, oracle_price)`.
 
-This helper intentionally uses the validated oracle-price sample as both:
-
-- the mark-to-market price sample (`P_last`), and
-- the deterministic funding-basis metadata sample (`fund_px_last`).
-
-Under the zero-rate core profile of §4.12, `fund_px_last` is metadata only; no funding transfer is applied in this revision.
-
 This helper MUST:
 
 1. require trusted `now_slot >= slot_last`
 2. require validated `0 < oracle_price <= MAX_ORACLE_PRICE`
-3. snapshot `OI_long_0 = OI_eff_long` and `OI_short_0 = OI_eff_short`
-4. compute signed one-shot `ΔP = (oracle_price as i128) - (P_last as i128)`
-5. apply mark-to-market exactly once using the snapped side state:
-   - if `OI_long_0 > 0`, `K_long = checked_add_i128(K_long, (A_long * ΔP))`
-   - if `OI_short_0 > 0`, `K_short = checked_sub_i128(K_short, (A_short * ΔP))`
-6. apply no funding transfer in this revision; `r_last` is always `0` under §4.12
+3. let `dt = now_slot - slot_last`
+4. snapshot `OI_long_0 = OI_eff_long` and `OI_short_0 = OI_eff_short`; let `fund_px_0 = fund_px_last`
+5. Mark-to-market (once): compute signed `ΔP = (oracle_price as i128) - (P_last as i128)`:
+   - if `OI_long_0 > 0`, `K_long = checked_add_i128(K_long, checked_mul_i128(A_long as i128, ΔP))`
+   - if `OI_short_0 > 0`, `K_short = checked_sub_i128(K_short, checked_mul_i128(A_short as i128, ΔP))`
+6. Funding transfer (sub-stepped): if `r_last != 0` and `dt > 0` and `OI_long_0 > 0` and `OI_short_0 > 0`:
+   - let `remaining = dt`
+   - while `remaining > 0`:
+     - let `dt_sub = min(remaining, MAX_FUNDING_DT)`
+     - `fund_num_1 = checked_mul_i128(fund_px_0 as i128, r_last as i128)`
+     - `fund_num = checked_mul_i128(fund_num_1, dt_sub as i128)`
+     - `fund_term = floor_div_signed_conservative(fund_num, 10000)`
+     - `K_long = checked_sub_i128(K_long, checked_mul_i128(A_long as i128, fund_term))`
+     - `K_short = checked_add_i128(K_short, checked_mul_i128(A_short as i128, fund_term))`
+     - `remaining = remaining - dt_sub`
 7. update `slot_last = now_slot`
 8. update `P_last = oracle_price`
 9. update `fund_px_last = oracle_price`
 
-Any future nonzero-funding revision MUST replace step 6 with a fully explicit normative funding-transfer rule.
+When `r_last > 0`, each executed funding sub-step has `fund_term >= 0`, so `K_long` weakly decreases (longs weakly lose) and `K_short` weakly increases (shorts weakly gain); if `fund_term == 0`, that sub-step has no realized funding effect because of integer flooring. When `r_last < 0`, the numerator of `fund_term` is strictly negative, so `floor_div_signed_conservative` yields `fund_term <= -1`; accordingly `K_long` strictly increases (longs gain) and `K_short` strictly decreases (shorts lose). Positive non-integral quotients round down toward zero, while negative non-integral quotients round down away from zero toward negative infinity.
+
+Normative timing note: funding over the elapsed interval intentionally uses `fund_px_0`, the start-of-call snapshot of `fund_px_last`, i.e. the previous interval's closing funding-price sample. This matches `r_last`, which was injected after the prior instruction's final post-reset state. The current `oracle_price` becomes the next interval's funding-price sample only after the current funding loop completes via step 9.
+
+Conservation: given the maintained snapped equality `OI_long_0 == OI_short_0`, using the same `fund_term` for both sides ensures theoretical zero-sum under the A/K settlement law at the side-aggregate quote-PnL level for every funding sub-step and therefore for the full elapsed interval. Per-account settlement via `wide_signed_mul_div_floor_from_k_pair` floors each individual signed claim downward, so in both signs payer-side realized funding is weakly more negative than theoretical and receiver-side realized funding is weakly less positive than theoretical; aggregate realized claims therefore cannot exceed zero in sum.
+
+The mark-to-market step (5) uses `ΔP` directly and does not require sub-stepping because it is a single price-difference event, not a rate-times-time accumulation. Funding step (6) uses sub-stepping because `dt` may exceed `MAX_FUNDING_DT` and the checked product `fund_px_0 * r_last * dt_sub` must remain within `i128` bounds per the analysis of §1.7.
 
 ### 5.5 Funding anti-retroactivity
 
-Each standard-lifecycle instruction of §10 MUST invoke `recompute_r_last_from_final_state()` exactly once and only after any end-of-instruction reset handling specified by that instruction.
+Each standard-lifecycle instruction of §10 MUST invoke `recompute_r_last_from_final_state(rate)` exactly once and only after any end-of-instruction reset handling specified by that instruction.
 
-In this revision the helper always stores `0`, so the ordering has no economic effect beyond deterministic state shape. Any future nonzero-funding revision MUST preserve the same post-reset recomputation ordering when it introduces live funding transfers.
+For compliant deployments, the rate passed to this helper MUST be computed by the deployment wrapper from the instruction's final post-reset state (or from external wrapper state that reflects the post-reset condition). Intermediate pre-reset state MUST NOT influence the supplied stored rate. The engine enforces only the call ordering and bound check; it does not verify the provenance of the supplied rate.
+
+This ordering ensures that the funding rate applied in the next interval reflects the market's final state, not any transient mid-instruction condition. In particular, if an instruction triggers a side reset that zeros OI, the wrapper-supplied post-reset rate SHOULD reflect the new OI and price state, not the pre-reset conditions.
 
 ### 5.6 `enqueue_adl(ctx, liq_side, q_close_q, D)`
 
@@ -1035,6 +1058,7 @@ Once either pending-reset flag becomes true during a top-level instruction, that
 ---
 
 ## 6. Warmup and matured-profit release
+
 
 ### 6.1 Parameter
 
@@ -1328,8 +1352,10 @@ Unless explicitly noted otherwise (for example `deposit`, `deposit_fee_credits`,
 3. perform the endpoint's exact current-state inner execution
 4. call `schedule_end_of_instruction_resets(ctx)` exactly once
 5. call `finalize_end_of_instruction_resets(ctx)` exactly once
-6. recompute `r_last` exactly once from the final post-reset state
+6. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 7. if the instruction can mutate live side exposure, assert `OI_eff_long == OI_eff_short` at the end
+
+Here and below, `wrapper_computed_rate` denotes the deployment-wrapper output injected through §4.12's helper. For compliant deployments it is computed from the instruction's final post-reset state, but the core engine does not derive or verify that provenance internally.
 
 This subsection is a condensation aid only. The endpoint subsections below remain the normative source of truth for exact call ordering, including any endpoint-specific exceptions or additional guards.
 
@@ -1363,7 +1389,7 @@ Procedure:
 2. `touch_account_full(i, oracle_price, now_slot)`
 3. `schedule_end_of_instruction_resets(ctx)`
 4. `finalize_end_of_instruction_resets(ctx)`
-5. recompute `r_last` exactly once from the final post-reset state
+5. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 
 This wrapper MUST NOT materialize a missing account.
 
@@ -1373,7 +1399,7 @@ This wrapper MUST NOT materialize a missing account.
 
 A pure deposit does **not** make unresolved A/K side effects locally authoritative. Therefore, for an account with `basis_pos_q_i != 0`, the deposit path MUST NOT treat the account as truly flat and MUST NOT sweep fee debt, because unresolved current-side trading losses remain senior until a later full current-state touch.
 
-A pure deposit also MUST NOT decrement `I` or record uninsured protocol loss. Therefore, even on a currently flat stored state, if negative PnL remains after principal settlement the deposit path MUST leave that remainder in `PNL_i` for a later full accrued touch.
+A pure deposit also MUST NOT decrement `I` or record uninsured protocol loss. Therefore, even on a currently flat stored state, if negative PnL remains after principal settlement the deposit path MUST leave that remainder in `PNL_i` for a later full current-state touch.
 
 Procedure:
 
@@ -1452,7 +1478,7 @@ Procedure:
    - `V = V - amount`
 8. `schedule_end_of_instruction_resets(ctx)`
 9. `finalize_end_of_instruction_resets(ctx)`
-10. recompute `r_last` exactly once from the final post-reset state
+10. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 
 ### 10.4.1 `convert_released_pnl(i, x_req, oracle_price, now_slot)`
 
@@ -1469,7 +1495,7 @@ Procedure:
    - the ordinary touch flow has already auto-converted any released profit eligible on the now-flat state
    - `schedule_end_of_instruction_resets(ctx)`
    - `finalize_end_of_instruction_resets(ctx)`
-   - recompute `r_last` exactly once from the final post-reset state
+   - after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
    - return
 5. require `0 < x_req <= ReleasedPos_i`
 6. compute `y` using the same pre-conversion haircut rule as §7.4:
@@ -1480,7 +1506,7 @@ Procedure:
 10. require the current post-step-9 state is maintenance healthy if `effective_pos_q(i) != 0`
 11. `schedule_end_of_instruction_resets(ctx)`
 12. `finalize_end_of_instruction_resets(ctx)`
-13. recompute `r_last` exactly once from the final post-reset state
+13. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 
 A failed post-conversion maintenance check MUST revert atomically. This instruction MUST NOT materialize a missing account.
 
@@ -1546,7 +1572,7 @@ A bilateral trade is valid only if **both** participating accounts independently
 This strict risk-reducing comparison is evaluated on the actual post-step-28 state but holds only the explicit fee of the candidate trade constant for the before/after comparison. Equivalently, it compares pre-trade raw maintenance buffer against post-trade raw maintenance buffer plus that same trade fee, so pure fee friction alone cannot make a genuinely de-risking trade fail the exemption. In addition, the fee-neutral raw maintenance-equity shortfall below zero must not worsen, so a large maintenance-requirement drop from a partial close cannot be used to mask newly created bad debt from execution slippage. All execution-slippage PnL, all position / notional changes, and all other current-state liabilities still remain in the comparison. Likewise, a voluntary organic flat close whose actual post-fee state would have negative exact `Eq_maint_raw_i` MUST still be rejected rather than exiting with unpaid fee debt that could later be forgiven by reclamation.
 30. `schedule_end_of_instruction_resets(ctx)`
 31. `finalize_end_of_instruction_resets(ctx)`
-32. recompute `r_last` exactly once from the final post-reset state
+32. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 33. assert `OI_eff_long == OI_eff_short`
 
 ### 10.6 `liquidate(i, oracle_price, now_slot, policy)`
@@ -1569,7 +1595,7 @@ Procedure:
 7. if any remaining nonzero position exists after liquidation, it MUST already have been reattached via `attach_effective_position`
 8. `schedule_end_of_instruction_resets(ctx)`
 9. `finalize_end_of_instruction_resets(ctx)`
-10. recompute `r_last` exactly once from the final post-reset state
+10. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 11. assert `OI_eff_long == OI_eff_short`
 
 ### 10.7 `reclaim_empty_account(i)`
@@ -1607,7 +1633,7 @@ Procedure:
    - if liquidation or the exact touch schedules a pending reset, break
 9. `schedule_end_of_instruction_resets(ctx)`
 10. `finalize_end_of_instruction_resets(ctx)`
-11. recompute `r_last` exactly once from the final post-reset state
+11. after final reset handling, invoke `recompute_r_last_from_final_state(wrapper_computed_rate)` exactly once
 12. assert `OI_eff_long == OI_eff_short`
 
 Rules:
@@ -1699,8 +1725,8 @@ An implementation MUST include tests that cover at least:
 15. **`set_pnl` aggregate safety:** positive-PnL updates do not overflow `PNL_pos_tot` or `PNL_matured_pos_tot`.
 16. **`PNL_i == i128::MIN` forbidden:** every negation path is safe.
 17. **Trading and liquidation fee shortfalls:** unpaid explicit fees become negative `fee_credits_i`, not `PNL_i` and not `D`.
-18. **Zero-rate recomputation ordering:** every standard-lifecycle endpoint recomputes `r_last` exactly once and only from final post-reset state, and every compliant recomputation stores exactly `0`.
-19. **Zero-rate funding surface determinism:** no compliant instruction in this revision applies a funding transfer, and `fund_px_last` always equals the oracle price from the most recent successful `accrue_market_to`.
+18. **Funding rate injection ordering:** every standard-lifecycle endpoint invokes `recompute_r_last_from_final_state` exactly once after final reset handling. For compliant deployments, the supplied rate is sourced from the final post-reset state by the deployment wrapper, and the stored value satisfies `|r_last| <= MAX_ABS_FUNDING_BPS_PER_SLOT`.
+19. **Funding transfer conservation under lazy settlement:** when `r_last != 0` and both sides have OI, each funding sub-step in `accrue_market_to` applies the same `fund_term` to both sides' `K` updates, so the side-aggregate funding PnL implied by the A/K law is zero-sum per sub-step and over the full elapsed interval, given the maintained snapped equality `OI_long_0 == OI_short_0`. After any later account settlements for those sub-steps, aggregate realized funding PnL across all accounts is `≤ 0` because payer-side claims are floored downward and receiver-side claims are also floored downward from their own sign.
 20. **Flat-account negative remainder:** a flat account with negative `PNL_i` after principal exhaustion resolves through `absorb_protocol_loss` only in the allowed already-authoritative flat-account paths.
 21. **Reset finalization:** after reconciling stale accounts, the side can leave `ResetPending` and accept fresh OI again.
 22. **Deposit loss seniority:** in `deposit`, realized losses are settled from newly deposited principal before any outstanding fee debt is swept.
@@ -1719,15 +1745,15 @@ An implementation MUST include tests that cover at least:
 35. **Keeper local-touch equivalence:** the per-candidate exact local touch used inside `keeper_crank` is economically equivalent to `touch_account_full` on the same already-accrued state.
 36. **Keeper revalidation budget accounting:** `max_revalidations` bounds the number of normal exact current-state revalidation attempts on materialized accounts, including safe false positives and cleanup-only touches; missing-account skips do not count. Fatal conservative failures are instruction failures, not counted skips.
 37. **No duplicate keeper touch before liquidation:** when `keeper_crank` liquidates a candidate, it does so from the already-touched current state and does not perform a second full touch of that same candidate inside the same attempt.
-38. **Keeper local liquidation is not a nested top-level finalize:** the per-candidate keeper liquidation path executes only the already-touched local liquidation subroutine and does not call `schedule_end_of_instruction_resets`, `finalize_end_of_instruction_resets`, or `recompute_r_last_from_final_state()` mid-loop.
+38. **Keeper local liquidation is not a nested top-level finalize:** the per-candidate keeper liquidation path executes only the already-touched local liquidation subroutine and does not call `schedule_end_of_instruction_resets`, `finalize_end_of_instruction_resets`, or `recompute_r_last_from_final_state` mid-loop.
 39. **Keeper candidate-order freedom:** the engine imposes no on-chain liquidation-first ordering across keeper-supplied candidates; a cleanup-first shortlist is processed in the keeper-supplied order unless a pending reset is scheduled.
 40. **Keeper stop on pending reset:** once a candidate touch or liquidation schedules a pending reset, `keeper_crank` performs no further candidate processing before end-of-instruction reset handling.
 41. **Permissionless reset or dust progress without on-chain scan:** targeted `settle_account` calls or targeted `keeper_crank` shortlists can reconcile stale accounts on a `ResetPending` side and can also clear targeted pre-reset dust-progress accounts on a side already within its phantom-dust-clear bound, without any on-chain phase-1 search.
-42. **Post-reset funding recomputation in keeper:** `keeper_crank` recomputes `r_last` exactly once after final reset handling, and the stored value is exactly `0` under the zero-rate core profile.
+42. **Post-reset funding recomputation in keeper:** `keeper_crank` invokes `recompute_r_last_from_final_state` exactly once after final reset handling with the wrapper-supplied rate. For compliant deployments, that supplied rate is sourced from the keeper instruction's final post-reset state, and the stored value satisfies the `MAX_ABS_FUNDING_BPS_PER_SLOT` bound.
 43. **K-pair chronology correctness:** same-epoch and epoch-mismatch settlement call `wide_signed_mul_div_floor_from_k_pair(abs_basis, k_then, k_now, den)` in chronological order; a true loss cannot be settled as a gain due to swapped arguments.
 44. **Deposit true-flat guard and latent-loss seniority:** a `deposit` into an account with `basis_pos_q_i != 0` neither routes unresolved negative PnL through §7.3 nor sweeps fee debt before a later full current-state touch.
 45. **No duplicate full-close touch:** both the top-level `liquidate` path and the `keeper_crank` local liquidation path execute the already-touched full-close / bankruptcy liquidation subroutine without a second full touch or second deterministic `last_fee_slot_i` stamp.
-46. **Zero-rate funding recomputation:** `recompute_r_last_from_final_state()` always stores `0` and never reverts.
+46. **Funding rate recomputation determinism and provenance boundary:** `recompute_r_last_from_final_state(rate)` stores exactly `rate` when `|rate| <= MAX_ABS_FUNDING_BPS_PER_SLOT` and rejects otherwise. It does not derive or verify the provenance of `rate`; sourcing that input from final post-reset state is a deployment-wrapper compliance obligation.
 47. **Keeper atomicity alignment:** a normal safe / cleanup / liquidated candidate counts against `max_revalidations`, but a fatal conservative failure during exact touch or liquidation reverts the whole instruction atomically rather than being treated as a counted skip.
 48. **Exact raw maintenance-buffer comparison:** strict risk-reducing trade permission uses the exact widened signed pre/post raw maintenance buffers and cannot be satisfied solely because both sides of the comparison were clamped at the negative representation floor.
 49. **Profit-conversion reserve preservation:** converting `ReleasedPos_i = x` leaves `R_i` unchanged and reduces both `PNL_pos_tot` and `PNL_matured_pos_tot` by exactly `x`; repeated settles cannot drain reserve faster than `advance_profit_warmup`.
@@ -1752,6 +1778,11 @@ An implementation MUST include tests that cover at least:
 68. **Partial liquidation remainder nonzero:** any compliant partial liquidation satisfies `0 < q_close_q < abs(old_eff_pos_q_i)` and therefore produces strictly nonzero `new_eff_pos_q_i`; there is no zero-result partial-liquidation branch.
 69. **Positive conversion denominator:** whenever flat auto-conversion or `convert_released_pnl` consumes `x > 0` released profit, `PNL_matured_pos_tot > 0` on that state and the haircut denominator is strictly positive.
 70. **Partial-liquidation local health check survives reset scheduling:** if a partial liquidation reattaches a nonzero remainder and `enqueue_adl` schedules a pending reset in the same instruction, the instruction still evaluates the post-step local maintenance-health requirement of §9.4 on that remaining state before final reset handling; only further live-OI-dependent work is skipped.
+71. **Funding sub-stepping:** when the accrual interval exceeds `MAX_FUNDING_DT`, `accrue_market_to` splits funding into consecutive sub-steps each `≤ MAX_FUNDING_DT` slots, all using the same start-of-call funding-price sample `fund_px_0 = fund_px_last`, and the total `K` delta equals the sum of sub-step deltas.
+72. **Funding sign and floor-direction correctness:** when `r_last > 0`, each executed funding sub-step has `fund_term >= 0`, so long-side `K` weakly decreases under the update `-A_long * fund_term` while short-side `K` weakly increases under the update `+A_short * fund_term`; if `fund_term == 0`, that sub-step transfers nothing. When `r_last < 0`, each executed funding sub-step has `fund_term <= -1`, so long-side `K` strictly increases under `-A_long * fund_term` while short-side `K` strictly decreases under `+A_short * fund_term`. `fund_term` MUST be computed with `floor_div_signed_conservative`, and later account settlement via `wide_signed_mul_div_floor_from_k_pair` MUST also floor signed values; in both signs this keeps payer-side realized funding weakly more negative than theoretical and receiver-side realized funding weakly less positive than theoretical. A positive rate never transfers value from shorts to longs, and a negative rate never transfers value from longs to shorts.
+73. **Funding skip on zero OI:** `accrue_market_to` applies no funding `K` delta when either side's snapped OI is zero, even when `r_last != 0`. This prevents writing `K` state into a side that has no stored positions to realize it.
+74. **Funding rate bound enforcement:** `recompute_r_last_from_final_state` rejects any input with magnitude exceeding `MAX_ABS_FUNDING_BPS_PER_SLOT`.
+75. **Funding price-basis timing:** `accrue_market_to` snapshots `fund_px_0 = fund_px_last` at call start, uses that same `fund_px_0` for every funding sub-step in the elapsed interval, and updates `fund_px_last = oracle_price` only after the funding loop so the current oracle price becomes the next interval's funding-price sample.
 
 ## 13. Compatibility and upgrade notes
 
@@ -1760,6 +1791,6 @@ An implementation MUST include tests that cover at least:
 3. This spec deliberately rejects hidden residual matching. Bankruptcy socialization occurs only through explicit Insurance Fund usage, explicit A/K state, or junior undercollateralization.
 4. Any upgrade path from a version that did not maintain `R_i`, `PNL_matured_pos_tot`, `basis_pos_q_i`, `a_basis_i`, `stored_pos_count_*`, `stale_account_count_*`, or `phantom_dust_bound_*_q` consistently MUST complete migration before OI-increasing operations are re-enabled.
 5. Any upgrade from an earlier integrated barrier-preview or addendum-based keeper design MAY drop the on-chain preview helper and barrier-scan logic once the exact current-state `keeper_crank` path and the shortlist-oriented tests from §12 are implemented.
-6. Any future revision that wishes to re-enable nonzero funding or recurring maintenance fees MUST replace the zero-rate and fee-disabled rules of §§4.12 and 8.2 with a fully explicit normative formula, funding-transfer arithmetic, and test suite; implementation-defined formulas are non-compliant.
+6. This revision enables live funding through the A/K mechanism. The v11.31 funding-disabled profile is replaced by a parameterized `recompute_r_last_from_final_state` that accepts an externally computed rate. Deployments upgrading from v11.31 start with `r_last = 0` and begin accruing funding as soon as the wrapper passes a nonzero rate. Markets that should remain unfunded MUST always pass `0`. If a deployment wrapper implements premium-based funding with a wrapper-level parameter such as `funding_k_bps` (equivalently `k_bps` in §4.12's notation), setting that wrapper parameter to `0` is a deployment-level kill switch; equivalently, any wrapper may simply pass `0` directly.
 7. Any future revision that wishes to allow runtime parameter mutation MUST define an explicit safe update procedure that preserves warmup, margin, liquidation, and dust-floor invariants across the transition.
 
