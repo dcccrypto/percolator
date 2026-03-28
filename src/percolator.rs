@@ -3193,8 +3193,6 @@ impl RiskEngine {
             }
         }
 
-        let num_gc_closed = self.garbage_collect_dust();
-
         // Steps 9-10: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
@@ -3214,7 +3212,7 @@ impl RiskEngine {
             panic_needed: false,
             num_liquidations,
             num_liq_errors: 0,
-            num_gc_closed,
+            num_gc_closed: 0,
             last_cursor: 0,
             sweep_complete: false,
         })
@@ -3685,6 +3683,7 @@ impl RiskEngine {
         let debt = fee_debt_u128_checked(self.accounts[idx as usize].fee_credits.get());
         let capped = amount.min(debt);
         if capped == 0 {
+            self.current_slot = now_slot;
             return Ok(()); // no debt to pay off
         }
         if capped > i128::MAX as u128 {
