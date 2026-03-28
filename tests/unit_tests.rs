@@ -2512,11 +2512,13 @@ fn test_close_account_resolved_with_fee_debt() {
     let idx = engine.add_user(1000).unwrap();
     engine.deposit(idx, 50_000, 1000, 100).unwrap();
 
-    // Inject fee debt
+    // Inject fee debt of 5000
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
     let returned = engine.close_account_resolved(idx).unwrap();
-    assert_eq!(returned, 50_000, "fee debt forgiven, full capital returned");
+    // Fee debt swept from capital first (spec §7.5 fee seniority):
+    // 50_000 capital - 5_000 fee sweep = 45_000 returned
+    assert_eq!(returned, 45_000, "fee debt swept before capital return");
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
 }

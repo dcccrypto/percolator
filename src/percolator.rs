@@ -517,15 +517,27 @@ impl RiskEngine {
         );
     }
 
-    /// Create a new risk engine (spec §2.7).
-    /// `init_slot` and `init_oracle_price` are required per spec §2.7.
+    /// Create a new risk engine for testing only. Initializes with
+    /// last_oracle_price = 0 — the accrue_market_to fallback self-heals
+    /// on first call. Non-compliant with spec §2.7 but convenient for tests
+    /// that don't care about first-interval funding.
+    #[cfg(any(feature = "test", kani))]
     pub fn new(params: RiskParams) -> Self {
-        Self::new_with_market(params, 0, 0)
+        // Use price=1 to pass validation, then override to 0 for legacy test compat
+        let mut engine = Self::new_with_market(params, 0, 1);
+        engine.last_oracle_price = 0;
+        engine.funding_price_sample_last = 0;
+        engine
     }
 
     /// Create a new risk engine with explicit market initialization (spec §2.7).
+    /// Requires `0 < init_oracle_price <= MAX_ORACLE_PRICE` per spec §1.2.
     pub fn new_with_market(params: RiskParams, init_slot: u64, init_oracle_price: u64) -> Self {
         Self::validate_params(&params);
+        assert!(
+            init_oracle_price > 0 && init_oracle_price <= MAX_ORACLE_PRICE,
+            "init_oracle_price must be in (0, MAX_ORACLE_PRICE] per spec §2.7"
+        );
         let mut engine = Self {
             vault: U128::ZERO,
             insurance_fund: InsuranceFund {
@@ -589,6 +601,10 @@ impl RiskEngine {
     /// Fully canonicalizes all state — safe even on non-zeroed memory.
     pub fn init_in_place(&mut self, params: RiskParams, init_slot: u64, init_oracle_price: u64) {
         Self::validate_params(&params);
+        assert!(
+            init_oracle_price > 0 && init_oracle_price <= MAX_ORACLE_PRICE,
+            "init_oracle_price must be in (0, MAX_ORACLE_PRICE] per spec §2.7"
+        );
         self.vault = U128::ZERO;
         self.insurance_fund = InsuranceFund { balance: U128::ZERO };
         self.params = params;
@@ -1024,6 +1040,11 @@ impl RiskEngine {
             self.accounts[idx].adl_k_snap = 0i128;
             self.accounts[idx].adl_epoch_snap = 0;
         } else {
+            // Spec §4.6: abs(new_eff_pos_q) <= MAX_POSITION_ABS_Q
+            assert!(
+                new_eff_pos_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+                "attach: abs(new_eff_pos_q) exceeds MAX_POSITION_ABS_Q"
+            );
             let side = side_of_i128(new_eff_pos_q).expect("attach: nonzero must have side");
             self.set_position_basis_q(idx, new_eff_pos_q);
 
@@ -2179,7 +2200,8 @@ impl RiskEngine {
     // Account Management
     // ========================================================================
 
-    pub fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
+    test_visible! {
+    fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
         let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {
             return Err(RiskError::Overflow);
@@ -2249,8 +2271,10 @@ impl RiskEngine {
 
         Ok(idx)
     }
+    }
 
-    pub fn add_lp(
+    test_visible! {
+    fn add_lp(
         &mut self,
         matching_engine_program: [u8; 32],
         matching_engine_context: [u8; 32],
@@ -2323,6 +2347,7 @@ impl RiskEngine {
         }
 
         Ok(idx)
+    }
     }
 
     pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
@@ -2557,14 +2582,15 @@ impl RiskEngine {
         let old_eff_b = self.effective_pos_q(b as usize);
 
         // Steps 14-16: capture pre-trade MM requirements and raw maintenance buffers
-        let mm_req_pre_a = {
+        // Spec §9.1: if effective_pos_q(i) == 0, MM_req_i = 0
+        let mm_req_pre_a = if old_eff_a == 0 { 0u128 } else {
             let not = self.notional(a as usize, oracle_price);
             core::cmp::max(
                     mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
                     self.params.min_nonzero_mm_req
                 )
         };
-        let mm_req_pre_b = {
+        let mm_req_pre_b = if old_eff_b == 0 { 0u128 } else {
             let not = self.notional(b as usize, oracle_price);
             core::cmp::max(
                     mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
@@ -3472,7 +3498,10 @@ impl RiskEngine {
             self.set_capital(idx as usize, new_cap);
         }
 
-        // Step 5: Forgive fee debt (safe: position and PnL are zero)
+        // Step 5: Sweep fee debt from capital first (spec §7.5 fee seniority)
+        self.fee_debt_sweep(idx as usize);
+
+        // Step 5b: Forgive any remaining fee debt after sweep
         if self.accounts[idx as usize].fee_credits.get() < 0 {
             self.accounts[idx as usize].fee_credits = I128::ZERO;
         }
