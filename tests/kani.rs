@@ -9438,3 +9438,184 @@ fn proof_haircut_cascade_loss_plus_two_gains() {
         "C7-C: vault must not grow during cascade"
     );
 }
+
+// ============================================================================
+// PERC-8184: Insurance Fund Non-Negative Invariant
+//
+// The insurance_fund.balance is typed as U128 (unsigned), so underflow is
+// impossible at the Rust type level. These proofs verify the *semantic*
+// invariant: no engine operation ever *decreases* insurance_fund.balance.
+//
+// All code paths that mutate insurance_fund.balance:
+//   - deposit/trade fees      → balance += fee       (monotone ↑)
+//   - liquidation fees        → balance += pay       (monotone ↑)
+//   - dust sweep (GC)         → balance += dust_cap  (monotone ↑)
+//   - top_up_insurance_fund   → balance += amount    (monotone ↑)
+//   - fund_market_insurance   → isolated_balance only, global balance unchanged
+//   - withdraw                → touches vault/capital only, insurance unchanged
+//
+// Harnesses:
+//   IF-A: insurance_fund_balance_never_decreases_on_deposit
+//   IF-B: insurance_fund_balance_never_decreases_on_liquidation
+//   IF-C: insurance_fund_balance_never_decreases_on_withdraw_trade_sequence
+// ============================================================================
+
+/// IF-A: Deposit never decreases insurance fund balance.
+///
+/// Deposit can only affect insurance via fee_credits settlement — and that
+/// path only *adds* owed fees to insurance. Balance must be >= before.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_insurance_fund_balance_never_decreases_on_deposit() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(0).unwrap();
+
+    // Symbolic initial insurance balance
+    let initial_insurance: u128 = kani::any();
+    kani::assume(initial_insurance < 100_000);
+    engine.insurance_fund.balance = U128::new(initial_insurance);
+
+    // Symbolic deposit amount
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount < 50_000);
+
+    // Vault must cover the deposit (conservation: vault >= c_tot + insurance)
+    let c_tot = engine.c_tot.get();
+    engine.vault = U128::new(
+        c_tot
+            .saturating_add(initial_insurance)
+            .saturating_add(amount),
+    );
+
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    // Deposit — may succeed or fail, but insurance must never decrease either way
+    let _ = engine.deposit(user_idx, amount, 0);
+
+    let insurance_after = engine.insurance_fund.balance.get();
+
+    assert!(
+        insurance_after >= insurance_before,
+        "IF-A: insurance_fund.balance must never decrease on deposit"
+    );
+
+    // Non-vacuity: at least one call path is reachable
+    kani::cover!(true, "IF-A: deposit path reached");
+}
+
+/// IF-B: Liquidation never decreases insurance fund balance.
+///
+/// Liquidation fees flow account capital → insurance fund. The insurance
+/// balance can only stay the same (zero-capital account) or increase.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_insurance_fund_balance_never_decreases_on_liquidation() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(0).unwrap();
+
+    // Set up account below maintenance margin (undercollateralised)
+    let capital: u128 = kani::any();
+    kani::assume(capital > 0 && capital < 5_000);
+
+    // Open long position at oracle price — just enough to be below maintenance
+    let pos_size: i128 = kani::any();
+    kani::assume(pos_size > 0 && pos_size < 100);
+
+    engine.accounts[user_idx as usize].capital = U128::new(capital);
+    engine.accounts[user_idx as usize].position_size = percolator::I128::new(pos_size);
+    engine.accounts[user_idx as usize].entry_price = 1_000_000;
+
+    // Set vault/c_tot consistent with account state
+    engine.c_tot = U128::new(capital);
+    let initial_insurance: u128 = kani::any();
+    kani::assume(initial_insurance < 10_000);
+    engine.insurance_fund.balance = U128::new(initial_insurance);
+    engine.vault = U128::new(capital.saturating_add(initial_insurance));
+    engine.pnl_pos_tot = U128::ZERO;
+
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    // Attempt liquidation at oracle price — may succeed or reject, but must never
+    // decrease insurance
+    let _ = engine.liquidate_at_oracle(user_idx, 0, 1_000_000);
+
+    let insurance_after = engine.insurance_fund.balance.get();
+
+    assert!(
+        insurance_after >= insurance_before,
+        "IF-B: insurance_fund.balance must never decrease on liquidation"
+    );
+
+    // Non-vacuity: prove that the insurance-increasing path is reachable
+    kani::cover!(
+        insurance_after > insurance_before,
+        "IF-B non-vacuity: insurance increased via liquidation fee"
+    );
+}
+
+/// IF-C: Withdraw and trade sequences never decrease insurance fund balance.
+///
+/// Withdraw deducts vault and capital, never touches insurance.
+/// Trades add fees to insurance. Combined sequence must preserve monotonicity.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_insurance_fund_balance_never_decreases_on_withdraw_trade_sequence() {
+    let mut engine = RiskEngine::new(test_params());
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // Well-capitalised accounts
+    let user_cap: u128 = 100_000;
+    let lp_cap: u128 = 100_000;
+    engine.accounts[user_idx as usize].capital = U128::new(user_cap);
+    engine.accounts[lp_idx as usize].capital = U128::new(lp_cap);
+
+    // Symbolic initial insurance
+    let initial_insurance: u128 = kani::any();
+    kani::assume(initial_insurance < 10_000);
+    engine.insurance_fund.balance = U128::new(initial_insurance);
+
+    engine.vault = U128::new(
+        user_cap
+            .saturating_add(lp_cap)
+            .saturating_add(initial_insurance),
+    );
+    sync_engine_aggregates(&mut engine);
+
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    // Step 1: trade (adds fees to insurance)
+    let delta: i128 = kani::any();
+    kani::assume(delta != 0 && delta != i128::MIN);
+    kani::assume(delta.abs() < 10);
+    let matcher = NoOpMatcher;
+    let _ = engine.execute_trade(&matcher, lp_idx, user_idx, 0, 1_000_000, delta);
+
+    let insurance_mid = engine.insurance_fund.balance.get();
+    assert!(
+        insurance_mid >= insurance_before,
+        "IF-C: insurance must not decrease after trade"
+    );
+
+    // Step 2: withdraw (never touches insurance)
+    let withdraw_amount: u128 = kani::any();
+    kani::assume(withdraw_amount > 0 && withdraw_amount < 1_000);
+    let _ = engine.withdraw(user_idx, withdraw_amount, 0, 1_000_000);
+
+    let insurance_after = engine.insurance_fund.balance.get();
+    assert!(
+        insurance_after >= insurance_mid,
+        "IF-C: insurance must not decrease after withdraw"
+    );
+
+    assert!(
+        insurance_after >= insurance_before,
+        "IF-C: insurance must not decrease across full withdraw+trade sequence"
+    );
+
+    // Non-vacuity: trade path reached
+    kani::cover!(true, "IF-C: trade+withdraw sequence path reached");
+}
