@@ -6159,3 +6159,95 @@ fn test_account_field_offsets() {
     println!("last_fee_slot: {}", offset_of!(Account, last_fee_slot));
     println!("Account size: {}", std::mem::size_of::<Account>());
 }
+
+#[test]
+fn test_all_field_offsets() {
+    use std::mem::offset_of;
+    println!("vault: {}", offset_of!(RiskEngine, vault));
+    println!("insurance_fund: {}", offset_of!(RiskEngine, insurance_fund));
+    println!("params: {}", offset_of!(RiskEngine, params));
+    println!("current_slot: {}", offset_of!(RiskEngine, current_slot));
+    println!("c_tot: {}", offset_of!(RiskEngine, c_tot));
+    println!("pnl_pos_tot: {}", offset_of!(RiskEngine, pnl_pos_tot));
+    println!(
+        "total_open_interest: {}",
+        offset_of!(RiskEngine, total_open_interest)
+    );
+    println!("long_oi: {}", offset_of!(RiskEngine, long_oi));
+    println!("short_oi: {}", offset_of!(RiskEngine, short_oi));
+    println!("net_lp_pos: {}", offset_of!(RiskEngine, net_lp_pos));
+    println!("lp_sum_abs: {}", offset_of!(RiskEngine, lp_sum_abs));
+    println!("lp_max_abs: {}", offset_of!(RiskEngine, lp_max_abs));
+    println!(
+        "lp_max_abs_sweep: {}",
+        offset_of!(RiskEngine, lp_max_abs_sweep)
+    );
+    println!(
+        "emergency_oi_mode: {}",
+        offset_of!(RiskEngine, emergency_oi_mode)
+    );
+    println!(
+        "emergency_start_slot: {}",
+        offset_of!(RiskEngine, emergency_start_slot)
+    );
+    println!(
+        "last_breaker_slot: {}",
+        offset_of!(RiskEngine, last_breaker_slot)
+    );
+    println!("trade_twap_e6: {}", offset_of!(RiskEngine, trade_twap_e6));
+    println!("twap_last_slot: {}", offset_of!(RiskEngine, twap_last_slot));
+    println!("used: {}", offset_of!(RiskEngine, used));
+    println!(
+        "num_used_accounts: {}",
+        offset_of!(RiskEngine, num_used_accounts)
+    );
+    println!(
+        "next_account_id: {}",
+        offset_of!(RiskEngine, next_account_id)
+    );
+    println!("free_head: {}", offset_of!(RiskEngine, free_head));
+    println!("next_free: {}", offset_of!(RiskEngine, next_free));
+    println!("accounts: {}", offset_of!(RiskEngine, accounts));
+    println!("RiskEngine size: {}", std::mem::size_of::<RiskEngine>());
+}
+
+#[test]
+fn test_riskparams_offsets() {
+    use std::mem::offset_of;
+    println!("RiskParams size: {}", std::mem::size_of::<RiskParams>());
+    println!("RiskParams align: {}", std::mem::align_of::<RiskParams>());
+    println!(
+        "fee_tier2_threshold: {}",
+        offset_of!(RiskParams, fee_tier2_threshold)
+    );
+    println!(
+        "fee_tier3_threshold: {}",
+        offset_of!(RiskParams, fee_tier3_threshold)
+    );
+    println!(
+        "min_nonzero_mm_req: {}",
+        offset_of!(RiskParams, min_nonzero_mm_req)
+    );
+    println!(
+        "min_nonzero_im_req: {}",
+        offset_of!(RiskParams, min_nonzero_im_req)
+    );
+    println!(
+        "insurance_floor: {}",
+        offset_of!(RiskParams, insurance_floor)
+    );
+    println!(
+        "use_mark_price: {}",
+        offset_of!(RiskParams, use_mark_price_for_liquidation)
+    );
+    println!(
+        "emergency_liq_bps: {}",
+        offset_of!(RiskParams, emergency_liquidation_margin_bps)
+    );
+    println!("fee_tier2_bps: {}", offset_of!(RiskParams, fee_tier2_bps));
+    println!("fee_tier3_bps: {}", offset_of!(RiskParams, fee_tier3_bps));
+    println!(
+        "fee_split_lp_bps: {}",
+        offset_of!(RiskParams, fee_split_lp_bps)
+    );
+}
