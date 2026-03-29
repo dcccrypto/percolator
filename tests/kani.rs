@@ -9156,9 +9156,18 @@ fn proof_haircut_cascade_3plus_conservation() {
     let pnl_a_after = engine.accounts[a as usize].pnl.get();
     let pnl_b_after = engine.accounts[b as usize].pnl.get();
     let pnl_c_after = engine.accounts[c as usize].pnl.get();
-    assert!(pnl_a_after >= 0, "C7-A: A pnl must be non-negative after settle");
-    assert!(pnl_b_after >= 0, "C7-A: B pnl must be non-negative after settle");
-    assert!(pnl_c_after >= 0, "C7-A: C pnl must be non-negative after settle");
+    assert!(
+        pnl_a_after >= 0,
+        "C7-A: A pnl must be non-negative after settle"
+    );
+    assert!(
+        pnl_b_after >= 0,
+        "C7-A: B pnl must be non-negative after settle"
+    );
+    assert!(
+        pnl_c_after >= 0,
+        "C7-A: C pnl must be non-negative after settle"
+    );
 }
 
 /// C7-B: Order independence — settling 3 accounts A, B, C in two orders
