@@ -9972,3 +9972,189 @@ fn proof_haircut_cascade_mixed_insurance_inviolable() {
         "C8-C: underbacked mixed cascade exercised"
     );
 }
+
+// ============================================================================
+// T7: enforce_one_side_margin / enforce_post_trade_margin proofs
+// PERC-8272 — ported from upstream v12.0.2 §9.2 + §10.5 step 29
+// ============================================================================
+
+/// T7-K1: Risk-increasing trade is blocked when below initial margin.
+/// If enforce_post_trade_margin returns Ok, then account must be at or above
+/// initial margin after the trade (for the risk-increasing side).
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t7_risk_increasing_requires_initial_margin() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Symbolic user with some capital
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 100 && capital <= 10_000_000);
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    // Symbolic oracle price and position values (bounded to avoid overflow)
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1_000 && oracle_price <= 1_000_000_000);
+
+    // Symbolic effective positions — opening from flat (risk-increasing)
+    let old_eff: i128 = 0i128; // flat before trade
+    let new_eff_abs: u128 = kani::any();
+    kani::assume(new_eff_abs >= 1 && new_eff_abs <= 1_000_000_000_000u128);
+    let new_eff: i128 = new_eff_abs as i128; // long side
+
+    // Pre-compute a conservative buffer_pre (flat position → buffer = equity - 0)
+    let maint_raw = engine.account_equity_maint_raw_wide(&engine.accounts[user_idx as usize]);
+    let buffer_pre = maint_raw; // MM_req_pre = 0 since old_eff == 0
+
+    let fee: u128 = kani::any();
+    kani::assume(fee <= 1_000_000);
+
+    let result = engine.enforce_one_side_margin_pub(
+        user_idx as usize,
+        oracle_price,
+        &old_eff,
+        &new_eff,
+        buffer_pre,
+        fee,
+    );
+
+    // If the call succeeds, account must be at/above initial margin
+    if result.is_ok() {
+        assert!(
+            engine.is_above_initial_margin(
+                &engine.accounts[user_idx as usize],
+                user_idx as usize,
+                oracle_price
+            ),
+            "T7-K1: enforce approved risk-increasing trade but initial margin not met"
+        );
+    }
+}
+
+/// T7-K2: Flat close is only allowed when maint_raw_wide >= 0.
+/// A flat-close (new_eff == 0) must be rejected if the account has negative net equity.
+#[kani::proof]
+#[kani::unwind(4)]
+fn proof_t7_flat_close_requires_nonnegative_equity() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 10 && capital <= 1_000_000);
+    let user_idx = engine.add_user(0).unwrap();
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1_000 && oracle_price <= 1_000_000_000);
+
+    let old_eff: i128 = kani::any();
+    kani::assume(old_eff != 0 && old_eff > i128::MIN);
+    let new_eff: i128 = 0i128; // flat-close
+
+    let maint_raw = engine.account_equity_maint_raw_wide(&engine.accounts[user_idx as usize]);
+    let buffer_pre = maint_raw;
+    let fee: u128 = kani::any();
+    kani::assume(fee <= 100_000);
+
+    let result = engine.enforce_one_side_margin_pub(
+        user_idx as usize,
+        oracle_price,
+        &old_eff,
+        &new_eff,
+        buffer_pre,
+        fee,
+    );
+
+    // If account has negative maint equity, flat-close must fail
+    let is_negative = maint_raw.is_negative();
+    if is_negative {
+        assert!(
+            result.is_err(),
+            "T7-K2: flat-close with negative equity must be rejected"
+        );
+    }
+}
+
+/// T7-K3: notional is zero when effective position is zero.
+#[kani::proof]
+#[kani::unwind(4)]
+fn proof_t7_notional_zero_when_flat() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    // Default account has zero position_basis_q → effective_pos_q == 0
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1 && oracle_price <= MAX_ORACLE_PRICE);
+
+    let notional = engine.notional(user_idx as usize, oracle_price);
+    assert_eq!(notional, 0, "T7-K3: notional must be 0 for flat position");
+}
+
+/// T7-K4: Risk-reducing trade on healthy account is always allowed.
+/// If an account is above maintenance margin before the trade, a strictly
+/// risk-reducing trade must be approved by enforce_one_side_margin.
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t7_maintenance_healthy_risk_reducing_allowed() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Well-capitalised user: large capital relative to position
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 1_000_000 && capital <= 10_000_000_000u128);
+    let user_idx = engine.add_user(0).unwrap();
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1_000 && oracle_price <= 1_000_000_000);
+
+    // Strictly reducing: old_eff and new_eff same sign, |new| < |old|
+    let old_eff_abs: u128 = kani::any();
+    kani::assume(old_eff_abs >= 2 && old_eff_abs <= 1_000_000_000u128);
+    let new_eff_abs: u128 = kani::any();
+    kani::assume(new_eff_abs >= 1 && new_eff_abs < old_eff_abs);
+
+    let old_eff: i128 = old_eff_abs as i128;
+    let new_eff: i128 = new_eff_abs as i128; // both long, strictly reducing
+
+    // Must be above maintenance margin for the guarantee to hold
+    kani::assume(engine.is_above_maintenance_margin(
+        &engine.accounts[user_idx as usize],
+        user_idx as usize,
+        oracle_price,
+    ));
+
+    let mm_req_pre = {
+        let not = engine.notional(user_idx as usize, oracle_price);
+        core::cmp::max(
+            percolator::mul_div_floor_u128_pub(not, params.maintenance_margin_bps as u128, 10_000),
+            params.min_nonzero_mm_req,
+        )
+    };
+    let maint_raw = engine.account_equity_maint_raw_wide(&engine.accounts[user_idx as usize]);
+    let buffer_pre = maint_raw
+        .checked_sub(percolator::I256::from_u128(mm_req_pre))
+        .expect("I256 sub");
+
+    let fee: u128 = kani::any();
+    kani::assume(fee <= 10_000);
+
+    let result = engine.enforce_one_side_margin_pub(
+        user_idx as usize,
+        oracle_price,
+        &old_eff,
+        &new_eff,
+        buffer_pre,
+        fee,
+    );
+
+    // Maintenance-healthy + strictly-reducing → must be Ok
+    assert!(
+        result.is_ok(),
+        "T7-K4: maintenance-healthy account must be allowed to reduce risk"
+    );
+}

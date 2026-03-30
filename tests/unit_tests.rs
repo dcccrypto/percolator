@@ -6390,9 +6390,8 @@ fn test_keeper_crank_runs_end_of_instruction_lifecycle() {
     engine.adl_coeff_short = 55;
 
     let oracle_price = 1_000_000u64;
-    engine
-        .keeper_crank(caller_idx, 1, oracle_price, 0, false)
-        .unwrap();
+    // keeper_crank(now_slot, oracle_price, ordered_candidates, max_revalidations, funding_rate)
+    engine.keeper_crank(1, oracle_price, &[], 0, 0i64).unwrap();
 
     // Lifecycle should have fired: ResetPending + OI==0 → Normal
     assert_eq!(
