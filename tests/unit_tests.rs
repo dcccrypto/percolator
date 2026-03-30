@@ -6360,3 +6360,64 @@ fn test_oi_eff_fields_initialized_to_zero() {
     assert_eq!(e.adl_mult_long, 0);
     assert_eq!(e.adl_mult_short, 0);
 }
+
+// PERC-8269: InstructionContext lifecycle wiring tests
+// Verify that execute_trade and keeper_crank invoke run_end_of_instruction_lifecycle,
+// transitioning ResetPending sides to Normal when OI has drained to zero.
+
+#[test]
+fn test_execute_trade_runs_end_of_instruction_lifecycle() {
+    use percolator::SideMode;
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user_idx = engine.add_user(0).unwrap();
+    let lp_idx = engine.add_lp([1u8; 32], [2u8; 32], 0).unwrap();
+
+    engine.deposit(user_idx, 100_000, 0).unwrap();
+    engine.accounts[lp_idx as usize].capital = U128::new(100_000);
+    engine.vault += 100_000;
+
+    // Simulate a long side in ResetPending with OI already zero
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.oi_eff_long_q = 0;
+    engine.adl_mult_long = 77;
+
+    // Execute a short trade (does not touch long side OI)
+    let oracle_price = 1_000_000u64;
+    engine
+        .execute_trade(&MATCHER, lp_idx, user_idx, 0, oracle_price, -100)
+        .unwrap();
+
+    // Lifecycle should have fired: ResetPending + OI==0 → Normal
+    assert_eq!(
+        engine.side_mode_long,
+        SideMode::Normal,
+        "execute_trade must run end-of-instruction lifecycle"
+    );
+    assert_eq!(engine.adl_mult_long, 0, "adl_mult_long must be cleared");
+}
+
+#[test]
+fn test_keeper_crank_runs_end_of_instruction_lifecycle() {
+    use percolator::SideMode;
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let caller_idx = engine.add_user(0).unwrap();
+    engine.deposit(caller_idx, 10_000, 0).unwrap();
+
+    // Simulate a short side in ResetPending with OI already zero
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.oi_eff_short_q = 0;
+    engine.adl_coeff_short = 55;
+
+    let oracle_price = 1_000_000u64;
+    engine
+        .keeper_crank(caller_idx, 1, oracle_price, 0, false)
+        .unwrap();
+
+    // Lifecycle should have fired: ResetPending + OI==0 → Normal
+    assert_eq!(
+        engine.side_mode_short,
+        SideMode::Normal,
+        "keeper_crank must run end-of-instruction lifecycle"
+    );
+    assert_eq!(engine.adl_coeff_short, 0, "adl_coeff_short must be cleared");
+}
