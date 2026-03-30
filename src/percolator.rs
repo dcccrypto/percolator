@@ -139,11 +139,11 @@ pub struct Account {
     /// Realized PNL from trading (can be positive or negative)
     pub pnl: I128,
 
-    /// Trade entry price (oracle e6 at position open).
-    /// Preserved across crank settlements for frontend display.
-    /// Set only in execute_trade when position goes from flat to non-flat.
-    /// Note: u64 to match on-chain slab layout (8 bytes, not 16)
-    pub reserved_pnl: u64,
+    /// Reserved positive PnL (R_i, spec §2.1): the portion of positive PnL still under warmup.
+    /// Tracks how much of max(PNL_i, 0) is "reserved" (not yet matured/released).
+    /// Invariant: 0 <= reserved_pnl <= max(PNL_i, 0)
+    /// Migrated from u64 → u128 in PERC-8267 to match upstream spec §2.1.
+    pub reserved_pnl: u128,
 
     // ========================================
     // Warmup (embedded, no separate struct)
@@ -214,7 +214,7 @@ fn empty_account() -> Account {
         capital: U128::ZERO,
         kind: AccountKind::User,
         pnl: I128::ZERO,
-        reserved_pnl: 0,
+        reserved_pnl: 0u128,
         warmup_started_at_slot: 0,
         warmup_slope_per_step: U128::ZERO,
         position_size: I128::ZERO,
@@ -600,6 +600,12 @@ pub struct RiskEngine {
     /// Maintained incrementally via set_pnl() helper.
     pub pnl_pos_tot: U128,
 
+    /// Sum of all matured (released) positive PnL: PNL_matured_pos_tot = Σ max(PNL_i - R_i, 0)
+    /// "Matured" = positive PnL that is past warmup (released from reserve).
+    /// Used as haircut denominator per spec §3.2 (v11.21+).
+    /// Maintained by set_pnl, set_reserved_pnl, and consume_released_pnl helpers.
+    pub pnl_matured_pos_tot: u128,
+
     // ========================================
     // Crank Cursors (bounded scan support)
     // ========================================
@@ -950,6 +956,7 @@ impl RiskEngine {
             short_oi: U128::ZERO,
             c_tot: U128::ZERO,
             pnl_pos_tot: U128::ZERO,
+            pnl_matured_pos_tot: 0u128,
             liq_cursor: 0,
             gc_cursor: 0,
             last_full_sweep_start_slot: 0,
@@ -1108,26 +1115,129 @@ impl RiskEngine {
     // O(1) Aggregate Helpers (spec §4)
     // ========================================
 
-    /// Mandatory helper: set account PnL and maintain pnl_pos_tot aggregate (spec §4.2).
-    /// All code paths that modify PnL MUST call this.
+    /// set_pnl (spec §4.4): update PNL_i and maintain pnl_pos_tot + pnl_matured_pos_tot.
+    ///
+    /// Reserve-first semantics:
+    ///   - If PnL increases: new profits go to reserve first (not yet matured).
+    ///   - If PnL decreases: losses drain the released portion first, then reserve.
+    ///
+    /// All code paths that modify PnL MUST call this helper.
     #[inline]
     pub fn set_pnl(&mut self, idx: usize, new_pnl: i128) {
-        let old = self.accounts[idx].pnl.get();
-        let old_pos = if old > 0 { old as u128 } else { 0 };
-        let new_pos = if new_pnl > 0 { new_pnl as u128 } else { 0 };
-        self.pnl_pos_tot = U128::new(
-            self.pnl_pos_tot
-                .get()
-                .saturating_add(new_pos)
-                .saturating_sub(old_pos),
-        );
-        self.accounts[idx].pnl = I128::new(new_pnl);
-        // §INV PA1: Clamp reserved_pnl to max(new_pnl, 0) so invariant
-        // reserved_pnl <= max(pnl, 0) is maintained whenever PnL decreases.
-        let max_reserved = if new_pnl > 0 { new_pnl as u64 } else { 0 };
-        if self.accounts[idx].reserved_pnl > max_reserved {
-            self.accounts[idx].reserved_pnl = max_reserved;
+        let old_pnl = self.accounts[idx].pnl.get();
+        let old_pos = if old_pnl > 0 { old_pnl as u128 } else { 0u128 };
+        let old_r = self.accounts[idx].reserved_pnl;
+        // released = max(PNL_i, 0) - R_i  (matured portion)
+        let old_rel = old_pos.saturating_sub(old_r);
+
+        let new_pos = if new_pnl > 0 { new_pnl as u128 } else { 0u128 };
+
+        // Compute new reserve: reserve-first semantics.
+        let new_r = if new_pos > old_pos {
+            // Increase: new profits go to reserve (no change to released).
+            let gain = new_pos - old_pos;
+            old_r.saturating_add(gain).min(new_pos)
+        } else {
+            // Decrease or flat: losses drain released first, then reserve.
+            let loss = old_pos.saturating_sub(new_pos);
+            // Released portion absorbs loss first.
+            let released_loss = loss.min(old_rel);
+            let remaining_loss = loss.saturating_sub(released_loss);
+            old_r.saturating_sub(remaining_loss).min(new_pos)
+        };
+        let new_rel = new_pos.saturating_sub(new_r);
+
+        // Update pnl_pos_tot
+        if new_pos > old_pos {
+            let delta = new_pos - old_pos;
+            self.pnl_pos_tot = U128::new(self.pnl_pos_tot.get().saturating_add(delta));
+        } else if old_pos > new_pos {
+            let delta = old_pos - new_pos;
+            self.pnl_pos_tot = U128::new(self.pnl_pos_tot.get().saturating_sub(delta));
         }
+
+        // Update pnl_matured_pos_tot
+        if new_rel > old_rel {
+            let delta = new_rel - old_rel;
+            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.saturating_add(delta);
+        } else if old_rel > new_rel {
+            let delta = old_rel - new_rel;
+            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.saturating_sub(delta);
+        }
+
+        // Write fields
+        self.accounts[idx].pnl = I128::new(new_pnl);
+        self.accounts[idx].reserved_pnl = new_r;
+    }
+
+    /// set_reserved_pnl (spec §4.3): update R_i and maintain pnl_matured_pos_tot.
+    ///
+    /// Used when warmup slope triggers partial release of reserves (R decreases → matured increases).
+    /// Asserts: new_r <= max(PNL_i, 0) (R cannot exceed positive PnL).
+    #[inline]
+    pub fn set_reserved_pnl(&mut self, idx: usize, new_r: u128) {
+        let pos = {
+            let p = self.accounts[idx].pnl.get();
+            if p > 0 {
+                p as u128
+            } else {
+                0u128
+            }
+        };
+        debug_assert!(
+            new_r <= pos,
+            "set_reserved_pnl: new_r ({}) > max(PNL_i, 0) ({})",
+            new_r,
+            pos
+        );
+        let new_r = new_r.min(pos); // clamp defensively
+
+        let old_r = self.accounts[idx].reserved_pnl;
+        let old_rel = pos.saturating_sub(old_r);
+        let new_rel = pos.saturating_sub(new_r);
+
+        // Update pnl_matured_pos_tot
+        if new_rel > old_rel {
+            let delta = new_rel - old_rel;
+            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.saturating_add(delta);
+        } else if old_rel > new_rel {
+            let delta = old_rel - new_rel;
+            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.saturating_sub(delta);
+        }
+
+        self.accounts[idx].reserved_pnl = new_r;
+    }
+
+    /// consume_released_pnl (spec §4.4.1): remove `x` matured released positive PnL from
+    /// account without touching R_i. Used for profit-to-capital conversions.
+    ///
+    /// Caller must ensure x <= (max(PNL_i, 0) - R_i).
+    #[inline]
+    pub fn consume_released_pnl(&mut self, idx: usize, x: u128) {
+        debug_assert!(x > 0, "consume_released_pnl: x must be > 0");
+        let old_pos = {
+            let p = self.accounts[idx].pnl.get();
+            if p > 0 {
+                p as u128
+            } else {
+                0u128
+            }
+        };
+        let old_r = self.accounts[idx].reserved_pnl;
+        let old_rel = old_pos.saturating_sub(old_r);
+        debug_assert!(x <= old_rel, "consume_released_pnl: x > released portion");
+        let x = x.min(old_rel); // clamp defensively
+
+        // Update pnl_pos_tot
+        self.pnl_pos_tot = U128::new(self.pnl_pos_tot.get().saturating_sub(x));
+        // Update pnl_matured_pos_tot
+        self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.saturating_sub(x);
+
+        // Reduce PNL_i by x (R_i unchanged)
+        let x_i128 = x.min(i128::MAX as u128) as i128;
+        let new_pnl = self.accounts[idx].pnl.get().saturating_sub(x_i128);
+        self.accounts[idx].pnl = I128::new(new_pnl);
+        // R_i stays unchanged; new released = (new_pos - old_r) which is now (old_rel - x)
     }
 
     /// Helper: set account capital and maintain c_tot aggregate (spec §4.1).
@@ -1142,28 +1252,40 @@ impl RiskEngine {
         self.accounts[idx].capital = U128::new(new_capital);
     }
 
-    /// Recompute c_tot and pnl_pos_tot from account data. For test use after direct state mutation.
+    /// Recompute c_tot, pnl_pos_tot, and pnl_matured_pos_tot from account data.
+    /// For test use after direct state mutation.
     pub fn recompute_aggregates(&mut self) {
         let mut c_tot = 0u128;
         let mut pnl_pos_tot = 0u128;
-        self.for_each_used(|_idx, account| {
+        let mut pnl_matured_pos_tot = 0u128;
+        for idx in 0..MAX_ACCOUNTS {
+            if !self.is_used(idx) {
+                continue;
+            }
+            let account = &self.accounts[idx];
             c_tot = c_tot.saturating_add(account.capital.get());
             let pnl = account.pnl.get();
             if pnl > 0 {
-                pnl_pos_tot = pnl_pos_tot.saturating_add(pnl as u128);
+                let pos = pnl as u128;
+                pnl_pos_tot = pnl_pos_tot.saturating_add(pos);
+                let released = pos.saturating_sub(account.reserved_pnl);
+                pnl_matured_pos_tot = pnl_matured_pos_tot.saturating_add(released);
             }
-        });
+        }
         self.c_tot = U128::new(c_tot);
         self.pnl_pos_tot = U128::new(pnl_pos_tot);
+        self.pnl_matured_pos_tot = pnl_matured_pos_tot;
     }
 
-    /// Compute haircut ratio (h_num, h_den) per spec §3.2.
-    /// h = min(Residual, PNL_pos_tot) / PNL_pos_tot where Residual = max(0, V - C_tot - I).
-    /// Returns (1, 1) when PNL_pos_tot == 0.
+    /// Compute haircut ratio (h_num, h_den) per spec §3.2 (v11.21+).
+    /// Uses pnl_matured_pos_tot as denominator: only matured/released PnL participates.
+    /// h = min(Residual, PNL_matured_pos_tot) / PNL_matured_pos_tot
+    ///   where Residual = max(0, V - C_tot - I).
+    /// Returns (1, 1) when PNL_matured_pos_tot == 0 (no mature PnL to haircut).
     #[inline]
     pub fn haircut_ratio(&self) -> (u128, u128) {
-        let pnl_pos_tot = self.pnl_pos_tot.get();
-        if pnl_pos_tot == 0 {
+        let pnl_matured = self.pnl_matured_pos_tot;
+        if pnl_matured == 0 {
             return (1, 1);
         }
         let total_insurance =
@@ -1173,8 +1295,8 @@ impl RiskEngine {
             .get()
             .saturating_sub(self.c_tot.get())
             .saturating_sub(total_insurance);
-        let h_num = core::cmp::min(residual, pnl_pos_tot);
-        (h_num, pnl_pos_tot)
+        let h_num = core::cmp::min(residual, pnl_matured);
+        (h_num, pnl_matured)
     }
 
     /// Compute effective positive PnL after haircut for a given account PnL (spec §3.3).
@@ -1552,7 +1674,7 @@ impl RiskEngine {
         let old_avail_gross = {
             let pnl = self.accounts[idx as usize].pnl.get();
             if pnl > 0 {
-                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl as u128)
+                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl)
             } else {
                 0
             }
@@ -1565,7 +1687,7 @@ impl RiskEngine {
         let new_avail_gross = {
             let pnl = self.accounts[idx as usize].pnl.get();
             if pnl > 0 {
-                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl as u128)
+                (pnl as u128).saturating_sub(self.accounts[idx as usize].reserved_pnl)
             } else {
                 0
             }
@@ -3680,6 +3802,106 @@ impl RiskEngine {
         }
     }
 
+    /// Eq_maint_raw_i in exact I256 (spec §3.4 "transient widened signed type").
+    ///
+    /// Eq_maint_raw_i = C_i + PNL_i - FeeDebt_i
+    ///
+    /// MUST be used for strict before/after maintenance-buffer comparisons to
+    /// avoid saturation masking real changes. No clamping.
+    pub fn account_equity_maint_raw_wide(&self, account: &Account) -> I256 {
+        let cap = I256::from_u128(account.capital.get());
+        let pnl = I256::from_i128(account.pnl.get());
+        let fee_debt = if account.fee_credits.is_negative() {
+            I256::from_u128(neg_i128_to_u128(account.fee_credits.get()))
+        } else {
+            I256::ZERO
+        };
+        cap.checked_add(pnl)
+            .expect("I256 add overflow: cap + pnl")
+            .checked_sub(fee_debt)
+            .expect("I256 sub overflow: - fee_debt")
+    }
+
+    /// Eq_maint_raw_i clamped to i128 (spec §3.4 saturation rule).
+    /// Positive overflow → i128::MAX; negative overflow → i128::MIN + 1.
+    pub fn account_equity_maint_raw(&self, account: &Account) -> i128 {
+        let wide = self.account_equity_maint_raw_wide(account);
+        match wide.try_into_i128() {
+            Some(v) => v,
+            None => {
+                if wide.is_negative() {
+                    i128::MIN + 1
+                } else {
+                    i128::MAX
+                }
+            }
+        }
+    }
+
+    /// Eq_init_raw_i (spec §3.4): C_i + min(PNL_i, 0) + PNL_eff_matured_i - FeeDebt_i
+    ///
+    /// Uses haircutted matured PnL only — stricter than maintenance equity.
+    /// Returns i128 with saturation on overflow per spec §3.4.
+    pub fn account_equity_init_raw(&self, account: &Account) -> i128 {
+        let cap = I256::from_u128(account.capital.get());
+        let neg_pnl_val = if account.pnl.get() < 0 {
+            account.pnl.get()
+        } else {
+            0i128
+        };
+        let neg_pnl = I256::from_i128(neg_pnl_val);
+        // Effective matured PnL: apply haircut to the matured (released) portion only
+        let released = {
+            let pos = if account.pnl.get() > 0 {
+                account.pnl.get() as u128
+            } else {
+                0u128
+            };
+            pos.saturating_sub(account.reserved_pnl)
+        };
+        let eff_matured = {
+            let (h_num, h_den) = self.haircut_ratio();
+            if h_den == 0 {
+                released
+            } else {
+                mul_u128(released, h_num) / h_den
+            }
+        };
+        let eff_mat_wide = I256::from_u128(eff_matured);
+        let fee_debt = if account.fee_credits.is_negative() {
+            I256::from_u128(neg_i128_to_u128(account.fee_credits.get()))
+        } else {
+            I256::ZERO
+        };
+        let sum = cap
+            .checked_add(neg_pnl)
+            .expect("I256 add overflow: cap + neg_pnl")
+            .checked_add(eff_mat_wide)
+            .expect("I256 add overflow: + eff_matured")
+            .checked_sub(fee_debt)
+            .expect("I256 sub overflow: - fee_debt");
+        match sum.try_into_i128() {
+            Some(v) => v,
+            None => {
+                if sum.is_negative() {
+                    i128::MIN + 1
+                } else {
+                    i128::MAX
+                }
+            }
+        }
+    }
+
+    /// Eq_init_net_i (spec §3.4): max(0, Eq_init_raw_i).
+    pub fn account_equity_init_net(&self, account: &Account) -> i128 {
+        let raw = self.account_equity_init_raw(account);
+        if raw < 0 {
+            0
+        } else {
+            raw
+        }
+    }
+
     /// Mark-to-market equity at oracle price with haircut (the ONLY correct equity for margin checks).
     /// equity_mtm = max(0, C_i + min(PNL_i, 0) + PNL_eff_pos_i + mark_pnl)
     /// where PNL_eff_pos_i = floor(max(PNL_i, 0) * h_num / h_den) per spec §3.3.
@@ -4214,17 +4436,18 @@ impl RiskEngine {
         // aggregates (c_tot, pnl_pos_tot) updated atomically below.
         user.pnl = I128::new(new_user_pnl);
         // Save trade entry price when opening from flat (reserved_pnl = trade_entry_price)
+        // Note: reserved_pnl is now u128; oracle_price is u64 — cast is safe.
         if user.position_size.is_zero() && new_user_position != 0 {
-            user.reserved_pnl = oracle_price;
+            user.reserved_pnl = oracle_price as u128;
         } else if new_user_position == 0 {
-            user.reserved_pnl = 0; // Clear on close
+            user.reserved_pnl = 0u128; // Clear on close
         }
         // §INV PA1: Clamp reserved_pnl to max(pnl, 0) to maintain invariant.
         // Trade PnL may reduce pnl below reserved_pnl; without clamping,
         // valid_state() / canonical_inv() PA1 check fails (Kani finding).
         {
-            let max_reserved = if new_user_pnl > 0 {
-                new_user_pnl as u64
+            let max_reserved: u128 = if new_user_pnl > 0 {
+                new_user_pnl as u128
             } else {
                 0
             };
@@ -4244,13 +4467,17 @@ impl RiskEngine {
         lp.pnl = I128::new(new_lp_pnl);
         // Save trade entry price for LP as well
         if lp.position_size.is_zero() && new_lp_position != 0 {
-            lp.reserved_pnl = oracle_price;
+            lp.reserved_pnl = oracle_price as u128;
         } else if new_lp_position == 0 {
-            lp.reserved_pnl = 0;
+            lp.reserved_pnl = 0u128;
         }
         // §INV PA1: Clamp reserved_pnl for LP as well
         {
-            let max_reserved = if new_lp_pnl > 0 { new_lp_pnl as u64 } else { 0 };
+            let max_reserved: u128 = if new_lp_pnl > 0 {
+                new_lp_pnl as u128
+            } else {
+                0
+            };
             if lp.reserved_pnl > max_reserved {
                 lp.reserved_pnl = max_reserved;
             }
