@@ -1345,8 +1345,7 @@ impl RiskEngine {
     // accrue_market_to (spec §5.4)
     // ========================================================================
 
-    test_visible! {
-    fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64) -> Result<()> {
+    pub fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64) -> Result<()> {
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
@@ -1435,7 +1434,6 @@ impl RiskEngine {
         self.funding_price_sample_last = oracle_price;
 
         Ok(())
-    }
     }
 
     /// recompute_r_last_from_final_state (spec v12.0.2 §4.12).
