@@ -81,6 +81,10 @@ pub const FORCE_REALIZE_BUDGET_PER_CRANK: u16 = 32;
 /// 10^15 allows prices up to $1B with 6 decimal places
 pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000_000;
 
+/// POS_SCALE = 1_000_000 (spec §1.2): position_basis_q is in micro-units.
+/// notional = floor(|effective_pos_q| * oracle_price / POS_SCALE)
+pub const POS_SCALE: u128 = 1_000_000;
+
 /// Maximum absolute position size (prevents overflow in mark_pnl calculations)
 /// 10^20 allows positions up to 100 billion units
 /// Combined with MAX_ORACLE_PRICE, guarantees mark_pnl multiply won't overflow i128
@@ -100,7 +104,7 @@ use wide_math::{
     fee_debt_u128_checked, floor_div_signed_conservative_i128, mul_div_floor_u128,
     saturating_mul_u128_u64, wide_mul_div_floor_u128, wide_signed_mul_div_floor_from_k_pair,
 };
-pub use wide_math::{I256, U256};
+pub use wide_math::{mul_div_floor_u128 as mul_div_floor_u128_pub, I256, U256};
 
 // ============================================================================
 // Core Data Structures
@@ -2717,8 +2721,11 @@ impl RiskEngine {
 
         // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
         // that were triggered during this ADL execution (spec §5.7-5.8).
+        // Use stored funding_rate_bps_per_slot_last — NOT 0i64 — to avoid
+        // overwriting the funding rate with a stale zero (security issue: LOW).
         let mut ctx = InstructionContext::new();
-        self.run_end_of_instruction_lifecycle(&mut ctx)?;
+        let stored_rate = self.funding_rate_bps_per_slot_last;
+        self.run_end_of_instruction_lifecycle(&mut ctx, stored_rate)?;
 
         Ok(result)
     }
@@ -3202,17 +3209,14 @@ impl RiskEngine {
             });
         }
 
-        // End-of-instruction lifecycle for two-phase path
+        // End-of-instruction lifecycle for two-phase path (single call — funding_rate from caller).
+        // Previously there was a second call with 0i64 here (stale copy) — removed to prevent
+        // overwriting funding_rate_bps_per_slot_last with zero (security issue: LOW).
         self.run_end_of_instruction_lifecycle(&mut ctx, funding_rate)?;
 
         let num_gc_closed = self.garbage_collect_dust();
         let force_realize_needed = self.force_realize_active();
         let panic_needed = false;
-
-        // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
-        // scheduled during this crank (spec §5.7-5.8).
-        let mut ctx = InstructionContext::new();
-        self.run_end_of_instruction_lifecycle(&mut ctx)?;
 
         Ok(CrankOutcome {
             advanced,
@@ -4709,6 +4713,291 @@ impl RiskEngine {
         }
     }
 
+    // ========================================================================
+    // Margin helpers (spec §9.1) — ported from upstream T7
+    // ========================================================================
+
+    /// notional (spec §9.1): floor(|effective_pos_q| * oracle_price / POS_SCALE)
+    pub fn notional(&self, idx: usize, oracle_price: u64) -> u128 {
+        let eff = self.effective_pos_q(idx);
+        if eff == 0 {
+            return 0;
+        }
+        let abs_eff = eff.unsigned_abs();
+        mul_div_floor_u128(abs_eff, oracle_price as u128, POS_SCALE)
+    }
+
+    /// account_equity_net (spec §3.4): max(0, Eq_maint_raw_i)
+    pub fn account_equity_net(&self, account: &Account, _oracle_price: u64) -> i128 {
+        let raw = self.account_equity_maint_raw(account);
+        if raw < 0 {
+            0i128
+        } else {
+            raw
+        }
+    }
+
+    /// is_above_maintenance_margin (spec §9.1): Eq_net_i > MM_req_i
+    pub fn is_above_maintenance_margin(
+        &self,
+        account: &Account,
+        idx: usize,
+        oracle_price: u64,
+    ) -> bool {
+        let eq_net = self.account_equity_net(account, oracle_price);
+        let eff = self.effective_pos_q(idx);
+        if eff == 0 {
+            return eq_net > 0;
+        }
+        let not = self.notional(idx, oracle_price);
+        let proportional =
+            mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000);
+        let mm_req = core::cmp::max(proportional, self.params.min_nonzero_mm_req);
+        let mm_req_i128 = if mm_req > i128::MAX as u128 {
+            i128::MAX
+        } else {
+            mm_req as i128
+        };
+        eq_net > mm_req_i128
+    }
+
+    /// is_above_maintenance_margin_from_notional: variant that accepts pre-computed
+    /// notional (from the caller's `new_eff` param) instead of re-reading engine state.
+    /// Used inside enforce_one_side_margin to avoid stale position_basis_q reads.
+    fn is_above_maintenance_margin_from_notional(
+        &self,
+        account: &Account,
+        notional: u128,
+        oracle_price: u64,
+    ) -> bool {
+        let eq_net = self.account_equity_net(account, oracle_price);
+        if notional == 0 {
+            return eq_net > 0;
+        }
+        let proportional =
+            mul_div_floor_u128(notional, self.params.maintenance_margin_bps as u128, 10_000);
+        let mm_req = core::cmp::max(proportional, self.params.min_nonzero_mm_req);
+        let mm_req_i128 = if mm_req > i128::MAX as u128 {
+            i128::MAX
+        } else {
+            mm_req as i128
+        };
+        eq_net > mm_req_i128
+    }
+
+    /// is_above_initial_margin (spec §9.1): Eq_init_raw_i >= IM_req_i
+    pub fn is_above_initial_margin(
+        &self,
+        account: &Account,
+        idx: usize,
+        oracle_price: u64,
+    ) -> bool {
+        let eq_init_raw = self.account_equity_init_raw(account);
+        let eff = self.effective_pos_q(idx);
+        if eff == 0 {
+            return eq_init_raw >= 0;
+        }
+        let not = self.notional(idx, oracle_price);
+        let proportional = mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
+        let im_req = core::cmp::max(proportional, self.params.min_nonzero_im_req);
+        let im_req_i128 = if im_req > i128::MAX as u128 {
+            i128::MAX
+        } else {
+            im_req as i128
+        };
+        eq_init_raw >= im_req_i128
+    }
+
+    /// enforce_post_trade_margin (spec §10.5 step 29):
+    /// Calls enforce_one_side_margin for both sides of a trade.
+    /// `fee` is the trading fee charged to side `a` (user). Side `b` (LP) pays no fee
+    /// — pass fee=0 for LP so the §9.2 exemption uses the correct fee-neutral buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enforce_post_trade_margin(
+        &self,
+        a: usize,
+        b: usize,
+        oracle_price: u64,
+        old_eff_a: &i128,
+        new_eff_a: &i128,
+        old_eff_b: &i128,
+        new_eff_b: &i128,
+        buffer_pre_a: I256,
+        buffer_pre_b: I256,
+        fee: u128,
+    ) -> Result<()> {
+        // `a` is the user (fee payer); `b` is the LP (no fee charged — fee=0).
+        self.enforce_one_side_margin(a, oracle_price, old_eff_a, new_eff_a, buffer_pre_a, fee)?;
+        self.enforce_one_side_margin(b, oracle_price, old_eff_b, new_eff_b, buffer_pre_b, 0u128)?;
+        Ok(())
+    }
+
+    /// enforce_one_side_margin (spec §10.5 step 29, v12.0.2 §9.2):
+    /// After a trade, gate on initial margin (risk-increasing) or maintenance margin
+    /// (risk-reducing). Strict-reducing trades that improve the fee-neutral buffer are
+    /// exempted from liquidation (spec §9.2 exemption).
+    pub fn enforce_one_side_margin_pub(
+        &self,
+        idx: usize,
+        oracle_price: u64,
+        old_eff: &i128,
+        new_eff: &i128,
+        buffer_pre: I256,
+        fee: u128,
+    ) -> Result<()> {
+        self.enforce_one_side_margin(idx, oracle_price, old_eff, new_eff, buffer_pre, fee)
+    }
+
+    fn enforce_one_side_margin(
+        &self,
+        idx: usize,
+        oracle_price: u64,
+        old_eff: &i128,
+        new_eff: &i128,
+        buffer_pre: I256,
+        fee: u128,
+    ) -> Result<()> {
+        if *new_eff == 0 {
+            // v12.0.2 §10.5 step 29: flat-close guard — Eq_maint_raw_i >= 0.
+            // Prevents flat exits with negative net wealth from fee debt.
+            let maint_raw = self.account_equity_maint_raw_wide(&self.accounts[idx]);
+            if maint_raw.is_negative() {
+                return Err(RiskError::Undercollateralized);
+            }
+            return Ok(());
+        }
+
+        let abs_old: u128 = if *old_eff == 0 {
+            0u128
+        } else {
+            old_eff.unsigned_abs()
+        };
+        let abs_new = new_eff.unsigned_abs();
+
+        // Determine if risk-increasing (spec §9.2)
+        let risk_increasing = abs_new > abs_old
+            || (*old_eff > 0 && *new_eff < 0)
+            || (*old_eff < 0 && *new_eff > 0)
+            || *old_eff == 0;
+
+        // Determine if strictly risk-reducing (spec §9.2)
+        let strictly_reducing = *old_eff != 0
+            && *new_eff != 0
+            && ((*old_eff > 0 && *new_eff > 0) || (*old_eff < 0 && *new_eff < 0))
+            && abs_new < abs_old;
+
+        // NOTE: Notional is computed directly from `new_eff` param (not re-read from
+        // engine state via effective_pos_q) to avoid stale position_basis_q reads after
+        // execute_trade mutations. Security issue: HIGH — fix per PR#69 review.
+        let notional_from_new_eff = if abs_new == 0 {
+            0u128
+        } else {
+            mul_div_floor_u128(abs_new, oracle_price as u128, POS_SCALE)
+        };
+
+        if risk_increasing {
+            // Require initial-margin healthy using Eq_init_raw_i
+            // Uses is_above_initial_margin which reads equity from account state (capital/pnl)
+            // and IM requirement computed from new_eff via notional_from_new_eff.
+            let im_req = {
+                let proportional = mul_div_floor_u128(
+                    notional_from_new_eff,
+                    self.params.initial_margin_bps as u128,
+                    10_000,
+                );
+                core::cmp::max(proportional, self.params.min_nonzero_im_req)
+            };
+            let im_req_i128 = if im_req > i128::MAX as u128 {
+                i128::MAX
+            } else {
+                im_req as i128
+            };
+            let eq_init_raw = self.account_equity_init_raw(&self.accounts[idx]);
+            if eq_init_raw < im_req_i128 {
+                return Err(RiskError::Undercollateralized);
+            }
+        } else if strictly_reducing {
+            // v12.0.2 §10.5 step 29: strict risk-reducing exemption (fee-neutral).
+            // Checked BEFORE maintenance-margin gate to avoid dead-code (security issue: MEDIUM).
+            // Both conditions must hold in exact widened I256:
+            // 1. Fee-neutral buffer improves: (Eq_maint_raw_post + fee) - MM_req_post > buffer_pre
+            // 2. Fee-neutral shortfall does not worsen: min(Eq_maint_raw_post + fee, 0) >= min(Eq_maint_raw_pre, 0)
+            let maint_raw_wide_post = self.account_equity_maint_raw_wide(&self.accounts[idx]);
+            let fee_wide = I256::from_u128(fee);
+
+            // Fee-neutral post equity and buffer — MM requirement uses new_eff (not stale state)
+            let maint_raw_fee_neutral =
+                maint_raw_wide_post.checked_add(fee_wide).expect("I256 add");
+            let mm_req_post = {
+                let proportional = mul_div_floor_u128(
+                    notional_from_new_eff,
+                    self.params.maintenance_margin_bps as u128,
+                    10_000,
+                );
+                core::cmp::max(proportional, self.params.min_nonzero_mm_req)
+            };
+            let buffer_post_fee_neutral = maint_raw_fee_neutral
+                .checked_sub(I256::from_u128(mm_req_post))
+                .expect("I256 sub");
+
+            // Recover pre-trade raw equity from buffer_pre + MM_req_pre (uses old_eff)
+            let mm_req_pre = {
+                let not_pre = if *old_eff == 0 {
+                    0u128
+                } else {
+                    mul_div_floor_u128(old_eff.unsigned_abs(), oracle_price as u128, POS_SCALE)
+                };
+                core::cmp::max(
+                    mul_div_floor_u128(not_pre, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req,
+                )
+            };
+            let maint_raw_pre = buffer_pre
+                .checked_add(I256::from_u128(mm_req_pre))
+                .expect("I256 add");
+
+            // Condition 1: fee-neutral buffer strictly improves
+            let cond1 = buffer_post_fee_neutral > buffer_pre;
+
+            // Condition 2: fee-neutral shortfall below zero does not worsen
+            // min(post + fee, 0) >= min(pre, 0)
+            let zero = I256::from_i128(0);
+            let shortfall_post = if maint_raw_fee_neutral < zero {
+                maint_raw_fee_neutral
+            } else {
+                zero
+            };
+            let shortfall_pre = if maint_raw_pre < zero {
+                maint_raw_pre
+            } else {
+                zero
+            };
+            let cond2 = shortfall_post >= shortfall_pre;
+
+            if !(cond1 && cond2) {
+                // Exemption conditions not met: fall through to maintenance check
+                let mm_req_i128 = if mm_req_post > i128::MAX as u128 {
+                    i128::MAX
+                } else {
+                    mm_req_post as i128
+                };
+                let eq_net = self.account_equity_net(&self.accounts[idx], oracle_price);
+                if eq_net <= mm_req_i128 {
+                    return Err(RiskError::Undercollateralized);
+                }
+            }
+        } else if self.is_above_maintenance_margin_from_notional(
+            &self.accounts[idx],
+            notional_from_new_eff,
+            oracle_price,
+        ) {
+            // Maintenance healthy: allow
+        } else {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
     /// Eq_maint_raw_i in exact I256 (spec §3.4 "transient widened signed type").
     ///
     /// Eq_maint_raw_i = C_i + PNL_i - FeeDebt_i
@@ -5096,6 +5385,48 @@ impl RiskEngine {
         } else {
             0
         };
+
+        // Capture pre-trade effective positions and maintenance buffers for
+        // enforce_post_trade_margin (spec §10.5 step 29 / T7).
+        // Must be captured AFTER touch/settle (so PnL is current) but BEFORE
+        // split_at_mut and position mutation.
+        //
+        // Use position_size as the source of truth for pre-trade effective position.
+        // In our implementation, position_basis_q is not updated by execute_trade
+        // (that is an upstream ADL-specific field), so effective_pos_q() returns 0
+        // here. Using position_size directly gives the correct pre-trade position.
+        // Security fix (HIGH from PR#69 review): ensures notional is computed from
+        // the actual position, not from stale position_basis_q=0.
+        let pre_eff_user = self.accounts[user_idx as usize].position_size.get();
+        let pre_eff_lp = self.accounts[lp_idx as usize].position_size.get();
+        let mm_req_pre_user: u128 = if pre_eff_user == 0 {
+            0
+        } else {
+            let not =
+                mul_div_floor_u128(pre_eff_user.unsigned_abs(), oracle_price as u128, POS_SCALE);
+            core::cmp::max(
+                mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                self.params.min_nonzero_mm_req,
+            )
+        };
+        let mm_req_pre_lp: u128 = if pre_eff_lp == 0 {
+            0
+        } else {
+            let not =
+                mul_div_floor_u128(pre_eff_lp.unsigned_abs(), oracle_price as u128, POS_SCALE);
+            core::cmp::max(
+                mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                self.params.min_nonzero_mm_req,
+            )
+        };
+        let buffer_pre_user = self
+            .account_equity_maint_raw_wide(&self.accounts[user_idx as usize])
+            .checked_sub(I256::from_u128(mm_req_pre_user))
+            .expect("I256 sub");
+        let buffer_pre_lp = self
+            .account_equity_maint_raw_wide(&self.accounts[lp_idx as usize])
+            .checked_sub(I256::from_u128(mm_req_pre_lp))
+            .expect("I256 sub");
 
         // Access both accounts
         let (user, lp) = if user_idx < lp_idx {
@@ -5486,10 +5817,36 @@ impl RiskEngine {
         self.update_warmup_slope(user_idx)?;
         self.update_warmup_slope(lp_idx)?;
 
+        // T7: Post-trade margin enforcement (spec §10.5 step 29, v12.0.2 §9.2).
+        // Uses pre-captured positions (from position_size) and buffers.
+        // new_eff = pre_eff ± exec_size (trades are zero-sum bilateral).
+        // These match new_user_position / new_lp_position computed above.
+        let new_eff_user = pre_eff_user
+            .checked_add(exec_size)
+            .ok_or(RiskError::Overflow)?;
+        let new_eff_lp = pre_eff_lp
+            .checked_sub(exec_size)
+            .ok_or(RiskError::Overflow)?;
+        self.enforce_post_trade_margin(
+            user_idx as usize,
+            lp_idx as usize,
+            oracle_price,
+            &pre_eff_user,
+            &new_eff_user,
+            &pre_eff_lp,
+            &new_eff_lp,
+            buffer_pre_user,
+            buffer_pre_lp,
+            fee,
+        )?;
+
         // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
         // that were scheduled during trade processing (spec §5.7-5.8).
+        // Use stored funding_rate_bps_per_slot_last — NOT 0i64 — to avoid
+        // overwriting the funding rate with a stale zero (security issue: LOW).
         let mut ctx = InstructionContext::new();
-        self.run_end_of_instruction_lifecycle(&mut ctx)?;
+        let stored_rate = self.funding_rate_bps_per_slot_last;
+        self.run_end_of_instruction_lifecycle(&mut ctx, stored_rate)?;
 
         Ok(())
     }
