@@ -1303,6 +1303,30 @@ pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
     }
 }
 
+/// i128 version of floor_div_signed_conservative for compact code paths.
+pub fn floor_div_signed_conservative_i128(n: i128, d: u128) -> i128 {
+    assert!(
+        d != 0,
+        "floor_div_signed_conservative_i128: zero denominator"
+    );
+    if n == 0 {
+        return 0;
+    }
+    if n > 0 {
+        (n as u128 / d) as i128
+    } else {
+        let abs_n = n.unsigned_abs();
+        let q = abs_n / d;
+        let r = abs_n % d;
+        let q_final = if r != 0 { q + 1 } else { q };
+        assert!(
+            q_final <= i128::MAX as u128,
+            "floor_div_signed_conservative_i128: result out of range"
+        );
+        -(q_final as i128)
+    }
+}
+
 /// Spec section 4.6: positive ceiling division.
 /// ceil(n / d) = (n + d - 1) / d, but we use the remainder form to avoid overflow:
 /// ceil(n / d) = trunc(n / d) + (1 if n % d != 0 else 0).

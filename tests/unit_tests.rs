@@ -1739,6 +1739,10 @@ fn test_account_equity_computes_correctly() {
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
         last_partial_liquidation_slot: 0,
+        position_basis_q: 0i128,
+        adl_a_basis: 1_000_000u128,
+        adl_k_snap: 0i128,
+        adl_epoch_snap: 0,
     };
     assert_eq!(engine.account_equity(&account_pos), 7_000);
 
@@ -1760,6 +1764,10 @@ fn test_account_equity_computes_correctly() {
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
         last_partial_liquidation_slot: 0,
+        position_basis_q: 0i128,
+        adl_a_basis: 1_000_000u128,
+        adl_k_snap: 0i128,
+        adl_epoch_snap: 0,
     };
     assert_eq!(engine.account_equity(&account_neg), 0);
 
@@ -1781,6 +1789,10 @@ fn test_account_equity_computes_correctly() {
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
         last_partial_liquidation_slot: 0,
+        position_basis_q: 0i128,
+        adl_a_basis: 1_000_000u128,
+        adl_k_snap: 0i128,
+        adl_epoch_snap: 0,
     };
     assert_eq!(engine.account_equity(&account_profit), 15_000);
 }
@@ -1917,7 +1929,7 @@ fn test_keeper_crank_liquidates_undercollateralized_user() {
     let _insurance_before = engine.insurance_fund.balance;
 
     // Call keeper_crank with oracle price 0.5 (500_000 in e6)
-    let result = engine.keeper_crank(user, 1, 500_000, 0, false);
+    let result = engine.keeper_crank(1, 500_000, &[], 64, 0);
     assert!(result.is_ok());
 
     let outcome = result.unwrap();
@@ -1939,7 +1951,7 @@ fn test_keeper_crank_liquidates_undercollateralized_user() {
     // Pending loss from liquidation is resolved after a full sweep
     // Run enough cranks to complete a full sweep
     for slot in 2..=17 {
-        engine.keeper_crank(user, slot, 500_000, 0, false).unwrap();
+        engine.keeper_crank(slot, 500_000, &[], 64, 0).unwrap();
     }
 
     // Note: Insurance may decrease if liquidation creates unpaid losses
@@ -2399,7 +2411,7 @@ fn test_gc_fee_drained_dust() {
 
     // Advance time to drain fees (500 / 100 = 5 slots)
     // Crank will settle fees, drain capital to 0, then GC
-    let outcome = engine.keeper_crank(user, 10, 1_000_000, 0, false).unwrap();
+    let outcome = engine.keeper_crank(10, 1_000_000, &[], 64, 0).unwrap();
 
     assert!(
         !engine.is_used(user as usize),
@@ -2422,9 +2434,7 @@ fn test_gc_positive_pnl_never_collected() {
     assert!(engine.is_used(user as usize), "User should exist");
 
     // Crank should NOT GC this account
-    let outcome = engine
-        .keeper_crank(u16::MAX, 100, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(100, 1_000_000, &[], 64, 0).unwrap();
 
     assert!(
         engine.is_used(user as usize),
@@ -2460,9 +2470,7 @@ fn test_gc_negative_pnl_socialized() {
     assert!(engine.is_used(user as usize), "User should exist");
 
     // First crank: GC writes off negative PnL and frees account
-    let outcome = engine
-        .keeper_crank(u16::MAX, 100, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(100, 1_000_000, &[], 64, 0).unwrap();
 
     assert!(
         !engine.is_used(user as usize),
@@ -2509,9 +2517,7 @@ fn test_gc_with_position_not_collected() {
     engine.total_open_interest = U128::new(1000);
 
     // Crank should NOT GC this account (has position)
-    let outcome = engine
-        .keeper_crank(u16::MAX, 100, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(100, 1_000_000, &[], 64, 0).unwrap();
 
     assert!(
         engine.is_used(user as usize),
@@ -2598,16 +2604,12 @@ fn test_batched_adl_profit_exclusion() {
 
     // Run crank at oracle price 0.81 - liquidation adds profit to pending bucket
     let crank_oracle = 810_000;
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, crank_oracle, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, crank_oracle, &[], 64, 0).unwrap();
 
     // Run additional cranks until socialization completes
     // (socialization processes accounts per crank)
     for slot in 2..20 {
-        engine
-            .keeper_crank(u16::MAX, slot, crank_oracle, 0, false)
-            .unwrap();
+        engine.keeper_crank(slot, crank_oracle, &[], 64, 0).unwrap();
     }
 
     // Verify conservation holds after socialization (use crank oracle since entries were updated)
@@ -2676,9 +2678,7 @@ fn test_batched_adl_conservation_basic() {
     );
 
     // Crank at same price (no mark pnl change)
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Verify conservation after
     assert!(
@@ -2753,9 +2753,7 @@ fn test_two_phase_liquidation_priority_and_sweep() {
     );
 
     // Single crank should liquidate all underwater accounts via priority phase
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Verify conservation after
     assert!(
@@ -2798,9 +2796,7 @@ fn test_two_phase_liquidation_priority_and_sweep() {
     // If sweep didn't complete in first crank, run more until it does
     let mut slot = 2u64;
     while !engine.last_full_sweep_completed_slot > 0 && slot < 100 {
-        let outcome = engine
-            .keeper_crank(u16::MAX, slot, 1_000_000, 0, false)
-            .unwrap();
+        let outcome = engine.keeper_crank(slot, 1_000_000, &[], 64, 0).unwrap();
         if outcome.sweep_complete {
             break;
         }
@@ -2866,9 +2862,7 @@ fn test_window_liquidation_many_accounts_few_liquidatable() {
     );
 
     // Run crank - should select top-K efficiently
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Verify conservation after
     assert!(
@@ -2934,9 +2928,7 @@ fn test_window_liquidation_many_liquidatable() {
     );
 
     // Run crank
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Verify conservation after
     assert!(
@@ -2995,9 +2987,7 @@ fn test_force_realize_step_closes_in_window_only() {
 
     // Run crank (cursor starts at 0)
     assert_eq!(engine.crank_cursor, 0);
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Force-realize should have run and closed positions
     assert!(
@@ -3054,9 +3044,7 @@ fn test_force_realize_step_inert_above_threshold() {
     let pos_before = engine.accounts[user as usize].position_size;
 
     // Run crank
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Force-realize should not be needed
     assert!(
@@ -3107,9 +3095,7 @@ fn test_crank_force_closes_dust_positions() {
     );
 
     // Run crank
-    let outcome = engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Force-realize mode should NOT be needed (insurance above threshold)
     assert!(
@@ -3176,7 +3162,7 @@ fn test_pending_finalize_liveness_insurance_covers() {
 
     // Run enough cranks to complete a full sweep
     for slot in 1..=16 {
-        let result = engine.keeper_crank(u16::MAX, slot, 1_000_000, 0, false);
+        let result = engine.keeper_crank(slot, 1_000_000, &[], 64, 0);
         assert!(result.is_ok());
     }
 
@@ -3229,7 +3215,7 @@ fn test_force_realize_updates_lp_aggregates() {
     let sum_abs_before = engine.lp_sum_abs;
 
     // Run crank - should close LP position via force-realize
-    let result = engine.keeper_crank(u16::MAX, 1, 1_000_000, 0, false);
+    let result = engine.keeper_crank(1, 1_000_000, &[], 64, 0);
     assert!(result.is_ok());
 
     // LP position should be closed
@@ -3264,9 +3250,7 @@ fn test_withdrawals_blocked_during_pending_unblocked_after() {
     engine.deposit(user, 10_000, 0).unwrap();
 
     // Crank to establish baseline
-    engine
-        .keeper_crank(u16::MAX, 1, 1_000_000, 0, false)
-        .unwrap();
+    engine.keeper_crank(1, 1_000_000, &[], 64, 0).unwrap();
 
     // Under haircut-ratio design, there is no pending_unpaid_loss mechanism.
     // Withdrawals are not blocked by pending losses.
@@ -3832,9 +3816,7 @@ fn test_idle_user_drains_and_gc_closes() {
     assert!(engine.is_used(user_idx as usize));
 
     // Advance 1000 slots and crank — fee drains 1/slot * 1000 = 1000 >> 10 capital
-    let outcome = engine
-        .keeper_crank(user_idx, 1001, ORACLE_100K, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(1001, ORACLE_100K, &[], 64, 0).unwrap();
 
     // Account should have been drained to 0 capital
     // The crank settles fees and then GC sweeps dust
@@ -3871,9 +3853,7 @@ fn test_dust_stale_funding_gc() {
     assert!(engine.is_used(user_idx as usize));
 
     // Crank should snap funding and GC the dust account
-    let outcome = engine
-        .keeper_crank(user_idx, 10, ORACLE_100K, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(10, ORACLE_100K, &[], 64, 0).unwrap();
 
     assert_eq!(
         outcome.num_gc_closed, 1,
@@ -3902,9 +3882,7 @@ fn test_dust_negative_fee_credits_gc() {
     assert!(engine.is_used(user_idx as usize));
 
     // Crank should GC this account — negative fee_credits doesn't block GC
-    let outcome = engine
-        .keeper_crank(user_idx, 10, ORACLE_100K, 0, false)
-        .unwrap();
+    let outcome = engine.keeper_crank(10, ORACLE_100K, &[], 64, 0).unwrap();
 
     assert_eq!(
         outcome.num_gc_closed, 1,
@@ -3935,7 +3913,7 @@ fn test_lp_never_gc() {
     // Crank many times — LP should never be GC'd
     for slot in 1..=10 {
         let outcome = engine
-            .keeper_crank(lp_idx, slot * 100, ORACLE_100K, 0, false)
+            .keeper_crank(slot * 100, ORACLE_100K, &[], 64, 0)
             .unwrap();
         assert_eq!(
             outcome.num_gc_closed,
@@ -4152,12 +4130,12 @@ fn test_abandoned_with_stale_last_fee_slot_eventually_closed() {
     // Don't call any user ops. Run crank at a slot far ahead.
     // First crank: drains the account via fee settlement
     let _ = engine
-        .keeper_crank(user_idx, 10_000, ORACLE_100K, 0, false)
+        .keeper_crank(10_000, ORACLE_100K, &[], 64, 0)
         .unwrap();
 
     // Second crank: GC scan should pick up the dust
     let _outcome = engine
-        .keeper_crank(user_idx, 10_001, ORACLE_100K, 0, false)
+        .keeper_crank(10_001, ORACLE_100K, &[], 64, 0)
         .unwrap();
 
     // The account must be closed by now (across both cranks)
@@ -6076,24 +6054,27 @@ fn test_offset_check_for_tests() {
     //                        +8 bytes from Account.reserved_pnl: u64 → u128
     // Updated for PERC-8268: +224 bytes from ADL side state fields (SideMode, oi_eff, adl_mult/coeff/epoch, etc.)
     //                        used: 760→984, num_used (full): 1272→1496, accounts (full): 9488→9712
-    //                        num_used (small): 792→1016, accounts (small): 1328→1552
-    //                        num_used (medium): 888→1112, accounts (medium): 2960→3184
+    // Updated for PERC-8270: +32 bytes from last_market_slot, funding_price_sample_last,
+    //                        materialized_account_count, last_oracle_price added to RiskEngine
+    //                        used: 984→1016, num_used (full): 1496→1528, accounts (full): 9712→9744
+    //                        Note: Account also gains 56 bytes (position_basis_q, adl_a_basis,
+    //                        adl_k_snap, adl_epoch_snap) — SLAB_LEN will change (devnet migration required)
     // Note: `small` feature uses MAX_ACCOUNTS=256, shrinking next_free[] and accounts[] — offsets differ
     assert_eq!(
         offset_of!(RiskEngine, used),
-        984,
-        "used bitmap offset changed -- update SBF_ENGINE_OFF+984 in integration tests"
+        1016,
+        "used bitmap offset changed -- update SBF_ENGINE_OFF+1016 in integration tests"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        1496,
-        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1496 in integration tests"
+        1528,
+        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1528 in integration tests"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        1016,
+        1048,
         "small feature: num_used_accounts offset differs (MAX_ACCOUNTS=256 → bitmap=32 bytes)"
     );
     #[cfg(feature = "medium")]
@@ -6105,19 +6086,19 @@ fn test_offset_check_for_tests() {
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        9712,
-        "accounts offset changed -- update SBF_ENGINE_OFF+9712 in integration tests"
+        9744,
+        "accounts offset changed -- update SBF_ENGINE_OFF+9744 in integration tests (PERC-8270)"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        1552,
+        1584,
         "small feature: accounts offset differs (MAX_ACCOUNTS=256 → next_free is 512 bytes)"
     );
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        3184,
+        3216,
         "medium feature: accounts offset differs (MAX_ACCOUNTS=1024 → next_free is 2048 bytes)"
     );
 }
@@ -6310,7 +6291,7 @@ fn test_run_end_of_instruction_lifecycle_resets_when_oi_zero() {
     e.adl_coeff_long = 42;
 
     let mut ctx = InstructionContext::new();
-    e.run_end_of_instruction_lifecycle(&mut ctx).unwrap();
+    e.run_end_of_instruction_lifecycle(&mut ctx, 0i64).unwrap();
 
     // Side should have been reset to Normal
     assert_eq!(e.side_mode_long, SideMode::Normal);
@@ -6329,7 +6310,7 @@ fn test_run_end_of_instruction_lifecycle_no_reset_when_oi_nonzero() {
     e.adl_mult_long = 999;
 
     let mut ctx = InstructionContext::new();
-    e.run_end_of_instruction_lifecycle(&mut ctx).unwrap();
+    e.run_end_of_instruction_lifecycle(&mut ctx, 0i64).unwrap();
 
     // Still ResetPending — OI not drained yet
     assert_eq!(e.side_mode_long, SideMode::ResetPending);

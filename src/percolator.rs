@@ -71,7 +71,7 @@ pub const ACCOUNTS_PER_CRANK: u16 = 256;
 
 /// Hard liquidation budget per crank call (caps total work)
 /// Set to 120 to keep worst-case crank CU under ~50% of Solana limit
-pub const LIQ_BUDGET_PER_CRANK: u16 = 120;
+pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
 
 /// Max number of force-realize closes per crank call.
 /// Hard CU bound in force-realize mode. Liquidations are skipped when active.
@@ -96,6 +96,10 @@ pub use i128::{I128, U128};
 // Wide 256-bit Arithmetic (see src/wide_math.rs)
 // ============================================================================
 pub mod wide_math;
+use wide_math::{
+    fee_debt_u128_checked, floor_div_signed_conservative_i128, mul_div_floor_u128,
+    saturating_mul_u128_u64, wide_mul_div_floor_u128, wide_signed_mul_div_floor_from_k_pair,
+};
 pub use wide_math::{I256, U256};
 
 // ============================================================================
@@ -240,6 +244,22 @@ pub struct Account {
 
     /// Last slot when a partial liquidation occurred (PERC-122 cooldown).
     pub last_partial_liquidation_slot: u64,
+
+    // ===================================================
+    // ADL per-account state (spec §2.1, T5: PERC-8270)
+    // ===================================================
+    /// Signed fixed-point base quantity basis (i128, spec §2.1)
+    /// Replaces position_size in the two-phase crank model.
+    pub position_basis_q: i128,
+
+    /// Side multiplier snapshot at last explicit position attachment (u128)
+    pub adl_a_basis: u128,
+
+    /// K coefficient snapshot (i128)
+    pub adl_k_snap: i128,
+
+    /// Side epoch snapshot
+    pub adl_epoch_snap: u64,
 }
 
 impl Account {
@@ -273,6 +293,10 @@ fn empty_account() -> Account {
         fee_credits: I128::ZERO,
         last_fee_slot: 0,
         last_partial_liquidation_slot: 0,
+        position_basis_q: 0i128,
+        adl_a_basis: 1_000_000u128, // ADL_ONE
+        adl_k_snap: 0i128,
+        adl_epoch_snap: 0,
     }
 }
 
@@ -597,6 +621,18 @@ pub struct RiskEngine {
     /// Anti-retroactivity: state changes at slot t can only affect funding for slots >= t.
     pub funding_rate_bps_per_slot_last: i64,
 
+    /// Last slot used in accrue_market_to
+    pub last_market_slot: u64,
+
+    /// Funding price sample for anti-retroactivity
+    pub funding_price_sample_last: u64,
+
+    /// Materialized account count (spec §2.2)
+    pub materialized_account_count: u64,
+
+    /// Last oracle price seen (for delta_p computation in accrue_market_to)
+    pub last_oracle_price: u64,
+
     // ========================================
     // Premium Funding State (PERC-121)
     // ========================================
@@ -851,6 +887,15 @@ pub enum RiskError {
 
 pub type Result<T> = core::result::Result<T, RiskError>;
 
+/// Liquidation policy for keeper-supplied candidates (spec §10.6)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiquidationPolicy {
+    /// Close the full effective position
+    FullClose,
+    /// Close exactly q_close_q units (validated against current state)
+    ExactPartial(u128),
+}
+
 /// Outcome of a keeper crank operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CrankOutcome {
@@ -903,6 +948,16 @@ fn opposite_side(s: Side) -> Side {
     match s {
         Side::Long => Side::Short,
         Side::Short => Side::Long,
+    }
+}
+
+/// Clamp i128 to max(v, 0) as u128 (upstream: i128_clamp_pos)
+#[inline]
+fn i128_clamp_pos(v: i128) -> u128 {
+    if v > 0 {
+        v as u128
+    } else {
+        0u128
     }
 }
 
@@ -1078,6 +1133,10 @@ impl RiskEngine {
             funding_index_qpb_e6: I128::ZERO,
             last_funding_slot: 0,
             funding_rate_bps_per_slot_last: 0,
+            last_market_slot: 0,
+            funding_price_sample_last: 0,
+            materialized_account_count: 0,
+            last_oracle_price: 0,
             mark_price_e6: 0,
             funding_frozen: false,
             funding_frozen_rate_snapshot: 0,
@@ -1195,6 +1254,186 @@ impl RiskEngine {
         }
     }
 
+    // ========================================
+    // ADL per-account accessor helpers (T5: PERC-8270)
+    // ========================================
+
+    #[allow(dead_code)]
+    fn get_a_side(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.adl_mult_long,
+            Side::Short => self.adl_mult_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_k_side(&self, s: Side) -> i128 {
+        match s {
+            Side::Long => self.adl_coeff_long,
+            Side::Short => self.adl_coeff_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_epoch_side(&self, s: Side) -> u64 {
+        match s {
+            Side::Long => self.adl_epoch_long,
+            Side::Short => self.adl_epoch_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_k_epoch_start(&self, s: Side) -> i128 {
+        match s {
+            Side::Long => self.adl_epoch_start_k_long,
+            Side::Short => self.adl_epoch_start_k_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_stale_count(&self, s: Side) -> u64 {
+        match s {
+            Side::Long => self.stale_account_count_long,
+            Side::Short => self.stale_account_count_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_stale_count(&mut self, s: Side, v: u64) {
+        match s {
+            Side::Long => self.stale_account_count_long = v,
+            Side::Short => self.stale_account_count_short = v,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn inc_phantom_dust_bound(&mut self, s: Side) {
+        match s {
+            Side::Long => {
+                self.phantom_dust_bound_long_q = self
+                    .phantom_dust_bound_long_q
+                    .checked_add(1u128)
+                    .expect("phantom dust long overflow")
+            }
+            Side::Short => {
+                self.phantom_dust_bound_short_q = self
+                    .phantom_dust_bound_short_q
+                    .checked_add(1u128)
+                    .expect("phantom dust short overflow")
+            }
+        }
+    }
+
+    /// checked_u128_mul_i128: multiply u128 * i128, return i128 or Overflow
+    #[allow(dead_code)]
+    fn checked_u128_mul_i128(a: u128, b: i128) -> Result<i128> {
+        if a == 0 || b == 0 {
+            return Ok(0i128);
+        }
+        let negative = b < 0;
+        let abs_b = if b == i128::MIN {
+            return Err(RiskError::Overflow);
+        } else {
+            b.unsigned_abs()
+        };
+        let product = U256::from_u128(a)
+            .checked_mul(U256::from_u128(abs_b))
+            .ok_or(RiskError::Overflow)?;
+        match product.try_into_u128() {
+            Some(v) if v <= i128::MAX as u128 => {
+                if negative {
+                    Ok(-(v as i128))
+                } else {
+                    Ok(v as i128)
+                }
+            }
+            _ => Err(RiskError::Overflow),
+        }
+    }
+
+    // ========================================
+    // Position basis helpers (T5: PERC-8270)
+    // ========================================
+
+    #[allow(dead_code)]
+    fn set_position_basis_q(&mut self, idx: usize, new_basis: i128) {
+        let old = self.accounts[idx].position_basis_q;
+        let old_side = side_of_i128(old);
+        let new_side = side_of_i128(new_basis);
+        if let Some(s) = old_side {
+            match s {
+                Side::Long => {
+                    self.stored_pos_count_long = self
+                        .stored_pos_count_long
+                        .checked_sub(1)
+                        .expect("set_position_basis_q long underflow")
+                }
+                Side::Short => {
+                    self.stored_pos_count_short = self
+                        .stored_pos_count_short
+                        .checked_sub(1)
+                        .expect("set_position_basis_q short underflow")
+                }
+            }
+        }
+        if let Some(s) = new_side {
+            match s {
+                Side::Long => {
+                    self.stored_pos_count_long = self
+                        .stored_pos_count_long
+                        .checked_add(1)
+                        .expect("set_position_basis_q long overflow")
+                }
+                Side::Short => {
+                    self.stored_pos_count_short = self
+                        .stored_pos_count_short
+                        .checked_add(1)
+                        .expect("set_position_basis_q short overflow")
+                }
+            }
+        }
+        self.accounts[idx].position_basis_q = new_basis;
+    }
+
+    /// effective_pos_q (spec §5.2): compute effective position quantity for account idx.
+    #[allow(dead_code)]
+    pub fn effective_pos_q(&self, idx: usize) -> i128 {
+        let basis = self.accounts[idx].position_basis_q;
+        if basis == 0 {
+            return 0i128;
+        }
+        let side = side_of_i128(basis).unwrap();
+        let epoch_snap = self.accounts[idx].adl_epoch_snap;
+        let epoch_side = self.get_epoch_side(side);
+        if epoch_snap != epoch_side {
+            return 0i128;
+        }
+        let a_side = self.get_a_side(side);
+        let a_basis = self.accounts[idx].adl_a_basis;
+        if a_basis == 0 {
+            return 0i128;
+        }
+        let abs_basis = basis.unsigned_abs();
+        let effective_abs = mul_div_floor_u128(abs_basis, a_side, a_basis);
+        if basis < 0 {
+            if effective_abs == 0 {
+                0i128
+            } else {
+                assert!(
+                    effective_abs <= i128::MAX as u128,
+                    "effective_pos_q: overflow"
+                );
+                -(effective_abs as i128)
+            }
+        } else {
+            assert!(
+                effective_abs <= i128::MAX as u128,
+                "effective_pos_q: overflow"
+            );
+            effective_abs as i128
+        }
+    }
+
     /// Schedule deferred ADL epoch resets for the end of this instruction.
     ///
     /// Sets `pending_reset_long/short` flags in `ctx` when the side is in
@@ -1240,9 +1479,14 @@ impl RiskEngine {
     /// `finalize_end_of_instruction_resets` in the canonical order.
     /// Callers must invoke this before returning from any instruction that
     /// may call `enqueue_adl`.
-    pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+    pub fn run_end_of_instruction_lifecycle(
+        &mut self,
+        ctx: &mut InstructionContext,
+        funding_rate: i64,
+    ) -> Result<()> {
         self.schedule_end_of_instruction_resets(ctx)?;
         self.finalize_end_of_instruction_resets(ctx);
+        self.recompute_r_last_from_final_state(funding_rate);
         Ok(())
     }
 
@@ -1507,6 +1751,363 @@ impl RiskEngine {
         self.accounts[idx].capital = U128::new(new_capital);
     }
 
+    // ========================================
+    // Warmup & settlement helpers (T5: PERC-8270)
+    // ========================================
+
+    /// released_pos (spec §2.1): ReleasedPos_i = max(PNL_i, 0) - R_i
+    #[allow(dead_code)]
+    pub fn released_pos(&self, idx: usize) -> u128 {
+        let pnl = self.accounts[idx].pnl.get();
+        let pos_pnl = i128_clamp_pos(pnl);
+        pos_pnl.saturating_sub(self.accounts[idx].reserved_pnl)
+    }
+
+    /// use_insurance_buffer (spec §4.11): deduct loss from insurance down to floor.
+    #[allow(dead_code)]
+    fn use_insurance_buffer(&mut self, loss: u128) -> u128 {
+        if loss == 0 {
+            return 0;
+        }
+        let ins_bal = self.insurance_fund.balance.get();
+        let floor = self.params.insurance_floor.get();
+        let available = ins_bal.saturating_sub(floor);
+        let pay = core::cmp::min(loss, available);
+        if pay > 0 {
+            self.insurance_fund.balance = U128::new(ins_bal - pay);
+        }
+        loss - pay
+    }
+
+    /// absorb_protocol_loss (spec §4.11): use insurance buffer, remainder is implicit haircut.
+    #[allow(dead_code)]
+    fn absorb_protocol_loss(&mut self, loss: u128) {
+        if loss == 0 {
+            return;
+        }
+        let _rem = self.use_insurance_buffer(loss);
+    }
+
+    /// restart_warmup_after_reserve_increase (spec §4.9)
+    #[allow(dead_code)]
+    fn restart_warmup_after_reserve_increase(&mut self, idx: usize) {
+        let t = self.params.warmup_period_slots;
+        if t == 0 {
+            self.set_reserved_pnl(idx, 0);
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+            self.accounts[idx].warmup_started_at_slot = self.current_slot;
+            return;
+        }
+        let r = self.accounts[idx].reserved_pnl;
+        if r == 0 {
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+            self.accounts[idx].warmup_started_at_slot = self.current_slot;
+            return;
+        }
+        let base = r / (t as u128);
+        let slope = if base == 0 { 1u128 } else { base };
+        self.accounts[idx].warmup_slope_per_step = U128::new(slope);
+        self.accounts[idx].warmup_started_at_slot = self.current_slot;
+    }
+
+    /// advance_profit_warmup (spec §4.9): advance warmup clock for account idx.
+    #[allow(dead_code)]
+    fn advance_profit_warmup(&mut self, idx: usize) {
+        let r = self.accounts[idx].reserved_pnl;
+        if r == 0 {
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+            self.accounts[idx].warmup_started_at_slot = self.current_slot;
+            return;
+        }
+        let t = self.params.warmup_period_slots;
+        if t == 0 {
+            self.set_reserved_pnl(idx, 0);
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+            self.accounts[idx].warmup_started_at_slot = self.current_slot;
+            return;
+        }
+        let elapsed = self
+            .current_slot
+            .saturating_sub(self.accounts[idx].warmup_started_at_slot);
+        let cap = saturating_mul_u128_u64(self.accounts[idx].warmup_slope_per_step.get(), elapsed);
+        let release = core::cmp::min(r, cap);
+        if release > 0 {
+            self.set_reserved_pnl(idx, r - release);
+        }
+        if self.accounts[idx].reserved_pnl == 0 {
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+        }
+        self.accounts[idx].warmup_started_at_slot = self.current_slot;
+    }
+
+    /// settle_losses (spec §7.1): settle negative PnL from principal.
+    #[allow(dead_code)]
+    fn settle_losses(&mut self, idx: usize) {
+        let pnl = self.accounts[idx].pnl.get();
+        if pnl >= 0 {
+            return;
+        }
+        assert!(pnl != i128::MIN, "settle_losses: i128::MIN");
+        let need = pnl.unsigned_abs();
+        let cap = self.accounts[idx].capital.get();
+        let pay = core::cmp::min(need, cap);
+        if pay > 0 {
+            self.set_capital(idx, cap - pay);
+            let pay_i128 = pay as i128;
+            let new_pnl = pnl.checked_add(pay_i128).unwrap_or(0i128);
+            self.set_pnl(idx, if new_pnl == i128::MIN { 0i128 } else { new_pnl });
+        }
+    }
+
+    /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL.
+    #[allow(dead_code)]
+    fn resolve_flat_negative(&mut self, idx: usize) {
+        let eff = self.effective_pos_q(idx);
+        if eff != 0 {
+            return;
+        }
+        let pnl = self.accounts[idx].pnl.get();
+        if pnl < 0 {
+            assert!(pnl != i128::MIN, "resolve_flat_negative: i128::MIN");
+            let loss = pnl.unsigned_abs();
+            self.absorb_protocol_loss(loss);
+            self.set_pnl(idx, 0i128);
+        }
+    }
+
+    /// do_profit_conversion (spec §7.4): convert matured released profit into principal.
+    #[allow(dead_code)]
+    fn do_profit_conversion(&mut self, idx: usize) {
+        let x = self.released_pos(idx);
+        if x == 0 {
+            return;
+        }
+        let (h_num, h_den) = self.haircut_ratio();
+        assert!(
+            h_den > 0,
+            "do_profit_conversion: h_den must be > 0 when x > 0"
+        );
+        let y: u128 = wide_mul_div_floor_u128(x, h_num, h_den);
+        self.consume_released_pnl(idx, x);
+        let new_cap = add_u128(self.accounts[idx].capital.get(), y);
+        self.set_capital(idx, new_cap);
+        if self.accounts[idx].reserved_pnl == 0 {
+            self.accounts[idx].warmup_slope_per_step = U128::ZERO;
+            self.accounts[idx].warmup_started_at_slot = self.current_slot;
+        }
+    }
+
+    /// fee_debt_sweep (spec §7.5): after capital increase, sweep fee debt.
+    #[allow(dead_code)]
+    fn fee_debt_sweep(&mut self, idx: usize) {
+        let fc = self.accounts[idx].fee_credits.get();
+        let debt = fee_debt_u128_checked(fc);
+        if debt == 0 {
+            return;
+        }
+        let cap = self.accounts[idx].capital.get();
+        let pay = core::cmp::min(debt, cap);
+        if pay > 0 {
+            self.set_capital(idx, cap - pay);
+            let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
+            self.accounts[idx].fee_credits = I128::new(
+                self.accounts[idx]
+                    .fee_credits
+                    .get()
+                    .checked_add(pay_i128)
+                    .expect("fee_debt_sweep overflow"),
+            );
+            self.insurance_fund.balance += pay;
+        }
+    }
+
+    /// settle_maintenance_fee_internal (spec §8.2): update last_fee_slot for account.
+    #[allow(dead_code)]
+    fn settle_maintenance_fee_internal(&mut self, idx: usize, now_slot: u64) -> Result<()> {
+        self.accounts[idx].last_fee_slot = now_slot;
+        Ok(())
+    }
+
+    // ========================================
+    // ADL settle / accrue helpers (T5: PERC-8270)
+    // ========================================
+
+    /// settle_side_effects (spec §5.3): settle A/K gains for account at current epoch.
+    #[allow(dead_code)]
+    fn settle_side_effects(&mut self, idx: usize) -> Result<()> {
+        let basis = self.accounts[idx].position_basis_q;
+        if basis == 0 {
+            return Ok(());
+        }
+
+        let side = side_of_i128(basis).unwrap();
+        let epoch_snap = self.accounts[idx].adl_epoch_snap;
+        let epoch_side = self.get_epoch_side(side);
+        let a_basis = self.accounts[idx].adl_a_basis;
+        if a_basis == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        let abs_basis = basis.unsigned_abs();
+
+        if epoch_snap == epoch_side {
+            let a_side = self.get_a_side(side);
+            let k_side = self.get_k_side(side);
+            let k_snap = self.accounts[idx].adl_k_snap;
+            let q_eff_new = mul_div_floor_u128(abs_basis, a_side, a_basis);
+            let old_r = self.accounts[idx].reserved_pnl;
+            let den = a_basis
+                .checked_mul(1_000_000u128)
+                .ok_or(RiskError::Overflow)?;
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_side, den);
+            let old_pnl = self.accounts[idx].pnl.get();
+            let new_pnl = old_pnl.checked_add(pnl_delta).ok_or(RiskError::Overflow)?;
+            if new_pnl == i128::MIN {
+                return Err(RiskError::Overflow);
+            }
+            self.set_pnl(idx, new_pnl);
+            if self.accounts[idx].reserved_pnl > old_r {
+                self.restart_warmup_after_reserve_increase(idx);
+            }
+            if q_eff_new == 0 {
+                self.inc_phantom_dust_bound(side);
+                self.set_position_basis_q(idx, 0i128);
+                self.accounts[idx].adl_a_basis = 1_000_000u128;
+                self.accounts[idx].adl_k_snap = 0i128;
+                self.accounts[idx].adl_epoch_snap = 0;
+            } else {
+                self.accounts[idx].adl_k_snap = k_side;
+                self.accounts[idx].adl_epoch_snap = epoch_side;
+            }
+        } else {
+            let side_mode = self.get_side_mode(side);
+            if side_mode != SideMode::ResetPending {
+                return Err(RiskError::CorruptState);
+            }
+            if epoch_snap.checked_add(1) != Some(epoch_side) {
+                return Err(RiskError::CorruptState);
+            }
+            let k_epoch_start = self.get_k_epoch_start(side);
+            let k_snap = self.accounts[idx].adl_k_snap;
+            let old_r = self.accounts[idx].reserved_pnl;
+            let den = a_basis
+                .checked_mul(1_000_000u128)
+                .ok_or(RiskError::Overflow)?;
+            let pnl_delta =
+                wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
+            let old_pnl = self.accounts[idx].pnl.get();
+            let new_pnl = old_pnl.checked_add(pnl_delta).ok_or(RiskError::Overflow)?;
+            if new_pnl == i128::MIN {
+                return Err(RiskError::Overflow);
+            }
+            self.set_pnl(idx, new_pnl);
+            if self.accounts[idx].reserved_pnl > old_r {
+                self.restart_warmup_after_reserve_increase(idx);
+            }
+            self.set_position_basis_q(idx, 0i128);
+            let old_stale = self.get_stale_count(side);
+            let new_stale = old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?;
+            self.set_stale_count(side, new_stale);
+            self.accounts[idx].adl_a_basis = 1_000_000u128;
+            self.accounts[idx].adl_k_snap = 0i128;
+            self.accounts[idx].adl_epoch_snap = 0;
+        }
+        Ok(())
+    }
+
+    /// accrue_market_to (spec §5.4): advance K/A coefficients for elapsed slots.
+    /// Called once per keeper_crank invocation to update ADL market state.
+    #[allow(dead_code)]
+    fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64) -> Result<()> {
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        let long_live = self.oi_eff_long_q != 0;
+        let short_live = self.oi_eff_short_q != 0;
+
+        let total_dt = now_slot.saturating_sub(self.last_market_slot);
+        if total_dt == 0 && self.last_oracle_price == oracle_price {
+            self.current_slot = now_slot;
+            return Ok(());
+        }
+
+        let current_price = self.last_oracle_price;
+        let delta_p = (oracle_price as i128)
+            .checked_sub(current_price as i128)
+            .ok_or(RiskError::Overflow)?;
+        if delta_p != 0 {
+            if long_live {
+                let delta_k = Self::checked_u128_mul_i128(self.adl_mult_long, delta_p)?;
+                self.adl_coeff_long = self
+                    .adl_coeff_long
+                    .checked_add(delta_k)
+                    .ok_or(RiskError::Overflow)?;
+            }
+            if short_live {
+                let delta_k = Self::checked_u128_mul_i128(self.adl_mult_short, delta_p)?;
+                self.adl_coeff_short = self
+                    .adl_coeff_short
+                    .checked_sub(delta_k)
+                    .ok_or(RiskError::Overflow)?;
+            }
+        }
+
+        // Funding transfer via sub-stepping (spec v12.0.2 §5.4)
+        let r_last = self.funding_rate_bps_per_slot_last;
+        if r_last != 0 && total_dt > 0 && long_live && short_live {
+            let fund_px_0 = self.funding_price_sample_last;
+            if fund_px_0 > 0 {
+                let mut dt_remaining = total_dt;
+                while dt_remaining > 0 {
+                    let dt_sub = core::cmp::min(dt_remaining, u16::MAX as u64);
+                    dt_remaining -= dt_sub;
+                    let fund_num: i128 = (fund_px_0 as i128)
+                        .checked_mul(r_last as i128)
+                        .ok_or(RiskError::Overflow)?
+                        .checked_mul(dt_sub as i128)
+                        .ok_or(RiskError::Overflow)?;
+                    let fund_term = floor_div_signed_conservative_i128(fund_num, 10_000u128);
+                    if fund_term != 0 {
+                        let delta_k_long =
+                            Self::checked_u128_mul_i128(self.adl_mult_long, fund_term)?;
+                        self.adl_coeff_long = self
+                            .adl_coeff_long
+                            .checked_sub(delta_k_long)
+                            .ok_or(RiskError::Overflow)?;
+                        let delta_k_short =
+                            Self::checked_u128_mul_i128(self.adl_mult_short, fund_term)?;
+                        self.adl_coeff_short = self
+                            .adl_coeff_short
+                            .checked_add(delta_k_short)
+                            .ok_or(RiskError::Overflow)?;
+                    }
+                }
+            }
+        }
+
+        self.current_slot = now_slot;
+        self.last_market_slot = now_slot;
+        self.last_oracle_price = oracle_price;
+        self.funding_price_sample_last = oracle_price;
+        Ok(())
+    }
+
+    /// recompute_r_last_from_final_state (spec v12.0.2 §4.12).
+    #[allow(dead_code)]
+    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) {
+        assert!(
+            externally_computed_rate.unsigned_abs() <= 10_000u64,
+            "recompute_r_last: rate exceeds MAX_ABS_FUNDING_BPS_PER_SLOT"
+        );
+        self.funding_rate_bps_per_slot_last = externally_computed_rate;
+    }
+
     /// Recompute c_tot, pnl_pos_tot, and pnl_matured_pos_tot from account data.
     /// For test use after direct state mutation.
     pub fn recompute_aggregates(&mut self) {
@@ -1663,6 +2264,10 @@ impl RiskEngine {
             fee_credits: I128::ZERO,
             last_fee_slot: self.current_slot,
             last_partial_liquidation_slot: 0,
+            position_basis_q: 0i128,
+            adl_a_basis: 1_000_000u128,
+            adl_k_snap: 0i128,
+            adl_epoch_snap: 0,
         };
 
         // Maintain c_tot aggregate (account was created with capital = excess)
@@ -1724,6 +2329,10 @@ impl RiskEngine {
             fee_credits: I128::ZERO,
             last_fee_slot: self.current_slot,
             last_partial_liquidation_slot: 0,
+            position_basis_q: 0i128,
+            adl_a_basis: 1_000_000u128,
+            adl_k_snap: 0i128,
+            adl_epoch_snap: 0,
         };
 
         // Maintain c_tot aggregate (account was created with capital = excess)
@@ -2374,36 +2983,28 @@ impl RiskEngine {
     /// covers all accounts and completes a full sweep.
     pub fn keeper_crank(
         &mut self,
-        caller_idx: u16,
         now_slot: u64,
         oracle_price: u64,
-        funding_rate_bps_per_slot: i64,
-        _allow_panic: bool,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        funding_rate: i64,
     ) -> Result<CrankOutcome> {
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
 
+        // Create instruction context for deferred resets
+        let mut ctx = InstructionContext {
+            pending_reset_long: false,
+            pending_reset_short: false,
+        };
+
+        // Accrue ADL market state
+        let _ = self.accrue_market_to(now_slot, oracle_price);
+
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
-
-        // Detect if this is the start of a new sweep
-        let starting_new_sweep = self.crank_cursor == self.sweep_start_idx;
-        if starting_new_sweep {
-            self.last_full_sweep_start_slot = now_slot;
-            // Reset in-progress lp_max_abs for fresh sweep
-            self.lp_max_abs_sweep = U128::ZERO;
-        }
-
-        // Accrue funding first using the STORED rate (anti-retroactivity).
-        // This ensures funding charged for the elapsed interval uses the rate that was
-        // in effect at the start of the interval, NOT the new rate computed from current state.
-        self.accrue_funding(now_slot, oracle_price)?;
-
-        // Now set the new rate for the NEXT interval (anti-retroactivity).
-        // The funding_rate_bps_per_slot parameter becomes the rate for [now_slot, next_accrual).
-        self.set_funding_rate_for_next_interval(funding_rate_bps_per_slot);
 
         // Check if we're advancing the global crank slot
         let advanced = now_slot > self.last_crank_slot;
@@ -2411,170 +3012,209 @@ impl RiskEngine {
             self.last_crank_slot = now_slot;
         }
 
-        // Always attempt caller's maintenance settle (best-effort, no timestamp games)
-        let (slots_forgiven, caller_settle_ok) = if (caller_idx as usize) < MAX_ACCOUNTS
-            && self.is_used(caller_idx as usize)
-        {
-            let last_fee = self.accounts[caller_idx as usize].last_fee_slot;
-            let dt = now_slot.saturating_sub(last_fee);
-            let forgive = dt / 2;
-
-            if forgive > 0 && dt > 0 {
-                self.accounts[caller_idx as usize].last_fee_slot = last_fee.saturating_add(forgive);
-            }
-            let settle_result =
-                self.settle_maintenance_fee_best_effort_for_crank(caller_idx, now_slot);
-            (forgive, settle_result.is_ok())
-        } else {
-            (0, true)
-        };
-
-        // Detect conditions for informational flags (before processing)
-        let force_realize_active = self.force_realize_active();
-
-        // Process up to ACCOUNTS_PER_CRANK occupied accounts
         let mut num_liquidations: u32 = 0;
         let mut num_liq_errors: u16 = 0;
-        let mut force_realize_closed: u16 = 0;
-        let mut force_realize_errors: u16 = 0;
-        let mut sweep_complete = false;
-        let mut accounts_processed: u16 = 0;
         let mut liq_budget = LIQ_BUDGET_PER_CRANK;
-        let mut force_realize_budget = FORCE_REALIZE_BUDGET_PER_CRANK;
 
-        let _start_cursor = self.crank_cursor;
+        if !ordered_candidates.is_empty() {
+            // === Two-phase keeper model: process ordered candidates ===
+            let limit = core::cmp::min(ordered_candidates.len(), max_revalidations as usize);
+            for &(candidate_idx, ref _policy) in &ordered_candidates[..limit] {
+                let cidx = candidate_idx as usize;
+                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) {
+                    continue;
+                }
 
-        // Iterate through index space looking for occupied accounts
-        let mut idx = self.crank_cursor as usize;
-        let mut slots_scanned: usize = 0;
+                // Phase 1: settle side effects and warmup
+                self.advance_profit_warmup(cidx);
+                let _ = self.settle_side_effects(cidx); // best-effort
+                self.settle_losses(cidx);
 
-        while accounts_processed < ACCOUNTS_PER_CRANK && slots_scanned < MAX_ACCOUNTS {
-            slots_scanned += 1;
+                let eff = self.effective_pos_q(cidx);
+                let pnl = self.accounts[cidx].pnl.get();
+                if eff == 0 && pnl < 0 {
+                    self.resolve_flat_negative(cidx);
+                }
 
-            // Check if slot is used
-            let block = idx >> 6;
-            let bit = idx & 63;
-            let is_occupied = (self.used[block] & (1u64 << bit)) != 0;
+                let _ = self.settle_maintenance_fee_internal(cidx, now_slot);
 
-            if is_occupied {
-                accounts_processed += 1;
+                let eff2 = self.effective_pos_q(cidx);
+                if eff2 == 0 {
+                    self.do_profit_conversion(cidx);
+                }
 
-                // Always settle maintenance fees for every visited account.
-                // This drains idle accounts over time so they eventually become dust.
-                let _ = self.settle_maintenance_fee_best_effort_for_crank(idx as u16, now_slot);
-                // Touch account and settle warmup to drain abandoned positive PnL
-                let _ = self.touch_account(idx as u16);
-                self.settle_warmup_to_capital_for_crank(idx as u16);
+                self.fee_debt_sweep(cidx);
 
-                // === Liquidation (if not in force-realize mode) ===
-                if !force_realize_active && liq_budget > 0 {
-                    if !self.accounts[idx].position_size.is_zero() {
-                        match self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
-                            Ok(true) => {
-                                num_liquidations += 1;
-                                liq_budget = liq_budget.saturating_sub(1);
-                            }
-                            Ok(false) => {}
-                            Err(_) => {
-                                num_liq_errors += 1;
-                            }
+                // Phase 2: liquidation (only when no pending resets)
+                if !ctx.pending_reset_long
+                    && !ctx.pending_reset_short
+                    && liq_budget > 0
+                    && !self.accounts[cidx].position_size.is_zero()
+                {
+                    match self.liquidate_at_oracle(candidate_idx, now_slot, oracle_price) {
+                        Ok(true) => {
+                            num_liquidations += 1;
+                            liq_budget = liq_budget.saturating_sub(1);
                         }
-                    }
-
-                    // Force-close negative equity or dust positions
-                    if !self.accounts[idx].position_size.is_zero() {
-                        let equity =
-                            self.account_equity_mtm_at_oracle(&self.accounts[idx], oracle_price);
-                        let abs_pos = self.accounts[idx].position_size.unsigned_abs();
-                        let is_dust = abs_pos < self.params.min_liquidation_abs.get();
-
-                        if equity == 0 || is_dust {
-                            // Force close: settle mark, close position, write off loss
-                            let _ = self.touch_account_for_liquidation(
-                                idx as u16,
-                                now_slot,
-                                oracle_price,
-                            );
-                            let _ = self.oracle_close_position_core(idx as u16, oracle_price);
-                            self.lifetime_force_realize_closes =
-                                self.lifetime_force_realize_closes.saturating_add(1);
+                        Ok(false) => {}
+                        Err(_) => {
+                            num_liq_errors += 1;
                         }
                     }
                 }
+            }
+        } else {
+            // === Fallback: cursor-based scan (backward compat) ===
+            let starting_new_sweep = self.crank_cursor == self.sweep_start_idx;
+            if starting_new_sweep {
+                self.last_full_sweep_start_slot = now_slot;
+                self.lp_max_abs_sweep = U128::ZERO;
+            }
 
-                // === Force-realize (when insurance at/below threshold) ===
-                if force_realize_active
-                    && force_realize_budget > 0
-                    && !self.accounts[idx].position_size.is_zero()
-                {
-                    if self
-                        .touch_account_for_force_realize(idx as u16, now_slot, oracle_price)
-                        .is_ok()
+            // Accrue funding using STORED rate (anti-retroactivity)
+            self.accrue_funding(now_slot, oracle_price)?;
+            self.set_funding_rate_for_next_interval(funding_rate);
+
+            let force_realize_active = self.force_realize_active();
+            let mut force_realize_closed: u16 = 0;
+            let mut force_realize_errors: u16 = 0;
+            let mut sweep_complete = false;
+            let mut accounts_processed: u16 = 0;
+            let mut force_realize_budget = FORCE_REALIZE_BUDGET_PER_CRANK;
+
+            let mut idx = self.crank_cursor as usize;
+            let mut slots_scanned: usize = 0;
+
+            while accounts_processed < ACCOUNTS_PER_CRANK && slots_scanned < MAX_ACCOUNTS {
+                slots_scanned += 1;
+                let block = idx >> 6;
+                let bit = idx & 63;
+                let is_occupied = (self.used[block] & (1u64 << bit)) != 0;
+
+                if is_occupied {
+                    accounts_processed += 1;
+                    let _ = self.settle_maintenance_fee_best_effort_for_crank(idx as u16, now_slot);
+                    let _ = self.touch_account(idx as u16);
+                    self.settle_warmup_to_capital_for_crank(idx as u16);
+
+                    if !force_realize_active && liq_budget > 0 {
+                        if !self.accounts[idx].position_size.is_zero() {
+                            match self.liquidate_at_oracle(idx as u16, now_slot, oracle_price) {
+                                Ok(true) => {
+                                    num_liquidations += 1;
+                                    liq_budget = liq_budget.saturating_sub(1);
+                                }
+                                Ok(false) => {}
+                                Err(_) => {
+                                    num_liq_errors += 1;
+                                }
+                            }
+                        }
+                        if !self.accounts[idx].position_size.is_zero() {
+                            let equity = self
+                                .account_equity_mtm_at_oracle(&self.accounts[idx], oracle_price);
+                            let abs_pos = self.accounts[idx].position_size.unsigned_abs();
+                            let is_dust = abs_pos < self.params.min_liquidation_abs.get();
+                            if equity == 0 || is_dust {
+                                let _ = self.touch_account_for_liquidation(
+                                    idx as u16,
+                                    now_slot,
+                                    oracle_price,
+                                );
+                                let _ = self.oracle_close_position_core(idx as u16, oracle_price);
+                                self.lifetime_force_realize_closes =
+                                    self.lifetime_force_realize_closes.saturating_add(1);
+                            }
+                        }
+                    }
+
+                    if force_realize_active
+                        && force_realize_budget > 0
+                        && !self.accounts[idx].position_size.is_zero()
                     {
                         if self
-                            .oracle_close_position_core(idx as u16, oracle_price)
+                            .touch_account_for_force_realize(idx as u16, now_slot, oracle_price)
                             .is_ok()
                         {
-                            force_realize_closed += 1;
-                            force_realize_budget = force_realize_budget.saturating_sub(1);
-                            self.lifetime_force_realize_closes =
-                                self.lifetime_force_realize_closes.saturating_add(1);
+                            if self
+                                .oracle_close_position_core(idx as u16, oracle_price)
+                                .is_ok()
+                            {
+                                force_realize_closed += 1;
+                                force_realize_budget = force_realize_budget.saturating_sub(1);
+                                self.lifetime_force_realize_closes =
+                                    self.lifetime_force_realize_closes.saturating_add(1);
+                            } else {
+                                force_realize_errors += 1;
+                            }
                         } else {
                             force_realize_errors += 1;
                         }
-                    } else {
-                        force_realize_errors += 1;
+                    }
+
+                    if self.accounts[idx].is_lp() {
+                        let abs_pos = self.accounts[idx].position_size.unsigned_abs();
+                        self.lp_max_abs_sweep = self.lp_max_abs_sweep.max(U128::new(abs_pos));
                     }
                 }
 
-                // === LP max tracking ===
-                if self.accounts[idx].is_lp() {
-                    let abs_pos = self.accounts[idx].position_size.unsigned_abs();
-                    self.lp_max_abs_sweep = self.lp_max_abs_sweep.max(U128::new(abs_pos));
+                idx = (idx + 1) & ACCOUNT_IDX_MASK;
+                if idx == self.sweep_start_idx as usize && slots_scanned > 0 {
+                    sweep_complete = true;
+                    break;
                 }
             }
 
-            // Advance to next index (with wrap)
-            idx = (idx + 1) & ACCOUNT_IDX_MASK;
-
-            // Check for sweep completion: we've wrapped around to sweep_start_idx
-            // (and we've actually processed some slots, not just starting)
-            if idx == self.sweep_start_idx as usize && slots_scanned > 0 {
-                sweep_complete = true;
-                break;
+            self.crank_cursor = idx as u16;
+            if sweep_complete {
+                self.last_full_sweep_completed_slot = now_slot;
+                self.lp_max_abs = self.lp_max_abs_sweep;
+                self.sweep_start_idx = self.crank_cursor;
             }
+
+            // End-of-instruction lifecycle for fallback path
+            self.run_end_of_instruction_lifecycle(&mut ctx, funding_rate)?;
+
+            let num_gc_closed = self.garbage_collect_dust();
+            let force_realize_needed = self.force_realize_active();
+            let panic_needed = false;
+
+            return Ok(CrankOutcome {
+                advanced,
+                slots_forgiven: 0,
+                caller_settle_ok: true,
+                force_realize_needed,
+                panic_needed,
+                num_liquidations,
+                num_liq_errors,
+                num_gc_closed,
+                force_realize_closed,
+                force_realize_errors,
+                last_cursor: self.crank_cursor,
+                sweep_complete,
+            });
         }
 
-        // Update cursor for next crank
-        self.crank_cursor = idx as u16;
+        // End-of-instruction lifecycle for two-phase path
+        self.run_end_of_instruction_lifecycle(&mut ctx, funding_rate)?;
 
-        // If sweep complete, finalize
-        if sweep_complete {
-            self.last_full_sweep_completed_slot = now_slot;
-            self.lp_max_abs = self.lp_max_abs_sweep;
-            self.sweep_start_idx = self.crank_cursor;
-        }
-
-        // Garbage collect dust accounts
         let num_gc_closed = self.garbage_collect_dust();
-
-        // Detect conditions for informational flags
         let force_realize_needed = self.force_realize_active();
-        let panic_needed = false; // No longer needed with haircut ratio
+        let panic_needed = false;
 
         Ok(CrankOutcome {
             advanced,
-            slots_forgiven,
-            caller_settle_ok,
+            slots_forgiven: 0,
+            caller_settle_ok: true,
             force_realize_needed,
             panic_needed,
             num_liquidations,
             num_liq_errors,
             num_gc_closed,
-            force_realize_closed,
-            force_realize_errors,
+            force_realize_closed: 0,
+            force_realize_errors: 0,
             last_cursor: self.crank_cursor,
-            sweep_complete,
+            sweep_complete: false,
         })
     }
 
