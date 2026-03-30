@@ -109,6 +109,53 @@ pub enum AccountKind {
     LP = 1,
 }
 
+/// Side mode for OI sides (spec §2.4)
+///
+/// Controls whether a given side (long/short) is accepting new positions or
+/// draining as part of an ADL epoch reset.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideMode {
+    /// Normal operation — new positions accepted on this side
+    Normal = 0,
+    /// Drain-only — no new positions; existing ones may be closed
+    DrainOnly = 1,
+    /// Reset pending — waiting for OI to reach zero before resetting A/K coefficients
+    ResetPending = 2,
+}
+
+/// Side of a position (Long = positive size, Short = negative size)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Long,
+    Short,
+}
+
+/// Instruction-level context for deferred ADL reset scheduling (spec §5.7-5.8)
+///
+/// Passed through the instruction lifecycle so that `enqueue_adl` can mark
+/// sides for pending reset without immediately mutating `side_mode_*`.
+/// `run_end_of_instruction_lifecycle` finalises the resets at end-of-instruction.
+pub struct InstructionContext {
+    pub pending_reset_long: bool,
+    pub pending_reset_short: bool,
+}
+
+impl InstructionContext {
+    pub fn new() -> Self {
+        Self {
+            pending_reset_long: false,
+            pending_reset_short: false,
+        }
+    }
+}
+
+impl Default for InstructionContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Unified account - can be user or LP
 ///
 /// LPs are distinguished by having kind = LP and matcher_program/context set.
@@ -637,6 +684,63 @@ pub struct RiskEngine {
     pub lifetime_force_realize_closes: u64,
 
     // ========================================
+    // ADL Side State (spec §2.4, T3: SideMode enum)
+    // ========================================
+    /// ADL A-coefficient for long side (socialized loss multiplier)
+    pub adl_mult_long: u128,
+
+    /// ADL A-coefficient for short side (socialized loss multiplier)
+    pub adl_mult_short: u128,
+
+    /// ADL K-coefficient for long side (epoch accumulator)
+    pub adl_coeff_long: i128,
+
+    /// ADL K-coefficient for short side (epoch accumulator)
+    pub adl_coeff_short: i128,
+
+    /// ADL epoch counter for long side
+    pub adl_epoch_long: u64,
+
+    /// ADL epoch counter for short side
+    pub adl_epoch_short: u64,
+
+    /// K value at start of current ADL epoch (long side)
+    pub adl_epoch_start_k_long: i128,
+
+    /// K value at start of current ADL epoch (short side)
+    pub adl_epoch_start_k_short: i128,
+
+    /// Effective OI for long side (in Q units, updated by enqueue_adl)
+    pub oi_eff_long_q: u128,
+
+    /// Effective OI for short side (in Q units, updated by enqueue_adl)
+    pub oi_eff_short_q: u128,
+
+    /// Side mode for long side (Normal / DrainOnly / ResetPending)
+    pub side_mode_long: SideMode,
+
+    /// Side mode for short side (Normal / DrainOnly / ResetPending)
+    pub side_mode_short: SideMode,
+
+    /// Count of stored (open) positions on long side
+    pub stored_pos_count_long: u64,
+
+    /// Count of stored (open) positions on short side
+    pub stored_pos_count_short: u64,
+
+    /// Count of stale accounts on long side (pending re-settlement)
+    pub stale_account_count_long: u64,
+
+    /// Count of stale accounts on short side (pending re-settlement)
+    pub stale_account_count_short: u64,
+
+    /// Dynamic phantom dust bound for long side (spec §4.6)
+    pub phantom_dust_bound_long_q: u128,
+
+    /// Dynamic phantom dust bound for short side (spec §4.6)
+    pub phantom_dust_bound_short_q: u128,
+
+    // ========================================
     // LP Aggregates (O(1) maintained for funding/threshold)
     // ========================================
     /// Net LP position: sum of position_size across all LP accounts
@@ -737,6 +841,12 @@ pub enum RiskError {
 
     /// Entry price must be positive when opening a position
     InvalidEntryPrice,
+
+    /// Side is in DrainOnly or ResetPending mode — new positions blocked (spec §2.4)
+    SideBlocked,
+
+    /// Internal state is corrupt (invariant violation detected)
+    CorruptState,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -773,6 +883,28 @@ pub struct CrankOutcome {
 // ============================================================================
 // Math Helpers (Saturating Arithmetic for Safety)
 // ============================================================================
+
+/// Determine which side a signed position is on.
+/// Returns `None` for flat (zero) positions.
+#[allow(dead_code)]
+fn side_of_i128(v: i128) -> Option<Side> {
+    if v == 0 {
+        None
+    } else if v > 0 {
+        Some(Side::Long)
+    } else {
+        Some(Side::Short)
+    }
+}
+
+/// Return the opposite side.
+#[allow(dead_code)]
+fn opposite_side(s: Side) -> Side {
+    match s {
+        Side::Long => Side::Short,
+        Side::Short => Side::Long,
+    }
+}
 
 #[inline]
 fn add_u128(a: u128, b: u128) -> u128 {
@@ -965,6 +1097,24 @@ impl RiskEngine {
             sweep_start_idx: 0,
             lifetime_liquidations: 0,
             lifetime_force_realize_closes: 0,
+            adl_mult_long: 0,
+            adl_mult_short: 0,
+            adl_coeff_long: 0,
+            adl_coeff_short: 0,
+            adl_epoch_long: 0,
+            adl_epoch_short: 0,
+            adl_epoch_start_k_long: 0,
+            adl_epoch_start_k_short: 0,
+            oi_eff_long_q: 0,
+            oi_eff_short_q: 0,
+            side_mode_long: SideMode::Normal,
+            side_mode_short: SideMode::Normal,
+            stored_pos_count_long: 0,
+            stored_pos_count_short: 0,
+            stale_account_count_long: 0,
+            stale_account_count_short: 0,
+            phantom_dust_bound_long_q: 0,
+            phantom_dust_bound_short_q: 0,
             net_lp_pos: I128::ZERO,
             lp_sum_abs: U128::ZERO,
             lp_max_abs: U128::ZERO,
@@ -989,6 +1139,111 @@ impl RiskEngine {
         engine.next_free[MAX_ACCOUNTS - 1] = u16::MAX; // Sentinel
 
         engine
+    }
+
+    // ========================================
+    // ADL Side State Helpers (T3: SideMode enum, spec §2.4)
+    // ========================================
+
+    /// Get the SideMode for a given side.
+    #[inline]
+    #[allow(dead_code)] // used by T8 ADL core (PERC-8273)
+    fn get_side_mode(&self, s: Side) -> SideMode {
+        match s {
+            Side::Long => self.side_mode_long,
+            Side::Short => self.side_mode_short,
+        }
+    }
+
+    /// Set the SideMode for a given side.
+    #[inline]
+    #[allow(dead_code)] // used by T8 ADL core (PERC-8273)
+    fn set_side_mode(&mut self, s: Side, m: SideMode) {
+        match s {
+            Side::Long => self.side_mode_long = m,
+            Side::Short => self.side_mode_short = m,
+        }
+    }
+
+    /// Get the effective OI (in Q units) for a given side.
+    #[inline]
+    #[allow(dead_code)] // used by T8 ADL core (PERC-8273)
+    fn get_oi_eff(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.oi_eff_long_q,
+            Side::Short => self.oi_eff_short_q,
+        }
+    }
+
+    /// Set the effective OI (in Q units) for a given side.
+    #[inline]
+    #[allow(dead_code)] // used by T8 ADL core (PERC-8273)
+    fn set_oi_eff(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.oi_eff_long_q = v,
+            Side::Short => self.oi_eff_short_q = v,
+        }
+    }
+
+    /// Check whether a new position open is permitted on the given side.
+    /// Returns `Err(SideBlocked)` when side_mode is DrainOnly or ResetPending.
+    #[inline]
+    pub fn check_side_open_permitted(&self, s: Side) -> Result<()> {
+        match self.get_side_mode(s) {
+            SideMode::Normal => Ok(()),
+            SideMode::DrainOnly | SideMode::ResetPending => Err(RiskError::SideBlocked),
+        }
+    }
+
+    /// Schedule deferred ADL epoch resets for the end of this instruction.
+    ///
+    /// Sets `pending_reset_long/short` flags in `ctx` when the side is in
+    /// ResetPending state, so `finalize_end_of_instruction_resets` can commit.
+    fn schedule_end_of_instruction_resets(&self, ctx: &mut InstructionContext) -> Result<()> {
+        if self.side_mode_long == SideMode::ResetPending {
+            ctx.pending_reset_long = true;
+        }
+        if self.side_mode_short == SideMode::ResetPending {
+            ctx.pending_reset_short = true;
+        }
+        Ok(())
+    }
+
+    /// Finalize deferred ADL epoch resets that were scheduled at end-of-instruction.
+    ///
+    /// If a side was in ResetPending and OI has reached zero, transition it back
+    /// to Normal and reset A/K coefficients.
+    fn finalize_end_of_instruction_resets(&mut self, ctx: &InstructionContext) {
+        if ctx.pending_reset_long
+            && self.side_mode_long == SideMode::ResetPending
+            && self.oi_eff_long_q == 0
+        {
+            self.side_mode_long = SideMode::Normal;
+            self.adl_mult_long = 0;
+            self.adl_coeff_long = 0;
+            self.adl_epoch_start_k_long = 0;
+        }
+        if ctx.pending_reset_short
+            && self.side_mode_short == SideMode::ResetPending
+            && self.oi_eff_short_q == 0
+        {
+            self.side_mode_short = SideMode::Normal;
+            self.adl_mult_short = 0;
+            self.adl_coeff_short = 0;
+            self.adl_epoch_start_k_short = 0;
+        }
+    }
+
+    /// Public entry-point for the end-of-instruction lifecycle (spec §5.7-5.8).
+    ///
+    /// Runs `schedule_end_of_instruction_resets` then
+    /// `finalize_end_of_instruction_resets` in the canonical order.
+    /// Callers must invoke this before returning from any instruction that
+    /// may call `enqueue_adl`.
+    pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+        self.schedule_end_of_instruction_resets(ctx)?;
+        self.finalize_end_of_instruction_resets(ctx);
+        Ok(())
     }
 
     // ========================================
