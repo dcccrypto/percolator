@@ -6080,8 +6080,8 @@ fn test_offset_check_for_tests() {
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        1112,
-        "medium feature: num_used_accounts offset differs (MAX_ACCOUNTS=1024 → bitmap=128 bytes)"
+        1144,
+        "medium feature: num_used_accounts offset differs (MAX_ACCOUNTS=1024 → bitmap=128 bytes, +32 from ADL epoch fields PERC-8272)"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
