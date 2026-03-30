@@ -6074,46 +6074,50 @@ fn test_offset_check_for_tests() {
     // Updated for percolator@cf35789 (PERC-8093): +48 bytes in RiskParams (min_nonzero_mm_req, min_nonzero_im_req, insurance_floor)
     // Updated for PERC-8267: +16 bytes from pnl_matured_pos_tot field added to RiskEngine
     //                        +8 bytes from Account.reserved_pnl: u64 → u128
+    // Updated for PERC-8268: +224 bytes from ADL side state fields (SideMode, oi_eff, adl_mult/coeff/epoch, etc.)
+    //                        used: 760→984, num_used (full): 1272→1496, accounts (full): 9488→9712
+    //                        num_used (small): 792→1016, accounts (small): 1328→1552
+    //                        num_used (medium): 888→1112, accounts (medium): 2960→3184
     // Note: `small` feature uses MAX_ACCOUNTS=256, shrinking next_free[] and accounts[] — offsets differ
     assert_eq!(
         offset_of!(RiskEngine, used),
-        760,
-        "used bitmap offset changed -- update SBF_ENGINE_OFF+760 in integration tests"
+        984,
+        "used bitmap offset changed -- update SBF_ENGINE_OFF+984 in integration tests"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        1272,
-        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1272 in integration tests"
+        1496,
+        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1496 in integration tests"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        792,
+        1016,
         "small feature: num_used_accounts offset differs (MAX_ACCOUNTS=256 → bitmap=32 bytes)"
     );
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        888,
+        1112,
         "medium feature: num_used_accounts offset differs (MAX_ACCOUNTS=1024 → bitmap=128 bytes)"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        9488,
-        "accounts offset changed -- update SBF_ENGINE_OFF+9488 in integration tests"
+        9712,
+        "accounts offset changed -- update SBF_ENGINE_OFF+9712 in integration tests"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        1328,
+        1552,
         "small feature: accounts offset differs (MAX_ACCOUNTS=256 → next_free is 512 bytes)"
     );
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        2960,
+        3184,
         "medium feature: accounts offset differs (MAX_ACCOUNTS=1024 → next_free is 2048 bytes)"
     );
 }
@@ -6258,4 +6262,101 @@ fn test_riskparams_offsets() {
         "fee_split_lp_bps: {}",
         offset_of!(RiskParams, fee_split_lp_bps)
     );
+}
+
+// ============================================================================
+// PERC-8268: SideMode enum + InstructionContext tests
+// ============================================================================
+
+#[test]
+fn test_sidemode_check_open_permitted_normal() {
+    use percolator::{Side, SideMode};
+    let mut e = *Box::new(RiskEngine::new(default_params()));
+    // Both sides start Normal — opens are permitted
+    assert!(e.check_side_open_permitted(Side::Long).is_ok());
+    assert!(e.check_side_open_permitted(Side::Short).is_ok());
+}
+
+#[test]
+fn test_sidemode_check_open_blocked_drain_only() {
+    use percolator::{RiskError, Side, SideMode};
+    let mut e = *Box::new(RiskEngine::new(default_params()));
+    e.side_mode_long = SideMode::DrainOnly;
+    let err = e.check_side_open_permitted(Side::Long).unwrap_err();
+    assert_eq!(err, RiskError::SideBlocked);
+    // Short side unaffected
+    assert!(e.check_side_open_permitted(Side::Short).is_ok());
+}
+
+#[test]
+fn test_sidemode_check_open_blocked_reset_pending() {
+    use percolator::{RiskError, Side, SideMode};
+    let mut e = *Box::new(RiskEngine::new(default_params()));
+    e.side_mode_short = SideMode::ResetPending;
+    let err = e.check_side_open_permitted(Side::Short).unwrap_err();
+    assert_eq!(err, RiskError::SideBlocked);
+    // Long side unaffected
+    assert!(e.check_side_open_permitted(Side::Long).is_ok());
+}
+
+#[test]
+fn test_run_end_of_instruction_lifecycle_resets_when_oi_zero() {
+    use percolator::{InstructionContext, SideMode};
+    let mut e = *Box::new(RiskEngine::new(default_params()));
+    // Simulate a side that is in ResetPending with OI already drained to 0
+    e.side_mode_long = SideMode::ResetPending;
+    e.oi_eff_long_q = 0;
+    e.adl_mult_long = 999;
+    e.adl_coeff_long = 42;
+
+    let mut ctx = InstructionContext::new();
+    e.run_end_of_instruction_lifecycle(&mut ctx).unwrap();
+
+    // Side should have been reset to Normal
+    assert_eq!(e.side_mode_long, SideMode::Normal);
+    assert_eq!(e.adl_mult_long, 0);
+    assert_eq!(e.adl_coeff_long, 0);
+    assert_eq!(e.adl_epoch_start_k_long, 0);
+}
+
+#[test]
+fn test_run_end_of_instruction_lifecycle_no_reset_when_oi_nonzero() {
+    use percolator::{InstructionContext, SideMode};
+    let mut e = *Box::new(RiskEngine::new(default_params()));
+    // Side is in ResetPending but OI is not zero — should NOT reset
+    e.side_mode_long = SideMode::ResetPending;
+    e.oi_eff_long_q = 100;
+    e.adl_mult_long = 999;
+
+    let mut ctx = InstructionContext::new();
+    e.run_end_of_instruction_lifecycle(&mut ctx).unwrap();
+
+    // Still ResetPending — OI not drained yet
+    assert_eq!(e.side_mode_long, SideMode::ResetPending);
+    assert_eq!(e.adl_mult_long, 999); // unchanged
+}
+
+#[test]
+fn test_instruction_context_default() {
+    use percolator::InstructionContext;
+    let ctx = InstructionContext::default();
+    assert!(!ctx.pending_reset_long);
+    assert!(!ctx.pending_reset_short);
+}
+
+#[test]
+fn test_sidemode_repr_u8_values() {
+    use percolator::SideMode;
+    assert_eq!(SideMode::Normal as u8, 0);
+    assert_eq!(SideMode::DrainOnly as u8, 1);
+    assert_eq!(SideMode::ResetPending as u8, 2);
+}
+
+#[test]
+fn test_oi_eff_fields_initialized_to_zero() {
+    let e = *Box::new(RiskEngine::new(default_params()));
+    assert_eq!(e.oi_eff_long_q, 0);
+    assert_eq!(e.oi_eff_short_q, 0);
+    assert_eq!(e.adl_mult_long, 0);
+    assert_eq!(e.adl_mult_short, 0);
 }
