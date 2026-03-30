@@ -6279,7 +6279,7 @@ fn test_sidemode_check_open_permitted_normal() {
 
 #[test]
 fn test_sidemode_check_open_blocked_drain_only() {
-    use percolator::{Side, SideMode, RiskError};
+    use percolator::{RiskError, Side, SideMode};
     let mut e = *Box::new(RiskEngine::new(default_params()));
     e.side_mode_long = SideMode::DrainOnly;
     let err = e.check_side_open_permitted(Side::Long).unwrap_err();
@@ -6290,7 +6290,7 @@ fn test_sidemode_check_open_blocked_drain_only() {
 
 #[test]
 fn test_sidemode_check_open_blocked_reset_pending() {
-    use percolator::{Side, SideMode, RiskError};
+    use percolator::{RiskError, Side, SideMode};
     let mut e = *Box::new(RiskEngine::new(default_params()));
     e.side_mode_short = SideMode::ResetPending;
     let err = e.check_side_open_permitted(Side::Short).unwrap_err();
