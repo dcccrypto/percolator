@@ -2090,10 +2090,10 @@ impl RiskEngine {
         let target_positive_pnl = target_pnl as u128;
         let abs_pos = saturating_abs_i128(pos) as u128;
 
-        if target_positive_pnl <= excess || abs_pos == 0 {
+        let result = if target_positive_pnl <= excess || abs_pos == 0 {
             // Close entire position — not enough to cover all excess
             self.oracle_close_position_core(idx, oracle_price)?;
-            Ok(abs_pos)
+            abs_pos
         } else {
             // Partial close: close proportion = excess / target_positive_pnl
             let close_abs = abs_pos
@@ -2103,8 +2103,15 @@ impl RiskEngine {
             let close_abs = core::cmp::max(close_abs, 1);
 
             self.oracle_close_position_slice_core(idx, oracle_price, close_abs)?;
-            Ok(close_abs)
-        }
+            close_abs
+        };
+
+        // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
+        // that were triggered during this ADL execution (spec §5.7-5.8).
+        let mut ctx = InstructionContext::new();
+        self.run_end_of_instruction_lifecycle(&mut ctx)?;
+
+        Ok(result)
     }
 
     /// Update initial and maintenance margin BPS. Admin only.
@@ -2561,6 +2568,11 @@ impl RiskEngine {
         // Detect conditions for informational flags
         let force_realize_needed = self.force_realize_active();
         let panic_needed = false; // No longer needed with haircut ratio
+
+        // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
+        // scheduled during this crank (spec §5.7-5.8).
+        let mut ctx = InstructionContext::new();
+        self.run_end_of_instruction_lifecycle(&mut ctx)?;
 
         Ok(CrankOutcome {
             advanced,
@@ -4833,6 +4845,11 @@ impl RiskEngine {
         // Now recompute warmup slopes after PnL changes (resets started_at_slot)
         self.update_warmup_slope(user_idx)?;
         self.update_warmup_slope(lp_idx)?;
+
+        // End-of-instruction lifecycle: finalize any deferred ADL epoch resets
+        // that were scheduled during trade processing (spec §5.7-5.8).
+        let mut ctx = InstructionContext::new();
+        self.run_end_of_instruction_lifecycle(&mut ctx)?;
 
         Ok(())
     }
