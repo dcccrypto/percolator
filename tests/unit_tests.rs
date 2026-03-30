@@ -4579,6 +4579,9 @@ fn test_haircut_includes_isolated_balance() {
     engine.insurance_fund.balance = U128::new(0);
     engine.insurance_fund.isolated_balance = U128::new(500_000_000);
     engine.pnl_pos_tot = U128::new(1_000_000_000);
+    // PERC-8267: haircut_ratio now uses pnl_matured_pos_tot as denominator.
+    // Set matured = pnl_pos_tot to test the same scenario (all PnL matured).
+    engine.pnl_matured_pos_tot = 1_000_000_000;
 
     let (h_num, h_den) = engine.haircut_ratio();
 
@@ -4588,7 +4591,10 @@ fn test_haircut_includes_isolated_balance() {
         h_num, 0,
         "Haircut should include isolated_balance, making residual=0"
     );
-    assert_eq!(h_den, 1_000_000_000, "Denominator should be pnl_pos_tot");
+    assert_eq!(
+        h_den, 1_000_000_000,
+        "Denominator should be pnl_matured_pos_tot"
+    );
 
     // Without isolated_balance (simulate old bug)
     let residual_old = engine
@@ -6066,46 +6072,48 @@ fn test_offset_check_for_tests() {
     // These assertions match the SBF_ENGINE_OFF=600 offsets in integration tests
     // If any of these fail, the integration test helpers need updating
     // Updated for percolator@cf35789 (PERC-8093): +48 bytes in RiskParams (min_nonzero_mm_req, min_nonzero_im_req, insurance_floor)
+    // Updated for PERC-8267: +16 bytes from pnl_matured_pos_tot field added to RiskEngine
+    //                        +8 bytes from Account.reserved_pnl: u64 → u128
     // Note: `small` feature uses MAX_ACCOUNTS=256, shrinking next_free[] and accounts[] — offsets differ
     assert_eq!(
         offset_of!(RiskEngine, used),
-        744,
-        "used bitmap offset changed -- update SBF_ENGINE_OFF+744 in integration tests"
+        760,
+        "used bitmap offset changed -- update SBF_ENGINE_OFF+760 in integration tests"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        1256,
-        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1256 in integration tests"
+        1272,
+        "num_used_accounts offset changed -- update SBF_ENGINE_OFF+1272 in integration tests"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        776,
+        792,
         "small feature: num_used_accounts offset differs (MAX_ACCOUNTS=256 → bitmap=32 bytes)"
     );
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, num_used_accounts),
-        872,
+        888,
         "medium feature: num_used_accounts offset differs (MAX_ACCOUNTS=1024 → bitmap=128 bytes)"
     );
     #[cfg(not(any(feature = "small", feature = "medium")))]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        9472,
-        "accounts offset changed -- update SBF_ENGINE_OFF+9472 in integration tests"
+        9488,
+        "accounts offset changed -- update SBF_ENGINE_OFF+9488 in integration tests"
     );
     #[cfg(feature = "small")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        1312,
+        1328,
         "small feature: accounts offset differs (MAX_ACCOUNTS=256 → next_free is 512 bytes)"
     );
     #[cfg(feature = "medium")]
     assert_eq!(
         offset_of!(RiskEngine, accounts),
-        2944,
+        2960,
         "medium feature: accounts offset differs (MAX_ACCOUNTS=1024 → next_free is 2048 bytes)"
     );
 }
