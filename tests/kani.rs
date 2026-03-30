@@ -10158,3 +10158,204 @@ fn proof_t7_maintenance_healthy_risk_reducing_allowed() {
         "T7-K4: maintenance-healthy account must be allowed to reduce risk"
     );
 }
+
+// =============================================================================
+// PERC-8286: ADL Engine Proofs — Engine-level (T8 T14 security gate)
+// =============================================================================
+//
+// Engine-level proofs that exercise execute_adl on a live RiskEngine state.
+//
+// Properties proven:
+//   T8-E1: execute_adl rejects non-profitable target (pnl ≤ 0)
+//   T8-E2: execute_adl returns closed_abs ≤ initial abs_pos (partial bound)
+//   T8-E3: execute_adl partial close: closed_abs ≥ 1 (minimum 1 unit)
+//   T8-E4: execute_adl conservation: vault ≥ c_tot + insurance after ADL
+// =============================================================================
+
+/// Maximum oracle price used in ADL proofs (1 billion e6 = ~1B units).
+const ADL_MAX_ORACLE: u64 = 1_000_000_000;
+
+/// T8-E1: execute_adl rejects targets with pnl ≤ 0.
+///
+/// If the target position has no positive PnL, ADL must return an error.
+/// Deleveraging a non-profitable position does not reduce the system's liability.
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t8_execute_adl_rejects_nonprofitable_target() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    // Add a position with zero PnL (at entry price = oracle price → zero mark PnL)
+    let user_idx = engine.add_user(0).unwrap();
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 1_000_000 && capital <= 1_000_000_000u128);
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    let oracle_price: u64 = kani::any();
+    kani::assume(oracle_price >= 1 && oracle_price <= ADL_MAX_ORACLE);
+
+    // Set a long position with entry == oracle → mark PnL is 0 → target_pnl = 0
+    let pos_size: i128 = kani::any();
+    kani::assume(pos_size >= 1 && pos_size <= 1_000_000i128);
+    engine.accounts[user_idx as usize].position_size = percolator::I128::new(pos_size);
+    engine.accounts[user_idx as usize].entry_price = oracle_price;
+    // PnL = 0 (entry == oracle, no prior PnL)
+    engine.set_pnl(user_idx as usize, 0);
+    // Sync OI aggregates
+    engine.total_open_interest = pos_size as u128;
+    engine.long_oi = pos_size as u128;
+
+    // Insurance depleted (ADL gate passes)
+    engine.insurance_fund.balance = percolator::U128::ZERO;
+
+    let result = engine.execute_adl(user_idx, 1, oracle_price, 0);
+
+    // After settlement, mark PnL at entry == oracle is 0, so target_pnl ≤ 0 → must fail
+    assert!(
+        result.is_err(),
+        "T8-E1: execute_adl must reject targets with non-positive PnL"
+    );
+}
+
+/// T8-E2: execute_adl partial close: returned closed_abs ≤ initial abs_pos.
+///
+/// When excess < target_pnl (partial close path), the engine closes a proportion
+/// of the position. The proportion must not exceed 1.0 (closed ≤ full position).
+///
+/// This is the engine-level complement to the pure T8-K1 proof.
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t8_execute_adl_partial_close_bounded() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 10_000_000 && capital <= 1_000_000_000u128);
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    // Entry price lower than oracle → long position has positive mark PnL
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    kani::assume(entry_price >= 1 && entry_price <= 100_000);
+    kani::assume(oracle_price > entry_price && oracle_price <= ADL_MAX_ORACLE);
+
+    let pos_size: i128 = kani::any();
+    kani::assume(pos_size >= 1_000 && pos_size <= 100_000i128);
+    engine.accounts[user_idx as usize].position_size = percolator::I128::new(pos_size);
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.set_pnl(user_idx as usize, 0);
+    engine.total_open_interest = pos_size as u128;
+    engine.long_oi = pos_size as u128;
+
+    // Insurance depleted
+    engine.insurance_fund.balance = percolator::U128::ZERO;
+
+    // Small excess relative to position (forces partial close path)
+    let excess: u128 = kani::any();
+    kani::assume(excess <= 100u128); // small excess → partial close
+
+    let abs_pos_before = pos_size as u128;
+
+    let result = engine.execute_adl(user_idx, 1, oracle_price, excess);
+
+    if let Ok(closed_abs) = result {
+        assert!(
+            closed_abs <= abs_pos_before,
+            "T8-E2: execute_adl must not close more than the full position size"
+        );
+    }
+    // Errors are acceptable (e.g. settle_mark_to_oracle_best_effort edge cases)
+}
+
+/// T8-E3: execute_adl partial close: closed_abs ≥ 1 when it succeeds.
+///
+/// Every successful execute_adl call closes at least 1 unit.
+/// This ensures forward progress and prevents ADL stalls.
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t8_execute_adl_closes_at_least_one_unit() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 10_000_000 && capital <= 1_000_000_000u128);
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    kani::assume(entry_price >= 1 && entry_price <= 100_000);
+    kani::assume(oracle_price > entry_price && oracle_price <= ADL_MAX_ORACLE);
+
+    let pos_size: i128 = kani::any();
+    kani::assume(pos_size >= 1_000 && pos_size <= 100_000i128);
+    engine.accounts[user_idx as usize].position_size = percolator::I128::new(pos_size);
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.set_pnl(user_idx as usize, 0);
+    engine.total_open_interest = pos_size as u128;
+    engine.long_oi = pos_size as u128;
+
+    engine.insurance_fund.balance = percolator::U128::ZERO;
+
+    let excess: u128 = kani::any();
+    kani::assume(excess <= 1_000u128);
+
+    let result = engine.execute_adl(user_idx, 1, oracle_price, excess);
+
+    if let Ok(closed_abs) = result {
+        assert!(
+            closed_abs >= 1,
+            "T8-E3: execute_adl must close at least 1 unit on success"
+        );
+    }
+}
+
+/// T8-E4: execute_adl conservation — vault ≥ c_tot + insurance after ADL.
+///
+/// ADL is a position close: no new tokens enter or leave the vault.
+/// The primary conservation invariant (vault ≥ c_tot + insurance) must hold
+/// after every successful execute_adl call.
+#[kani::proof]
+#[kani::unwind(8)]
+fn proof_t8_execute_adl_conservation() {
+    let params = test_params();
+    let mut engine = Box::new(RiskEngine::new(params));
+
+    let user_idx = engine.add_user(0).unwrap();
+    let capital: u128 = kani::any();
+    kani::assume(capital >= 10_000_000 && capital <= 1_000_000_000u128);
+    engine.deposit(user_idx, capital, 0).unwrap();
+
+    // Deposit also funds vault: conservation holds after deposit
+    kani::assume(conservation_fast_no_funding(&engine));
+
+    let entry_price: u64 = kani::any();
+    let oracle_price: u64 = kani::any();
+    kani::assume(entry_price >= 1 && entry_price <= 100_000);
+    kani::assume(oracle_price > entry_price && oracle_price <= ADL_MAX_ORACLE);
+
+    let pos_size: i128 = kani::any();
+    kani::assume(pos_size >= 1_000 && pos_size <= 100_000i128);
+    engine.accounts[user_idx as usize].position_size = percolator::I128::new(pos_size);
+    engine.accounts[user_idx as usize].entry_price = entry_price;
+    engine.set_pnl(user_idx as usize, 0);
+    engine.total_open_interest = pos_size as u128;
+    engine.long_oi = pos_size as u128;
+
+    // Insurance depleted
+    engine.insurance_fund.balance = percolator::U128::ZERO;
+
+    let excess: u128 = kani::any();
+    kani::assume(excess <= 1_000u128);
+
+    let result = engine.execute_adl(user_idx, 1, oracle_price, excess);
+
+    if result.is_ok() {
+        // Conservation invariant must still hold after ADL
+        assert!(
+            conservation_fast_no_funding(&engine),
+            "T8-E4: execute_adl must preserve vault >= c_tot + insurance"
+        );
+    }
+}
