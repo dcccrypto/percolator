@@ -10609,8 +10609,8 @@ fn kani_P8335_adaptive_funding_symmetry_balanced_oi() {
     let max_bps: u64 = kani::any();
 
     kani::assume(oi > 0 && oi <= (u64::MAX / 2) as u128); // avoid overflow in total_oi = oi*2
-    // scale=0 is valid: both the early-return path and the normal path yield
-    // prev_rate.clamp(-max, max) when long_oi == short_oi. No assume needed.
+                                                          // scale=0 is valid: both the early-return path and the normal path yield
+                                                          // prev_rate.clamp(-max, max) when long_oi == short_oi. No assume needed.
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
     // Perfectly balanced: long_oi == short_oi, total_oi = long + short
