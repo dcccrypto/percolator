@@ -8910,14 +8910,14 @@ fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
 #[cfg(kani)]
 #[kani::proof]
 fn proof_adaptive_funding_converges_at_equilibrium() {
-    // When skew = 0 (long_oi == short_oi), rate must not change (unless clamped).
-    // This invariant only holds when adaptive scaling is active (scale > 0).
-    // When scale == 0 the function returns prev_rate_bps unchanged (no clamping).
+    // When skew = 0 (long_oi == short_oi), rate must equal clamped prev_rate.
+    // This holds for all scale values including 0: when scale == 0 (or total_oi == 0),
+    // the function returns prev_rate_bps.clamp(-max, max) — satisfying the same invariant.
     let prev_rate: i64 = kani::any();
     let oi: u128 = kani::any();
     kani::assume(oi > 0 && oi <= u64::MAX as u128);
     let scale: u16 = kani::any();
-    kani::assume(scale > 0); // clamping contract only applies when scaling is active
+    // No assume on scale — scale=0 early-return also satisfies: result == clamp(prev, -max, max)
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0);
 
@@ -8936,9 +8936,9 @@ fn proof_adaptive_funding_converges_at_equilibrium() {
 #[cfg(kani)]
 #[kani::proof]
 fn proof_adaptive_funding_clamped_within_bounds() {
-    // When scale == 0 the function returns prev_rate_bps without clamping (no
-    // adjustment mode).  This proof verifies the clamping contract only when
-    // adaptive scaling is active (scale > 0).
+    // Output is always bounded within [-max_bps, +max_bps] for all inputs.
+    // When scale == 0 (or total_oi == 0), the function returns prev_rate.clamp(-max, max),
+    // which also satisfies the clamping invariant. No scale restriction needed.
     let prev_rate: i64 = kani::any();
     let long_oi: u128 = kani::any();
     let short_oi: u128 = kani::any();
@@ -8946,7 +8946,7 @@ fn proof_adaptive_funding_clamped_within_bounds() {
     kani::assume(total_oi > 0 && total_oi <= u64::MAX as u128);
     kani::assume(long_oi <= total_oi && short_oi <= total_oi);
     let scale: u16 = kani::any();
-    kani::assume(scale > 0); // clamping contract only applies when scaling is active
+    // No assume on scale — scale=0 returns clamped prev_rate, satisfying bounds.
     let max_bps: u64 = kani::any();
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
@@ -10560,6 +10560,10 @@ fn kani_P8335_adaptive_funding_no_overflow() {
 /// This is the clamping invariant: regardless of skew magnitude, adaptive scale, or
 /// previous rate, the returned value must be bounded. Covers the case where an existing
 /// out-of-bounds rate is corrected back into range.
+///
+/// Note: scale=0 is explicitly included. When adaptive_scale_bps == 0, the function
+/// returns prev_rate_bps.clamp(-max, max) — so the bounded-output invariant holds
+/// for all scale values including zero.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(1)]
@@ -10573,8 +10577,8 @@ fn kani_P8335_adaptive_funding_bounded_output() {
 
     kani::assume(total_oi > 0 && total_oi <= u64::MAX as u128);
     kani::assume(long_oi <= total_oi && short_oi <= total_oi);
-    // scale must be > 0 for clamping contract to apply (scale=0 returns prev_rate unclamped)
-    kani::assume(scale > 0);
+    // scale=0 is valid: returns prev_rate.clamp(-max, max), which still satisfies bounds.
+    // No assumption on scale — proof covers all u16 values including 0.
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
     let result = RiskEngine::compute_adaptive_funding_rate(
@@ -10592,6 +10596,9 @@ fn kani_P8335_adaptive_funding_bounded_output() {
 /// When long_oi == short_oi (perfectly balanced market), the skew is 0, delta is 0,
 /// and the rate must equal the clamped previous rate (no drift). This is the neutrality
 /// property: balanced OI must not generate funding-rate inflation.
+///
+/// Note: scale=0 is included — the scale=0 early-return path also produces
+/// prev_rate.clamp(-max, max), satisfying the same invariant.
 #[cfg(kani)]
 #[kani::proof]
 #[kani::unwind(1)]
@@ -10602,7 +10609,8 @@ fn kani_P8335_adaptive_funding_symmetry_balanced_oi() {
     let max_bps: u64 = kani::any();
 
     kani::assume(oi > 0 && oi <= (u64::MAX / 2) as u128); // avoid overflow in total_oi = oi*2
-    kani::assume(scale > 0);
+    // scale=0 is valid: both the early-return path and the normal path yield
+    // prev_rate.clamp(-max, max) when long_oi == short_oi. No assume needed.
     kani::assume(max_bps > 0 && max_bps <= 1_000_000);
 
     // Perfectly balanced: long_oi == short_oi, total_oi = long + short
