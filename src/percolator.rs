@@ -927,6 +927,12 @@ pub struct CrankOutcome {
     pub last_cursor: u16,
     /// Whether this crank completed a full sweep of all accounts
     pub sweep_complete: bool,
+    /// Number of times accrue_market_to failed during this crank (ADL coefficients went stale).
+    /// Under normal conditions this is always 0. Non-zero values indicate extreme adl_mult +
+    /// large price swing combinations that caused overflow inside accrue_market_to. No funds are
+    /// lost — the ADL coefficients are simply not updated for this crank cycle — but observability
+    /// of silent failures was previously zero. GH#1931.
+    pub adl_accrue_failures: u8,
 }
 
 // ============================================================================
@@ -3014,8 +3020,13 @@ impl RiskEngine {
             pending_reset_short: false,
         };
 
-        // Accrue ADL market state
-        let _ = self.accrue_market_to(now_slot, oracle_price);
+        // Accrue ADL market state.
+        // Track silent failures for observability (GH#1931 / PERC-8296).
+        let adl_accrue_failures: u8 = if self.accrue_market_to(now_slot, oracle_price).is_err() {
+            1
+        } else {
+            0
+        };
 
         // Update current_slot so warmup/bookkeeping progresses consistently
         self.current_slot = now_slot;
@@ -3206,6 +3217,7 @@ impl RiskEngine {
                 force_realize_errors,
                 last_cursor: self.crank_cursor,
                 sweep_complete,
+                adl_accrue_failures,
             });
         }
 
@@ -3231,6 +3243,7 @@ impl RiskEngine {
             force_realize_errors: 0,
             last_cursor: self.crank_cursor,
             sweep_complete: false,
+            adl_accrue_failures,
         })
     }
 
