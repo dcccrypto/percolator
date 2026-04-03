@@ -3314,9 +3314,22 @@ impl RiskEngine {
                     self.params.liquidation_fee_cap.get(),
                 );
 
-                // 2. Predict post-partial Eq_maint_raw (settle_losses preserves C + PNL sum)
+                // 2. Predict post-partial Eq_maint_raw (settle_losses preserves C + PNL sum).
+                // Model the same capped fee application as charge_fee_to_insurance:
+                // only capital + collectible fee-debt headroom is actually applied.
+                let cap = account.capital.get();
+                let fee_from_capital = core::cmp::min(liq_fee, cap);
+                let fee_shortfall = liq_fee - fee_from_capital;
+                let current_fc = account.fee_credits.get();
+                let fc_headroom = match current_fc.checked_add(i128::MAX) {
+                    Some(h) if h > 0 => h as u128,
+                    _ => 0u128,
+                };
+                let fee_from_debt = core::cmp::min(fee_shortfall, fc_headroom);
+                let fee_applied = fee_from_capital + fee_from_debt;
+
                 let eq_raw_wide = self.account_equity_maint_raw_wide(account);
-                let predicted_eq = match eq_raw_wide.checked_sub(I256::from_u128(liq_fee)) {
+                let predicted_eq = match eq_raw_wide.checked_sub(I256::from_u128(fee_applied)) {
                     Some(v) => v,
                     None => return None,
                 };
@@ -3691,10 +3704,8 @@ impl RiskEngine {
                 continue;
             }
 
-            // Best-effort fee settle (GC is non-critical; skip on error)
-            if self.settle_maintenance_fee_internal(idx, self.current_slot).is_err() {
-                continue;
-            }
+            // Note: GC does NOT realize recurring maintenance fees. That is only
+            // allowed in touch_account_full and reclaim_empty_account per spec §8.2.3.
 
             // Dust predicate: zero position basis, zero capital, zero reserved,
             // non-positive pnl, AND zero fee_credits. Must not GC accounts
