@@ -3614,14 +3614,16 @@ impl RiskEngine {
             self.accounts[i].adl_epoch_snap = 0;
         }
 
-        // Step 1b: Realize recurring maintenance fees (spec §8.2)
-        self.settle_maintenance_fee_internal(i, self.current_slot)?;
-
-        // Step 2: Settle losses from principal
+        // Step 2: Settle losses from principal (senior to fees)
         self.settle_losses(i);
 
         // Step 3: Absorb any remaining flat negative PnL
         self.resolve_flat_negative(i);
+
+        // Step 3b: Realize recurring maintenance fees (spec §8.2).
+        // After losses and flat-negative absorption, matching touch_account_full
+        // ordering where fees are junior to trading losses.
+        self.settle_maintenance_fee_internal(i, self.current_slot)?;
 
         // Step 4: Convert positive PnL to capital (bypass warmup for resolved market).
         // Uses the same release-then-haircut order as do_profit_conversion and
