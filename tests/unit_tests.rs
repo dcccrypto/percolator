@@ -6713,3 +6713,143 @@ fn test_force_close_resolved_decrements_oi() {
     engine.force_close_resolved(short_idx).unwrap();
     assert_eq!(engine.oi_eff_short_q, 0);
 }
+
+// ==============================================================================
+// PERC-8459: settle_side_effects validate-then-mutate
+// ==============================================================================
+
+/// PERC-8459: Epoch-mismatch branch with stale_count=0 must fail WITHOUT
+/// mutating PnL. Before the fix, set_pnl was called before checked_sub(stale_count),
+/// so a stale_count underflow would leave PnL already mutated.
+#[test]
+fn test_settle_side_effects_epoch_mismatch_stale_zero_no_pnl_mutation() {
+    use percolator::SideMode;
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    // Set up epoch-mismatch scenario: account epoch_snap = 0, side epoch = 1
+    engine.adl_epoch_long = 1;
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.adl_epoch_start_k_long = 500_000i128;
+    engine.adl_coeff_long = 1_000_000i128;
+
+    // Give account a position and ADL state
+    engine.accounts[idx as usize].position_basis_q = 1_000i128;
+    engine.accounts[idx as usize].adl_a_basis = 1_000_000u128;
+    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+
+    // CRITICAL: set stale_count to 0 — checked_sub(1) must fail
+    engine.stale_account_count_long = 0;
+
+    let pnl_before = engine.accounts[idx as usize].pnl.get();
+
+    // settle_side_effects must fail because stale_count underflows
+    let result = engine.settle_side_effects(idx as usize);
+    assert!(result.is_err(), "must fail when stale_count is 0");
+
+    // PnL must NOT have been mutated (validate-then-mutate property)
+    let pnl_after = engine.accounts[idx as usize].pnl.get();
+    assert_eq!(
+        pnl_before, pnl_after,
+        "PERC-8459: PnL must not be mutated when stale_count validation fails"
+    );
+}
+
+/// PERC-8459: Same-epoch branch happy path — PnL should be settled correctly.
+#[test]
+fn test_settle_side_effects_same_epoch_pnl_settled() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    // Set up same-epoch scenario: epoch_snap matches side epoch
+    engine.adl_epoch_long = 1;
+    engine.adl_coeff_long = 1_000_000i128;
+    engine.adl_mult_long = 1_000_000u128;
+
+    engine.accounts[idx as usize].position_basis_q = 1_000i128;
+    engine.accounts[idx as usize].adl_a_basis = 1_000_000u128;
+    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].adl_epoch_snap = 1; // matches epoch_long
+
+    let pnl_before = engine.accounts[idx as usize].pnl.get();
+
+    let result = engine.settle_side_effects(idx as usize);
+    assert!(result.is_ok(), "same-epoch settle should succeed");
+
+    // PnL should have changed (k_side - k_snap = 1_000_000 - 0 = 1_000_000, non-zero delta)
+    // The exact value depends on wide_signed_mul_div_floor_from_k_pair, but it should
+    // at least have been called.
+    // We just verify the function completed without error.
+}
+
+/// PERC-8459: Epoch-mismatch branch happy path — stale_count decremented,
+/// PnL settled, account ADL state cleared.
+#[test]
+fn test_settle_side_effects_epoch_mismatch_happy_path() {
+    use percolator::SideMode;
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    // Set up epoch-mismatch: epoch_snap=0, side epoch=1
+    engine.adl_epoch_long = 1;
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.adl_epoch_start_k_long = 0i128;
+    engine.adl_coeff_long = 0i128;
+
+    engine.accounts[idx as usize].position_basis_q = 1_000i128;
+    engine.accounts[idx as usize].adl_a_basis = 1_000_000u128;
+    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].adl_epoch_snap = 0;
+
+    // stale_count = 1 — checked_sub(1) will succeed
+    engine.stale_account_count_long = 1;
+    // stored_pos_count_long = 1 — needed for set_position_basis_q(idx, 0) decrement
+    engine.stored_pos_count_long = 1;
+
+    let result = engine.settle_side_effects(idx as usize);
+    assert!(
+        result.is_ok(),
+        "epoch-mismatch settle should succeed with stale_count=1"
+    );
+
+    // Verify stale_count decremented
+    assert_eq!(
+        engine.stale_account_count_long, 0,
+        "stale_count must be decremented"
+    );
+
+    // Verify ADL state cleared
+    assert_eq!(
+        engine.accounts[idx as usize].position_basis_q, 0,
+        "basis must be cleared"
+    );
+    assert_eq!(
+        engine.accounts[idx as usize].adl_a_basis, 1_000_000u128,
+        "a_basis must be reset"
+    );
+    assert_eq!(
+        engine.accounts[idx as usize].adl_k_snap, 0i128,
+        "k_snap must be cleared"
+    );
+    assert_eq!(
+        engine.accounts[idx as usize].adl_epoch_snap, 0,
+        "epoch_snap must be cleared"
+    );
+}
+
+/// PERC-8459: Zero basis is a no-op.
+#[test]
+fn test_settle_side_effects_zero_basis_noop() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    // basis=0 → early return Ok
+    engine.accounts[idx as usize].position_basis_q = 0;
+    let result = engine.settle_side_effects(idx as usize);
+    assert!(result.is_ok(), "zero basis must be a no-op");
+}

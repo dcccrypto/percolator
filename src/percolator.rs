@@ -1950,8 +1950,13 @@ impl RiskEngine {
     // ========================================
 
     /// settle_side_effects (spec §5.3): settle A/K gains for account at current epoch.
+    ///
+    /// PERC-8459 (SYNC-02): Refactored to validate-then-mutate pattern.
+    /// Phase 1: COMPUTE + VALIDATE — all arithmetic and validations complete before
+    ///          any state mutation. If any validation fails, state is untouched.
+    /// Phase 2: MUTATE — apply all state changes atomically after validation passes.
     #[allow(dead_code)]
-    fn settle_side_effects(&mut self, idx: usize) -> Result<()> {
+    pub fn settle_side_effects(&mut self, idx: usize) -> Result<()> {
         let basis = self.accounts[idx].position_basis_q;
         if basis == 0 {
             return Ok(());
@@ -1967,6 +1972,7 @@ impl RiskEngine {
         let abs_basis = basis.unsigned_abs();
 
         if epoch_snap == epoch_side {
+            // ── Phase 1: COMPUTE + VALIDATE (same-epoch branch) ──────────
             let a_side = self.get_a_side(side);
             let k_side = self.get_k_side(side);
             let k_snap = self.accounts[idx].adl_k_snap;
@@ -1981,6 +1987,8 @@ impl RiskEngine {
             if new_pnl == i128::MIN {
                 return Err(RiskError::Overflow);
             }
+
+            // ── Phase 2: MUTATE (same-epoch branch) ──────────────────────
             self.set_pnl(idx, new_pnl);
             if self.accounts[idx].reserved_pnl > old_r {
                 self.restart_warmup_after_reserve_increase(idx);
@@ -1996,6 +2004,7 @@ impl RiskEngine {
                 self.accounts[idx].adl_epoch_snap = epoch_side;
             }
         } else {
+            // ── Phase 1: COMPUTE + VALIDATE (epoch-mismatch branch) ──────
             let side_mode = self.get_side_mode(side);
             if side_mode != SideMode::ResetPending {
                 return Err(RiskError::CorruptState);
@@ -2016,13 +2025,16 @@ impl RiskEngine {
             if new_pnl == i128::MIN {
                 return Err(RiskError::Overflow);
             }
+            // Validate stale_count BEFORE any mutation (PERC-8459 fix)
+            let old_stale = self.get_stale_count(side);
+            let new_stale = old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?;
+
+            // ── Phase 2: MUTATE (epoch-mismatch branch) ──────────────────
             self.set_pnl(idx, new_pnl);
             if self.accounts[idx].reserved_pnl > old_r {
                 self.restart_warmup_after_reserve_increase(idx);
             }
             self.set_position_basis_q(idx, 0i128);
-            let old_stale = self.get_stale_count(side);
-            let new_stale = old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?;
             self.set_stale_count(side, new_stale);
             self.accounts[idx].adl_a_basis = 1_000_000u128;
             self.accounts[idx].adl_k_snap = 0i128;
