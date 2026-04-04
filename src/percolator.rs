@@ -3523,18 +3523,19 @@ impl RiskEngine {
             let epoch_snap = self.accounts[i].adl_epoch_snap;
             let epoch_side = self.get_epoch_side(side);
 
+            // Reject corrupt ADL state (a_basis must be > 0 for any position)
+            if a_basis == 0 {
+                return Err(RiskError::CorruptState);
+            }
+
             // Phase 1: COMPUTE (no mutations)
-            let pnl_delta = if a_basis > 0 {
-                let k_end = if epoch_snap == epoch_side {
-                    self.get_k_side(side)
-                } else {
-                    self.get_k_epoch_start(side)
-                };
-                let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-                wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_end, den)
+            let k_end = if epoch_snap == epoch_side {
+                self.get_k_side(side)
             } else {
-                0i128
+                self.get_k_epoch_start(side)
             };
+            let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_end, den);
 
             // Phase 1b: VALIDATE (check all fallible ops before mutating)
             let new_pnl = self.accounts[i].pnl.checked_add(pnl_delta)
@@ -3562,6 +3563,14 @@ impl RiskEngine {
             if epoch_snap != epoch_side {
                 let old_stale = self.get_stale_count(side);
                 self.set_stale_count(side, old_stale - 1);
+            }
+
+            // Decrement OI by the account's effective position before zeroing
+            let eff = self.effective_pos_q(i);
+            if eff > 0 {
+                self.oi_eff_long_q = self.oi_eff_long_q.saturating_sub(eff as u128);
+            } else if eff < 0 {
+                self.oi_eff_short_q = self.oi_eff_short_q.saturating_sub(eff.unsigned_abs());
             }
 
             // Zero position

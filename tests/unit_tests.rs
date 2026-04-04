@@ -2691,3 +2691,45 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
     assert!(engine.check_conservation());
 }
 
+#[test]
+fn test_force_close_decrements_oi() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 500_000, 1000, 100).unwrap();
+    engine.deposit(b, 500_000, 1000, 100).unwrap();
+
+    engine.execute_trade(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i64).unwrap();
+    assert!(engine.oi_eff_long_q > 0);
+    assert!(engine.oi_eff_short_q > 0);
+
+    engine.force_close_resolved(a).unwrap();
+    // a was long — OI long must decrease
+    assert_eq!(engine.oi_eff_long_q, 0, "OI long must be 0 after force-closing the only long");
+    // b still has short position
+    assert!(engine.oi_eff_short_q > 0);
+
+    engine.force_close_resolved(b).unwrap();
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0, "OI short must be 0 after force-closing all");
+    assert_eq!(engine.stored_pos_count_long, 0);
+    assert_eq!(engine.stored_pos_count_short, 0);
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn test_force_close_rejects_corrupt_a_basis() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = engine.add_user(1000).unwrap();
+    engine.deposit(a, 500_000, 1000, 100).unwrap();
+
+    // Manufacture corrupt state: nonzero position with a_basis = 0
+    engine.set_position_basis_q(a as usize, (10 * POS_SCALE) as i128);
+    engine.stored_pos_count_long = 1;
+    engine.accounts[a as usize].adl_a_basis = 0;
+
+    let result = engine.force_close_resolved(a);
+    assert_eq!(result, Err(RiskError::CorruptState),
+        "must reject corrupt a_basis = 0");
+}
+

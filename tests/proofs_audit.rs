@@ -960,10 +960,14 @@ fn proof_force_close_resolved_position_conservation() {
     // Advance K via price movement
     engine.keeper_crank(DEFAULT_SLOT + 1, 1500, &[], 64, 0i64).unwrap();
 
+    let oi_long_before = engine.oi_eff_long_q;
     let result = engine.force_close_resolved(a);
     assert!(result.is_ok());
     assert!(!engine.is_used(a as usize));
     assert!(engine.accounts[a as usize].position_basis_q == 0);
+    // OI must decrease (a was long)
+    assert!(engine.oi_eff_long_q < oi_long_before,
+        "OI long must decrease after force_close of long position");
     assert!(engine.check_conservation(),
         "V >= C_tot + I must hold after force_close with position");
 }
