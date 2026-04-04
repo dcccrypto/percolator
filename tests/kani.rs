@@ -10627,3 +10627,578 @@ fn kani_P8335_adaptive_funding_symmetry_balanced_oi() {
         "P8335-C: balanced OI (long==short) must produce clamped prev_rate with zero adaptive delta",
     );
 }
+
+// ============================================================================
+// PERC-8409: Edge-case Kani proofs for settle_warmup, garbage_collect_dust,
+//            insurance fund drain, and haircut_ratio extreme values
+// ============================================================================
+
+// --- 1. settle_warmup with zero-balance positions ---
+
+/// settle_warmup_to_capital on zero-balance account (capital=0, pnl=0):
+/// Must succeed (Ok), preserve INV, and leave account unchanged (idempotent no-op).
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_zero_balance_idempotent() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(100_000);
+    engine.current_slot = 200;
+
+    let user_idx = engine.add_user(0).unwrap();
+    // Explicitly zero everything — the "zero-balance position" edge case
+    engine.accounts[user_idx as usize].capital = U128::new(0);
+    engine.accounts[user_idx as usize].pnl = I128::new(0);
+    engine.accounts[user_idx as usize].position_size = I128::new(0);
+    engine.accounts[user_idx as usize].reserved_pnl = 0;
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0);
+    engine.recompute_aggregates();
+
+    kani::assume(canonical_inv(&engine));
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    // Must succeed
+    let _ = assert_ok!(result, "settle_warmup must succeed on zero-balance account");
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV preserved after settle_warmup on zero-balance account",
+    );
+
+    // Zero-balance account must remain zero (no spurious mutations)
+    kani::assert(
+        engine.accounts[user_idx as usize].capital.get() == 0,
+        "capital must remain 0 on zero-balance settle_warmup",
+    );
+    kani::assert(
+        engine.accounts[user_idx as usize].pnl.get() == 0,
+        "pnl must remain 0 on zero-balance settle_warmup",
+    );
+}
+
+/// settle_warmup on zero-capital but negative-pnl account:
+/// Negative PnL with zero capital → write-off (PnL set to 0, capital stays 0).
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_zero_capital_negative_pnl_writeoff() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(100_000);
+    engine.current_slot = 200;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = U128::new(0);
+
+    // Symbolic negative PnL
+    let neg_pnl: i128 = kani::any();
+    kani::assume(neg_pnl < 0 && neg_pnl > -50_000);
+    engine.accounts[user_idx as usize].pnl = I128::new(neg_pnl);
+    engine.recompute_aggregates();
+
+    kani::assume(canonical_inv(&engine));
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    if result.is_ok() {
+        kani::assert(
+            canonical_inv(&engine),
+            "INV preserved after settle_warmup zero-cap negative pnl",
+        );
+
+        // With zero capital, loss settlement can't pay anything.
+        // §6.1 step 4: remaining negative PnL is written off → pnl becomes 0.
+        kani::assert(
+            engine.accounts[user_idx as usize].pnl.get() == 0,
+            "negative pnl must be written off when capital is zero",
+        );
+        kani::assert(
+            engine.accounts[user_idx as usize].capital.get() == 0,
+            "capital must remain zero after writeoff",
+        );
+    }
+
+    let _ = assert_ok!(result, "settle_warmup must succeed on zero-cap account");
+}
+
+/// settle_warmup on zero-capital but positive-pnl account with zero warmup slope:
+/// Positive PnL but slope=0 → nothing converts to capital.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_settle_warmup_zero_capital_positive_pnl_zero_slope() {
+    let mut engine = RiskEngine::new(test_params());
+    engine.vault = U128::new(100_000);
+    engine.current_slot = 200;
+
+    let user_idx = engine.add_user(0).unwrap();
+    engine.accounts[user_idx as usize].capital = U128::new(0);
+
+    let pos_pnl: i128 = kani::any();
+    kani::assume(pos_pnl > 0 && pos_pnl < 50_000);
+    engine.accounts[user_idx as usize].pnl = I128::new(pos_pnl);
+    engine.accounts[user_idx as usize].warmup_started_at_slot = 200; // started now
+    engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0); // zero slope
+    engine.recompute_aggregates();
+
+    kani::assume(canonical_inv(&engine));
+
+    let result = engine.settle_warmup_to_capital(user_idx);
+
+    if result.is_ok() {
+        kani::assert(
+            canonical_inv(&engine),
+            "INV preserved after settle_warmup zero-slope",
+        );
+
+        // With zero slope and started_at == current_slot, cap = slope * elapsed = 0 * 0 = 0.
+        // x = min(avail_gross, 0) = 0. No conversion happens.
+        kani::assert(
+            engine.accounts[user_idx as usize].capital.get() == 0,
+            "capital must remain zero when warmup slope is zero",
+        );
+        // PnL unchanged (no conversion occurred)
+        kani::assert(
+            engine.accounts[user_idx as usize].pnl.get() == pos_pnl,
+            "pnl must be unchanged when zero slope prevents conversion",
+        );
+    }
+
+    let _ = assert_ok!(result, "settle_warmup must succeed with zero slope");
+}
+
+// --- 2. garbage_collect_dust with dust below minimum threshold ---
+
+/// Helper: test_params with non-zero new_account_fee (minimum deposit floor).
+fn test_params_with_account_fee() -> RiskParams {
+    RiskParams {
+        warmup_period_slots: 100,
+        maintenance_margin_bps: 500,
+        initial_margin_bps: 1000,
+        trading_fee_bps: 10,
+        max_accounts: 4,
+        new_account_fee: U128::new(1_000), // Non-zero: dust threshold
+        risk_reduction_threshold: U128::ZERO,
+        maintenance_fee_per_slot: U128::ZERO,
+        max_crank_staleness_slots: u64::MAX,
+        liquidation_fee_bps: 50,
+        liquidation_fee_cap: U128::new(10_000),
+        liquidation_buffer_bps: 100,
+        min_liquidation_abs: U128::new(100_000),
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 0,
+        funding_premium_max_bps_per_slot: 0,
+        partial_liquidation_bps: 0,
+        partial_liquidation_cooldown_slots: 0,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 3334,
+        fee_split_protocol_bps: 3333,
+        fee_split_creator_bps: 3333,
+        fee_utilization_surge_bps: 0,
+        min_nonzero_mm_req: 0,
+        min_nonzero_im_req: 0,
+    }
+}
+
+/// GC reclaims accounts with dust capital below new_account_fee (spec §2.6).
+/// Capital < new_account_fee (the minimum deposit floor) is swept to insurance.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_gc_dust_below_minimum_threshold() {
+    let mut engine = RiskEngine::new(test_params_with_account_fee());
+    engine.vault = U128::new(100_000);
+    engine.insurance_fund.balance = U128::new(1_000);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let dust_idx = engine.add_user(0).unwrap();
+
+    // Symbolic dust capital: 0 < capital < new_account_fee (1_000)
+    let dust_cap: u128 = kani::any();
+    kani::assume(dust_cap > 0 && dust_cap < 1_000);
+
+    engine.accounts[dust_idx as usize].capital = U128::new(dust_cap);
+    engine.accounts[dust_idx as usize].pnl = I128::new(0);
+    engine.accounts[dust_idx as usize].position_size = I128::new(0);
+    engine.accounts[dust_idx as usize].reserved_pnl = 0;
+    engine.accounts[dust_idx as usize].funding_index = engine.funding_index_qpb_e6;
+    engine.recompute_aggregates();
+
+    kani::assume(canonical_inv(&engine));
+
+    let ins_before = engine.insurance_fund.balance.get();
+
+    let closed = engine.garbage_collect_dust();
+
+    kani::assert(
+        canonical_inv(&engine),
+        "INV preserved after GC of sub-threshold dust",
+    );
+
+    // Account should be reclaimed (spec §2.6: capital < min_initial_deposit)
+    kani::assert(
+        closed > 0,
+        "GC must close account with dust capital below threshold",
+    );
+
+    // Dust capital swept into insurance
+    kani::assert(
+        engine.insurance_fund.balance.get() == ins_before + dust_cap,
+        "dust capital must be swept to insurance fund",
+    );
+}
+
+/// GC does NOT reclaim accounts with capital >= new_account_fee.
+/// Accounts at or above the minimum deposit are "real" accounts, not dust.
+#[kani::proof]
+#[kani::unwind(33)]
+#[kani::solver(cadical)]
+fn proof_gc_preserves_above_threshold() {
+    let mut engine = RiskEngine::new(test_params_with_account_fee());
+    engine.vault = U128::new(100_000);
+    engine.insurance_fund.balance = U128::new(1_000);
+    engine.current_slot = 100;
+    engine.last_crank_slot = 100;
+    engine.last_full_sweep_start_slot = 100;
+
+    let idx = engine.add_user(0).unwrap();
+
+    // Capital at or above the threshold
+    let cap: u128 = kani::any();
+    kani::assume(cap >= 1_000 && cap < 10_000);
+
+    engine.accounts[idx as usize].capital = U128::new(cap);
+    engine.accounts[idx as usize].pnl = I128::new(0);
+    engine.accounts[idx as usize].position_size = I128::new(0);
+    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.accounts[idx as usize].funding_index = engine.funding_index_qpb_e6;
+    engine.vault = U128::new(cap + 1_000);
+    engine.recompute_aggregates();
+
+    kani::assume(canonical_inv(&engine));
+
+    let _ = engine.garbage_collect_dust();
+
+    // Account must NOT be freed
+    kani::assert(
+        engine.is_used(idx as usize),
+        "GC must not free account with capital >= new_account_fee",
+    );
+
+    // Capital unchanged
+    kani::assert(
+        engine.accounts[idx as usize].capital.get() == cap,
+        "capital must be unchanged for non-dust account",
+    );
+}
+
+// --- 3. Insurance fund drain scenarios hitting floor ---
+
+/// use_insurance_buffer respects insurance_floor: draws stop at the floor.
+/// When loss > available (above floor), only available portion is used.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_insurance_drain_respects_floor() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    // Set insurance_floor to a nonzero value
+    let floor: u128 = kani::any();
+    kani::assume(floor > 0 && floor < 5_000);
+    engine.params.insurance_floor = U128::new(floor);
+
+    // Insurance balance above the floor
+    let balance: u128 = kani::any();
+    kani::assume(balance >= floor && balance < 50_000);
+    engine.insurance_fund.balance = U128::new(balance);
+
+    // Loss that would drain below floor
+    let loss: u128 = kani::any();
+    kani::assume(loss > 0 && loss < 100_000);
+
+    let available = balance.saturating_sub(floor);
+    let expected_pay = core::cmp::min(loss, available);
+    let expected_remainder = loss - expected_pay;
+
+    let remainder = engine.use_insurance_buffer(loss);
+
+    // Insurance must not drop below floor
+    kani::assert(
+        engine.insurance_fund.balance.get() >= floor,
+        "insurance fund must not drop below floor",
+    );
+
+    // Remainder must be correct
+    kani::assert(
+        remainder == expected_remainder,
+        "remainder must equal loss minus what insurance could pay",
+    );
+
+    // Balance after = balance - pay
+    kani::assert(
+        engine.insurance_fund.balance.get() == balance - expected_pay,
+        "insurance balance must be correctly reduced",
+    );
+}
+
+/// Insurance fund at exactly floor: any loss is fully unsatisfied (remainder = loss).
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_insurance_at_floor_no_draws() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    let floor: u128 = kani::any();
+    kani::assume(floor > 0 && floor < 10_000);
+    engine.params.insurance_floor = U128::new(floor);
+    engine.insurance_fund.balance = U128::new(floor); // Exactly at floor
+
+    let loss: u128 = kani::any();
+    kani::assume(loss > 0 && loss < 50_000);
+
+    let remainder = engine.use_insurance_buffer(loss);
+
+    // At floor, available = 0, so entire loss is remainder
+    kani::assert(
+        remainder == loss,
+        "at floor, entire loss must be returned as remainder",
+    );
+
+    // Balance unchanged
+    kani::assert(
+        engine.insurance_fund.balance.get() == floor,
+        "insurance fund at floor must remain unchanged",
+    );
+}
+
+/// Insurance fund below floor (possible via direct manipulation or initialization):
+/// available = 0 (saturating_sub), so no draws possible.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_insurance_below_floor_saturates() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    let floor: u128 = kani::any();
+    kani::assume(floor > 100 && floor < 10_000);
+    engine.params.insurance_floor = U128::new(floor);
+
+    // Balance below floor (edge case — shouldn't normally happen but must be safe)
+    let balance: u128 = kani::any();
+    kani::assume(balance < floor && balance < 10_000);
+    engine.insurance_fund.balance = U128::new(balance);
+
+    let loss: u128 = kani::any();
+    kani::assume(loss > 0 && loss < 50_000);
+
+    let remainder = engine.use_insurance_buffer(loss);
+
+    // saturating_sub(floor) → 0 available → entire loss is remainder
+    kani::assert(
+        remainder == loss,
+        "below floor: entire loss must be returned as remainder",
+    );
+
+    // Balance must not decrease further
+    kani::assert(
+        engine.insurance_fund.balance.get() == balance,
+        "below floor: insurance balance must not decrease",
+    );
+}
+
+/// Zero loss → zero remainder, no change to insurance regardless of state.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_insurance_drain_zero_loss_noop() {
+    let mut engine = RiskEngine::new(test_params_with_floor());
+
+    let floor: u128 = kani::any();
+    kani::assume(floor < 10_000);
+    engine.params.insurance_floor = U128::new(floor);
+
+    let balance: u128 = kani::any();
+    kani::assume(balance < 50_000);
+    engine.insurance_fund.balance = U128::new(balance);
+
+    let remainder = engine.use_insurance_buffer(0);
+
+    kani::assert(remainder == 0, "zero loss must yield zero remainder");
+    kani::assert(
+        engine.insurance_fund.balance.get() == balance,
+        "zero loss must not change insurance balance",
+    );
+}
+
+// --- 4. haircut_ratio overflow/underflow at extreme values ---
+
+/// haircut_ratio with extreme vault/c_tot/insurance values near u128 saturation.
+/// Verifies no overflow or panic; h ∈ [0, 1] is maintained.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_haircut_ratio_extreme_values_no_overflow() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Use large but bounded symbolic values to test near-overflow behaviour
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let pnl_matured: u128 = kani::any();
+
+    // Constraint: values up to 1e18 (realistic maximum for Solana token amounts × 1e6 price)
+    // This is large enough to stress saturating arithmetic
+    kani::assume(vault <= 1_000_000_000_000_000_000);
+    kani::assume(c_tot <= vault);
+    kani::assume(insurance <= vault.saturating_sub(c_tot));
+    kani::assume(pnl_matured <= 1_000_000_000_000_000_000);
+
+    engine.vault = U128::new(vault);
+    engine.c_tot = U128::new(c_tot);
+    engine.insurance_fund.balance = U128::new(insurance);
+    engine.insurance_fund.isolated_balance = U128::new(0);
+    engine.pnl_matured_pos_tot = pnl_matured;
+
+    let (h_num, h_den) = engine.haircut_ratio();
+
+    // P1: h ∈ [0, 1] — h_num <= h_den always
+    kani::assert(h_num <= h_den, "PERC-8409: haircut ratio must be in [0, 1]");
+
+    // P2: Denominator is always positive (no division by zero possible)
+    kani::assert(h_den > 0, "PERC-8409: haircut denominator must be > 0");
+
+    // P3: When pnl_matured == 0, returns (1, 1)
+    if pnl_matured == 0 {
+        kani::assert(
+            h_num == 1 && h_den == 1,
+            "PERC-8409: h must be (1,1) when pnl_matured_pos_tot == 0",
+        );
+    }
+}
+
+/// haircut_ratio: residual underflow when vault < c_tot + insurance.
+/// Verifies saturating_sub produces residual = 0, so h_num = 0 (full haircut).
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_haircut_ratio_vault_underfunded() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Deliberately underfunded: vault < c_tot + insurance
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let pnl_matured: u128 = kani::any();
+
+    kani::assume(vault <= 100_000);
+    kani::assume(c_tot <= 100_000);
+    kani::assume(insurance <= 100_000);
+    kani::assume(pnl_matured > 0 && pnl_matured <= 100_000);
+
+    // Force underfunded: vault < c_tot (insurance doesn't even matter)
+    kani::assume(vault < c_tot);
+
+    engine.vault = U128::new(vault);
+    engine.c_tot = U128::new(c_tot);
+    engine.insurance_fund.balance = U128::new(insurance);
+    engine.insurance_fund.isolated_balance = U128::new(0);
+    engine.pnl_matured_pos_tot = pnl_matured;
+
+    let (h_num, h_den) = engine.haircut_ratio();
+
+    // Residual = vault.saturating_sub(c_tot) = 0 when vault < c_tot
+    // Then residual.saturating_sub(insurance) = 0
+    // h_num = min(0, pnl_matured) = 0
+    kani::assert(
+        h_num == 0,
+        "PERC-8409: haircut must be full (h_num=0) when vault underfunded",
+    );
+    kani::assert(
+        h_den == pnl_matured,
+        "PERC-8409: denominator must be pnl_matured when pnl_matured > 0",
+    );
+}
+
+/// effective_pos_pnl with extreme haircut: never overflows via mul_u128 (saturating).
+/// Tests that floor(pos_pnl * h_num / h_den) doesn't panic at large values.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_effective_pnl_extreme_no_overflow() {
+    let mut engine = RiskEngine::new(test_params());
+
+    // Large values approaching realistic extremes
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let pnl_matured: u128 = kani::any();
+    let pnl: i128 = kani::any();
+
+    kani::assume(vault > 0 && vault <= 1_000_000_000_000);
+    kani::assume(c_tot <= vault);
+    kani::assume(pnl_matured > 0 && pnl_matured <= 1_000_000_000_000);
+    kani::assume(pnl > 0 && pnl <= 500_000_000_000);
+
+    engine.vault = U128::new(vault);
+    engine.c_tot = U128::new(c_tot);
+    engine.insurance_fund.balance = U128::new(0);
+    engine.insurance_fund.isolated_balance = U128::new(0);
+    engine.pnl_matured_pos_tot = pnl_matured;
+
+    let eff = engine.effective_pos_pnl(pnl);
+
+    // Must not exceed actual positive PnL
+    kani::assert(
+        eff <= pnl as u128,
+        "PERC-8409: effective_pos_pnl must not exceed actual PnL",
+    );
+}
+
+/// haircut_ratio with isolated_balance: total_insurance includes both balance + isolated.
+/// Verify correct deduction of total insurance from residual.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_haircut_ratio_isolated_balance_included() {
+    let mut engine = RiskEngine::new(test_params());
+
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let ins_main: u128 = kani::any();
+    let ins_isolated: u128 = kani::any();
+    let pnl_matured: u128 = kani::any();
+
+    kani::assume(vault <= 100_000);
+    kani::assume(c_tot <= vault);
+    kani::assume(ins_main <= 50_000);
+    kani::assume(ins_isolated <= 50_000);
+    kani::assume(pnl_matured > 0 && pnl_matured <= 100_000);
+
+    engine.vault = U128::new(vault);
+    engine.c_tot = U128::new(c_tot);
+    engine.insurance_fund.balance = U128::new(ins_main);
+    engine.insurance_fund.isolated_balance = U128::new(ins_isolated);
+    engine.pnl_matured_pos_tot = pnl_matured;
+
+    let (h_num, h_den) = engine.haircut_ratio();
+
+    // Compute expected residual
+    let total_ins = ins_main.saturating_add(ins_isolated);
+    let residual = vault.saturating_sub(c_tot).saturating_sub(total_ins);
+    let expected_h_num = core::cmp::min(residual, pnl_matured);
+
+    kani::assert(
+        h_num == expected_h_num,
+        "PERC-8409: h_num must account for both main + isolated insurance",
+    );
+    kani::assert(h_den == pnl_matured, "PERC-8409: h_den must be pnl_matured");
+    kani::assert(h_num <= h_den, "PERC-8409: h must be in [0, 1]");
+}
