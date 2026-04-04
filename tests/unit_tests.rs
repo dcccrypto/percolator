@@ -7011,6 +7011,8 @@ fn test_deposit_ghost_account_no_state_leak_on_cap_failure() {
         engine.accounts[idx as usize].capital.get(),
         capital_before,
         "capital must not change on failed deposit"
+    );
+}
 
 // PERC-8461: Recurring Maintenance Fees (spec §8.2)
 // ==============================================================================
@@ -7036,7 +7038,9 @@ fn test_maintenance_fee_basic_accrual() {
     // Advance 100 slots via the public settle_maintenance_fee path
     let dt = 100u64;
     let now_slot = dt;
-    let paid = engine.settle_maintenance_fee(idx, now_slot, DEFAULT_ORACLE).unwrap();
+    let paid = engine
+        .settle_maintenance_fee(idx, now_slot, DEFAULT_ORACLE)
+        .unwrap();
 
     // fee_due = 10 * 100 = 1000
     // fee_credits starts at 0, goes to -1000, then capital pays 1000 into insurance
@@ -7057,7 +7061,9 @@ fn test_maintenance_fee_zero_dt_noop() {
 
     // Set last_fee_slot = 50, then call with now_slot = 50 → dt = 0
     engine.accounts[idx as usize].last_fee_slot = 50;
-    let paid = engine.settle_maintenance_fee(idx, 50, DEFAULT_ORACLE).unwrap();
+    let paid = engine
+        .settle_maintenance_fee(idx, 50, DEFAULT_ORACLE)
+        .unwrap();
     assert_eq!(paid, 0);
     assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000);
 }
@@ -7107,7 +7113,9 @@ fn test_maintenance_fee_zero_rate_noop() {
     engine.deposit(idx, 100_000, 0).unwrap();
     set_insurance(&mut engine, 1_000);
 
-    let paid = engine.settle_maintenance_fee(idx, 1_000_000, DEFAULT_ORACLE).unwrap();
+    let paid = engine
+        .settle_maintenance_fee(idx, 1_000_000, DEFAULT_ORACLE)
+        .unwrap();
     assert_eq!(paid, 0);
     assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000);
 }
@@ -7128,7 +7136,9 @@ fn test_maintenance_fee_credits_buffer() {
 
     // 100 slots → fee_due = 1000
     // fee_credits: 500 - 1000 = -500 → pay 500 from capital
-    let paid = engine.settle_maintenance_fee(idx, 100, DEFAULT_ORACLE).unwrap();
+    let paid = engine
+        .settle_maintenance_fee(idx, 100, DEFAULT_ORACLE)
+        .unwrap();
     assert_eq!(paid, 500); // only the capital portion
     assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000 - 500);
 }
@@ -7145,7 +7155,9 @@ fn test_maintenance_fee_partial_payment() {
     assert_conserved(&engine);
 
     // 100 slots → fee_due = 10_000, but capital is only 500
-    let paid = engine.settle_maintenance_fee(idx, 100, DEFAULT_ORACLE).unwrap();
+    let paid = engine
+        .settle_maintenance_fee(idx, 100, DEFAULT_ORACLE)
+        .unwrap();
     assert_eq!(paid, 500); // all capital consumed
     assert_eq!(engine.accounts[idx as usize].capital.get(), 0);
     // Remaining debt stays in fee_credits (negative)
