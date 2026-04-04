@@ -6853,3 +6853,163 @@ fn test_settle_side_effects_zero_basis_noop() {
     let result = engine.settle_side_effects(idx as usize);
     assert!(result.is_ok(), "zero basis must be a no-op");
 }
+
+// ============================================================================
+// PERC-8462: Deposit ghost account fix — vault capacity + min initial deposit
+// ============================================================================
+
+#[test]
+fn test_deposit_vault_capacity_rejects_overflow() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+
+    // Artificially set vault near MAX_VAULT_TVL
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL - 100);
+
+    // Deposit that fits within cap succeeds
+    let result = engine.deposit(idx, 100, 1);
+    assert!(result.is_ok(), "deposit within cap must succeed");
+
+    // Vault is now exactly at MAX_VAULT_TVL; any further deposit must fail
+    let result = engine.deposit(idx, 1, 2);
+    assert!(result.is_err(), "deposit exceeding vault cap must fail");
+}
+
+#[test]
+fn test_deposit_vault_capacity_exact_boundary() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+
+    // Set vault so that deposit brings it exactly to MAX_VAULT_TVL
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL - 50_000);
+    let result = engine.deposit(idx, 50_000, 1);
+    assert!(
+        result.is_ok(),
+        "deposit to exactly MAX_VAULT_TVL must succeed"
+    );
+    assert_eq!(engine.vault.get(), percolator::MAX_VAULT_TVL);
+}
+
+#[test]
+fn test_deposit_min_initial_deposit_rejects_dust() {
+    let mut params = default_params();
+    params.new_account_fee = percolator::U128::new(1_000); // min deposit = 1000
+    let mut engine = *Box::new(RiskEngine::new(params));
+    // add_user with exact fee — capital starts at 0
+    let idx = engine.add_user(1_000).unwrap();
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 0);
+
+    // Dust deposit (< min_initial_deposit) on zero-capital account must fail
+    let result = engine.deposit(idx, 999, 1);
+    assert!(
+        result.is_err(),
+        "dust deposit on zero-capital account must fail"
+    );
+
+    // Deposit exactly at min threshold succeeds
+    let result = engine.deposit(idx, 1_000, 2);
+    assert!(
+        result.is_ok(),
+        "deposit at min_initial_deposit threshold must succeed"
+    );
+}
+
+#[test]
+fn test_deposit_min_initial_deposit_allows_subsequent_dust() {
+    let mut params = default_params();
+    params.new_account_fee = percolator::U128::new(1_000);
+    let mut engine = *Box::new(RiskEngine::new(params));
+    let idx = engine.add_user(1_000).unwrap();
+
+    // First deposit meets minimum
+    engine.deposit(idx, 5_000, 1).unwrap();
+    assert!(engine.accounts[idx as usize].capital.get() > 0);
+
+    // Subsequent small deposits are fine (account already has capital)
+    let result = engine.deposit(idx, 1, 2);
+    assert!(
+        result.is_ok(),
+        "small deposit on funded account must succeed"
+    );
+}
+
+#[test]
+fn test_add_user_vault_capacity_rejects_overflow() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+
+    // Set vault near MAX_VAULT_TVL
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL - 10);
+
+    // add_user with fee_payment > remaining cap must fail
+    let result = engine.add_user(11);
+    assert!(result.is_err(), "add_user exceeding vault cap must fail");
+
+    // add_user with fee_payment within cap succeeds
+    let result = engine.add_user(10);
+    assert!(result.is_ok(), "add_user within vault cap must succeed");
+}
+
+#[test]
+fn test_add_lp_vault_capacity_rejects_overflow() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+
+    // Set vault near MAX_VAULT_TVL
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL - 10);
+
+    // add_lp with fee_payment > remaining cap must fail
+    let result = engine.add_lp([0; 32], [0; 32], 11);
+    assert!(result.is_err(), "add_lp exceeding vault cap must fail");
+
+    // add_lp with fee_payment within cap succeeds
+    let result = engine.add_lp([0; 32], [0; 32], 10);
+    assert!(result.is_ok(), "add_lp within vault cap must succeed");
+}
+
+#[test]
+fn test_deposit_fee_credits_vault_capacity_rejects_overflow() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 1_000, 0).unwrap();
+
+    // Set vault near MAX_VAULT_TVL
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL - 100);
+
+    // deposit_fee_credits within cap succeeds
+    let result = engine.deposit_fee_credits(idx, 100, 1);
+    assert!(result.is_ok(), "fee credits within cap must succeed");
+
+    // Exceeding cap fails
+    let result = engine.deposit_fee_credits(idx, 1, 2);
+    assert!(result.is_err(), "fee credits exceeding vault cap must fail");
+}
+
+#[test]
+fn test_deposit_ghost_account_no_state_leak_on_cap_failure() {
+    let mut engine = *Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 10_000, 0).unwrap();
+
+    // Record state before failed deposit
+    let vault_before = engine.vault.get();
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    let c_tot_before = engine.c_tot.get();
+
+    // Set vault so next deposit will exceed cap
+    engine.vault = percolator::U128::new(percolator::MAX_VAULT_TVL);
+    let vault_at_cap = engine.vault.get();
+
+    let result = engine.deposit(idx, 1, 1);
+    assert!(result.is_err());
+
+    // Verify NO state was mutated on failure
+    assert_eq!(
+        engine.vault.get(),
+        vault_at_cap,
+        "vault must not change on failed deposit"
+    );
+    assert_eq!(
+        engine.accounts[idx as usize].capital.get(),
+        capital_before,
+        "capital must not change on failed deposit"
+    );
+}
