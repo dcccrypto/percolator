@@ -2241,7 +2241,8 @@ impl RiskEngine {
     // Account Management
     // ========================================================================
 
-    pub fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
+    test_visible! {
+    fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
         let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {
             return Err(RiskError::Overflow);
@@ -2311,8 +2312,10 @@ impl RiskEngine {
 
         Ok(idx)
     }
+    }
 
-    pub fn add_lp(
+    test_visible! {
+    fn add_lp(
         &mut self,
         matching_engine_program: [u8; 32],
         matching_engine_context: [u8; 32],
@@ -2385,6 +2388,7 @@ impl RiskEngine {
         }
 
         Ok(idx)
+    }
     }
 
     pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
@@ -2739,16 +2743,18 @@ impl RiskEngine {
             fee_impact_b = impact_b;
         }
 
-        // Track LP fees: use capital actually paid to insurance (realized revenue),
-        // not including collectible debt that may later be forgiven.
+        // Track LP fees: use total equity impact (capital paid + collectible debt).
+        // This is the nominal fee obligation from the counterparty's trade.
+        // Debt may be collected later via fee_debt_sweep or forgiven on dust
+        // reclamation — that's an insurance concern, not LP attribution.
         if self.accounts[a as usize].is_lp() {
             self.accounts[a as usize].fees_earned_total = U128::new(
-                add_u128(self.accounts[a as usize].fees_earned_total.get(), fee_cash_b)
+                add_u128(self.accounts[a as usize].fees_earned_total.get(), fee_impact_b)
             );
         }
         if self.accounts[b as usize].is_lp() {
             self.accounts[b as usize].fees_earned_total = U128::new(
-                add_u128(self.accounts[b as usize].fees_earned_total.get(), fee_cash_a)
+                add_u128(self.accounts[b as usize].fees_earned_total.get(), fee_impact_a)
             );
         }
 
@@ -3533,18 +3539,23 @@ impl RiskEngine {
 
     /// Force-close an account on a resolved market.
     ///
+    /// `resolved_slot` is the market resolution boundary slot, used to anchor
+    /// `current_slot` and realize maintenance fees through that slot.
+    ///
     /// Settles K-pair PnL, zeros position, settles losses, absorbs from
     /// insurance, converts profit (bypassing warmup), sweeps fee debt,
     /// forgives remainder, returns capital, frees slot.
     ///
     /// Skips accrue_market_to (market is frozen). Handles both same-epoch
-    /// and epoch-mismatch accounts. For epoch-mismatch where the normal
-    /// settle_side_effects would reject due to side mode, falls back to
-    /// manual K-pair settlement using the same wide arithmetic.
-    pub fn force_close_resolved_not_atomic(&mut self, idx: u16) -> Result<u128> {
+    /// and epoch-mismatch accounts.
+    pub fn force_close_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64) -> Result<u128> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        if resolved_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        self.current_slot = resolved_slot;
 
         let i = idx as usize;
 
