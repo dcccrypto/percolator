@@ -96,6 +96,12 @@ pub const POS_SCALE: u128 = 1_000_000;
 /// Combined with MAX_ORACLE_PRICE, guarantees mark_pnl multiply won't overflow i128
 pub const MAX_POSITION_ABS: u128 = 100_000_000_000_000_000_000;
 
+/// Maximum vault TVL (spec §2.2).
+/// Caps total token balance to prevent overflow in downstream accounting.
+/// 10^30 ≈ 1 trillion tokens at 10^18 decimal precision — well above any
+/// realistic deployment while still fitting comfortably within u128 arithmetic.
+pub const MAX_VAULT_TVL: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 10^30
+
 // ============================================================================
 // BPF-Safe 128-bit Types (see src/i128.rs)
 // ============================================================================
@@ -2270,12 +2276,25 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // --- GHOST ACCOUNT FIX (upstream d94d064a) ---
+        // Vault capacity check BEFORE slot allocation.
+        // Prevents ghost accounts: if vault cap is exceeded, no slot is consumed.
+        let new_vault = self
+            .vault
+            .get()
+            .checked_add(fee_payment)
+            .ok_or(RiskError::Overflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(RiskError::Overflow);
+        }
+
         // Bug #4 fix: Compute excess payment to credit to user capital
         let excess = fee_payment.saturating_sub(required_fee);
 
         // Pay fee to insurance (fee tokens are deposited into vault)
-        // Account for FULL fee_payment in vault, not just required_fee
-        self.vault += fee_payment;
+        // Account for FULL fee_payment in vault, not just required_fee.
+        // Uses pre-validated new_vault from capacity check above.
+        self.vault = U128::new(new_vault);
         self.insurance_fund.balance += required_fee;
         self.insurance_fund.fee_revenue += required_fee;
 
@@ -2335,12 +2354,24 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
+        // --- GHOST ACCOUNT FIX (upstream d94d064a) ---
+        // Vault capacity check BEFORE slot allocation.
+        let new_vault = self
+            .vault
+            .get()
+            .checked_add(fee_payment)
+            .ok_or(RiskError::Overflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(RiskError::Overflow);
+        }
+
         // Bug #4 fix: Compute excess payment to credit to LP capital
         let excess = fee_payment.saturating_sub(required_fee);
 
         // Pay fee to insurance (fee tokens are deposited into vault)
-        // Account for FULL fee_payment in vault, not just required_fee
-        self.vault += fee_payment;
+        // Account for FULL fee_payment in vault, not just required_fee.
+        // Uses pre-validated new_vault from capacity check above.
+        self.vault = U128::new(new_vault);
         self.insurance_fund.balance += required_fee;
         self.insurance_fund.fee_revenue += required_fee;
 
@@ -2625,8 +2656,19 @@ impl RiskEngine {
         }
         self.current_slot = now_slot;
 
+        // --- GHOST ACCOUNT FIX (upstream d94d064a) ---
+        // Vault capacity check before mutation.
+        let new_vault = self
+            .vault
+            .get()
+            .checked_add(amount)
+            .ok_or(RiskError::Overflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(RiskError::Overflow);
+        }
+
         // Wrapper transferred tokens into vault
-        self.vault += amount;
+        self.vault = U128::new(new_vault);
 
         // Pre-fund: insurance receives the amount now.
         // When credits are later spent during fee settlement, no further
@@ -4657,6 +4699,28 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
+        // --- GHOST ACCOUNT FIX (upstream d94d064a) ---
+        // Vault capacity check BEFORE any state mutation.
+        // If this fails, no account state is touched — prevents ghost accounts
+        // where a slot is allocated but the deposit is rejected.
+        let new_vault = self
+            .vault
+            .get()
+            .checked_add(amount)
+            .ok_or(RiskError::Overflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(RiskError::Overflow);
+        }
+
+        // Minimum initial deposit check for accounts with zero capital.
+        // Prevents dust accounts that are expensive to GC but hold no real value.
+        // new_account_fee doubles as the minimum deposit floor (spec §2.2).
+        let min_deposit = self.params.new_account_fee.get();
+        if min_deposit > 0 && self.accounts[idx as usize].capital.get() == 0 && amount < min_deposit
+        {
+            return Err(RiskError::InsufficientBalance);
+        }
+
         let account = &mut self.accounts[idx as usize];
         let mut deposit_remaining = amount;
 
@@ -4690,8 +4754,9 @@ impl RiskEngine {
                 .saturating_add(u128_to_i128_clamped(pay));
         }
 
-        // Vault gets full deposit (tokens received)
-        self.vault = U128::new(add_u128(self.vault.get(), amount));
+        // Vault gets full deposit (tokens received).
+        // Uses pre-validated new_vault from the capacity check above.
+        self.vault = U128::new(new_vault);
 
         // Capital gets remainder after fees (via set_capital to maintain c_tot)
         let new_cap = add_u128(self.accounts[idx as usize].capital.get(), deposit_remaining);
