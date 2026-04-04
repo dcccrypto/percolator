@@ -2841,6 +2841,174 @@ impl RiskEngine {
         Ok(capital.get())
     }
 
+    // ========================================================================
+    // force_close_resolved (resolved/frozen market path)
+    // ========================================================================
+
+    /// Force-close an account on a resolved market.
+    ///
+    /// Settles K-pair PnL, zeros position, settles losses, absorbs from
+    /// insurance, converts profit (bypassing warmup), sweeps fee debt,
+    /// forgives remainder, returns capital, frees slot.
+    ///
+    /// Skips accrue_market_to (market is frozen). Handles both same-epoch
+    /// and epoch-mismatch accounts. For epoch-mismatch where the normal
+    /// settle_side_effects would reject due to side mode, falls back to
+    /// manual K-pair settlement using the same wide arithmetic.
+    pub fn force_close_resolved(&mut self, idx: u16) -> Result<u128> {
+        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        let i = idx as usize;
+
+        // Step 1: Settle K-pair PnL and zero position.
+        // Uses validate-then-mutate: compute pnl_delta and validate all checked
+        // ops BEFORE any mutation, preventing partial-mutation-on-error.
+        // Does NOT call settle_side_effects (which interleaves mutations with
+        // fallible checked_sub on stale_count).
+        if self.accounts[i].position_basis_q != 0 {
+            let basis = self.accounts[i].position_basis_q;
+            let abs_basis = basis.unsigned_abs();
+            let a_basis = self.accounts[i].adl_a_basis;
+            let k_snap = self.accounts[i].adl_k_snap;
+            let side = side_of_i128(basis).unwrap();
+            let epoch_snap = self.accounts[i].adl_epoch_snap;
+            let epoch_side = self.get_epoch_side(side);
+
+            // Reject corrupt ADL state (a_basis must be > 0 for any position)
+            if a_basis == 0 {
+                return Err(RiskError::CorruptState);
+            }
+
+            // Phase 1: COMPUTE (no mutations)
+            let k_end = if epoch_snap == epoch_side {
+                self.get_k_side(side)
+            } else {
+                self.get_k_epoch_start(side)
+            };
+            let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_end, den);
+
+            // Phase 1b: VALIDATE (check all fallible ops before mutating)
+            let new_pnl = self.accounts[i]
+                .pnl
+                .get()
+                .checked_add(pnl_delta)
+                .ok_or(RiskError::Overflow)?;
+            if new_pnl == i128::MIN {
+                return Err(RiskError::Overflow);
+            }
+            // Validate OI decrement (computed before any mutation)
+            let eff = self.effective_pos_q(i);
+            if eff > 0 {
+                self.oi_eff_long_q
+                    .checked_sub(eff as u128)
+                    .ok_or(RiskError::CorruptState)?;
+            } else if eff < 0 {
+                self.oi_eff_short_q
+                    .checked_sub(eff.unsigned_abs())
+                    .ok_or(RiskError::CorruptState)?;
+            }
+
+            if epoch_snap != epoch_side {
+                // Validate epoch adjacency (same check as settle_side_effects
+                // minus the ResetPending mode check, which is relaxed for
+                // resolved markets where the side may be in any mode)
+                if epoch_snap.checked_add(1) != Some(epoch_side) {
+                    return Err(RiskError::CorruptState);
+                }
+                let old_stale = self.get_stale_count(side);
+                if old_stale == 0 {
+                    return Err(RiskError::CorruptState);
+                }
+            }
+
+            // Phase 2: MUTATE (all validated, safe to commit)
+            if pnl_delta != 0 {
+                let old_r = self.accounts[i].reserved_pnl;
+                self.set_pnl(i, new_pnl);
+                if self.accounts[i].reserved_pnl > old_r {
+                    self.restart_warmup_after_reserve_increase(i);
+                }
+            }
+
+            // Decrement stale count (pre-validated above)
+            if epoch_snap != epoch_side {
+                let old_stale = self.get_stale_count(side);
+                self.set_stale_count(side, old_stale - 1);
+            }
+
+            // Decrement OI (pre-validated above)
+            if eff > 0 {
+                self.oi_eff_long_q -= eff as u128;
+            } else if eff < 0 {
+                self.oi_eff_short_q -= eff.unsigned_abs();
+            }
+
+            // Zero position
+            self.set_position_basis_q(i, 0);
+            self.accounts[i].adl_a_basis = 1_000_000u128; // ADL_ONE
+            self.accounts[i].adl_k_snap = 0;
+            self.accounts[i].adl_epoch_snap = 0;
+        }
+
+        // Step 2: Settle losses from principal (senior to fees)
+        self.settle_losses(i);
+
+        // Step 3: Absorb any remaining flat negative PnL
+        self.resolve_flat_negative(i);
+
+        // Step 3b: Realize recurring maintenance fees (spec §8.2).
+        // After losses and flat-negative absorption, matching touch_account_full
+        // ordering where fees are junior to trading losses.
+        self.settle_maintenance_fee_internal(i, self.current_slot)?;
+
+        // Step 4: Convert positive PnL to capital (bypass warmup for resolved market).
+        // Uses the same release-then-haircut order as do_profit_conversion and
+        // convert_released_pnl. Sequential closers see progressively larger
+        // pnl_matured_pos_tot denominators, which is the same behavior as normal
+        // sequential profit conversion — this is inherent to the haircut model,
+        // not a force_close-specific issue.
+        if self.accounts[i].pnl.get() > 0 {
+            // Release all reserves unconditionally (bypass warmup)
+            self.set_reserved_pnl(i, 0);
+            // Convert using post-release haircut
+            let released = self.released_pos(i);
+            if released > 0 {
+                let (h_num, h_den) = self.haircut_ratio();
+                let y = if h_den == 0 {
+                    released
+                } else {
+                    wide_mul_div_floor_u128(released, h_num, h_den)
+                };
+                self.consume_released_pnl(i, released);
+                let new_cap = add_u128(self.accounts[i].capital.get(), y);
+                self.set_capital(i, new_cap);
+            }
+        }
+
+        // Step 5: Sweep fee debt from capital
+        self.fee_debt_sweep(i);
+
+        // Step 6: Forgive any remaining fee debt
+        if self.accounts[i].fee_credits.get() < 0 {
+            self.accounts[i].fee_credits = I128::ZERO;
+        }
+
+        // Step 7: Return capital and free slot
+        let capital = self.accounts[i].capital;
+        if capital > self.vault {
+            return Err(RiskError::InsufficientBalance);
+        }
+        self.vault = self.vault - capital;
+        self.set_capital(i, 0);
+
+        self.free_slot(idx);
+
+        Ok(capital.get())
+    }
+
     /// Free an account slot (internal helper).
     /// Clears the account, bitmap, and returns slot to freelist.
     /// Caller must ensure the account is safe to free (no capital, no positive pnl, etc).
