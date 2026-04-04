@@ -189,13 +189,13 @@ fn inductive_withdraw_preserves_accounting() {
     kani::assume(dep >= 1000 && dep <= 1_000_000);
     engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Run keeper_crank to satisfy fresh-crank requirement for withdraw
-    let _ = engine.keeper_crank(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64);
+    // Run keeper_crank_not_atomic to satisfy fresh-crank requirement for withdraw_not_atomic
+    let _ = engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64);
 
     let w: u32 = kani::any();
     kani::assume(w >= 1 && w <= dep);
-    let result = engine.withdraw(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    kani::cover!(result.is_ok(), "withdraw Ok path reachable");
+    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
+    kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
     if result.is_ok() {
         assert!(engine.check_conservation());
     }
@@ -218,8 +218,8 @@ fn inductive_settle_loss_preserves_accounting() {
     kani::assume((-loss as u32) <= dep);
     engine.set_pnl(idx as usize, loss as i128);
 
-    // touch_account_full settles losses from principal (step 9)
-    let _ = engine.touch_account_full(idx as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
+    // touch_account_full_not_atomic settles losses from principal (step 9)
+    let _ = engine.touch_account_full_not_atomic(idx as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(engine.check_conservation());
 }
 
@@ -483,7 +483,7 @@ fn proof_side_mode_gating() {
     engine.side_mode_long = SideMode::DrainOnly;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
     assert!(result == Err(RiskError::SideBlocked));
 
     engine.side_mode_long = SideMode::Normal;
@@ -491,7 +491,7 @@ fn proof_side_mode_gating() {
     engine.stale_account_count_short = 1;
 
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i64);
+    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i64);
     assert!(result2 == Err(RiskError::SideBlocked));
 }
 

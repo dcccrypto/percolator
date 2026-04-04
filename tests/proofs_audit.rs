@@ -267,10 +267,10 @@ fn proof_fee_debt_sweep_checked_arithmetic() {
 }
 
 // ############################################################################
-// FIX 5: keeper_crank pre-flight validates partial hints (no griefing)
+// FIX 5: keeper_crank_not_atomic pre-flight validates partial hints (no griefing)
 // ############################################################################
 
-/// keeper_crank with a bad partial hint (too small to restore health) must NOT
+/// keeper_crank_not_atomic with a bad partial hint (too small to restore health) must NOT
 /// Invalid partial hint → no liquidation action (spec §11.1 rule 3).
 /// The crank succeeds but the account retains its position.
 #[kani::proof]
@@ -286,15 +286,15 @@ fn proof_keeper_crank_invalid_partial_no_action() {
     engine.deposit(b, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = 100 * POS_SCALE as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let crash_oracle = 500u64;
 
     // Tiny partial — won't restore health, pre-flight returns None → no action
     let bad_hint = Some(LiquidationPolicy::ExactPartial(POS_SCALE as u128));
     let candidates = [(a, bad_hint)];
-    let result = engine.keeper_crank(DEFAULT_SLOT + 1, crash_oracle, &candidates, 10, 0i64);
-    assert!(result.is_ok(), "keeper_crank must not revert on invalid partial hint");
+    let result = engine.keeper_crank_not_atomic(DEFAULT_SLOT + 1, crash_oracle, &candidates, 10, 0i64);
+    assert!(result.is_ok(), "keeper_crank_not_atomic must not revert on invalid partial hint");
 
     // Invalid hint means no liquidation — account still has position
     assert!(engine.effective_pos_q(a as usize) != 0,
@@ -303,10 +303,10 @@ fn proof_keeper_crank_invalid_partial_no_action() {
 }
 
 // ############################################################################
-// FIX 6: liquidate_at_oracle rejects missing accounts before touch
+// FIX 6: liquidate_at_oracle_not_atomic rejects missing accounts before touch
 // ############################################################################
 
-/// liquidate_at_oracle on a missing account must return Ok(false) without
+/// liquidate_at_oracle_not_atomic on a missing account must return Ok(false) without
 /// mutating market state (no accrue_market_to side effects).
 #[kani::proof]
 #[kani::unwind(34)]
@@ -318,7 +318,7 @@ fn proof_liquidate_missing_account_no_market_mutation() {
     let oracle_before = engine.last_oracle_price;
 
     // Call liquidate on an unused slot
-    let result = engine.liquidate_at_oracle(0, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose, 0i64);
+    let result = engine.liquidate_at_oracle_not_atomic(0, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose, 0i64);
     assert!(matches!(result, Ok(false)), "must return Ok(false) for missing account");
 
     // Market state must not have been mutated
@@ -376,10 +376,10 @@ fn proof_config_rejects_im_gt_deposit() {
 }
 
 // ############################################################################
-// FIX 8: close_account checks PnL before forgiving fee debt
+// FIX 8: close_account_not_atomic checks PnL before forgiving fee debt
 // ############################################################################
 
-/// close_account must not forgive fee debt if PnL > 0 (warmup not complete).
+/// close_account_not_atomic must not forgive fee debt if PnL > 0 (warmup not complete).
 /// The PnL check must come BEFORE fee forgiveness.
 ///
 /// Setup: flat account with positive reserved PnL (warmup incomplete),
@@ -404,11 +404,11 @@ fn proof_close_account_pnl_check_before_fee_forgive() {
     engine.accounts[idx as usize].fee_credits = I128::new(-1000);
     let fc_before = engine.accounts[idx as usize].fee_credits.get();
 
-    // close_account: touch will be no-op for fees (capital=0),
+    // close_account_not_atomic: touch will be no-op for fees (capital=0),
     // do_profit_conversion: released = max(5000,0) - 5000 = 0, so skip.
     // PnL check: pnl > 0 → Err(PnlNotWarmedUp)
-    let result = engine.close_account(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
-    assert!(result.is_err(), "close_account must reject when pnl > 0");
+    let result = engine.close_account_not_atomic(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i64);
+    assert!(result.is_err(), "close_account_not_atomic must reject when pnl > 0");
 
     // fee_credits must NOT have been zeroed by forgiveness (PnL check is first)
     assert!(
@@ -440,7 +440,7 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
 
     // Open a tiny position (1 unit of basis)
     let tiny = 1i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Trigger an ADL that sets a_long to a value that would truncate the position to 0.
     // The simplest way: directly manipulate adl_mult_long to 0 (below MIN_A_SIDE).
@@ -449,7 +449,7 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
     engine.adl_mult_long = 1; // Very small — floor(1 * 1 / 1_000_000) = 0
 
     // Now touch the account — settle_side_effects should zero the position
-    let _ = engine.touch_account_full(a as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let _ = engine.touch_account_full_not_atomic(a as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
 
     // If position was zeroed, epoch_snap must be 0 per §2.4
     if engine.accounts[a as usize].position_basis_q == 0 {
@@ -478,7 +478,7 @@ fn proof_keeper_hint_none_returns_none() {
 
     // Open a position so eff != 0
     let size: i128 = (POS_SCALE as i128) * 10;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let eff = engine.effective_pos_q(a as usize);
     assert!(eff != 0);
@@ -500,7 +500,7 @@ fn proof_keeper_hint_fullclose_passthrough() {
     engine.deposit(b, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size: i128 = (POS_SCALE as i128) * 10;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let eff = engine.effective_pos_q(a as usize);
     let hint = Some(LiquidationPolicy::FullClose);
@@ -599,10 +599,10 @@ fn proof_config_rejects_fee_cap_exceeds_max() {
 }
 
 // ############################################################################
-// FIX 12: touch_account_full rejects out-of-bounds and unused accounts
+// FIX 12: touch_account_full_not_atomic rejects out-of-bounds and unused accounts
 // ############################################################################
 
-/// touch_account_full on an unused slot must return AccountNotFound.
+/// touch_account_full_not_atomic on an unused slot must return AccountNotFound.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -610,27 +610,27 @@ fn proof_touch_unused_returns_error() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     // Slot 0 is not used (no add_user called)
-    let result = engine.touch_account_full(0, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.touch_account_full_not_atomic(0, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(result.is_err(), "touch on unused slot must fail");
 }
 
-/// touch_account_full on an out-of-bounds index must return error.
+/// touch_account_full_not_atomic on an out-of-bounds index must return error.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_touch_oob_returns_error() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    let result = engine.touch_account_full(MAX_ACCOUNTS, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.touch_account_full_not_atomic(MAX_ACCOUNTS, DEFAULT_ORACLE, DEFAULT_SLOT);
     assert!(result.is_err(), "touch on OOB index must fail");
 }
 
 // ############################################################################
-// FIX 13: withdraw and execute_trade do not require fresh crank (spec §0 goal 6)
+// FIX 13: withdraw_not_atomic and execute_trade_not_atomic do not require fresh crank (spec §0 goal 6)
 // ############################################################################
 
-/// Withdraw must succeed even when no keeper_crank has ever run.
-/// Spec §10.4 does not gate withdraw on keeper liveness.
+/// Withdraw must succeed even when no keeper_crank_not_atomic has ever run.
+/// Spec §10.4 does not gate withdraw_not_atomic on keeper liveness.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -641,12 +641,12 @@ fn proof_withdraw_no_crank_gate() {
 
     // last_crank_slot is 0, now_slot is far ahead. Must still succeed.
     let far_slot = DEFAULT_SLOT + 100_000;
-    let result = engine.withdraw(idx, 1_000, DEFAULT_ORACLE, far_slot, 0i64);
-    assert!(result.is_ok(), "withdraw must not require fresh crank (spec §0 goal 6)");
+    let result = engine.withdraw_not_atomic(idx, 1_000, DEFAULT_ORACLE, far_slot, 0i64);
+    assert!(result.is_ok(), "withdraw_not_atomic must not require fresh crank (spec §0 goal 6)");
 }
 
-/// execute_trade must succeed even when no keeper_crank has ever run.
-/// Spec §10.5 does not gate execute_trade on keeper liveness.
+/// execute_trade_not_atomic must succeed even when no keeper_crank_not_atomic has ever run.
+/// Spec §10.5 does not gate execute_trade_not_atomic on keeper liveness.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -660,7 +660,7 @@ fn proof_trade_no_crank_gate() {
     // last_crank_slot is 0, now_slot is far ahead. Must still succeed.
     let far_slot = DEFAULT_SLOT + 100_000;
     let size: i128 = POS_SCALE as i128;
-    let result = engine.execute_trade(a, b, DEFAULT_ORACLE, far_slot, size, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, far_slot, size, DEFAULT_ORACLE, 0i64);
     assert!(result.is_ok(), "trade must not require fresh crank (spec §0 goal 6)");
 }
 
@@ -682,7 +682,7 @@ fn proof_gc_skips_negative_pnl() {
 
     // Directly set negative PnL to simulate a flat account with unresolved loss.
     // In production this arises when a position is closed at a loss but
-    // touch_account_full → §7.3 hasn't run yet.
+    // touch_account_full_not_atomic → §7.3 hasn't run yet.
     engine.set_pnl(idx as usize, -100i128);
 
     let ins_before = engine.insurance_fund.balance.get();
@@ -734,7 +734,7 @@ fn proof_config_rejects_excessive_insurance_floor() {
 ///
 /// We construct an underwater account, call validate_keeper_hint with a
 /// symbolic q_close_q, and if the hint passes through (returns ExactPartial),
-/// run the actual keeper_crank and verify it succeeds (doesn't fall back
+/// run the actual keeper_crank_not_atomic and verify it succeeds (doesn't fall back
 /// to FullClose due to step 14 rejection).
 #[kani::proof]
 #[kani::unwind(34)]
@@ -750,7 +750,7 @@ fn proof_validate_hint_preflight_conservative() {
 
     // Open position
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject loss to make a underwater
     engine.set_pnl(a as usize, -800_000i128);
@@ -769,13 +769,13 @@ fn proof_validate_hint_preflight_conservative() {
     if let Some(LiquidationPolicy::ExactPartial(q)) = validated {
         assert_eq!(q, q_close, "approved q must match");
 
-        // Run actual liquidation via keeper_crank
+        // Run actual liquidation via keeper_crank_not_atomic
         let slot2 = DEFAULT_SLOT + 1;
         let candidates = [(a, Some(LiquidationPolicy::ExactPartial(q)))];
-        let result = engine.keeper_crank(slot2, DEFAULT_ORACLE, &candidates, 10, 0i64);
+        let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i64);
 
         // Crank must succeed (step 14 must pass if pre-flight said OK)
-        assert!(result.is_ok(), "keeper_crank must succeed when pre-flight approved ExactPartial");
+        assert!(result.is_ok(), "keeper_crank_not_atomic must succeed when pre-flight approved ExactPartial");
 
         // And the account must still have a position (partial, not converted to full close)
         let eff_after = engine.effective_pos_q(a as usize);
@@ -806,7 +806,7 @@ fn proof_validate_hint_preflight_oracle_shift() {
 
     // Open position at DEFAULT_ORACLE (1000)
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Inject loss to make a underwater
     engine.set_pnl(a as usize, -800_000i128);
@@ -833,10 +833,10 @@ fn proof_validate_hint_preflight_oracle_shift() {
         let candidates = [(a, Some(LiquidationPolicy::ExactPartial(q)))];
         // Crank uses the shifted oracle — touch will run settle_side_effects
         // producing nonzero pnl_delta from K-pair settlement
-        let result = engine.keeper_crank(slot2, crank_oracle, &candidates, 10, 0i64);
+        let result = engine.keeper_crank_not_atomic(slot2, crank_oracle, &candidates, 10, 0i64);
 
         assert!(result.is_ok(),
-            "keeper_crank must succeed when pre-flight approved ExactPartial (oracle-shifted)");
+            "keeper_crank_not_atomic must succeed when pre-flight approved ExactPartial (oracle-shifted)");
     }
 
     kani::cover!(matches!(validated, Some(LiquidationPolicy::ExactPartial(_))),
@@ -874,10 +874,10 @@ fn proof_set_owner_rejects_claimed() {
 }
 
 // ############################################################################
-// force_close_resolved: conservation and correctness
+// force_close_resolved_not_atomic: conservation and correctness
 // ############################################################################
 
-/// force_close_resolved settles K-pair PnL on accounts with open positions.
+/// force_close_resolved_not_atomic settles K-pair PnL on accounts with open positions.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -890,20 +890,20 @@ fn proof_force_close_resolved_with_position_conserves() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic loss on the position holder
     let loss: u32 = kani::any();
     kani::assume(loss >= 1 && loss <= 400_000);
     engine.set_pnl(a as usize, -(loss as i128));
 
-    let result = engine.force_close_resolved(a);
+    let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok(), "force_close must succeed with open position");
     assert!(!engine.is_used(a as usize), "account must be freed");
     assert!(engine.check_conservation());
 }
 
-/// force_close_resolved converts positive PnL on flat accounts.
+/// force_close_resolved_not_atomic converts positive PnL on flat accounts.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -917,14 +917,14 @@ fn proof_force_close_resolved_with_profit_conserves() {
     engine.set_pnl(idx as usize, profit as i128);
 
     let cap_before = engine.accounts[idx as usize].capital.get();
-    let result = engine.force_close_resolved(idx);
+    let result = engine.force_close_resolved_not_atomic(idx);
     assert!(result.is_ok(), "force_close must succeed with positive PnL");
     assert!(result.unwrap() >= cap_before, "returned must include converted profit");
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
 }
 
-/// force_close_resolved on a flat account with no PnL returns exact capital.
+/// force_close_resolved_not_atomic on a flat account with no PnL returns exact capital.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -936,14 +936,14 @@ fn proof_force_close_resolved_flat_returns_capital() {
     kani::assume(dep >= 1 && dep <= 1_000_000);
     engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    let result = engine.force_close_resolved(idx);
+    let result = engine.force_close_resolved_not_atomic(idx);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), dep as u128, "flat account must return exact capital");
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
 }
 
-/// force_close_resolved with open position: conservation must hold.
+/// force_close_resolved_not_atomic with open position: conservation must hold.
 /// Symbolic loss on position-holder exercises K-pair settlement + loss path.
 #[kani::proof]
 #[kani::unwind(34)]
@@ -957,13 +957,13 @@ fn proof_force_close_resolved_position_conservation() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Advance K via price movement
-    engine.keeper_crank(DEFAULT_SLOT + 1, 1500, &[], 64, 0i64).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT + 1, 1500, &[], 64, 0i64).unwrap();
 
     let oi_long_before = engine.oi_eff_long_q;
-    let result = engine.force_close_resolved(a);
+    let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok());
     assert!(!engine.is_used(a as usize));
     assert!(engine.accounts[a as usize].position_basis_q == 0);
@@ -974,7 +974,7 @@ fn proof_force_close_resolved_position_conservation() {
         "V >= C_tot + I must hold after force_close with position");
 }
 
-/// force_close_resolved: stored_pos_count decrements correctly
+/// force_close_resolved_not_atomic: stored_pos_count decrements correctly
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -987,20 +987,20 @@ fn proof_force_close_resolved_pos_count_decrements() {
     engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let size = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64).unwrap();
 
     let long_before = engine.stored_pos_count_long;
     let short_before = engine.stored_pos_count_short;
 
-    engine.force_close_resolved(a).unwrap(); // a was long
+    engine.force_close_resolved_not_atomic(a).unwrap(); // a was long
     assert_eq!(engine.stored_pos_count_long, long_before - 1);
     assert_eq!(engine.stored_pos_count_short, short_before);
 
-    engine.force_close_resolved(b).unwrap(); // b was short
+    engine.force_close_resolved_not_atomic(b).unwrap(); // b was short
     assert_eq!(engine.stored_pos_count_short, short_before - 1);
 }
 
-/// force_close_resolved with fee debt: insurance receives swept amount
+/// force_close_resolved_not_atomic with fee debt: insurance receives swept amount
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -1016,7 +1016,7 @@ fn proof_force_close_resolved_fee_sweep_conservation() {
     engine.accounts[idx as usize].fee_credits = I128::new(-(debt as i128));
 
     let ins_before = engine.insurance_fund.balance.get();
-    let result = engine.force_close_resolved(idx);
+    let result = engine.force_close_resolved_not_atomic(idx);
     assert!(result.is_ok());
 
     // Insurance must have increased by swept amount
@@ -1054,7 +1054,7 @@ fn proof_maintenance_fee_conservation() {
     kani::assume(dt >= 1 && dt <= 1000);
 
     let slot2 = DEFAULT_SLOT + (dt as u64);
-    let result = engine.touch_account_full(a as usize, DEFAULT_ORACLE, slot2);
+    let result = engine.touch_account_full_not_atomic(a as usize, DEFAULT_ORACLE, slot2);
     assert!(result.is_ok());
 
     // Fee = dt * 100, fully covered by 500k capital
@@ -1084,7 +1084,7 @@ fn proof_maintenance_fee_large_dt_no_revert() {
     // 100_000 slots of inactivity — would have bricked under old 10^20 cap
     let large_dt = 100_000u64;
     let slot2 = DEFAULT_SLOT + large_dt;
-    let result = engine.touch_account_full(a as usize, DEFAULT_ORACLE, slot2);
+    let result = engine.touch_account_full_not_atomic(a as usize, DEFAULT_ORACLE, slot2);
     assert!(result.is_ok(), "large dt must not revert with correct MAX_PROTOCOL_FEE_ABS");
     assert!(engine.check_conservation());
 }

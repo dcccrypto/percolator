@@ -8,6 +8,19 @@
 //! 3. ADL via lazy A/K side indices on the opposing OI side
 //! 4. Conservation of funds across all operations (V >= C_tot + I)
 //! 5. No hidden protocol MM — bankruptcy socialization through explicit A/K state only
+//!
+//! # Atomicity Model
+//!
+//! Functions suffixed with `_not_atomic` can return `Err` after partial state
+//! mutation. **Callers MUST abort the entire transaction on `Err`** — they
+//! must not retry, suppress, or continue with mutated state.
+//!
+//! On Solana SVM, any `Err` return from an instruction aborts the transaction
+//! and rolls back all account state automatically. This is the expected
+//! deployment model.
+//!
+//! Functions WITHOUT the `_not_atomic` suffix are error-atomic: `Err` means
+//! no state was changed.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -1455,7 +1468,7 @@ impl RiskEngine {
     ///
     /// Runs schedule_end_of_instruction_resets, finalize, and
     /// recompute_r_last_from_final_state in the canonical order.
-    /// Callers that bypass `keeper_crank` (e.g. the resolved-market
+    /// Callers that bypass `keeper_crank_not_atomic` (e.g. the resolved-market
     /// settlement crank) must invoke this before returning.
     pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext, funding_rate: i64) -> Result<()> {
                 Self::validate_funding_rate(funding_rate)?;
@@ -2130,10 +2143,10 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // touch_account_full (spec §10.1)
+    // touch_account_full_not_atomic (spec §10.1)
     // ========================================================================
 
-    pub fn touch_account_full(&mut self, idx: usize, oracle_price: u64, now_slot: u64) -> Result<()> {
+    pub fn touch_account_full_not_atomic(&mut self, idx: usize, oracle_price: u64, now_slot: u64) -> Result<()> {
         // Bounds and existence check (hardened public API surface)
         if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
             return Err(RiskError::AccountNotFound);
@@ -2445,10 +2458,10 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // withdraw (spec §10.3)
+    // withdraw_not_atomic (spec §10.3)
     // ========================================================================
 
-    pub fn withdraw(
+    pub fn withdraw_not_atomic(
         &mut self,
         idx: u16,
         amount: u128,
@@ -2462,8 +2475,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // No require_fresh_crank: spec §10.4 does not gate withdraw on keeper
-        // liveness. touch_account_full calls accrue_market_to with the caller's
+        // No require_fresh_crank: spec §10.4 does not gate withdraw_not_atomic on keeper
+        // liveness. touch_account_full_not_atomic calls accrue_market_to with the caller's
         // oracle and slot, satisfying spec §0 goal 6 (liveness without external action).
 
         if !self.is_used(idx as usize) {
@@ -2472,21 +2485,21 @@ impl RiskEngine {
 
         let mut ctx = InstructionContext::new();
 
-        // Step 3: touch_account_full
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        // Step 3: touch_account_full_not_atomic
+        self.touch_account_full_not_atomic(idx as usize, oracle_price, now_slot)?;
 
         // Step 4: require amount <= C_i
         if self.accounts[idx as usize].capital.get() < amount {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Step 5: universal dust guard — post-withdraw capital must be 0 or >= MIN_INITIAL_DEPOSIT
+        // Step 5: universal dust guard — post-withdraw_not_atomic capital must be 0 or >= MIN_INITIAL_DEPOSIT
         let post_cap = self.accounts[idx as usize].capital.get() - amount;
         if post_cap != 0 && post_cap < self.params.min_initial_deposit.get() {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Step 6: if position exists, require post-withdraw initial margin
+        // Step 6: if position exists, require post-withdraw_not_atomic initial margin
         let eff = self.effective_pos_q(idx as usize);
         if eff != 0 {
             // Simulate withdrawal: adjust BOTH capital AND vault to keep Residual consistent
@@ -2516,12 +2529,12 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // settle_account (spec §10.7)
+    // settle_account_not_atomic (spec §10.7)
     // ========================================================================
 
     /// Top-level settle wrapper per spec §10.7.
     /// If settlement is exposed as a standalone instruction, this wrapper MUST be used.
-    pub fn settle_account(
+    pub fn settle_account_not_atomic(
         &mut self,
         idx: u16,
         oracle_price: u64,
@@ -2539,8 +2552,8 @@ impl RiskEngine {
 
         let mut ctx = InstructionContext::new();
 
-        // Step 3: touch_account_full
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        // Step 3: touch_account_full_not_atomic
+        self.touch_account_full_not_atomic(idx as usize, oracle_price, now_slot)?;
 
         // Steps 4-5: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -2554,10 +2567,10 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // execute_trade (spec §10.4)
+    // execute_trade_not_atomic (spec §10.4)
     // ========================================================================
 
-    pub fn execute_trade(
+    pub fn execute_trade_not_atomic(
         &mut self,
         a: u16,
         b: u16,
@@ -2589,8 +2602,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // No require_fresh_crank: spec §10.5 does not gate execute_trade on
-        // keeper liveness. touch_account_full calls accrue_market_to with the
+        // No require_fresh_crank: spec §10.5 does not gate execute_trade_not_atomic on
+        // keeper liveness. touch_account_full_not_atomic calls accrue_market_to with the
         // caller's oracle and slot, satisfying spec §0 goal 6.
 
         if !self.is_used(a as usize) || !self.is_used(b as usize) {
@@ -2603,8 +2616,8 @@ impl RiskEngine {
         let mut ctx = InstructionContext::new();
 
         // Steps 11-12: touch both
-        self.touch_account_full(a as usize, oracle_price, now_slot)?;
-        self.touch_account_full(b as usize, oracle_price, now_slot)?;
+        self.touch_account_full_not_atomic(a as usize, oracle_price, now_slot)?;
+        self.touch_account_full_not_atomic(b as usize, oracle_price, now_slot)?;
 
         // Step 13: capture old effective positions
         let old_eff_a = self.effective_pos_q(a as usize);
@@ -2995,12 +3008,12 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // liquidate_at_oracle (spec §10.5 + §10.0)
+    // liquidate_at_oracle_not_atomic (spec §10.5 + §10.0)
     // ========================================================================
 
     /// Top-level liquidation: creates its own InstructionContext and finalizes resets.
     /// Accepts LiquidationPolicy per spec §10.6.
-    pub fn liquidate_at_oracle(
+    pub fn liquidate_at_oracle_not_atomic(
         &mut self,
         idx: u16,
         now_slot: u64,
@@ -3010,7 +3023,7 @@ impl RiskEngine {
     ) -> Result<bool> {
                 Self::validate_funding_rate(funding_rate)?;
 
-        // Bounds and existence check BEFORE touch_account_full to prevent
+        // Bounds and existence check BEFORE touch_account_full_not_atomic to prevent
         // market-state mutation (accrue_market_to) on missing accounts.
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Ok(false);
@@ -3018,13 +3031,13 @@ impl RiskEngine {
 
         let mut ctx = InstructionContext::new();
 
-        // Per spec §10.6 step 3: touch_account_full before the liquidation routine.
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        // Per spec §10.6 step 3: touch_account_full_not_atomic before the liquidation routine.
+        self.touch_account_full_not_atomic(idx as usize, oracle_price, now_slot)?;
 
         let result = self.liquidate_at_oracle_internal(idx, now_slot, oracle_price, policy, &mut ctx)?;
 
         // End-of-instruction resets must run unconditionally because
-        // touch_account_full mutates state even when liquidation doesn't proceed.
+        // touch_account_full_not_atomic mutates state even when liquidation doesn't proceed.
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
         self.recompute_r_last_from_final_state(funding_rate)?;
@@ -3035,7 +3048,7 @@ impl RiskEngine {
     }
 
     /// Internal liquidation routine: takes caller's shared InstructionContext.
-    /// Precondition (spec §9.4): caller has already called touch_account_full(i).
+    /// Precondition (spec §9.4): caller has already called touch_account_full_not_atomic(i).
     /// Does NOT call schedule/finalize resets — caller is responsible.
     fn liquidate_at_oracle_internal(
         &mut self,
@@ -3167,13 +3180,13 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // keeper_crank (spec §10.6)
+    // keeper_crank_not_atomic (spec §10.6)
     // ========================================================================
 
-    /// keeper_crank (spec §10.8): Minimal on-chain permissionless shortlist processor.
+    /// keeper_crank_not_atomic (spec §10.8): Minimal on-chain permissionless shortlist processor.
     /// Candidate discovery is performed off-chain. ordered_candidates[] is untrusted.
     /// Each candidate is (account_idx, optional liquidation policy hint).
-    pub fn keeper_crank(
+    pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -3231,7 +3244,7 @@ impl RiskEngine {
             attempts += 1;
             let cidx = candidate_idx as usize;
 
-            // Per-candidate local exact-touch (spec §11.2): same as touch_account_full
+            // Per-candidate local exact-touch (spec §11.2): same as touch_account_full_not_atomic
             // steps 7-13 on already-accrued state. MUST NOT call accrue_market_to again.
 
             // Step 7: advance_profit_warmup
@@ -3289,7 +3302,7 @@ impl RiskEngine {
 
         // Step 12: assert OI balance
         assert!(self.oi_eff_long_q == self.oi_eff_short_q,
-            "OI_eff_long != OI_eff_short after keeper_crank");
+            "OI_eff_long != OI_eff_short after keeper_crank_not_atomic");
 
         Ok(CrankOutcome {
             advanced,
@@ -3388,11 +3401,11 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // convert_released_pnl (spec §10.4.1)
+    // convert_released_pnl_not_atomic (spec §10.4.1)
     // ========================================================================
 
     /// Explicit voluntary conversion of matured released positive PnL for open-position accounts.
-    pub fn convert_released_pnl(
+    pub fn convert_released_pnl_not_atomic(
         &mut self,
         idx: u16,
         x_req: u128,
@@ -3411,8 +3424,8 @@ impl RiskEngine {
 
         let mut ctx = InstructionContext::new();
 
-        // Step 3: touch_account_full
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        // Step 3: touch_account_full_not_atomic
+        self.touch_account_full_not_atomic(idx as usize, oracle_price, now_slot)?;
 
         // Step 4: if flat, auto-conversion already happened in touch
         if self.accounts[idx as usize].position_basis_q == 0 {
@@ -3431,7 +3444,7 @@ impl RiskEngine {
         // Step 6: compute y using pre-conversion haircut (spec §7.4).
         // Because x_req > 0 implies pnl_matured_pos_tot > 0, h_den is strictly positive.
         let (h_num, h_den) = self.haircut_ratio();
-        assert!(h_den > 0, "convert_released_pnl: h_den must be > 0 when x_req > 0");
+        assert!(h_den > 0, "convert_released_pnl_not_atomic: h_den must be > 0 when x_req > 0");
         let y: u128 = wide_mul_div_floor_u128(x_req, h_num, h_den);
 
         // Step 7: consume_released_pnl(i, x_req)
@@ -3461,10 +3474,10 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // close_account
+    // close_account_not_atomic
     // ========================================================================
 
-    pub fn close_account(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate: i64) -> Result<u128> {
+    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate: i64) -> Result<u128> {
                 Self::validate_funding_rate(funding_rate)?;
 
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -3473,7 +3486,7 @@ impl RiskEngine {
 
         let mut ctx = InstructionContext::new();
 
-        self.touch_account_full(idx as usize, oracle_price, now_slot)?;
+        self.touch_account_full_not_atomic(idx as usize, oracle_price, now_slot)?;
 
         // Position must be zero
         let eff = self.effective_pos_q(idx as usize);
@@ -3514,7 +3527,7 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // force_close_resolved (resolved/frozen market path)
+    // force_close_resolved_not_atomic (resolved/frozen market path)
     // ========================================================================
 
     /// Force-close an account on a resolved market.
@@ -3527,7 +3540,7 @@ impl RiskEngine {
     /// and epoch-mismatch accounts. For epoch-mismatch where the normal
     /// settle_side_effects would reject due to side mode, falls back to
     /// manual K-pair settlement using the same wide arithmetic.
-    pub fn force_close_resolved(&mut self, idx: u16) -> Result<u128> {
+    pub fn force_close_resolved_not_atomic(&mut self, idx: u16) -> Result<u128> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -3643,13 +3656,13 @@ impl RiskEngine {
         self.resolve_flat_negative(i);
 
         // Step 3b: Realize recurring maintenance fees (spec §8.2).
-        // After losses and flat-negative absorption, matching touch_account_full
+        // After losses and flat-negative absorption, matching touch_account_full_not_atomic
         // ordering where fees are junior to trading losses.
         self.settle_maintenance_fee_internal(i, self.current_slot)?;
 
         // Step 4: Convert positive PnL to capital (bypass warmup for resolved market).
         // Uses the same release-then-haircut order as do_profit_conversion and
-        // convert_released_pnl. Sequential closers see progressively larger
+        // convert_released_pnl_not_atomic. Sequential closers see progressively larger
         // pnl_matured_pos_tot denominators, which is the same behavior as normal
         // sequential profit conversion — this is inherent to the haircut model,
         // not a force_close-specific issue.
@@ -3694,11 +3707,11 @@ impl RiskEngine {
     // Permissionless account reclamation (spec §10.7 + §2.6)
     // ========================================================================
 
-    /// reclaim_empty_account(i, now_slot) — permissionless O(1) empty/dust-account recycling.
+    /// reclaim_empty_account_not_atomic(i, now_slot) — permissionless O(1) empty/dust-account recycling.
     /// Spec §10.7: MUST NOT call accrue_market_to, MUST NOT mutate side state,
     /// MUST NOT materialize any account. Realizes recurring maintenance fees
     /// on the already-flat state before checking final reclaim eligibility.
-    pub fn reclaim_empty_account(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+    pub fn reclaim_empty_account_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -3780,7 +3793,7 @@ impl RiskEngine {
             }
 
             // Note: GC does NOT realize recurring maintenance fees. That is only
-            // allowed in touch_account_full and reclaim_empty_account per spec §8.2.3.
+            // allowed in touch_account_full_not_atomic and reclaim_empty_account_not_atomic per spec §8.2.3.
 
             // Dust predicate: zero position basis, zero capital, zero reserved,
             // non-positive pnl, AND zero fee_credits. Must not GC accounts
@@ -3798,7 +3811,7 @@ impl RiskEngine {
                 continue;
             }
             // Spec §2.6 requires PNL_i == 0 as a precondition.
-            // Accounts with PNL != 0 need touch_account_full → §7.3 first.
+            // Accounts with PNL != 0 need touch_account_full_not_atomic → §7.3 first.
             if account.pnl != 0 {
                 continue;
             }

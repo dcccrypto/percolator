@@ -384,7 +384,7 @@ fn proof_touch_maintenance_fee_conservation() {
     let dt: u16 = kani::any();
     kani::assume(dt >= 1 && dt <= 1000);
 
-    let result = engine.touch_account_full(idx as usize, DEFAULT_ORACLE, dt as u64);
+    let result = engine.touch_account_full_not_atomic(idx as usize, DEFAULT_ORACLE, dt as u64);
     assert!(result.is_ok());
 
     // Capital must decrease by exactly the fee
@@ -606,7 +606,7 @@ fn proof_bilateral_oi_decomposition() {
 
     // First trade: open a position (a long, b short)
     let open_size = (100 * POS_SCALE) as i128;
-    let r1 = engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open_size, DEFAULT_ORACLE, 0i64);
+    let r1 = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open_size, DEFAULT_ORACLE, 0i64);
     assert!(r1.is_ok(), "initial trade must succeed");
 
     // Second trade: symbolic size exercises close, reduce, and flip paths
@@ -618,9 +618,9 @@ fn proof_bilateral_oi_decomposition() {
 
     // size_q > 0 required: when raw_size < 0, swap a and b
     let result = if raw_size > 0 {
-        engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size_q, DEFAULT_ORACLE, 0i64)
+        engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size_q, DEFAULT_ORACLE, 0i64)
     } else {
-        engine.execute_trade(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size_q, DEFAULT_ORACLE, 0i64)
+        engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size_q, DEFAULT_ORACLE, 0i64)
     };
 
     kani::cover!(result.is_ok(), "bilateral OI trade reachable");
@@ -671,7 +671,7 @@ fn proof_partial_liquidation_remainder_nonzero() {
 
     // Open near-max leverage: 480 units, notional=480K, IM ~48K with 50K capital
     let size_q = (480 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     let abs_eff = engine.effective_pos_q(a as usize).unsigned_abs();
     assert!(abs_eff > 0, "position must be open");
@@ -683,7 +683,7 @@ fn proof_partial_liquidation_remainder_nonzero() {
 
     // Crash: 10% drop triggers liquidation (PNL = -480*100 = -48K, equity ~2K < MM=4800)
     let crash = 900u64;
-    let result = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, crash,
+    let result = engine.liquidate_at_oracle_not_atomic(a, DEFAULT_SLOT + 1, crash,
         LiquidationPolicy::ExactPartial(q_close), 0i64);
 
     // Non-vacuity: partial MUST succeed
@@ -716,12 +716,12 @@ fn proof_liquidation_policy_validity() {
     engine.last_oracle_price = DEFAULT_ORACLE;
 
     let size_q = (400 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     let abs_eff = engine.effective_pos_q(a as usize).unsigned_abs();
 
     // ExactPartial(0) must fail
-    let r1 = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, 500,
+    let r1 = engine.liquidate_at_oracle_not_atomic(a, DEFAULT_SLOT + 1, 500,
         LiquidationPolicy::ExactPartial(0), 0i64);
     // Either not liquidatable or rejected
     if let Ok(true) = r1 {
@@ -790,14 +790,14 @@ fn proof_partial_liq_health_check_mandatory() {
 
     // Open near-max leverage position
     let size_q = (400 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic tiny close amount (1..100 units — all too small to restore health)
     let tiny_close: u8 = kani::any();
     kani::assume(tiny_close >= 1);
 
     // Severe crash — account is deeply unhealthy
-    let result = engine.liquidate_at_oracle(a, DEFAULT_SLOT + 1, 500,
+    let result = engine.liquidate_at_oracle_not_atomic(a, DEFAULT_SLOT + 1, 500,
         LiquidationPolicy::ExactPartial(tiny_close as u128), 0i64);
 
     // Health check at step 14 MUST reject: closing a few units out of 400M
@@ -811,7 +811,7 @@ fn proof_partial_liq_health_check_mandatory() {
 // PROPERTY 42: Post-reset funding recomputation stores exactly 0
 // ############################################################################
 
-/// keeper_crank invokes recompute_r_last_from_final_state exactly once after
+/// keeper_crank_not_atomic invokes recompute_r_last_from_final_state exactly once after
 /// final reset handling. The stored rate equals the supplied funding_rate
 /// regardless of the pre-crank rate.
 #[kani::proof]
@@ -830,13 +830,13 @@ fn proof_keeper_crank_r_last_stores_supplied_rate() {
     let supplied_rate: i16 = kani::any();
     kani::assume(supplied_rate.unsigned_abs() <= MAX_ABS_FUNDING_BPS_PER_SLOT as u16);
 
-    let result = engine.keeper_crank(DEFAULT_SLOT + 1, DEFAULT_ORACLE,
+    let result = engine.keeper_crank_not_atomic(DEFAULT_SLOT + 1, DEFAULT_ORACLE,
         &[(idx, None)], 64, supplied_rate as i64);
     assert!(result.is_ok());
 
     // r_last must equal the supplied rate, not the pre-crank rate
     assert!(engine.funding_rate_bps_per_slot_last == supplied_rate as i64,
-        "r_last must equal supplied funding_rate after keeper_crank");
+        "r_last must equal supplied funding_rate after keeper_crank_not_atomic");
 }
 
 // ############################################################################
@@ -862,7 +862,7 @@ fn proof_deposit_nonflat_no_sweep_no_resolve() {
 
     // Open position for a
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
 
     // Symbolic fee debt
     let debt: u16 = kani::any();
