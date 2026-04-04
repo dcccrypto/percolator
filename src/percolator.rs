@@ -81,6 +81,12 @@ pub const FORCE_REALIZE_BUDGET_PER_CRANK: u16 = 32;
 /// 10^15 allows prices up to $1B with 6 decimal places
 pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000_000;
 
+/// MAX_FUNDING_DT: maximum sub-step size for funding transfer loop (spec §1.4).
+pub const MAX_FUNDING_DT: u64 = u16::MAX as u64;
+
+/// MAX_ABS_FUNDING_BPS_PER_SLOT: absolute bound on funding rate (spec §1.4).
+pub const MAX_ABS_FUNDING_BPS_PER_SLOT: i64 = 10_000;
+
 /// POS_SCALE = 1_000_000 (spec §1.2): position_basis_q is in micro-units.
 /// notional = floor(|effective_pos_q| * oracle_price / POS_SCALE)
 pub const POS_SCALE: u128 = 1_000_000;
@@ -1494,9 +1500,10 @@ impl RiskEngine {
         ctx: &mut InstructionContext,
         funding_rate: i64,
     ) -> Result<()> {
+        Self::validate_funding_rate(funding_rate)?;
         self.schedule_end_of_instruction_resets(ctx)?;
         self.finalize_end_of_instruction_resets(ctx);
-        self.recompute_r_last_from_final_state(funding_rate);
+        self.recompute_r_last_from_final_state(funding_rate)?;
         Ok(())
     }
 
@@ -2038,44 +2045,47 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
+        // Step 4: snapshot OI at start (fixed for all sub-steps per spec §5.4)
         let long_live = self.oi_eff_long_q != 0;
         let short_live = self.oi_eff_short_q != 0;
 
         let total_dt = now_slot.saturating_sub(self.last_market_slot);
         if total_dt == 0 && self.last_oracle_price == oracle_price {
+            // Step 5: no change — set current_slot and return (spec §5.4)
             self.current_slot = now_slot;
             return Ok(());
         }
 
+        // Use scratch K values for the entire mark + funding computation.
+        // Only commit to engine state after ALL computations succeed.
+        // This prevents partial K advancement on mid-function errors.
+        let mut k_long = self.adl_coeff_long;
+        let mut k_short = self.adl_coeff_short;
+
+        // Step 5: Mark-to-market (once, spec §1.5 item 21)
         let current_price = self.last_oracle_price;
         let delta_p = (oracle_price as i128)
             .checked_sub(current_price as i128)
             .ok_or(RiskError::Overflow)?;
         if delta_p != 0 {
             if long_live {
-                let delta_k = Self::checked_u128_mul_i128(self.adl_mult_long, delta_p)?;
-                self.adl_coeff_long = self
-                    .adl_coeff_long
-                    .checked_add(delta_k)
-                    .ok_or(RiskError::Overflow)?;
+                let dk = Self::checked_u128_mul_i128(self.adl_mult_long, delta_p)?;
+                k_long = k_long.checked_add(dk).ok_or(RiskError::Overflow)?;
             }
             if short_live {
-                let delta_k = Self::checked_u128_mul_i128(self.adl_mult_short, delta_p)?;
-                self.adl_coeff_short = self
-                    .adl_coeff_short
-                    .checked_sub(delta_k)
-                    .ok_or(RiskError::Overflow)?;
+                let dk = Self::checked_u128_mul_i128(self.adl_mult_short, delta_p)?;
+                k_short = k_short.checked_sub(dk).ok_or(RiskError::Overflow)?;
             }
         }
 
-        // Funding transfer via sub-stepping (spec v12.0.2 §5.4)
+        // Step 6: Funding transfer via sub-stepping (spec v12.1.0 §5.4)
         let r_last = self.funding_rate_bps_per_slot_last;
         if r_last != 0 && total_dt > 0 && long_live && short_live {
             let fund_px_0 = self.funding_price_sample_last;
             if fund_px_0 > 0 {
                 let mut dt_remaining = total_dt;
                 while dt_remaining > 0 {
-                    let dt_sub = core::cmp::min(dt_remaining, u16::MAX as u64);
+                    let dt_sub = core::cmp::min(dt_remaining, MAX_FUNDING_DT);
                     dt_remaining -= dt_sub;
                     let fund_num: i128 = (fund_px_0 as i128)
                         .checked_mul(r_last as i128)
@@ -2084,23 +2094,18 @@ impl RiskEngine {
                         .ok_or(RiskError::Overflow)?;
                     let fund_term = floor_div_signed_conservative_i128(fund_num, 10_000u128);
                     if fund_term != 0 {
-                        let delta_k_long =
-                            Self::checked_u128_mul_i128(self.adl_mult_long, fund_term)?;
-                        self.adl_coeff_long = self
-                            .adl_coeff_long
-                            .checked_sub(delta_k_long)
-                            .ok_or(RiskError::Overflow)?;
-                        let delta_k_short =
-                            Self::checked_u128_mul_i128(self.adl_mult_short, fund_term)?;
-                        self.adl_coeff_short = self
-                            .adl_coeff_short
-                            .checked_add(delta_k_short)
-                            .ok_or(RiskError::Overflow)?;
+                        let dk_long = Self::checked_u128_mul_i128(self.adl_mult_long, fund_term)?;
+                        k_long = k_long.checked_sub(dk_long).ok_or(RiskError::Overflow)?;
+                        let dk_short = Self::checked_u128_mul_i128(self.adl_mult_short, fund_term)?;
+                        k_short = k_short.checked_add(dk_short).ok_or(RiskError::Overflow)?;
                     }
                 }
             }
         }
 
+        // ALL computations succeeded — commit K values and synchronize state
+        self.adl_coeff_long = k_long;
+        self.adl_coeff_short = k_short;
         self.current_slot = now_slot;
         self.last_market_slot = now_slot;
         self.last_oracle_price = oracle_price;
@@ -2108,14 +2113,25 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// recompute_r_last_from_final_state (spec v12.0.2 §4.12).
+    /// Pre-validate funding rate bound (called at top of each instruction,
+    /// before any mutations, so bad rates never cause partial-mutation errors).
+    fn validate_funding_rate(rate: i64) -> Result<()> {
+        if rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64 {
+            return Err(RiskError::Overflow);
+        }
+        Ok(())
+    }
+
+    /// recompute_r_last_from_final_state (spec v12.1.0 §4.12).
+    /// Stores the pre-validated funding rate for the next interval.
     #[allow(dead_code)]
-    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) {
-        assert!(
-            externally_computed_rate.unsigned_abs() <= 10_000u64,
-            "recompute_r_last: rate exceeds MAX_ABS_FUNDING_BPS_PER_SLOT"
-        );
+    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) -> Result<()> {
+        // Rate already validated at instruction entry; belt-and-suspenders re-check.
+        if externally_computed_rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64 {
+            return Err(RiskError::Overflow);
+        }
         self.funding_rate_bps_per_slot_last = externally_computed_rate;
+        Ok(())
     }
 
     /// Recompute c_tot, pnl_pos_tot, and pnl_matured_pos_tot from account data.
@@ -3009,6 +3025,8 @@ impl RiskEngine {
         max_revalidations: u16,
         funding_rate: i64,
     ) -> Result<CrankOutcome> {
+        Self::validate_funding_rate(funding_rate)?;
+
         // Validate oracle price bounds (prevents overflow in mark_pnl calculations)
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -3098,7 +3116,7 @@ impl RiskEngine {
 
             // Accrue funding using STORED rate (anti-retroactivity)
             self.accrue_funding(now_slot, oracle_price)?;
-            self.set_funding_rate_for_next_interval(funding_rate);
+            self.set_funding_rate_for_next_interval(funding_rate)?;
 
             let force_realize_active = self.force_realize_active();
             let mut force_realize_closed: u16 = 0;
@@ -3901,12 +3919,14 @@ impl RiskEngine {
     ///
     /// This implements the "rate-change rule" from the spec: state changes at slot t
     /// can only affect funding for slots >= t.
-    pub fn set_funding_rate_for_next_interval(&mut self, new_rate_bps_per_slot: i64) {
+    pub fn set_funding_rate_for_next_interval(&mut self, new_rate_bps_per_slot: i64) -> Result<()> {
+        Self::validate_funding_rate(new_rate_bps_per_slot)?;
         // If funding is frozen, ignore rate updates (frozen rate snapshot is used instead)
         if self.funding_frozen {
-            return;
+            return Ok(());
         }
         self.funding_rate_bps_per_slot_last = new_rate_bps_per_slot;
+        Ok(())
     }
 
     /// Convenience: Set rate then accrue in one call.
@@ -3920,7 +3940,7 @@ impl RiskEngine {
         oracle_price: u64,
         funding_rate_bps_per_slot: i64,
     ) -> Result<()> {
-        self.set_funding_rate_for_next_interval(funding_rate_bps_per_slot);
+        self.set_funding_rate_for_next_interval(funding_rate_bps_per_slot)?;
         self.accrue_funding(now_slot, oracle_price)
     }
 
@@ -4238,7 +4258,7 @@ impl RiskEngine {
         );
 
         // Step 4: Store for next interval (anti-retroactivity)
-        self.set_funding_rate_for_next_interval(combined);
+        self.set_funding_rate_for_next_interval(combined)?;
 
         Ok(())
     }

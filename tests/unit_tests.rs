@@ -6401,3 +6401,113 @@ fn test_keeper_crank_runs_end_of_instruction_lifecycle() {
     );
     assert_eq!(engine.adl_coeff_short, 0, "adl_coeff_short must be cleared");
 }
+
+// ==============================================================================
+// PERC-8458: Scratch K Atomicity + validate_funding_rate
+// ==============================================================================
+
+/// Verify scratch K atomicity via keeper_crank: when accrue_market_to encounters
+/// an overflow in the funding sub-step (after mark-to-market succeeds), the K values
+/// are NOT partially advanced. keeper_crank gracefully handles this as adl_accrue_failure.
+#[test]
+fn test_scratch_k_atomicity_via_keeper_crank() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    engine.last_oracle_price = 1_000_000;
+    engine.current_slot = 100;
+    engine.last_market_slot = 100;
+
+    // Set up nonzero OI on both sides so funding path is active
+    engine.oi_eff_long_q = 1_000_000;
+    engine.oi_eff_short_q = 1_000_000;
+    engine.adl_mult_long = u128::MAX / 2;
+    engine.adl_mult_short = u128::MAX / 2;
+
+    // Set K near i128::MAX so funding sub will overflow
+    engine.adl_coeff_long = i128::MAX - 1;
+    engine.adl_coeff_short = i128::MAX - 1;
+
+    // Large rate to force funding overflow
+    engine.funding_rate_bps_per_slot_last = 10_000;
+    engine.funding_price_sample_last = 1_000_000;
+
+    // Snapshot K values before the call
+    let k_long_before = engine.adl_coeff_long;
+    let k_short_before = engine.adl_coeff_short;
+
+    // keeper_crank calls accrue_market_to internally; overflow is handled gracefully.
+    // With scratch K, the overflow prevents ANY K mutation (atomic rollback).
+    let outcome = engine.keeper_crank(200, 1_000_001, &[], 0, 0i64).unwrap();
+
+    // accrue_market_to failed internally → adl_accrue_failures > 0
+    assert!(
+        outcome.adl_accrue_failures > 0,
+        "Expected accrue failure due to overflow with near-MAX K values"
+    );
+
+    // Atomicity: K values must not be partially advanced
+    assert_eq!(
+        engine.adl_coeff_long, k_long_before,
+        "K_long must be unchanged when accrue_market_to overflows (scratch K atomicity)"
+    );
+    assert_eq!(
+        engine.adl_coeff_short, k_short_before,
+        "K_short must be unchanged when accrue_market_to overflows (scratch K atomicity)"
+    );
+}
+
+/// validate_funding_rate rejects rates exceeding MAX_ABS_FUNDING_BPS_PER_SLOT.
+#[test]
+fn test_validate_funding_rate_rejects_excessive_rate() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+
+    // keeper_crank with rate > 10_000 should fail immediately
+    let result = engine.keeper_crank(1, 1_000_000, &[], 0, 10_001i64);
+    assert!(result.is_err(), "funding_rate > 10000 must be rejected");
+
+    let result = engine.keeper_crank(1, 1_000_000, &[], 0, -10_001i64);
+    assert!(result.is_err(), "funding_rate < -10000 must be rejected");
+
+    // Exactly 10_000 should be accepted
+    let result = engine.keeper_crank(1, 1_000_000, &[], 0, 10_000i64);
+    assert!(result.is_ok(), "funding_rate == 10000 must be accepted");
+
+    // Exactly -10_000 should be accepted
+    let result = engine.keeper_crank(2, 1_000_000, &[], 0, -10_000i64);
+    assert!(result.is_ok(), "funding_rate == -10000 must be accepted");
+
+    // 0 should be accepted
+    let result = engine.keeper_crank(3, 1_000_000, &[], 0, 0i64);
+    assert!(result.is_ok(), "funding_rate == 0 must be accepted");
+}
+
+/// validate_funding_rate also guards set_funding_rate_for_next_interval.
+#[test]
+fn test_set_funding_rate_validates_bounds() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    assert!(engine.set_funding_rate_for_next_interval(10_000).is_ok());
+    assert!(engine.set_funding_rate_for_next_interval(-10_000).is_ok());
+    assert!(engine.set_funding_rate_for_next_interval(0).is_ok());
+    assert!(engine.set_funding_rate_for_next_interval(10_001).is_err());
+    assert!(engine.set_funding_rate_for_next_interval(-10_001).is_err());
+    assert!(engine.set_funding_rate_for_next_interval(i64::MAX).is_err());
+    assert!(engine.set_funding_rate_for_next_interval(i64::MIN).is_err());
+}
+
+/// MAX_FUNDING_DT constant matches spec §1.4.
+#[test]
+fn test_max_funding_dt_constant() {
+    assert_eq!(
+        MAX_FUNDING_DT, 65535,
+        "MAX_FUNDING_DT must be u16::MAX per spec §1.4"
+    );
+    assert_eq!(
+        MAX_ABS_FUNDING_BPS_PER_SLOT, 10_000,
+        "MAX_ABS = 10000 per spec §1.4"
+    );
+}
