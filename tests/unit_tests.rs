@@ -7013,3 +7013,170 @@ fn test_deposit_ghost_account_no_state_leak_on_cap_failure() {
         "capital must not change on failed deposit"
     );
 }
+
+// PERC-8461: Recurring Maintenance Fees (spec §8.2)
+// ==============================================================================
+
+/// Helper: create params with a nonzero maintenance_fee_per_slot.
+fn params_with_maintenance_fee(fee_per_slot: u128) -> RiskParams {
+    let mut p = default_params();
+    p.maintenance_fee_per_slot = U128::new(fee_per_slot);
+    p
+}
+
+/// Basic fee accrual: after N slots, fee_due = fee_per_slot * N is charged.
+#[test]
+fn test_maintenance_fee_basic_accrual() {
+    let fee_per_slot = 10u128;
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(fee_per_slot)));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+    set_insurance(&mut engine, 1_000);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    // Advance 100 slots via the public settle_maintenance_fee path
+    let dt = 100u64;
+    let now_slot = dt;
+    let paid = engine
+        .settle_maintenance_fee(idx, now_slot, DEFAULT_ORACLE)
+        .unwrap();
+
+    // fee_due = 10 * 100 = 1000
+    // fee_credits starts at 0, goes to -1000, then capital pays 1000 into insurance
+    assert_eq!(paid, fee_per_slot * dt as u128);
+    assert_eq!(engine.accounts[idx as usize].last_fee_slot, now_slot);
+    // Capital reduced by 1000
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000 - 1000);
+    assert_conserved(&engine);
+}
+
+/// Zero dt is a no-op — no fee charged.
+#[test]
+fn test_maintenance_fee_zero_dt_noop() {
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(10)));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+    set_insurance(&mut engine, 1_000);
+
+    // Set last_fee_slot = 50, then call with now_slot = 50 → dt = 0
+    engine.accounts[idx as usize].last_fee_slot = 50;
+    let paid = engine
+        .settle_maintenance_fee(idx, 50, DEFAULT_ORACLE)
+        .unwrap();
+    assert_eq!(paid, 0);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000);
+}
+
+/// Fee charges through force_close_resolved path (internal fn).
+#[test]
+fn test_maintenance_fee_via_force_close_resolved() {
+    let fee_per_slot = 5u128;
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(fee_per_slot)));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 10_000, 0).unwrap();
+    set_insurance(&mut engine, 500);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    // Advance current_slot so force_close_resolved will compute dt > 0
+    engine.current_slot = 200;
+    // last_fee_slot defaults to current_slot at deposit time (0)
+    // So dt = 200, fee_due = 5 * 200 = 1000
+
+    let capital_returned = engine.force_close_resolved(user).unwrap();
+
+    // Capital was 10_000, fee charged = 1000, returned = 10_000 - 1000 = 9_000
+    assert_eq!(capital_returned, 9_000);
+    assert!(!engine.is_used(user as usize));
+}
+
+/// Validate Params rejects maintenance_fee_per_slot > MAX_MAINTENANCE_FEE_PER_SLOT.
+#[test]
+fn test_maintenance_fee_params_validation() {
+    use percolator::MAX_MAINTENANCE_FEE_PER_SLOT;
+
+    // At the limit — should be accepted
+    let mut p = params_with_maintenance_fee(MAX_MAINTENANCE_FEE_PER_SLOT);
+    assert!(p.validate().is_ok(), "fee at cap must be accepted");
+
+    // Above the limit — rejected
+    p.maintenance_fee_per_slot = U128::new(MAX_MAINTENANCE_FEE_PER_SLOT + 1);
+    assert!(p.validate().is_err(), "fee above cap must be rejected");
+}
+
+/// Fee with zero fee_per_slot is no-op even with large dt.
+#[test]
+fn test_maintenance_fee_zero_rate_noop() {
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(0)));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+    set_insurance(&mut engine, 1_000);
+
+    let paid = engine
+        .settle_maintenance_fee(idx, 1_000_000, DEFAULT_ORACLE)
+        .unwrap();
+    assert_eq!(paid, 0);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000);
+}
+
+/// Fee deducted from fee_credits first, then capital if credits go negative.
+#[test]
+fn test_maintenance_fee_credits_buffer() {
+    let fee_per_slot = 10u128;
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(fee_per_slot)));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, 0).unwrap();
+    set_insurance(&mut engine, 1_000);
+
+    // Give account 500 fee credits (coupon)
+    engine.accounts[idx as usize].fee_credits = I128::new(500);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    // 100 slots → fee_due = 1000
+    // fee_credits: 500 - 1000 = -500 → pay 500 from capital
+    let paid = engine
+        .settle_maintenance_fee(idx, 100, DEFAULT_ORACLE)
+        .unwrap();
+    assert_eq!(paid, 500); // only the capital portion
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 100_000 - 500);
+}
+
+/// Fee with insufficient capital: pays what it can, remainder stays as debt.
+#[test]
+fn test_maintenance_fee_partial_payment() {
+    let fee_per_slot = 100u128;
+    let mut engine = Box::new(RiskEngine::new(params_with_maintenance_fee(fee_per_slot)));
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 500, 0).unwrap(); // small capital
+    set_insurance(&mut engine, 1_000);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    // 100 slots → fee_due = 10_000, but capital is only 500
+    let paid = engine
+        .settle_maintenance_fee(idx, 100, DEFAULT_ORACLE)
+        .unwrap();
+    assert_eq!(paid, 500); // all capital consumed
+    assert_eq!(engine.accounts[idx as usize].capital.get(), 0);
+    // Remaining debt stays in fee_credits (negative)
+    assert!(engine.accounts[idx as usize].fee_credits.get() < 0);
+}
+
+/// MAX_PROTOCOL_FEE_ABS and MAX_MAINTENANCE_FEE_PER_SLOT constants are sane.
+#[test]
+fn test_maintenance_fee_constants() {
+    use percolator::{MAX_MAINTENANCE_FEE_PER_SLOT, MAX_PROTOCOL_FEE_ABS};
+
+    assert_eq!(MAX_MAINTENANCE_FEE_PER_SLOT, 1_000_000_000_000);
+    assert_eq!(MAX_PROTOCOL_FEE_ABS, 1_000_000_000_000_000_000);
+
+    // MAX_MAINTENANCE_FEE_PER_SLOT * u16::MAX should not exceed MAX_PROTOCOL_FEE_ABS
+    // (i.e., even at max rate for max funding dt, the fee is within cap)
+    let max_fee = MAX_MAINTENANCE_FEE_PER_SLOT * (u16::MAX as u128);
+    assert!(
+        max_fee <= MAX_PROTOCOL_FEE_ABS,
+        "max_fee_per_slot * max_dt must fit within MAX_PROTOCOL_FEE_ABS"
+    );
+}

@@ -102,6 +102,16 @@ pub const MAX_POSITION_ABS: u128 = 100_000_000_000_000_000_000;
 /// realistic deployment while still fitting comfortably within u128 arithmetic.
 pub const MAX_VAULT_TVL: u128 = 1_000_000_000_000_000_000_000_000_000_000; // 10^30
 
+/// Maximum allowed maintenance_fee_per_slot in Params (spec §8.2).
+/// 10^12 per slot ≈ 1 USDC/slot at 6-decimal precision.
+/// Validated in Params::validate() — admin cannot set higher.
+pub const MAX_MAINTENANCE_FEE_PER_SLOT: u128 = 1_000_000_000_000;
+
+/// Maximum fee that a single settle_maintenance_fee_internal call may charge (spec §8.2).
+/// Prevents a stale account from accumulating unbounded fee debt in one settlement.
+/// 10^18 ≈ 1 billion USDC at 6 decimals — generous cap that still prevents u128 overflow.
+pub const MAX_PROTOCOL_FEE_ABS: u128 = 1_000_000_000_000_000_000;
+
 // ============================================================================
 // BPF-Safe 128-bit Types (see src/i128.rs)
 // ============================================================================
@@ -595,6 +605,11 @@ impl RiskParams {
         // Insurance floor (spec §1.4: 0 <= I_floor <= MAX_ORACLE_PRICE * MAX_POSITION_ABS)
         // No separate MAX_VAULT_TVL constant in this fork; nonzero values are permissive.
         // Structural validity is enforced: insurance_floor must fit within U128.
+
+        // Maintenance fee per slot must not exceed cap (spec §8.2)
+        if self.maintenance_fee_per_slot.get() > MAX_MAINTENANCE_FEE_PER_SLOT {
+            return Err(RiskError::Overflow);
+        }
         Ok(())
     }
 
@@ -1944,10 +1959,73 @@ impl RiskEngine {
         }
     }
 
-    /// settle_maintenance_fee_internal (spec §8.2): update last_fee_slot for account.
-    #[allow(dead_code)]
+    /// settle_maintenance_fee_internal (spec §8.2): compute and charge recurring maintenance fees.
+    ///
+    /// Algorithm (upstream e357d431):
+    /// 1. Compute dt = now_slot - last_fee_slot (checked to prevent underflow)
+    /// 2. If dt == 0, no-op
+    /// 3. fee_due = maintenance_fee_per_slot * dt (checked_mul prevents overflow)
+    /// 4. Validate fee_due <= MAX_PROTOCOL_FEE_ABS (rejects absurd accumulations)
+    /// 5. Stamp last_fee_slot BEFORE charging (prevents re-charge on retry/failure)
+    /// 6. Deduct from fee_credits; if negative, pay from capital into insurance
+    ///
+    /// Used by force_close_resolved and keeper_crank paths where margin checks
+    /// are inappropriate (the caller handles position closure/liquidation).
     fn settle_maintenance_fee_internal(&mut self, idx: usize, now_slot: u64) -> Result<()> {
+        let fee_per_slot = self.params.maintenance_fee_per_slot.get();
+        if fee_per_slot == 0 {
+            // No maintenance fee configured — just advance the slot marker
+            self.accounts[idx].last_fee_slot = now_slot;
+            return Ok(());
+        }
+
+        let last_slot = self.accounts[idx].last_fee_slot;
+        // Checked subtraction: now_slot must be >= last_fee_slot
+        let dt = now_slot.checked_sub(last_slot).ok_or(RiskError::Overflow)?;
+        if dt == 0 {
+            return Ok(());
+        }
+
+        // Compute fee_due with checked arithmetic (prevents u128 overflow)
+        let fee_due = fee_per_slot
+            .checked_mul(dt as u128)
+            .ok_or(RiskError::Overflow)?;
+
+        // Cap: reject absurd fee accumulation (e.g. stale account with huge dt)
+        if fee_due > MAX_PROTOCOL_FEE_ABS {
+            return Err(RiskError::Overflow);
+        }
+
+        // CRITICAL: stamp last_fee_slot BEFORE charging.
+        // If the charge below fails or the transaction is retried, we will NOT
+        // re-compute the same fee window. This is the upstream CEI pattern.
         self.accounts[idx].last_fee_slot = now_slot;
+
+        // Deduct from fee_credits (coupon buffer)
+        let fc = self.accounts[idx].fee_credits.get();
+        let new_fc = fc.checked_sub(fee_due as i128).ok_or(RiskError::Overflow)?;
+        self.accounts[idx].fee_credits = I128::new(new_fc);
+
+        // If fee_credits went negative, pay debt from capital into insurance
+        if new_fc < 0 {
+            let debt = neg_i128_to_u128(new_fc);
+            let cap = self.accounts[idx].capital.get();
+            let pay = core::cmp::min(debt, cap);
+            if pay > 0 {
+                self.set_capital(idx, cap - pay);
+                let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
+                self.accounts[idx].fee_credits = I128::new(
+                    self.accounts[idx]
+                        .fee_credits
+                        .get()
+                        .checked_add(pay_i128)
+                        .ok_or(RiskError::Overflow)?,
+                );
+                self.insurance_fund.balance += pay;
+                self.insurance_fund.fee_revenue += pay;
+            }
+        }
+
         Ok(())
     }
 
