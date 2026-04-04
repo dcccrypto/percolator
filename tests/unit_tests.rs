@@ -6511,3 +6511,205 @@ fn test_max_funding_dt_constant() {
         "MAX_ABS = 10000 per spec §1.4"
     );
 }
+
+// ==============================================================================
+// PERC-8460: force_close_resolved tests
+// ==============================================================================
+
+/// Helper: set up a two-user engine with bilateral trade positions.
+/// Returns (engine, long_idx, short_idx). Both users have capital=1000,
+/// long has position_basis_q > 0, short < 0. OI is consistent.
+fn setup_bilateral_engine() -> (Box<RiskEngine>, u16, u16) {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let long_idx = engine.add_user(0).unwrap();
+    let short_idx = engine.add_user(0).unwrap();
+
+    engine.deposit(long_idx, 1_000, 0).unwrap();
+    engine.deposit(short_idx, 1_000, 0).unwrap();
+    set_insurance(&mut engine, 1_000);
+
+    // Simulate bilateral position: long +500_000, short -500_000 (micro-units)
+    // Direct field write + manual stored_pos_count tracking
+    engine.accounts[long_idx as usize].position_basis_q = 500_000;
+    engine.stored_pos_count_long += 1;
+    engine.accounts[short_idx as usize].position_basis_q = -500_000;
+    engine.stored_pos_count_short += 1;
+
+    // Set matching ADL state: a_basis and side multipliers at ADL_ONE
+    engine.accounts[long_idx as usize].adl_a_basis = 1_000_000; // ADL_ONE
+    engine.accounts[long_idx as usize].adl_k_snap = 0;
+    engine.accounts[short_idx as usize].adl_a_basis = 1_000_000;
+    engine.accounts[short_idx as usize].adl_k_snap = 0;
+    // Side multipliers must be nonzero for effective_pos_q to return nonzero
+    engine.adl_mult_long = 1_000_000; // ADL_ONE
+    engine.adl_mult_short = 1_000_000; // ADL_ONE
+
+    // Set OI to match positions
+    engine.oi_eff_long_q = 500_000;
+    engine.oi_eff_short_q = 500_000;
+
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    (engine, long_idx, short_idx)
+}
+
+#[test]
+fn test_force_close_resolved_flat_account() {
+    // force_close_resolved on a flat account (no position) should work
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000, 0).unwrap();
+    set_insurance(&mut engine, 100);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    let vault_before = engine.vault.get();
+    let capital_returned = engine.force_close_resolved(user).unwrap();
+
+    assert_eq!(capital_returned, 1_000, "should return full capital");
+    assert_eq!(engine.vault.get(), vault_before - 1_000);
+    assert!(!engine.is_used(user as usize), "slot should be freed");
+}
+
+#[test]
+fn test_force_close_resolved_unused_slot() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    assert_eq!(
+        engine.force_close_resolved(0).unwrap_err(),
+        RiskError::AccountNotFound
+    );
+}
+
+#[test]
+fn test_force_close_resolved_oob_index() {
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    assert_eq!(
+        engine.force_close_resolved(u16::MAX).unwrap_err(),
+        RiskError::AccountNotFound
+    );
+}
+
+#[test]
+fn test_force_close_resolved_with_open_position_zero_pnl() {
+    // Account has a position but no K-pair PnL delta (k_snap == k_end = 0)
+    let (mut engine, long_idx, short_idx) = setup_bilateral_engine();
+
+    // Force-close long — position zeroed, capital returned
+    let capital = engine.force_close_resolved(long_idx).unwrap();
+
+    assert_eq!(capital, 1_000);
+    assert!(!engine.is_used(long_idx as usize));
+    assert_eq!(engine.oi_eff_long_q, 0, "OI should be decremented");
+
+    // Force-close short
+    let capital_s = engine.force_close_resolved(short_idx).unwrap();
+    assert_eq!(capital_s, 1_000);
+    assert!(!engine.is_used(short_idx as usize));
+    assert_eq!(engine.oi_eff_short_q, 0, "OI should be decremented");
+}
+
+#[test]
+fn test_force_close_resolved_with_negative_pnl() {
+    // Account has negative PnL — losses should be absorbed from capital
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000, 0).unwrap();
+    set_insurance(&mut engine, 500);
+
+    // Set negative PnL directly (simulating a loss on resolved market)
+    engine.accounts[user as usize].pnl = I128::new(-200);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    let capital = engine.force_close_resolved(user).unwrap();
+
+    // Capital should be 1000 - 200 = 800 (losses settled from principal)
+    assert_eq!(capital, 800);
+    assert!(!engine.is_used(user as usize));
+}
+
+#[test]
+fn test_force_close_resolved_with_positive_pnl() {
+    // Account has positive PnL — should be converted bypassing warmup
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(0).unwrap();
+    let counterparty = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000, 0).unwrap();
+    engine.deposit(counterparty, 1_000, 0).unwrap();
+    set_insurance(&mut engine, 500);
+
+    // Give user positive PnL and counterparty negative PnL (zero-sum)
+    engine.accounts[user as usize].pnl = I128::new(300);
+    engine.accounts[counterparty as usize].pnl = I128::new(-300);
+    // Settle counterparty's losses by subtracting from capital
+    // (mimics what settle_losses does but via direct manipulation)
+    engine.accounts[counterparty as usize].capital =
+        U128::new(engine.accounts[counterparty as usize].capital.get() - 300);
+    engine.accounts[counterparty as usize].pnl = I128::ZERO;
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    let capital = engine.force_close_resolved(user).unwrap();
+
+    // Should get principal + some PnL converted (depends on haircut)
+    assert!(capital >= 1_000, "should get at least principal back");
+    assert!(!engine.is_used(user as usize));
+}
+
+#[test]
+fn test_force_close_resolved_with_fee_debt() {
+    // Account has fee debt — should be swept from capital, remainder forgiven
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000, 0).unwrap();
+    set_insurance(&mut engine, 100);
+
+    // Set fee debt
+    engine.accounts[user as usize].fee_credits = I128::new(-200);
+    engine.recompute_aggregates();
+    assert_conserved(&engine);
+
+    let capital = engine.force_close_resolved(user).unwrap();
+
+    // Capital should be 1000 - 200 (fee sweep) = 800
+    assert_eq!(capital, 800);
+    assert!(!engine.is_used(user as usize));
+}
+
+#[test]
+fn test_force_close_resolved_rejects_corrupt_a_basis() {
+    // a_basis == 0 with nonzero position should be rejected as CorruptState
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let user = engine.add_user(0).unwrap();
+    engine.deposit(user, 1_000, 0).unwrap();
+
+    // Set position with corrupt a_basis = 0
+    engine.accounts[user as usize].position_basis_q = 100_000;
+    engine.stored_pos_count_long += 1;
+    engine.accounts[user as usize].adl_a_basis = 0; // CORRUPT
+                                                    // epoch_snap defaults to 0 which matches the default epoch_side (0)
+    engine.oi_eff_long_q = 100_000;
+    engine.recompute_aggregates();
+
+    assert_eq!(
+        engine.force_close_resolved(user).unwrap_err(),
+        RiskError::CorruptState,
+        "corrupt a_basis must be rejected"
+    );
+}
+
+#[test]
+fn test_force_close_resolved_decrements_oi() {
+    // After force-closing both sides, OI should be zero
+    let (mut engine, long_idx, short_idx) = setup_bilateral_engine();
+
+    assert_eq!(engine.oi_eff_long_q, 500_000);
+    assert_eq!(engine.oi_eff_short_q, 500_000);
+
+    engine.force_close_resolved(long_idx).unwrap();
+    assert_eq!(engine.oi_eff_long_q, 0);
+
+    engine.force_close_resolved(short_idx).unwrap();
+    assert_eq!(engine.oi_eff_short_q, 0);
+}
