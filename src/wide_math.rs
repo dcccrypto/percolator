@@ -1488,7 +1488,7 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
     assert!(d > 0, "mul_div_ceil_u128: division by zero");
     let p = a.checked_mul(b).expect("mul_div_ceil_u128: a*b overflow");
     let q = p / d;
-    if !p.is_multiple_of(d) {
+    if p % d != 0 {
         q + 1
     } else {
         q
