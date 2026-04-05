@@ -3625,7 +3625,10 @@ impl RiskEngine {
             if new_pnl == i128::MIN {
                 return Err(RiskError::Overflow);
             }
-            // Validate OI decrement (computed before any mutation)
+            // Validate OI decrement (computed before any mutation).
+            // Decrement only the account's own side. The wrapper must
+            // force-close ALL accounts before resuming standard-lifecycle
+            // operations that assert OI_long == OI_short.
             let eff = self.effective_pos_q(i);
             if eff > 0 {
                 self.oi_eff_long_q.checked_sub(eff as u128)
@@ -3663,7 +3666,7 @@ impl RiskEngine {
                 self.set_stale_count(side, old_stale - 1);
             }
 
-            // Decrement OI (pre-validated above)
+            // Decrement OI for account's side only (pre-validated above)
             if eff > 0 {
                 self.oi_eff_long_q -= eff as u128;
             } else if eff < 0 {
