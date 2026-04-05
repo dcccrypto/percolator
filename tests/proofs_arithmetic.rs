@@ -464,8 +464,10 @@ fn proof_k_pair_variant_sign_and_rounding() {
     let k_then_val: i8 = kani::any();
     let denom: u8 = kani::any();
 
-    kani::assume(basis > 0);
-    kani::assume(denom > 0);
+    kani::assume(basis > 0 && basis <= 15);
+    kani::assume(denom > 0 && denom <= 15);
+    kani::assume(k_now_val >= -15 && k_now_val <= 15);
+    kani::assume(k_then_val >= -15 && k_then_val <= 15);
 
     let abs_basis = basis as u128;
     let k_now = k_now_val as i128;

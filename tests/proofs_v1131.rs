@@ -609,10 +609,11 @@ fn proof_bilateral_oi_decomposition() {
     let r1 = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open_size, DEFAULT_ORACLE, 0i64);
     assert!(r1.is_ok(), "initial trade must succeed");
 
-    // Second trade: symbolic size exercises close, reduce, and flip paths
+    // Second trade: symbolic size exercises close, reduce, and flip paths.
+    // Constrained to [-200, 200] to keep solver tractable while covering:
+    // - reduce (1..99), close (100), flip (101..200), and reverse (-1..-200)
     let raw_size: i16 = kani::any();
-    kani::assume(raw_size != 0);
-    // Scale to position units — covers -32768..32767 * POS_SCALE
+    kani::assume(raw_size != 0 && raw_size >= -200 && raw_size <= 200);
     let abs_size_q = ((raw_size as i128).unsigned_abs()) * (POS_SCALE as u128);
     let pos_size_q = abs_size_q as i128;
 
