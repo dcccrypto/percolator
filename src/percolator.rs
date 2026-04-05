@@ -2537,23 +2537,7 @@ impl RiskEngine {
             .saturating_sub(due as i128);
 
         // If fee_credits is negative, pay from capital using set_capital helper (spec §4.1)
-        let mut paid_from_capital = 0u128;
-        if self.accounts[idx as usize].fee_credits.is_negative() {
-            let owed = neg_i128_to_u128(self.accounts[idx as usize].fee_credits.get());
-            let current_cap = self.accounts[idx as usize].capital.get();
-            let pay = core::cmp::min(owed, current_cap);
-
-            // Use set_capital helper to maintain c_tot aggregate (spec §4.1)
-            self.set_capital(idx as usize, current_cap.saturating_sub(pay));
-            self.insurance_fund.balance += pay;
-            self.insurance_fund.fee_revenue += pay;
-
-            // Credit back what was paid
-            self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
-                .fee_credits
-                .saturating_add(u128_to_i128_clamped(pay));
-            paid_from_capital = pay;
-        }
+        let paid_from_capital = self.charge_fee_to_insurance(idx as usize);
 
         // Check maintenance margin if account has a position (MTM check)
         if !self.accounts[idx as usize].position_size.is_zero() {
@@ -2601,24 +2585,38 @@ impl RiskEngine {
             .saturating_sub(due as i128);
 
         // If negative, pay what we can from capital using set_capital helper (spec §4.1)
+        let paid_from_capital = self.charge_fee_to_insurance(idx as usize);
+
+        Ok(paid_from_capital) // Return actual amount paid into insurance
+    }
+
+    /// Shared helper: if account has negative `fee_credits`, pay down as much as
+    /// possible from `capital` and route into `insurance_fund` (balance + fee_revenue),
+    /// crediting back `fee_credits` by the amount paid. Returns amount paid into insurance.
+    ///
+    /// Invariants preserved (spec §4.1):
+    /// - Uses `set_capital` to maintain `c_tot` aggregate
+    /// - Only touches capital when `fee_credits` is already negative
+    /// - Pay = min(owed, current_cap); never underflows capital
+    fn charge_fee_to_insurance(&mut self, idx: usize) -> u128 {
         let mut paid_from_capital = 0u128;
-        if self.accounts[idx as usize].fee_credits.is_negative() {
-            let owed = neg_i128_to_u128(self.accounts[idx as usize].fee_credits.get());
-            let current_cap = self.accounts[idx as usize].capital.get();
+        if self.accounts[idx].fee_credits.is_negative() {
+            let owed = neg_i128_to_u128(self.accounts[idx].fee_credits.get());
+            let current_cap = self.accounts[idx].capital.get();
             let pay = core::cmp::min(owed, current_cap);
 
             // Use set_capital helper to maintain c_tot aggregate (spec §4.1)
-            self.set_capital(idx as usize, current_cap.saturating_sub(pay));
+            self.set_capital(idx, current_cap.saturating_sub(pay));
             self.insurance_fund.balance += pay;
             self.insurance_fund.fee_revenue += pay;
 
-            self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
+            // Credit back what was paid
+            self.accounts[idx].fee_credits = self.accounts[idx]
                 .fee_credits
                 .saturating_add(u128_to_i128_clamped(pay));
             paid_from_capital = pay;
         }
-
-        Ok(paid_from_capital) // Return actual amount paid into insurance
+        paid_from_capital
     }
 
     /// Best-effort warmup settlement for crank: settles any warmed positive PnL to capital.
