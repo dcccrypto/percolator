@@ -2889,10 +2889,11 @@ impl RiskEngine {
                 self.set_stale_count(side, old_stale - 1);
             }
 
-            // Decrement OI bilaterally — saturating for both sides because
-            // prior force-closes of the opposing side may have already zeroed OI.
-            if eff_abs > 0 {
+            // Decrement OI on the correct side only (spec §4.3).
+            // Saturating because prior force-closes may have partially zeroed OI.
+            if eff > 0 {
                 self.oi_eff_long_q = self.oi_eff_long_q.saturating_sub(eff_abs);
+            } else if eff < 0 {
                 self.oi_eff_short_q = self.oi_eff_short_q.saturating_sub(eff_abs);
             }
 
