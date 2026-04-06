@@ -798,8 +798,8 @@ impl I256 {
         let r_lo = rhs.lo_u128();
         let r_hi = rhs.hi_u128();
         let (lo, carry) = s_lo.overflowing_add(r_lo);
-        let (hi, overflow1) = s_hi.overflowing_add(r_hi);
-        let (hi, overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
+        let (hi, _overflow1) = s_hi.overflowing_add(r_hi);
+        let (hi, _overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
         let result = I256::from_lo_hi(lo, hi);
 
         let self_neg = self.is_negative();
@@ -827,7 +827,7 @@ impl I256 {
                 let result = I256::from_lo_hi(lo, hi);
                 let self_neg = self.is_negative();
                 let res_neg = result.is_negative();
-                if self_neg != true && res_neg != self_neg {
+                if !self_neg && res_neg != self_neg {
                     return None;
                 }
                 return Some(result);
