@@ -6,7 +6,8 @@ cd /home/anatoly/percolator
 OUTFILE="/home/anatoly/percolator/kani_audit_full.tsv"
 echo -e "proof\ttime_s\tstatus" > "$OUTFILE"
 
-PROOFS=$(grep -A5 'kani::proof' tests/kani.rs | grep '^\s*fn ' | sed 's/.*fn \([a-z_0-9]*\).*/\1/' | sort)
+# Collect all proof harness names from all proof files
+PROOFS=$(grep -rh '#\[kani::proof\]' tests/proofs_*.rs -A 3 | grep '^\s*fn ' | sed 's/.*fn \([a-z_0-9]*\).*/\1/' | sort -u)
 
 TOTAL=$(echo "$PROOFS" | wc -l)
 COUNT=0
@@ -18,7 +19,7 @@ for proof in $PROOFS; do
     echo "[$COUNT/$TOTAL] Running: $proof"
     START=$(date +%s)
 
-    if timeout 600 cargo kani --harness "$proof" --output-format terse 2>&1 | tail -3; then
+    if timeout 600 cargo kani --tests --harness "$proof" --output-format terse 2>&1 | tail -3; then
         STATUS="PASS"
         PASS=$((PASS + 1))
     else
