@@ -2778,3 +2778,36 @@ fn test_force_close_rejects_corrupt_a_basis() {
         "must reject corrupt a_basis = 0");
 }
 
+// ============================================================================
+// Spec §12 property 31: full-close liquidation closes full position
+// ============================================================================
+
+#[test]
+fn test_property_31_fullclose_liquidation_zeros_position() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = engine.add_user(1000).unwrap();
+    let b = engine.add_user(1000).unwrap();
+    engine.deposit(a, 50_000, 1000, 100).unwrap();
+    engine.deposit(b, 500_000, 1000, 100).unwrap();
+    engine.accounts[a as usize].last_fee_slot = 100;
+    engine.accounts[b as usize].last_fee_slot = 100;
+
+    // a opens leveraged long
+    let size = (450 * POS_SCALE) as i128;
+    engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i64).unwrap();
+    assert!(engine.effective_pos_q(a as usize) > 0);
+
+    // Crash price → a is underwater
+    let crash = 870u64;
+    let result = engine.liquidate_at_oracle_not_atomic(a, 101, crash, LiquidationPolicy::FullClose, 0i64);
+    assert!(result.is_ok());
+
+    // Property 31: after FullClose, effective_pos_q MUST be 0
+    assert_eq!(engine.effective_pos_q(a as usize), 0,
+        "FullClose liquidation must zero the effective position");
+    // Position basis must also be zero
+    assert_eq!(engine.accounts[a as usize].position_basis_q, 0,
+        "FullClose liquidation must zero position_basis_q");
+    assert!(engine.check_conservation());
+}
+
