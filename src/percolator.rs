@@ -4046,7 +4046,7 @@ impl RiskEngine {
             .saturating_sub(due as i128);
 
         // If fee_credits is negative, pay from capital using set_capital helper (spec §4.1)
-        let paid_from_capital = self.charge_fee_to_insurance(idx as usize);
+        let paid_from_capital = self.sweep_fee_debt_to_insurance(idx as usize);
 
         // Check maintenance margin if account has a position (MTM check)
         if self.accounts[idx as usize].position_size != 0 {
@@ -4094,7 +4094,7 @@ impl RiskEngine {
             .saturating_sub(due as i128);
 
         // If negative, pay what we can from capital using set_capital helper (spec §4.1)
-        let paid_from_capital = self.charge_fee_to_insurance(idx as usize);
+        let paid_from_capital = self.sweep_fee_debt_to_insurance(idx as usize);
 
         Ok(paid_from_capital) // Return actual amount paid into insurance
     }
@@ -4107,7 +4107,7 @@ impl RiskEngine {
     /// - Uses `set_capital` to maintain `c_tot` aggregate
     /// - Only touches capital when `fee_credits` is already negative
     /// - Pay = min(owed, current_cap); never underflows capital
-    fn charge_fee_to_insurance(&mut self, idx: usize) -> u128 {
+    fn sweep_fee_debt_to_insurance(&mut self, idx: usize) -> u128 {
         let mut paid_from_capital = 0u128;
         if self.accounts[idx].fee_credits.is_negative() {
             let owed = neg_i128_to_u128(self.accounts[idx].fee_credits.get());
