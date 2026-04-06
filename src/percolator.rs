@@ -854,6 +854,9 @@ impl RiskParams {
         if self.maintenance_fee_per_slot.get() > MAX_MAINTENANCE_FEE_PER_SLOT {
             return Err(RiskError::Overflow);
         }
+        if self.min_initial_deposit.get() == 0 {
+            return Err(RiskError::Overflow);
+        }
         Ok(())
     }
 
