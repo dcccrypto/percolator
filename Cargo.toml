@@ -18,6 +18,7 @@ proptest = "1.4"
 default = []
 test = []  # Use MAX_ACCOUNTS=64 for tests
 stress = []  # Expose test_visible methods but keep MAX_ACCOUNTS=4096
+medium = []  # MAX_ACCOUNTS=1024 (~2.7 SOL deployment size)
 fuzz = ["test"]  # Enable fuzzing tests (includes test feature for test_visible helpers)
 
 [profile.release]
