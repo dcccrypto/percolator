@@ -3569,6 +3569,157 @@ impl RiskEngine {
     }
 
     // ========================================================================
+    // execute_adl_not_atomic (spec §9.6 — auto-deleveraging)
+    // ========================================================================
+
+    /// execute_adl_not_atomic — close a winning trader's position to cover the
+    /// deficit socialized by an insolvent bankrupt counterpart.
+    ///
+    /// # Preconditions (caller must enforce before calling)
+    /// - Insurance fund balance must be zero (caller enforces H-4 gate).
+    /// - `pnl_pos_tot > cap` (caller enforces; not re-checked here).
+    ///
+    /// # What this does
+    /// 1. Validates slot bounds and bitmap allocation.
+    /// 2. Validates oracle price.
+    /// 3. Checks position is nonzero before touch (fast path guard).
+    /// 4. Calls `touch_account_full_not_atomic` to materialize K-pair PnL and
+    ///    accrue market state to `now_slot`.
+    /// 5. Reads the post-touch effective position size (`closed_abs`).
+    /// 6. Rejects unprofitable positions (`pnl <= 0` after touch): ADL targets
+    ///    only winning traders whose profits must be clawed back.
+    /// 7. Zeroes the position via `attach_effective_position(idx, 0)`, updating
+    ///    `stored_pos_count_long/short` and ADL slot defaults.
+    /// 8. Calls `enqueue_adl(ctx, adl_side, closed_abs, d=0)` to bilaterally
+    ///    decrement `oi_eff_long_q` and `oi_eff_short_q` via the A/K mechanism.
+    ///    `d=0` because ADL has no bankrupt deficit to socialize — it only removes
+    ///    excess winning-side OI.
+    /// 9. Calls `settle_losses` (no-op for pnl > 0 accounts; present for safety).
+    /// 10. Converts all remaining positive PnL into capital, bypassing warmup.
+    ///     (ADL is a forced close — warmup does not apply.)
+    /// 11. Runs end-of-instruction resets and recomputes `r_last`.
+    /// 12. Returns `(closed_abs, final_pnl_as_settled)` for logging.
+    ///
+    /// The account slot is NOT freed — the user's capital remains and they can
+    /// withdraw via the normal withdrawal path.
+    ///
+    /// Vault balance is NOT changed here — no token transfer occurs. The caller
+    /// (program handler) is responsible for any required vault adjustment.
+    ///
+    /// # Atomicity
+    /// Suffixed `_not_atomic`: returns `Err` after partial state mutation is
+    /// possible only after `touch_account_full_not_atomic`. The SVM transaction
+    /// boundary rolls back all state on any `Err`.
+    pub fn execute_adl_not_atomic(
+        &mut self,
+        target_idx: usize,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate: i64,
+    ) -> Result<(u128, i128)> {
+        Self::validate_funding_rate(funding_rate)?;
+
+        // Step 1: bounds and bitmap check
+        if target_idx >= MAX_ACCOUNTS || !self.is_used(target_idx) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // SECURITY M-2: Reject LP accounts — ADL bypasses LP withdrawal queue
+        // and share accounting. LP positions must be closed via normal LP flow.
+        if self.accounts[target_idx].is_lp() {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Step 2: oracle price validity
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 3: position must be nonzero before touch (fast path to avoid
+        // mutating market state for an account that has nothing to close).
+        if self.accounts[target_idx].position_basis_q == 0 {
+            return Err(RiskError::Overflow);
+        }
+
+        let mut ctx = InstructionContext::new();
+
+        // Step 4: materialize K-pair PnL; accrues market to now_slot.
+        // Same pre-touch pattern as liquidate_at_oracle_not_atomic (spec §10.6 step 3).
+        self.touch_account_full_not_atomic(target_idx, oracle_price, now_slot)?;
+
+        // Step 5: read effective position after touch.
+        // K-pair may have zeroed it via phantom dust collapse.
+        let eff = self.effective_pos_q(target_idx);
+        let closed_abs = eff.unsigned_abs();
+        if eff == 0 {
+            // Touch already zeroed the position. Run resets for market consistency.
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx);
+            self.recompute_r_last_from_final_state(funding_rate)?;
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 6: ADL only targets winning traders (positive PnL after touch).
+        // Accounts with pnl <= 0 are losing/neutral — reject.
+        if self.accounts[target_idx].pnl <= 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        // Capture the side of the position being ADL'd (needed for enqueue_adl).
+        let adl_side = side_of_i128(eff).expect("execute_adl: nonzero eff must have side");
+
+        // Step 7: zero the position via attach_effective_position.
+        // This updates stored_pos_count_long/short and resets the ADL slot fields
+        // (adl_a_basis, adl_k_snap, adl_epoch_snap). It does NOT update oi_eff_*.
+        self.attach_effective_position(target_idx, 0i128);
+
+        // Step 8: bilaterally decrement OI via enqueue_adl.
+        // adl_side = the side of the account being closed (the winning trader).
+        // d = 0: no bankrupt deficit to socialize (this is pure deleverage, no K-adj).
+        // enqueue_adl decrements oi_eff[adl_side] and oi_eff[opp] symmetrically,
+        // then propagates the A/K multiplier update to the opposing side.
+        self.enqueue_adl(&mut ctx, adl_side, closed_abs, 0)?;
+
+        // Step 9: settle any losses from principal (no-op for pnl > 0 accounts).
+        self.settle_losses(target_idx);
+
+        // Step 10: convert positive PnL into capital, bypassing warmup.
+        // Mirrors force_close_resolved_not_atomic §step 4: release all reserves,
+        // apply the haircut ratio, consume released PnL, credit capital.
+        if self.accounts[target_idx].pnl > 0 {
+            // Release all reserves unconditionally (bypass warmup for forced close).
+            self.set_reserved_pnl(target_idx, 0);
+            // Convert using post-release haircut.
+            let released = self.released_pos(target_idx);
+            if released > 0 {
+                let (h_num, h_den) = self.haircut_ratio();
+                let y = if h_den == 0 {
+                    released
+                } else {
+                    wide_mul_div_floor_u128(released, h_num, h_den)
+                };
+                self.consume_released_pnl(target_idx, released);
+                let new_cap = add_u128(self.accounts[target_idx].capital.get(), y);
+                self.set_capital(target_idx, new_cap);
+            }
+        }
+        let final_pnl = self.accounts[target_idx].pnl;
+
+        // Step 11: run end-of-instruction resets; recompute r_last.
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state(funding_rate)?;
+
+        // Assert OI symmetry invariant (same post-instruction check as liquidation).
+        assert!(
+            self.oi_eff_long_q == self.oi_eff_short_q,
+            "execute_adl_not_atomic: OI_eff_long != OI_eff_short after ADL"
+        );
+
+        Ok((closed_abs, final_pnl))
+    }
+
+    // ========================================================================
     // force_close_resolved_not_atomic (resolved/frozen market path)
     // ========================================================================
 
