@@ -2580,6 +2580,127 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
 }
 
 // ############################################################################
+// Full IM/MM margin enforcement: flat→open, reduction, sign-flip
+// ############################################################################
+
+/// Comprehensive margin enforcement proof covering all 3 risk categories:
+/// - flat → open (risk-increasing → requires IM)
+/// - same-sign reduction (risk-reducing → requires MM only)
+/// - sign-flip (risk-increasing → requires IM)
+///
+/// For every successful trade, both parties must be above MM.
+/// For risk-increasing trades, the risk-increasing party must also be above IM.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_execute_trade_full_margin_enforcement() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.last_crank_slot = DEFAULT_SLOT;
+    engine.last_market_slot = DEFAULT_SLOT;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+
+    let user = engine.add_user(0).unwrap();
+    let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
+
+    // Fixed capital near margin boundary for user; LP well-capitalized.
+    // Capital is concrete to keep the solver tractable (3 symbolic vars times
+    // the full execute_trade pipeline exceeds 10-minute budget).
+    let capital = 2_000u128;
+    engine.deposit(user, capital, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(lp, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Pre-construct initial position directly (avoids a second full trade
+    // pipeline which makes the solver intractable). The A/K state is set
+    // to match a fresh same-epoch position at DEFAULT_ORACLE.
+    let old_pos_units: i8 = kani::any();
+    kani::assume(old_pos_units >= -5 && old_pos_units <= 5);
+    let old_pos_q = (old_pos_units as i128) * (POS_SCALE as i128);
+    if old_pos_q != 0 {
+        engine.attach_effective_position(user as usize, old_pos_q);
+        engine.attach_effective_position(lp as usize, -old_pos_q);
+        // Update OI to match
+        let abs_q = old_pos_q.unsigned_abs();
+        engine.oi_eff_long_q = abs_q;
+        engine.oi_eff_short_q = abs_q;
+    }
+
+    let old_eff_user = engine.effective_pos_q(user as usize);
+    let old_eff_lp = engine.effective_pos_q(lp as usize);
+
+    // Symbolic trade delta in [-5, 5] units
+    let delta_units: i8 = kani::any();
+    kani::assume(delta_units != 0);
+    kani::assume(delta_units >= -5 && delta_units <= 5);
+
+    let result = if delta_units > 0 {
+        let sz = (delta_units as u128) * POS_SCALE;
+        engine.execute_trade_not_atomic(
+            user, lp, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i64)
+    } else {
+        let sz = ((-delta_units) as u128) * POS_SCALE;
+        engine.execute_trade_not_atomic(
+            lp, user, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i64)
+    };
+
+    if result.is_ok() {
+        let new_eff_user = engine.effective_pos_q(user as usize);
+        let new_eff_lp = engine.effective_pos_q(lp as usize);
+
+        // Classify risk for each party
+        let user_crosses_zero = (old_eff_user > 0 && new_eff_user < 0)
+            || (old_eff_user < 0 && new_eff_user > 0);
+        let user_risk_increasing = new_eff_user.unsigned_abs() > old_eff_user.unsigned_abs()
+            || user_crosses_zero
+            || old_eff_user == 0;
+
+        let lp_crosses_zero = (old_eff_lp > 0 && new_eff_lp < 0)
+            || (old_eff_lp < 0 && new_eff_lp > 0);
+        let lp_risk_increasing = new_eff_lp.unsigned_abs() > old_eff_lp.unsigned_abs()
+            || lp_crosses_zero
+            || old_eff_lp == 0;
+
+        // All successful trades: both parties must be above MM
+        if new_eff_user != 0 {
+            assert!(engine.is_above_maintenance_margin(
+                &engine.accounts[user as usize], user as usize, DEFAULT_ORACLE),
+                "user must be above MM after successful trade");
+        }
+        if new_eff_lp != 0 {
+            assert!(engine.is_above_maintenance_margin(
+                &engine.accounts[lp as usize], lp as usize, DEFAULT_ORACLE),
+                "LP must be above MM after successful trade");
+        }
+
+        // Risk-increasing: must also be above IM
+        if user_risk_increasing && new_eff_user != 0 {
+            assert!(engine.is_above_initial_margin(
+                &engine.accounts[user as usize], user as usize, DEFAULT_ORACLE),
+                "user must be above IM after risk-increasing trade");
+        }
+        if lp_risk_increasing && new_eff_lp != 0 {
+            assert!(engine.is_above_initial_margin(
+                &engine.accounts[lp as usize], lp as usize, DEFAULT_ORACLE),
+                "LP must be above IM after risk-increasing trade");
+        }
+
+        assert!(engine.check_conservation());
+    }
+
+    // Non-vacuity: flat→open (risk-increasing)
+    if old_pos_units == 0 && delta_units >= 1 && delta_units <= 3 {
+        kani::cover!(result.is_ok(), "flat-to-open trade succeeds");
+    }
+    // Non-vacuity: same-sign reduction (risk-reducing)
+    if old_pos_units == 5 && delta_units == -2 {
+        kani::cover!(result.is_ok(), "same-sign reduction succeeds");
+    }
+    // Non-vacuity: sign-flip (risk-increasing)
+    if old_pos_units == 3 && delta_units == -5 {
+        kani::cover!(result.is_ok(), "sign-flip trade reachable");
+    }
+}
+
+// ############################################################################
 // Weakness #12: convert_released_pnl_not_atomic reaches conversion path (not early-return)
 // ############################################################################
 
