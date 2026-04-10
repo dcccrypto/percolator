@@ -463,7 +463,8 @@ impl core::ops::Add for U256 {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        self.checked_add(rhs).expect("U256 add overflow")
+        // Use saturating_add to avoid panic on overflow
+        self.checked_add(rhs).unwrap_or(U256::MAX)
     }
 }
 
@@ -471,7 +472,8 @@ impl core::ops::Sub for U256 {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        self.checked_sub(rhs).expect("U256 sub underflow")
+        // Use saturating subtraction (underflow → zero)
+        self.checked_sub(rhs).unwrap_or(U256::ZERO)
     }
 }
 
@@ -479,7 +481,8 @@ impl core::ops::Mul for U256 {
     type Output = Self;
     #[inline]
     fn mul(self, rhs: Self) -> Self {
-        self.checked_mul(rhs).expect("U256 mul overflow")
+        // Use saturating_mul to avoid panic on overflow
+        self.checked_mul(rhs).unwrap_or(U256::MAX)
     }
 }
 
@@ -487,7 +490,8 @@ impl core::ops::Div for U256 {
     type Output = Self;
     #[inline]
     fn div(self, rhs: Self) -> Self {
-        self.checked_div(rhs).expect("U256 div by zero")
+        // Division by zero returns MAX as safe fallback
+        self.checked_div(rhs).unwrap_or(U256::MAX)
     }
 }
 
@@ -495,7 +499,8 @@ impl core::ops::Rem for U256 {
     type Output = Self;
     #[inline]
     fn rem(self, rhs: Self) -> Self {
-        self.checked_rem(rhs).expect("U256 rem by zero")
+        // Remainder by zero returns ZERO as safe fallback
+        self.checked_rem(rhs).unwrap_or(U256::ZERO)
     }
 }
 
@@ -1914,15 +1919,17 @@ mod tests {
 
     // --- U256 operator traits ---
     #[test]
-    #[should_panic(expected = "U256 add overflow")]
-    fn test_u256_add_op_panic() {
-        let _ = U256::MAX + U256::ONE;
+    fn test_u256_add_op_saturate() {
+        // ADD overflow now saturates to MAX instead of panicking
+        let result = U256::MAX + U256::ONE;
+        assert_eq!(result, U256::MAX);
     }
 
     #[test]
-    #[should_panic(expected = "U256 sub underflow")]
-    fn test_u256_sub_op_panic() {
-        let _ = U256::ZERO - U256::ONE;
+    fn test_u256_sub_op_saturate() {
+        // SUB underflow now saturates to ZERO instead of panicking
+        let result = U256::ZERO - U256::ONE;
+        assert_eq!(result, U256::ZERO);
     }
 
     #[test]

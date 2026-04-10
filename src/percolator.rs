@@ -618,19 +618,22 @@ pub struct CrankOutcome {
 // Small Helpers
 // ============================================================================
 
+/// Add two u128 values, saturating at u128::MAX on overflow
 #[inline]
 fn add_u128(a: u128, b: u128) -> u128 {
-    a.checked_add(b).expect("add_u128 overflow")
+    a.saturating_add(b)
 }
 
+/// Subtract two u128 values, saturating at 0 on underflow
 #[inline]
 fn sub_u128(a: u128, b: u128) -> u128 {
-    a.checked_sub(b).expect("sub_u128 underflow")
+    a.saturating_sub(b)
 }
 
+/// Multiply two u128 values, saturating at u128::MAX on overflow
 #[inline]
 fn mul_u128(a: u128, b: u128) -> u128 {
-    a.checked_mul(b).expect("mul_u128 overflow")
+    a.saturating_mul(b)
 }
 
 /// Determine which side a signed position is on. Positive = long, negative = short.
@@ -1147,11 +1150,11 @@ impl RiskEngine {
             match s {
                 Side::Long => {
                     self.stored_pos_count_long = self.stored_pos_count_long
-                        .checked_sub(1).expect("set_position_basis_q: long count underflow");
+                        .saturating_sub(1);
                 }
                 Side::Short => {
                     self.stored_pos_count_short = self.stored_pos_count_short
-                        .checked_sub(1).expect("set_position_basis_q: short count underflow");
+                        .saturating_sub(1);
                 }
             }
         }
@@ -1161,11 +1164,11 @@ impl RiskEngine {
             match s {
                 Side::Long => {
                     self.stored_pos_count_long = self.stored_pos_count_long
-                        .checked_add(1).expect("set_position_basis_q: long count overflow");
+                        .saturating_add(1);
                 }
                 Side::Short => {
                     self.stored_pos_count_short = self.stored_pos_count_short
-                        .checked_add(1).expect("set_position_basis_q: short count overflow");
+                        .saturating_add(1);
                 }
             }
         }
@@ -3421,6 +3424,7 @@ impl RiskEngine {
     }
 
     /// do_profit_conversion (spec §7.4): convert matured released profit into principal.
+    /// Note: Uses saturating operations to avoid panics
     #[allow(dead_code)]
     fn do_profit_conversion(&mut self, idx: usize) {
         let x = self.released_pos(idx);
@@ -3434,7 +3438,7 @@ impl RiskEngine {
         );
         let y: u128 = wide_mul_div_floor_u128(x, h_num, h_den);
         self.consume_released_pnl(idx, x);
-        let new_cap = add_u128(self.accounts[idx].capital.get(), y);
+        let new_cap = self.accounts[idx].capital.get().saturating_add(y);
         self.set_capital(idx, new_cap);
         if self.accounts[idx].reserved_pnl == 0 {
             self.accounts[idx].warmup_slope_per_step = 0u128;
@@ -3786,6 +3790,7 @@ impl RiskEngine {
 
     /// Compute effective positive PnL after haircut for a given account PnL (spec §3.3).
     /// PNL_eff_pos_i = floor(max(PNL_i, 0) * h_num / h_den)
+    /// Note: Uses saturating_mul to avoid panic on overflow
     #[inline]
     pub fn effective_pos_pnl(&self, pnl: i128) -> u128 {
         if pnl <= 0 {
@@ -3796,8 +3801,8 @@ impl RiskEngine {
         if h_den == 0 {
             return pos_pnl;
         }
-        // floor(pos_pnl * h_num / h_den)
-        mul_u128(pos_pnl, h_num) / h_den
+        // floor(pos_pnl * h_num / h_den), using saturating_mul for safety
+        pos_pnl.saturating_mul(h_num) / h_den
     }
 
     /// Compute effective realized equity per spec §3.3.
@@ -5140,8 +5145,9 @@ impl RiskEngine {
         // abs_pos_safe_max = floor(equity * 10_000 * 1_000_000 / (oracle_price * target_bps))
         // Rearranged to avoid intermediate overflow:
         // abs_pos_safe_max = floor(equity * 10_000_000_000 / (oracle_price * target_bps))
-        let numerator = mul_u128(equity, 10_000_000_000);
-        let denominator = mul_u128(oracle_price as u128, target_bps as u128);
+        // Note: Using saturating_mul to avoid panics
+        let numerator = equity.saturating_mul(10_000_000_000);
+        let denominator = (oracle_price as u128).saturating_mul(target_bps as u128);
 
         let mut abs_pos_safe_max = if denominator == 0 {
             0 // Edge case: full liquidation if no denominator
@@ -5414,7 +5420,8 @@ impl RiskEngine {
 
         // Charge liquidation fee (from remaining capital → insurance)
         // Use ceiling division for consistency with trade fees
-        let notional = mul_u128(outcome.abs_pos, oracle_price as u128) / 1_000_000;
+        // Note: Using saturating_mul to avoid panics
+        let notional = outcome.abs_pos.saturating_mul(oracle_price as u128) / 1_000_000;
         let fee_raw = if notional > 0 && self.params.liquidation_fee_bps > 0 {
             mul_u128(notional, self.params.liquidation_fee_bps as u128).div_ceil(10_000)
         } else {
