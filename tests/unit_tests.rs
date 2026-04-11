@@ -860,24 +860,6 @@ fn test_advance_slot() {
     assert_eq!(engine.current_slot, 50);
 }
 
-#[test]
-fn test_recompute_aggregates() {
-    let (mut engine, a, b) = setup_two_users(50_000, 50_000);
-    let oracle = 1000u64;
-    let slot = 1u64;
-
-    let size_q = make_size_q(30);
-    engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0).expect("trade");
-
-    let c_before = engine.c_tot.get();
-    let pnl_before = engine.pnl_pos_tot;
-
-    engine.recompute_aggregates();
-
-    // Aggregates should be consistent after recompute
-    assert_eq!(engine.c_tot.get(), c_before);
-    assert_eq!(engine.pnl_pos_tot, pnl_before);
-}
 
 #[test]
 fn test_multiple_accounts() {
@@ -2251,18 +2233,23 @@ fn test_property_52_convert_released_pnl_explicit() {
     let size_q = make_size_q(1);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0).unwrap();
 
-    // Set released matured profit
+    // Set released matured profit: use UseHLock(10) so PnL goes to reserve queue
     let idx = a as usize;
-    engine.set_pnl(idx, 10_000);
-    // set_pnl sets reserved_pnl = 10000 (all reserved). Reduce to 3000 to release 7000.
-    let old_r = engine.accounts[idx].reserved_pnl; // 10000
+    engine.set_pnl_with_reserve(idx, 10_000, ReserveMode::UseHLock(10)).unwrap();
+    assert_eq!(engine.accounts[idx].reserved_pnl, 10_000, "all goes to reserve with h_lock>0");
+    // Advance past horizon to mature cohorts, releasing 7000 (keep 3000 reserved)
+    engine.current_slot = slot + 20; // well past h_lock=10
+    engine.advance_profit_warmup_cohort(idx);
+    // All 10000 is now matured; manually set reserved to 3000 to simulate partial release
     engine.accounts[idx].reserved_pnl = 3_000;
-    engine.pnl_matured_pos_tot += old_r - 3_000; // 7000 now matured/released
+    // Adjust matured for the re-reservation
+    engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot.saturating_sub(3_000);
 
     let r_before = engine.accounts[idx].reserved_pnl;
+    let slot3 = slot + 21;
 
-    // Convert some released profit
-    let result = engine.convert_released_pnl_not_atomic(a, 5_000, oracle, slot + 1, 0i128, 0);
+    // Convert a small amount of released profit (within x_safe cap)
+    let result = engine.convert_released_pnl_not_atomic(a, 1_000, oracle, slot3, 0i128, 0);
     assert!(result.is_ok(), "convert_released_pnl_not_atomic must succeed: {:?}", result);
 
     // R_i must be unchanged
@@ -2275,7 +2262,7 @@ fn test_property_52_convert_released_pnl_explicit() {
         let pos = if pnl > 0 { pnl as u128 } else { 0u128 };
         pos.saturating_sub(engine.accounts[idx].reserved_pnl)
     };
-    let result2 = engine.convert_released_pnl_not_atomic(a, released_now + 1, oracle, slot + 1, 0i128, 0);
+    let result2 = engine.convert_released_pnl_not_atomic(a, released_now + 1, oracle, slot3, 0i128, 0);
     assert!(result2.is_err(), "requesting more than released must fail");
 }
 

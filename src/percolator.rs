@@ -972,68 +972,14 @@ impl RiskEngine {
     // O(1) Aggregate Helpers (spec §4)
     // ========================================================================
 
-    /// set_pnl (spec §4.4): Update PNL and maintain pnl_pos_tot + pnl_matured_pos_tot
-    /// with proper reserve handling. Forbids i128::MIN.
+    /// set_pnl: thin wrapper routing through set_pnl_with_reserve(ImmediateRelease).
+    /// All PnL mutations go through one canonical path. ImmediateRelease routes
+    /// positive increases directly to matured (no reserve queue), and decreases
+    /// go through apply_reserve_loss_lifo — replacing the old saturating_sub.
     test_visible! {
     fn set_pnl(&mut self, idx: usize, new_pnl: i128) {
-        // Step 1: forbid i128::MIN
-        assert!(new_pnl != i128::MIN, "set_pnl: i128::MIN forbidden");
-
-        let old = self.accounts[idx].pnl;
-        let old_pos = i128_clamp_pos(old);
-        let old_r = self.accounts[idx].reserved_pnl;
-        let old_rel = old_pos - old_r;
-        let new_pos = i128_clamp_pos(new_pnl);
-
-        // Step 6: per-account positive-PnL bound
-        assert!(new_pos <= MAX_ACCOUNT_POSITIVE_PNL, "set_pnl: exceeds MAX_ACCOUNT_POSITIVE_PNL");
-
-        // Steps 7-8: compute new_R
-        let new_r = if new_pos > old_pos {
-            // Step 7: positive increase → add to reserve
-            let reserve_add = new_pos - old_pos;
-            let nr = old_r.checked_add(reserve_add)
-                .expect("set_pnl: new_R overflow");
-            assert!(nr <= new_pos, "set_pnl: new_R > new_pos");
-            nr
-        } else {
-            // Step 8: decrease or same → saturating_sub loss from reserve
-            let pos_loss = old_pos - new_pos;
-            let nr = old_r.saturating_sub(pos_loss);
-            assert!(nr <= new_pos, "set_pnl: new_R > new_pos");
-            nr
-        };
-
-        let new_rel = new_pos - new_r;
-
-        // Steps 10-11: update pnl_pos_tot
-        if new_pos > old_pos {
-            let delta = new_pos - old_pos;
-            self.pnl_pos_tot = self.pnl_pos_tot.checked_add(delta)
-                .expect("set_pnl: pnl_pos_tot overflow");
-        } else if old_pos > new_pos {
-            let delta = old_pos - new_pos;
-            self.pnl_pos_tot = self.pnl_pos_tot.checked_sub(delta)
-                .expect("set_pnl: pnl_pos_tot underflow");
-        }
-        assert!(self.pnl_pos_tot <= MAX_PNL_POS_TOT, "set_pnl: exceeds MAX_PNL_POS_TOT");
-
-        // Steps 12-13: update pnl_matured_pos_tot
-        if new_rel > old_rel {
-            let delta = new_rel - old_rel;
-            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_add(delta)
-                .expect("set_pnl: pnl_matured_pos_tot overflow");
-        } else if old_rel > new_rel {
-            let delta = old_rel - new_rel;
-            self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_sub(delta)
-                .expect("set_pnl: pnl_matured_pos_tot underflow");
-        }
-        assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot,
-            "set_pnl: pnl_matured_pos_tot > pnl_pos_tot");
-
-        // Steps 14-15: write PNL_i and R_i
-        self.accounts[idx].pnl = new_pnl;
-        self.accounts[idx].reserved_pnl = new_r;
+        self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::ImmediateRelease)
+            .expect("set_pnl: set_pnl_with_reserve failed");
     }
     }
 
@@ -1775,12 +1721,14 @@ impl RiskEngine {
                             self.set_k_side(opp, new_k);
                         }
                         None => {
-                            // K-space overflow: record_uninsured (no-op)
+                            // K-space overflow: corruption signal
+                            return Err(RiskError::CorruptState);
                         }
                     }
                 }
                 Err(OverI128Magnitude) => {
-                    // Quotient overflow: record_uninsured (no-op)
+                    // Quotient overflow: corruption signal
+                    return Err(RiskError::CorruptState);
                 }
             }
         }
@@ -2114,10 +2062,21 @@ impl RiskEngine {
         }
     }
 
-    /// Eq_init_net_i (spec §3.4): max(0, Eq_init_raw_i). For IM/withdrawal checks.
+    /// Eq_init_net_i (spec §3.4): max(0, Eq_init_raw_i). For IM checks (trades).
     pub fn account_equity_init_net(&self, account: &Account, idx: usize) -> i128 {
         let raw = self.account_equity_init_raw(account, idx);
         if raw < 0 { 0i128 } else { raw }
+    }
+
+    /// Eq_withdraw_raw_i (spec §3.4): withdrawal equity uses only physical capital
+    /// minus losses minus fee debt — does NOT include matured released PnL.
+    /// This prevents withdrawal approval against haircutted PnL claims that may
+    /// not survive other accounts' subsequent conversions.
+    pub fn account_equity_withdraw_raw(&self, account: &Account) -> i128 {
+        let cap = account.capital.get() as i128;
+        let pnl_neg = core::cmp::min(account.pnl, 0);
+        let fee_debt = fee_debt_u128_checked(account.fee_credits.get()) as i128;
+        cap.saturating_add(pnl_neg).saturating_sub(fee_debt)
     }
 
     /// notional (spec §9.1): floor(|effective_pos_q| * oracle_price / POS_SCALE)
@@ -3025,19 +2984,23 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Step 6: if position exists, require post-withdraw_not_atomic initial margin
+        // Step 6: if position exists, require post-withdrawal margin using
+        // withdrawal equity (capital minus losses minus fees — does NOT include
+        // matured released PnL, preventing approval against claims that may not
+        // survive other accounts' conversions).
         let eff = self.effective_pos_q(idx as usize);
         if eff != 0 {
-            // Simulate withdrawal: adjust BOTH capital AND vault to keep Residual consistent
-            let old_cap = self.accounts[idx as usize].capital.get();
-            let old_vault = self.vault;
-            self.set_capital(idx as usize, post_cap);
-            self.vault = U128::new(sub_u128(self.vault.get(), amount));
-            let passes_im = self.is_above_initial_margin(&self.accounts[idx as usize], idx as usize, oracle_price);
-            // Revert both
-            self.set_capital(idx as usize, old_cap);
-            self.vault = old_vault;
-            if !passes_im {
+            // Post-withdrawal equity: current withdraw equity minus withdrawal amount
+            let eq_withdraw = self.account_equity_withdraw_raw(&self.accounts[idx as usize]);
+            let eq_post = eq_withdraw.saturating_sub(amount as i128);
+            let notional = self.notional(idx as usize, oracle_price);
+            let im_req = if notional == 0 { 0u128 } else {
+                core::cmp::max(
+                    mul_div_floor_u128(notional, self.params.initial_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_im_req,
+                )
+            };
+            if eq_post < im_req as i128 {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -4308,6 +4271,19 @@ impl RiskEngine {
         // Because x_req > 0 implies pnl_matured_pos_tot > 0, h_den is strictly positive.
         let (h_num, h_den) = self.haircut_ratio();
         assert!(h_den > 0, "convert_released_pnl_not_atomic: h_den must be > 0 when x_req > 0");
+
+        // Step 6a: safe conversion ceiling — reject if x_req exceeds per-account
+        // safe maximum. x_safe = floor(released * h_den / (h_den - h_num)) when h < 1.
+        // Converting more than x_safe would reduce the account's equity below zero
+        // after the haircut loss is absorbed.
+        if h_den > h_num {
+            let gap = h_den - h_num;
+            let x_safe = wide_mul_div_floor_u128(released, h_den, gap);
+            if x_req > x_safe {
+                return Err(RiskError::Overflow);
+            }
+        }
+
         let y: u128 = wide_mul_div_floor_u128(x_req, h_num, h_den);
 
         // Step 7: consume_released_pnl(i, x_req)
@@ -4573,11 +4549,28 @@ impl RiskEngine {
                 self.set_stale_count(side, old_stale - 1);
             }
 
-            // Decrement OI bilaterally — saturating for both sides because
-            // prior force-closes of the opposing side may have already zeroed OI.
+            // Decrement OI bilaterally. In resolved mode, resolve_market
+            // already zeroed OI, so these should already be 0.
+            // Use checked_sub where possible, fall back to assert on underflow.
             if eff_abs > 0 {
-                self.oi_eff_long_q = self.oi_eff_long_q.saturating_sub(eff_abs);
-                self.oi_eff_short_q = self.oi_eff_short_q.saturating_sub(eff_abs);
+                self.oi_eff_long_q = match self.oi_eff_long_q.checked_sub(eff_abs) {
+                    Some(v) => v,
+                    None => {
+                        // Resolved mode: OI was zeroed at resolve time.
+                        // Underflow here means the position was already accounted for.
+                        assert!(self.oi_eff_long_q == 0,
+                            "OI_long underflow on non-zero base — corrupt state");
+                        0
+                    }
+                };
+                self.oi_eff_short_q = match self.oi_eff_short_q.checked_sub(eff_abs) {
+                    Some(v) => v,
+                    None => {
+                        assert!(self.oi_eff_short_q == 0,
+                            "OI_short underflow on non-zero base — corrupt state");
+                        0
+                    }
+                };
             }
 
             // Account for same-epoch phantom dust before zeroing (same logic
@@ -4884,24 +4877,6 @@ impl RiskEngine {
     // ========================================================================
     // Recompute aggregates (test helper)
     // ========================================================================
-
-    test_visible! {
-    fn recompute_aggregates(&mut self) {
-        let mut c_tot = 0u128;
-        let mut pnl_pos_tot = 0u128;
-        let mut pnl_matured_pos_tot = 0u128;
-        self.for_each_used(|_idx, account| {
-            c_tot = c_tot.saturating_add(account.capital.get());
-            let pos_pnl = i128_clamp_pos(account.pnl);
-            pnl_pos_tot = pnl_pos_tot.saturating_add(pos_pnl);
-            let released = pos_pnl.saturating_sub(account.reserved_pnl);
-            pnl_matured_pos_tot = pnl_matured_pos_tot.saturating_add(released);
-        });
-        self.c_tot = U128::new(c_tot);
-        self.pnl_pos_tot = pnl_pos_tot;
-        self.pnl_matured_pos_tot = pnl_matured_pos_tot;
-    }
-    }
 
     // ========================================================================
     // Utilities
