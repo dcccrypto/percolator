@@ -2097,8 +2097,214 @@ impl RiskEngine {
         pos_pnl.saturating_sub(self.accounts[idx].reserved_pnl)
     }
 
-    /// restart_warmup_after_reserve_increase (spec §4.9)
-    /// Caller obligation: MUST be called after set_pnl increases R_i.
+    // ========================================================================
+    // Reserve cohort queue helpers (spec §4.4, v12.14.0)
+    // ========================================================================
+
+    /// append_or_route_new_reserve (spec §4.4.1)
+    test_visible! {
+    fn append_or_route_new_reserve(&mut self, idx: usize, reserve_add: u128, now_slot: u64, h_lock: u64) {
+        let a = &mut self.accounts[idx];
+        let count = a.exact_cohort_count as usize;
+        let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
+
+        // Step 1: promote overflow_older if exact capacity available
+        if a.overflow_older_present && has_cap {
+            a.exact_reserve_cohorts[count] = a.overflow_older;
+            a.exact_cohort_count += 1;
+            a.overflow_older = ReserveCohort::EMPTY;
+            a.overflow_older_present = false;
+        }
+
+        let count = a.exact_cohort_count as usize;
+        let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
+
+        // Step 2: activate pending overflow_newest if overflow_older absent
+        if !a.overflow_older_present && a.overflow_newest_present {
+            let pending_q = a.overflow_newest.remaining_q;
+            let pending_h = a.overflow_newest.horizon_slots;
+            a.overflow_newest = ReserveCohort::EMPTY;
+            a.overflow_newest_present = false;
+            let activated = ReserveCohort {
+                remaining_q: pending_q, anchor_q: pending_q,
+                start_slot: now_slot, horizon_slots: pending_h, sched_release_q: 0,
+            };
+            if has_cap {
+                a.exact_reserve_cohorts[count] = activated;
+                a.exact_cohort_count += 1;
+            } else {
+                a.overflow_older = activated;
+                a.overflow_older_present = true;
+            }
+        }
+
+        let count = a.exact_cohort_count as usize;
+        let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
+
+        // Step 3: exact merge into newest cohort (same slot, same horizon, not yet scheduled)
+        if !a.overflow_older_present && !a.overflow_newest_present && count > 0 {
+            let newest = &mut a.exact_reserve_cohorts[count - 1];
+            if newest.start_slot == now_slot && newest.horizon_slots == h_lock && newest.sched_release_q == 0 {
+                newest.remaining_q = newest.remaining_q.checked_add(reserve_add).expect("reserve overflow");
+                newest.anchor_q = newest.anchor_q.checked_add(reserve_add).expect("anchor overflow");
+                a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+                return;
+            }
+        }
+
+        // Step 4: exact merge into overflow_older
+        if a.overflow_older_present && !a.overflow_newest_present {
+            let o = &mut a.overflow_older;
+            if o.start_slot == now_slot && o.horizon_slots == h_lock && o.sched_release_q == 0 {
+                o.remaining_q = o.remaining_q.checked_add(reserve_add).expect("reserve overflow");
+                o.anchor_q = o.anchor_q.checked_add(reserve_add).expect("anchor overflow");
+                a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+                return;
+            }
+        }
+
+        let new_cohort = ReserveCohort {
+            remaining_q: reserve_add, anchor_q: reserve_add,
+            start_slot: now_slot, horizon_slots: h_lock, sched_release_q: 0,
+        };
+
+        // Step 5: append new exact cohort
+        if has_cap && !a.overflow_older_present && !a.overflow_newest_present {
+            a.exact_reserve_cohorts[count] = new_cohort;
+            a.exact_cohort_count += 1;
+            a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+            return;
+        }
+
+        // Step 6: create overflow_older
+        if !a.overflow_older_present && !a.overflow_newest_present {
+            a.overflow_older = new_cohort;
+            a.overflow_older_present = true;
+            a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+            return;
+        }
+
+        // Step 7: create overflow_newest
+        if a.overflow_older_present && !a.overflow_newest_present {
+            a.overflow_newest = new_cohort;
+            a.overflow_newest_present = true;
+            a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+            return;
+        }
+
+        // Step 8: merge into existing overflow_newest (first-write horizon preserved)
+        let n = &mut a.overflow_newest;
+        n.remaining_q = n.remaining_q.checked_add(reserve_add).expect("reserve overflow");
+        n.anchor_q = n.anchor_q.checked_add(reserve_add).expect("anchor overflow");
+        n.start_slot = now_slot; // inert metadata
+        // n.horizon_slots MUST remain unchanged
+        // n.sched_release_q stays 0
+        a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+    }
+
+    }
+
+    /// apply_reserve_loss_lifo (spec §4.4.2) — LIFO from newest to oldest.
+    test_visible! {
+    fn apply_reserve_loss_lifo(&mut self, idx: usize, reserve_loss: u128) {
+        let a = &mut self.accounts[idx];
+        let mut remaining = reserve_loss;
+
+        // Step 2: overflow_newest first
+        if a.overflow_newest_present && remaining > 0 {
+            let take = core::cmp::min(remaining, a.overflow_newest.remaining_q);
+            a.overflow_newest.remaining_q -= take;
+            a.reserved_pnl -= take;
+            remaining -= take;
+            if a.overflow_newest.remaining_q == 0 {
+                a.overflow_newest = ReserveCohort::EMPTY;
+                a.overflow_newest_present = false;
+            }
+        }
+
+        // Step 3: overflow_older next
+        if a.overflow_older_present && remaining > 0 {
+            let take = core::cmp::min(remaining, a.overflow_older.remaining_q);
+            a.overflow_older.remaining_q -= take;
+            a.reserved_pnl -= take;
+            remaining -= take;
+            if a.overflow_older.remaining_q == 0 {
+                a.overflow_older = ReserveCohort::EMPTY;
+                a.overflow_older_present = false;
+            }
+        }
+
+        // Step 4: exact cohorts newest-to-oldest
+        let count = a.exact_cohort_count as usize;
+        for i in (0..count).rev() {
+            if remaining == 0 { break; }
+            let take = core::cmp::min(remaining, a.exact_reserve_cohorts[i].remaining_q);
+            a.exact_reserve_cohorts[i].remaining_q -= take;
+            a.reserved_pnl -= take;
+            remaining -= take;
+        }
+
+        // Step 5: require fully consumed
+        assert!(remaining == 0, "apply_reserve_loss_lifo: loss exceeds R_i");
+
+        // Step 6: remove empty exact cohorts (compact)
+        let mut write = 0usize;
+        for read in 0..count {
+            if a.exact_reserve_cohorts[read].remaining_q > 0 {
+                if write != read {
+                    a.exact_reserve_cohorts[write] = a.exact_reserve_cohorts[read];
+                }
+                write += 1;
+            }
+        }
+        for i in write..count {
+            a.exact_reserve_cohorts[i] = ReserveCohort::EMPTY;
+        }
+        a.exact_cohort_count = write as u8;
+
+        // Step 7: post-loss overflow promotion
+        if !a.overflow_older_present && a.overflow_newest_present {
+            let pending_q = a.overflow_newest.remaining_q;
+            let pending_h = a.overflow_newest.horizon_slots;
+            a.overflow_newest = ReserveCohort::EMPTY;
+            a.overflow_newest_present = false;
+            let activated = ReserveCohort {
+                remaining_q: pending_q, anchor_q: pending_q,
+                start_slot: self.current_slot, horizon_slots: pending_h, sched_release_q: 0,
+            };
+            let count = a.exact_cohort_count as usize;
+            if count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT {
+                a.exact_reserve_cohorts[count] = activated;
+                a.exact_cohort_count += 1;
+            } else {
+                a.overflow_older = activated;
+                a.overflow_older_present = true;
+            }
+        }
+    }
+
+    }
+
+    /// prepare_account_for_resolved_touch (spec §4.4.3)
+    test_visible! {
+    fn prepare_account_for_resolved_touch(&mut self, idx: usize) {
+        let a = &mut self.accounts[idx];
+        if a.reserved_pnl == 0 { return; }
+        for i in 0..a.exact_cohort_count as usize {
+            a.exact_reserve_cohorts[i] = ReserveCohort::EMPTY;
+        }
+        a.exact_cohort_count = 0;
+        a.overflow_older = ReserveCohort::EMPTY;
+        a.overflow_older_present = false;
+        a.overflow_newest = ReserveCohort::EMPTY;
+        a.overflow_newest_present = false;
+        a.reserved_pnl = 0;
+        // Do NOT mutate PNL_matured_pos_tot (already set globally at resolve time)
+    }
+    }
+
+    /// restart_warmup_after_reserve_increase (spec §4.9) — LEGACY, used until
+    /// all callers are migrated to set_pnl with reserve_mode.
     test_visible! {
     fn restart_warmup_after_reserve_increase(&mut self, idx: usize) {
         let t = self.params.warmup_period_slots;

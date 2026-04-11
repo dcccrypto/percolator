@@ -2815,3 +2815,94 @@ fn test_property_31_fullclose_liquidation_zeros_position() {
     assert!(engine.check_conservation());
 }
 
+// ============================================================================
+// Reserve cohort queue tests (spec §4.4, v12.14.0)
+// ============================================================================
+
+#[test]
+fn test_append_reserve_creates_exact_cohort() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    // Simulate positive PnL increase that would create a reserve
+    engine.accounts[idx as usize].pnl = 10_000;
+    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.current_slot = 100;
+
+    engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 50);
+
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 1);
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].remaining_q, 10_000);
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].horizon_slots, 50);
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].start_slot, 100);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+}
+
+#[test]
+fn test_append_reserve_merges_same_slot_horizon() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    engine.current_slot = 100;
+
+    engine.append_or_route_new_reserve(idx as usize, 5_000, 100, 50);
+    engine.append_or_route_new_reserve(idx as usize, 3_000, 100, 50);
+
+    // Should merge into one cohort
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 1);
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].remaining_q, 8_000);
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].anchor_q, 8_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 8_000);
+}
+
+#[test]
+fn test_append_reserve_different_horizon_creates_new_cohort() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    engine.current_slot = 100;
+
+    engine.append_or_route_new_reserve(idx as usize, 5_000, 100, 50);
+    engine.append_or_route_new_reserve(idx as usize, 3_000, 100, 100); // different horizon
+
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 2);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 8_000);
+}
+
+#[test]
+fn test_apply_reserve_loss_lifo_newest_first() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    engine.current_slot = 100;
+
+    // Create two cohorts: oldest 5k, newest 3k
+    engine.append_or_route_new_reserve(idx as usize, 5_000, 100, 50);
+    engine.append_or_route_new_reserve(idx as usize, 3_000, 101, 100);
+
+    // Lose 4k — should consume all of newest (3k) + 1k from oldest
+    engine.apply_reserve_loss_lifo(idx as usize, 4_000);
+
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 1); // newest removed
+    assert_eq!(engine.accounts[idx as usize].exact_reserve_cohorts[0].remaining_q, 4_000); // oldest had 5k - 1k = 4k
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 4_000);
+}
+
+#[test]
+fn test_prepare_account_for_resolved_touch() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    engine.current_slot = 100;
+
+    engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 50);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+
+    engine.prepare_account_for_resolved_touch(idx as usize);
+
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0);
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 0);
+    assert!(!engine.accounts[idx as usize].overflow_older_present);
+    assert!(!engine.accounts[idx as usize].overflow_newest_present);
+}
+
