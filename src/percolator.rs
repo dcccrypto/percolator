@@ -398,6 +398,11 @@ pub struct RiskEngine {
     /// Resolved market state
     pub resolved_price: u64,
     pub resolved_slot: u64,
+    /// Resolved terminal payout snapshot — locked after all positions zeroed.
+    /// h_num/h_den frozen once, used for all terminal closes (order-invariant).
+    pub resolved_payout_h_num: u128,
+    pub resolved_payout_h_den: u128,
+    pub resolved_payout_ready: u8, // 0 = not ready, 1 = snapshot locked
 
     // Keeper crank tracking
     pub last_crank_slot: u64,
@@ -713,6 +718,9 @@ impl RiskEngine {
             market_mode: MarketMode::Live,
             resolved_price: 0,
             resolved_slot: 0,
+            resolved_payout_h_num: 0,
+            resolved_payout_h_den: 0,
+            resolved_payout_ready: 0,
             last_crank_slot: 0,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
             c_tot: U128::ZERO,
@@ -775,6 +783,9 @@ impl RiskEngine {
         self.market_mode = MarketMode::Live;
         self.resolved_price = 0;
         self.resolved_slot = 0;
+        self.resolved_payout_h_num = 0;
+        self.resolved_payout_h_den = 0;
+        self.resolved_payout_ready = 0;
         self.last_crank_slot = 0;
         self.max_crank_staleness_slots = params.max_crank_staleness_slots;
         self.c_tot = U128::ZERO;
@@ -3672,6 +3683,20 @@ impl RiskEngine {
             self.last_crank_slot = now_slot;
         }
 
+        // Compute shared whole-only conversion snapshot before candidate loop.
+        // This is the same computation finalize_touched_accounts_post_live does,
+        // but we apply it inline per-candidate to avoid the 4-account truncation.
+        let senior_sum = self.c_tot.get().checked_add(
+            self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
+        let residual = if self.vault.get() >= senior_sum {
+            self.vault.get() - senior_sum
+        } else { 0u128 };
+        let h_snapshot_den = self.pnl_matured_pos_tot;
+        let h_snapshot_num = if h_snapshot_den == 0 { 0 } else {
+            core::cmp::min(residual, h_snapshot_den)
+        };
+        let is_whole = h_snapshot_den > 0 && h_snapshot_num == h_snapshot_den;
+
         // Step 7-8: process candidates in keeper-supplied order
         let mut attempts: u16 = 0;
         let mut num_liquidations: u32 = 0;
@@ -3694,14 +3719,25 @@ impl RiskEngine {
             attempts += 1;
             let cidx = candidate_idx as usize;
 
-            // Per-candidate local exact-touch (spec §11.2, v12.14.0):
-            // cohort-based warmup + h_lock side effects on already-accrued state.
-            // MUST NOT call accrue_market_to again.
-            // NOTE: touch_account_live_local calls add_touched which has a
-            // MAX_TOUCHED_PER_INSTRUCTION=4 limit. After 4 accounts, further
-            // add_touched calls are silently dropped. This is acceptable — the
-            // keeper processes many accounts but only the first 4 get finalized.
+            // Per-candidate: touch + inline finalize (not deferred to avoid
+            // the MAX_TOUCHED_PER_INSTRUCTION=4 truncation issue).
             self.touch_account_live_local(cidx, &mut ctx)?;
+
+            // Inline whole-only flat conversion (same logic as finalize but
+            // per-candidate, using the snapshot computed before the loop).
+            // This ensures ALL crank-touched accounts get equal treatment.
+            if is_whole
+                && self.accounts[cidx].position_basis_q == 0
+                && self.accounts[cidx].pnl > 0
+            {
+                let released = self.released_pos(cidx);
+                if released > 0 {
+                    self.consume_released_pnl(cidx, released);
+                    let new_cap = add_u128(self.accounts[cidx].capital.get(), released);
+                    self.set_capital(cidx, new_cap);
+                }
+            }
+
             self.fee_debt_sweep(cidx);
 
             // Check if liquidatable after exact current-state touch.
@@ -3725,17 +3761,10 @@ impl RiskEngine {
             }
         }
 
-        // NOTE: touch_account_live_local's add_touched tracks at most
-        // MAX_TOUCHED_PER_INSTRUCTION = 4 accounts. Accounts beyond the
-        // first 4 still receive full live-touch (warmup, settle, losses,
-        // flat-negative) but do NOT get whole-only auto-conversion via
-        // finalize. This is an accepted liveness tradeoff — auto-conversion
-        // is optional convenience, not a safety requirement.
-        // Finalize all touched accounts (whole-only conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&ctx);
+        // Whole-only conversion and fee_debt_sweep already done inline per-candidate.
 
         // GC dust accounts
-        self.garbage_collect_dust();
+        let gc_closed = self.garbage_collect_dust();
 
         // Steps 9-10: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -3751,15 +3780,15 @@ impl RiskEngine {
         Ok(CrankOutcome {
             advanced,
             num_liquidations,
-            num_gc_closed: 0,
+            num_gc_closed: gc_closed,
         })
     }
 
     /// Validate a keeper-supplied liquidation-policy hint (spec §11.1 rule 3).
     /// Returns None if no liquidation action should be taken (absent hint per
     /// spec §11.2), or Some(policy) if the hint is valid. ExactPartial hints
-    /// are validated via a stateless pre-flight check; invalid partials fall
-    /// back to FullClose to preserve crank liveness.
+    /// are validated via a stateless pre-flight check; invalid partials
+    /// return None (no liquidation action) per spec §11.1 rule 3.
     ///
     /// Pre-flight correctness: settle_losses preserves C + PNL (spec §7.1),
     /// and the synthetic close at oracle generates zero additional PnL delta,
@@ -4348,16 +4377,20 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 5: price deviation check (exact wide arithmetic)
-        let p_last = self.last_oracle_price as i128;
-        let p_res = resolved_price as i128;
-        let dev_bps = self.params.resolve_price_deviation_bps as i128;
-        // |resolved_price - P_last| * 10_000 <= dev_bps * P_last
-        let diff_abs = (p_res - p_last).unsigned_abs();
-        let lhs = (diff_abs as u128).checked_mul(10_000).ok_or(RiskError::Overflow)?;
-        let rhs = (dev_bps as u128).checked_mul(p_last as u128).ok_or(RiskError::Overflow)?;
-        if lhs > rhs {
-            return Err(RiskError::Overflow); // price outside settlement band
+        // Step 5: price deviation check (exact wide arithmetic).
+        // Skip if last_oracle_price is uninitialized/sentinel (no oracle activity yet).
+        let p_last = self.last_oracle_price;
+        if p_last > 1 {
+            let p_last_i = p_last as i128;
+            let p_res = resolved_price as i128;
+            let dev_bps = self.params.resolve_price_deviation_bps as i128;
+            // |resolved_price - P_last| * 10_000 <= dev_bps * P_last
+            let diff_abs = (p_res - p_last_i).unsigned_abs();
+            let lhs = (diff_abs as u128).checked_mul(10_000).ok_or(RiskError::Overflow)?;
+            let rhs = (dev_bps as u128).checked_mul(p_last as u128).ok_or(RiskError::Overflow)?;
+            if lhs > rhs {
+                return Err(RiskError::Overflow); // price outside settlement band
+            }
         }
 
         // Save and zero funding state for zero-funding final accrual.
@@ -4411,6 +4444,12 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Two-phase resolved close. Phase 1 (reconcile): materialize latent K-pair
+    /// PnL, settle losses, absorb insurance. Phase 2 (terminal payout): only after
+    /// ALL positions are zeroed, lock a payout snapshot and convert/return capital.
+    ///
+    /// This ensures payouts are order-invariant: every closer uses the same frozen
+    /// h_num/h_den computed from the fully-materialized terminal state.
     pub fn force_close_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64) -> Result<u128> {
         if self.market_mode != MarketMode::Resolved {
             return Err(RiskError::Unauthorized);
@@ -4425,11 +4464,11 @@ impl RiskEngine {
 
         let i = idx as usize;
 
-        // Step 1: Settle K-pair PnL and zero position.
-        // Uses validate-then-mutate: compute pnl_delta and validate all checked
-        // ops BEFORE any mutation, preventing partial-mutation-on-error.
-        // Does NOT call settle_side_effects_with_h_lock (force_close uses inline
-        // validate-then-mutate for atomicity).
+        // ================================================================
+        // Phase 1: RECONCILE — materialize K-pair PnL, zero position,
+        // settle losses, absorb insurance. No payout yet.
+        // ================================================================
+
         if self.accounts[i].position_basis_q != 0 {
             let basis = self.accounts[i].position_basis_q;
             let abs_basis = basis.unsigned_abs();
@@ -4439,12 +4478,11 @@ impl RiskEngine {
             let epoch_snap = self.accounts[i].adl_epoch_snap;
             let epoch_side = self.get_epoch_side(side);
 
-            // Reject corrupt ADL state (a_basis must be > 0 for any position)
             if a_basis == 0 {
                 return Err(RiskError::CorruptState);
             }
 
-            // Phase 1: COMPUTE (no mutations)
+            // Compute K-pair PnL delta (validate before mutate)
             let k_end = if epoch_snap == epoch_side {
                 self.get_k_side(side)
             } else {
@@ -4453,23 +4491,13 @@ impl RiskEngine {
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
             let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_end, den);
 
-            // Phase 1b: VALIDATE (check all fallible ops before mutating)
             let new_pnl = self.accounts[i].pnl.checked_add(pnl_delta)
                 .ok_or(RiskError::Overflow)?;
             if new_pnl == i128::MIN {
                 return Err(RiskError::Overflow);
             }
-            // Compute OI decrement before any mutation.
-            // In resolved-market force-close, OI may already be partially or
-            // fully decremented by prior force-closes of the opposing side.
-            // Use saturating_sub for both sides to handle this gracefully.
-            let eff = self.effective_pos_q(i);
-            let eff_abs = eff.unsigned_abs();
 
             if epoch_snap != epoch_side {
-                // Validate epoch adjacency (same check as settle_side_effects
-                // minus the ResetPending mode check, which is relaxed for
-                // resolved markets where the side may be in any mode)
                 if epoch_snap.checked_add(1) != Some(epoch_side) {
                     return Err(RiskError::CorruptState);
                 }
@@ -4479,58 +4507,16 @@ impl RiskEngine {
                 }
             }
 
-            // Phase 2: MUTATE (all validated, safe to commit)
+            // MUTATE (all validated)
             self.prepare_account_for_resolved_touch(i);
             if pnl_delta != 0 {
                 self.set_pnl(i, new_pnl);
-                // In resolved mode all positive PnL is immediately matured
                 self.pnl_matured_pos_tot = self.pnl_pos_tot;
             }
 
-            // Decrement stale count (pre-validated above)
             if epoch_snap != epoch_side {
                 let old_stale = self.get_stale_count(side);
                 self.set_stale_count(side, old_stale - 1);
-            }
-
-            // Decrement OI bilaterally. In resolved mode, resolve_market
-            // already zeroed OI, so these should already be 0.
-            // Use checked_sub where possible, fall back to assert on underflow.
-            if eff_abs > 0 {
-                self.oi_eff_long_q = match self.oi_eff_long_q.checked_sub(eff_abs) {
-                    Some(v) => v,
-                    None => {
-                        // Resolved mode: OI was zeroed at resolve time.
-                        // Underflow here means the position was already accounted for.
-                        assert!(self.oi_eff_long_q == 0,
-                            "OI_long underflow on non-zero base — corrupt state");
-                        0
-                    }
-                };
-                self.oi_eff_short_q = match self.oi_eff_short_q.checked_sub(eff_abs) {
-                    Some(v) => v,
-                    None => {
-                        assert!(self.oi_eff_short_q == 0,
-                            "OI_short underflow on non-zero base — corrupt state");
-                        0
-                    }
-                };
-            }
-
-            // Account for same-epoch phantom dust before zeroing (same logic
-            // as attach_effective_position detach path, spec §4.5/§4.6)
-            if epoch_snap == epoch_side && a_basis != 0 {
-                let a_side_val = self.get_a_side(side);
-                let product = U256::from_u128(abs_basis)
-                    .checked_mul(U256::from_u128(a_side_val));
-                if let Some(p) = product {
-                    let rem = p.checked_rem(U256::from_u128(a_basis));
-                    if let Some(r) = rem {
-                        if !r.is_zero() {
-                            self.inc_phantom_dust_bound(side);
-                        }
-                    }
-                }
             }
 
             // Zero position
@@ -4540,27 +4526,50 @@ impl RiskEngine {
             self.accounts[i].adl_epoch_snap = 0;
         }
 
-        // Step 2: Settle losses from principal (senior to fees)
+        // Settle losses from principal (senior to payout)
         self.settle_losses(i);
 
-        // Step 3: Absorb any remaining flat negative PnL
+        // Absorb any remaining flat negative PnL
         self.resolve_flat_negative(i);
 
+        // ================================================================
+        // Phase 2: TERMINAL PAYOUT — only possible after all positions
+        // are zeroed (stored_pos_count == 0 on both sides). The payout
+        // snapshot is locked once and reused for all subsequent closers,
+        // making payouts order-invariant.
+        // ================================================================
 
-        // Step 4: Convert positive PnL to capital (bypass warmup for resolved market).
-        // Uses the same release-then-haircut order as convert_released_pnl_not_atomic.
-        // No engine-native maintenance fee in v12.14.0 (spec §8).
-        if self.accounts[i].pnl > 0 {
-            // Release all reserves via prepare_account_for_resolved_touch (does NOT
-            // adjust pnl_matured_pos_tot — resolve_market already matured everything).
+        let all_positions_zeroed =
+            self.stored_pos_count_long == 0 && self.stored_pos_count_short == 0;
+
+        if self.accounts[i].pnl > 0 && all_positions_zeroed {
+            // Lock the payout snapshot exactly once
+            if self.resolved_payout_ready == 0 {
+                // All latent K-pair PnL is now materialized. Snapshot the
+                // terminal-state haircut for all remaining closers.
+                self.pnl_matured_pos_tot = self.pnl_pos_tot;
+                let senior_sum = self.c_tot.get().checked_add(
+                    self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
+                let residual = if self.vault.get() >= senior_sum {
+                    self.vault.get() - senior_sum
+                } else { 0u128 };
+                let h_den = self.pnl_matured_pos_tot;
+                let h_num = if h_den == 0 { 0 } else {
+                    core::cmp::min(residual, h_den)
+                };
+                self.resolved_payout_h_num = h_num;
+                self.resolved_payout_h_den = h_den;
+                self.resolved_payout_ready = 1;
+            }
+
+            // Release all reserves
             self.prepare_account_for_resolved_touch(i);
-            // Resolved payouts use live haircut_ratio(), which is path-dependent —
-            // sequential closers see progressively smaller pnl_matured_pos_tot
-            // denominators. This is inherent to the haircut model's
-            // sequential-conversion semantics.
+
+            // Convert using frozen terminal snapshot (order-invariant)
             let released = self.released_pos(i);
             if released > 0 {
-                let (h_num, h_den) = self.haircut_ratio();
+                let h_num = self.resolved_payout_h_num;
+                let h_den = self.resolved_payout_h_den;
                 let y = if h_den == 0 { released } else {
                     wide_mul_div_floor_u128(released, h_num, h_den)
                 };
@@ -4568,17 +4577,23 @@ impl RiskEngine {
                 let new_cap = add_u128(self.accounts[i].capital.get(), y);
                 self.set_capital(i, new_cap);
             }
+        } else if self.accounts[i].pnl > 0 {
+            // Positive PnL but not all positions zeroed yet — cannot pay out.
+            // The account stays in the engine; caller must reconcile all
+            // remaining positions first, then re-call force_close.
+            // Return 0 to indicate no payout (account not freed).
+            return Ok(0);
         }
 
-        // Step 5: Sweep fee debt from capital
+        // Sweep fee debt from capital
         self.fee_debt_sweep(i);
 
-        // Step 6: Forgive any remaining fee debt
+        // Forgive any remaining fee debt
         if self.accounts[i].fee_credits.get() < 0 {
             self.accounts[i].fee_credits = I128::ZERO;
         }
 
-        // Step 7: Return capital and free slot
+        // Return capital and free slot
         let capital = self.accounts[i].capital;
         if capital > self.vault {
             return Err(RiskError::InsufficientBalance);

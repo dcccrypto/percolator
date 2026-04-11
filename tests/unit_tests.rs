@@ -2492,9 +2492,13 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
     // Align fee slots to 200 to prevent fee on force_close
 
 
-    // a (long) has unrealized profit from K-pair (K_long increased)
-    engine.market_mode = MarketMode::Resolved;
-    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
+    // Resolve market via proper entry point
+    engine.resolve_market(1500, 200).unwrap();
+
+    // Phase 1: reconcile loser (b) first — zeroes their position
+    let _b_returned = engine.force_close_resolved_not_atomic(b, 200).unwrap();
+
+    // Phase 2: now all positions zeroed — a gets terminal payout
     let returned = engine.force_close_resolved_not_atomic(a, 200).unwrap();
 
     // Returned should include settled K-pair profit
@@ -2638,7 +2642,7 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
 }
 
 #[test]
-fn test_force_close_decrements_oi() {
+fn test_force_close_decrements_positions() {
     let mut engine = RiskEngine::new(default_params());
     let a = engine.add_user(1000).unwrap();
     let b = engine.add_user(1000).unwrap();
@@ -2646,56 +2650,44 @@ fn test_force_close_decrements_oi() {
     engine.deposit(b, 500_000, 1000, 100).unwrap();
 
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0).unwrap();
-    assert!(engine.oi_eff_long_q > 0);
-    assert!(engine.oi_eff_short_q > 0);
+    assert!(engine.stored_pos_count_long > 0);
+    assert!(engine.stored_pos_count_short > 0);
 
-    engine.market_mode = MarketMode::Resolved;
-    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
+    // resolve_market zeroes OI; force_close zeroes positions
+    engine.resolve_market(1000, 100).unwrap();
+    assert_eq!(engine.oi_eff_long_q, 0, "resolve_market zeroes OI");
+
+    // Close both sides — position counts go to 0
     engine.force_close_resolved_not_atomic(a, 100).unwrap();
-    // Bilateral decrement: both sides go to 0 together
-    assert_eq!(engine.oi_eff_long_q, 0);
-    assert_eq!(engine.oi_eff_short_q, 0);
-    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q, "OI must stay symmetric");
-
     engine.force_close_resolved_not_atomic(b, 100).unwrap();
-    assert_eq!(engine.oi_eff_long_q, 0);
-    assert_eq!(engine.oi_eff_short_q, 0);
     assert_eq!(engine.stored_pos_count_long, 0);
     assert_eq!(engine.stored_pos_count_short, 0);
     assert!(engine.check_conservation());
 }
 
 #[test]
-fn test_force_close_oi_symmetry_after_one_side() {
-    // Critical liveness test: after force-closing long-side account,
-    // short-side user must be able to close_account without CorruptState.
+fn test_force_close_both_sides_sequential() {
+    // Both accounts must be closeable in either order after resolve.
     let mut engine = RiskEngine::new(default_params());
     let a = engine.add_user(1000).unwrap();
     let b = engine.add_user(1000).unwrap();
     engine.deposit(a, 500_000, 1000, 100).unwrap();
     engine.deposit(b, 500_000, 1000, 100).unwrap();
 
-
-
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0).unwrap();
-    assert!(engine.oi_eff_long_q > 0);
-    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q);
 
-    // Force-close only account a (the long side)
-    engine.market_mode = MarketMode::Resolved;
-    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
-    engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    engine.resolve_market(1000, 100).unwrap();
 
-    // After force-closing one side, OI must stay symmetric so the
-    // other side's users can still close normally.
-    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q,
-        "OI must stay symmetric after force-closing one side");
+    // Close a first (reconcile, may not get terminal payout yet)
+    let a_returned = engine.force_close_resolved_not_atomic(a, 100).unwrap();
 
-    // b (short side) must be able to force-close without CorruptState
-    engine.force_close_resolved_not_atomic(b, 100).unwrap();
-    assert_eq!(engine.oi_eff_long_q, 0);
-    assert_eq!(engine.oi_eff_short_q, 0);
+    // Close b — both positions now zeroed, snapshot captured
+    let b_returned = engine.force_close_resolved_not_atomic(b, 100).unwrap();
+
+    // If a got 0 (deferred payout), it was freed but payout is in capital
+    // Both must succeed and conservation must hold
     assert!(engine.check_conservation());
+    assert!(a_returned + b_returned > 0, "at least one account must return capital");
 }
 
 #[test]
