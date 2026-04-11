@@ -208,10 +208,19 @@ pub enum SideMode {
     ResetPending = 2,
 }
 
+/// Max accounts that can be touched in a single instruction
+pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 4;
+
 /// Instruction context for deferred reset scheduling (spec §5.7-5.8)
+/// and shared touched-account tracking (spec §7.8, v12.14.0).
 pub struct InstructionContext {
     pub pending_reset_long: bool,
     pub pending_reset_short: bool,
+    /// Shared warmup horizon for this instruction
+    pub h_lock_shared: u64,
+    /// Deduplicated touched accounts (ascending order)
+    pub touched_accounts: [u16; MAX_TOUCHED_PER_INSTRUCTION],
+    pub touched_count: u8,
 }
 
 impl InstructionContext {
@@ -219,6 +228,31 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            h_lock_shared: 0,
+            touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
+            touched_count: 0,
+        }
+    }
+
+    pub fn new_with_h_lock(h_lock: u64) -> Self {
+        Self {
+            pending_reset_long: false,
+            pending_reset_short: false,
+            h_lock_shared: h_lock,
+            touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
+            touched_count: 0,
+        }
+    }
+
+    /// Add account to touched set if not already present
+    pub fn add_touched(&mut self, idx: u16) {
+        let count = self.touched_count as usize;
+        for i in 0..count {
+            if self.touched_accounts[i] == idx { return; }
+        }
+        if count < MAX_TOUCHED_PER_INSTRUCTION {
+            self.touched_accounts[count] = idx;
+            self.touched_count += 1;
         }
     }
 }
@@ -1564,6 +1598,74 @@ impl RiskEngine {
     }
     }
 
+    /// settle_side_effects_live (spec §5.3, v12.14.0) — routes PnL delta
+    /// through set_pnl_with_reserve with UseHLock for cohort queue.
+    fn settle_side_effects_with_h_lock(&mut self, idx: usize, h_lock: u64) -> Result<()> {
+        let basis = self.accounts[idx].position_basis_q;
+        if basis == 0 { return Ok(()); }
+
+        let side = side_of_i128(basis).unwrap();
+        let epoch_snap = self.accounts[idx].adl_epoch_snap;
+        let epoch_side = self.get_epoch_side(side);
+        let a_basis = self.accounts[idx].adl_a_basis;
+        if a_basis == 0 { return Err(RiskError::CorruptState); }
+        let abs_basis = basis.unsigned_abs();
+
+        if epoch_snap == epoch_side {
+            // Same epoch
+            let a_side = self.get_a_side(side);
+            let k_side = self.get_k_side(side);
+            let k_snap = self.accounts[idx].adl_k_snap;
+            let q_eff_new = mul_div_floor_u128(abs_basis, a_side, a_basis);
+            let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_side, den);
+
+            let new_pnl = self.accounts[idx].pnl.checked_add(pnl_delta)
+                .ok_or(RiskError::Overflow)?;
+            if new_pnl == i128::MIN { return Err(RiskError::Overflow); }
+
+            self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseHLock(h_lock))?;
+
+            if q_eff_new == 0 {
+                self.inc_phantom_dust_bound(side);
+                self.set_position_basis_q(idx, 0i128);
+                self.accounts[idx].adl_a_basis = ADL_ONE;
+                self.accounts[idx].adl_k_snap = 0i128;
+                self.accounts[idx].adl_epoch_snap = 0;
+            } else {
+                self.accounts[idx].adl_k_snap = k_side;
+                self.accounts[idx].adl_epoch_snap = epoch_side;
+            }
+        } else {
+            // Epoch mismatch — validate then mutate
+            let side_mode = self.get_side_mode(side);
+            if side_mode != SideMode::ResetPending { return Err(RiskError::CorruptState); }
+            if epoch_snap.checked_add(1) != Some(epoch_side) { return Err(RiskError::CorruptState); }
+
+            let k_epoch_start = self.get_k_epoch_start(side);
+            let k_snap = self.accounts[idx].adl_k_snap;
+            let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
+
+            let new_pnl = self.accounts[idx].pnl.checked_add(pnl_delta)
+                .ok_or(RiskError::Overflow)?;
+            if new_pnl == i128::MIN { return Err(RiskError::Overflow); }
+
+            let old_stale = self.get_stale_count(side);
+            let new_stale = old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?;
+
+            // Mutate
+            self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseHLock(h_lock))?;
+            self.set_position_basis_q(idx, 0i128);
+            self.set_stale_count(side, new_stale);
+            self.accounts[idx].adl_a_basis = ADL_ONE;
+            self.accounts[idx].adl_k_snap = 0i128;
+            self.accounts[idx].adl_epoch_snap = 0;
+        }
+
+        Ok(())
+    }
+
     // ========================================================================
     // accrue_market_to (spec §5.4)
     // ========================================================================
@@ -2756,6 +2858,95 @@ impl RiskEngine {
 
     // ========================================================================
     // touch_account_full_not_atomic (spec §10.1)
+    // ========================================================================
+
+    // ========================================================================
+    // touch_account_live_local (spec §7.7, v12.14.0)
+    // ========================================================================
+
+    /// Live local touch: advance warmup, settle side effects, settle losses.
+    /// Does NOT auto-convert, does NOT fee-sweep. Those happen in finalize.
+    test_visible! {
+    fn touch_account_live_local(&mut self, idx: usize, ctx: &mut InstructionContext) -> Result<()> {
+        assert!(self.market_mode == MarketMode::Live, "touch_account_live_local requires Live");
+        if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
+            return Err(RiskError::AccountNotFound);
+        }
+        ctx.add_touched(idx as u16);
+
+        // Step 4: advance cohort-based warmup
+        self.advance_profit_warmup_cohort(idx);
+
+        // Step 5: settle side effects with H_lock for reserve routing
+        self.settle_side_effects_with_h_lock(idx, ctx.h_lock_shared)?;
+
+        // Step 6: settle losses from principal
+        self.settle_losses(idx);
+
+        // Step 7: resolve flat negative
+        if self.effective_pos_q(idx) == 0 && self.accounts[idx].pnl < 0 {
+            self.resolve_flat_negative(idx);
+        }
+
+        // Steps 8-9: MUST NOT auto-convert, MUST NOT fee-sweep
+        Ok(())
+    }
+
+    }
+
+    /// finalize_touched_accounts_post_live (spec §7.8, v12.14.0)
+    /// Whole-only conversion + fee sweep with shared snapshot.
+    test_visible! {
+    fn finalize_touched_accounts_post_live(&mut self, ctx: &InstructionContext) {
+        // Step 1: compute shared snapshot
+        let senior_sum = self.c_tot.get().checked_add(
+            self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
+        let residual = if self.vault.get() >= senior_sum {
+            self.vault.get() - senior_sum
+        } else { 0u128 };
+        let h_snapshot_den = self.pnl_matured_pos_tot;
+        let h_snapshot_num = if h_snapshot_den == 0 { 0 } else {
+            core::cmp::min(residual, h_snapshot_den)
+        };
+        let is_whole = h_snapshot_den > 0 && h_snapshot_num == h_snapshot_den;
+
+        // Step 2: iterate touched accounts in ascending order
+        // Sort touched_accounts (simple insertion sort, max 4 elements)
+        let count = ctx.touched_count as usize;
+        let mut sorted = ctx.touched_accounts;
+        for i in 1..count {
+            let mut j = i;
+            while j > 0 && sorted[j - 1] > sorted[j] {
+                sorted.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+
+        for ti in 0..count {
+            let idx = sorted[ti] as usize;
+
+            // Whole-only flat auto-conversion
+            if is_whole
+                && self.accounts[idx].position_basis_q == 0
+                && self.accounts[idx].pnl > 0
+            {
+                let released = self.released_pos(idx);
+                if released > 0 {
+                    self.consume_released_pnl(idx, released);
+                    let new_cap = add_u128(self.accounts[idx].capital.get(), released);
+                    self.set_capital(idx, new_cap);
+                }
+            }
+
+            // Fee-debt sweep
+            self.fee_debt_sweep(idx);
+        }
+    }
+
+    }
+
+    // ========================================================================
+    // touch_account_full_not_atomic (LEGACY, pre-v12.14.0)
     // ========================================================================
 
     pub fn touch_account_full_not_atomic(&mut self, idx: usize, oracle_price: u64, now_slot: u64) -> Result<()> {

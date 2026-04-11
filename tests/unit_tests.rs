@@ -3025,3 +3025,83 @@ fn test_set_pnl_with_reserve_h_lock_zero_immediate() {
     assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0);
     assert_eq!(engine.pnl_matured_pos_tot, 5_000);
 }
+
+// ============================================================================
+// Touch/finalize v12.14.0 tests
+// ============================================================================
+
+#[test]
+fn test_touch_live_local_does_not_auto_convert() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+    engine.accounts[idx as usize].last_fee_slot = 100;
+
+    // Give account positive PnL (flat, released)
+    engine.set_pnl(idx as usize, 10_000);
+    engine.pnl_matured_pos_tot = 10_000;
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    engine.last_market_slot = 100;
+    engine.last_oracle_price = 1000;
+
+    let mut ctx = InstructionContext::new_with_h_lock(50);
+    // accrue first
+    engine.accrue_market_to(100, 1000).unwrap();
+    engine.touch_account_live_local(idx as usize, &mut ctx).unwrap();
+
+    // Capital must NOT increase (no auto-conversion in live local touch)
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before,
+        "touch_account_live_local must NOT auto-convert");
+}
+
+#[test]
+fn test_finalize_whole_only_conversion() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+
+    // Flat account with 10k released positive PnL (use ImmediateRelease
+    // so reserved_pnl = 0, all matured)
+    engine.set_pnl_with_reserve(idx as usize, 10_000, ReserveMode::ImmediateRelease).unwrap();
+    // Ensure h = 1: vault >= c_tot + insurance + pnl_matured
+    // vault = 101_000 (100k deposit + 1k fee), c_tot = 100_000, insurance = 1_000
+    // residual = 101_000 - 100_000 - 1_000 = 0. Not enough! Need more vault.
+    engine.vault = U128::new(111_000);
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+
+    let mut ctx = InstructionContext::new_with_h_lock(50);
+    ctx.add_touched(idx);
+    engine.finalize_touched_accounts_post_live(&ctx);
+
+    // Whole-only: h = min(residual, matured) / matured
+    // residual = 111_000 - 100_000 - 1_000 = 10_000
+    // h_num = min(10_000, 10_000) = 10_000 = h_den → whole!
+    let cap_after = engine.accounts[idx as usize].capital.get();
+    assert_eq!(cap_after, cap_before + 10_000,
+        "whole snapshot must convert all released PnL");
+}
+
+#[test]
+fn test_finalize_no_conversion_under_haircut() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = engine.add_user(1000).unwrap();
+    engine.deposit(idx, 100_000, 1000, 100).unwrap();
+
+    // Flat with 10k PnL (ImmediateRelease) but insufficient residual
+    engine.set_pnl_with_reserve(idx as usize, 10_000, ReserveMode::ImmediateRelease).unwrap();
+    // vault = 105_000 → residual = 105_000 - 100_000 - 1_000 = 4_000
+    // h = 4_000 / 10_000 < 1 → NOT whole
+    engine.vault = U128::new(105_000);
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+
+    let mut ctx = InstructionContext::new_with_h_lock(50);
+    ctx.add_touched(idx);
+    engine.finalize_touched_accounts_post_live(&ctx);
+
+    // Under haircut: NO auto-conversion
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before,
+        "under haircut: must NOT auto-convert");
+}
