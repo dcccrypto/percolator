@@ -190,11 +190,11 @@ fn inductive_withdraw_preserves_accounting() {
     engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Run keeper_crank_not_atomic to satisfy fresh-crank requirement for withdraw_not_atomic
-    let _ = engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128);
+    let _ = engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0);
 
     let w: u32 = kani::any();
     kani::assume(w >= 1 && w <= dep);
-    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128);
+    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0);
     kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
     if result.is_ok() {
         assert!(engine.check_conservation());
@@ -483,7 +483,7 @@ fn proof_side_mode_gating() {
     engine.side_mode_long = SideMode::DrainOnly;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0);
     assert!(result == Err(RiskError::SideBlocked));
 
     engine.side_mode_long = SideMode::Normal;
@@ -491,7 +491,7 @@ fn proof_side_mode_gating() {
     engine.stale_account_count_short = 1;
 
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i128);
+    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i128, 0);
     assert!(result2 == Err(RiskError::SideBlocked));
 }
 

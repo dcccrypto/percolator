@@ -3285,6 +3285,7 @@ impl RiskEngine {
         oracle_price: u64,
         now_slot: u64,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<()> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -3357,6 +3358,7 @@ impl RiskEngine {
         oracle_price: u64,
         now_slot: u64,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<()> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -3396,6 +3398,7 @@ impl RiskEngine {
         size_q: i128,
         exec_price: u64,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<()> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -3873,6 +3876,7 @@ impl RiskEngine {
         oracle_price: u64,
         policy: LiquidationPolicy,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<bool> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -4046,6 +4050,7 @@ impl RiskEngine {
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<CrankOutcome> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -4265,6 +4270,7 @@ impl RiskEngine {
         oracle_price: u64,
         now_slot: u64,
         funding_rate_e9: i128,
+        h_lock: u64,
     ) -> Result<()> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
@@ -4330,7 +4336,7 @@ impl RiskEngine {
     // close_account_not_atomic
     // ========================================================================
 
-    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128) -> Result<u128> {
+    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128, h_lock: u64) -> Result<u128> {
                 Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
