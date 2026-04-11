@@ -2698,89 +2698,15 @@ impl RiskEngine {
     // Account Management
     // ========================================================================
 
-    test_visible! {
-    fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
-        let used_count = self.num_used_accounts as u64;
-        if used_count >= self.params.max_accounts {
-            return Err(RiskError::Overflow);
-        }
-
-        let required_fee = self.params.new_account_fee.get();
-        if fee_payment < required_fee {
-            return Err(RiskError::InsufficientBalance);
-        }
-
-        // MAX_VAULT_TVL bound
-        let v_candidate = self.vault.get().checked_add(fee_payment)
-            .ok_or(RiskError::Overflow)?;
-        if v_candidate > MAX_VAULT_TVL {
-            return Err(RiskError::Overflow);
-        }
-
-        // All fallible checks before state mutations
-        // Enforce materialized_account_count bound (spec §10.0)
-        self.materialized_account_count = self.materialized_account_count
-            .checked_add(1).ok_or(RiskError::Overflow)?;
-        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
-            self.materialized_account_count -= 1;
-            return Err(RiskError::Overflow);
-        }
-
-        let idx = match self.alloc_slot() {
-            Ok(i) => i,
-            Err(e) => {
-                self.materialized_account_count -= 1;
-                return Err(e);
-            }
-        };
-
-        // Commit vault/insurance only after all checks pass
-        let excess = fee_payment.saturating_sub(required_fee);
-        self.vault = U128::new(v_candidate);
-        self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
-
-        let account_id = self.next_account_id;
-        self.next_account_id = self.next_account_id.saturating_add(1);
-
-        self.accounts[idx as usize] = Account {
-            kind: Account::KIND_USER,
-            account_id,
-            capital: U128::new(excess),
-            pnl: 0i128,
-            reserved_pnl: 0u128,
-            position_basis_q: 0i128,
-            adl_a_basis: ADL_ONE,
-            adl_k_snap: 0i128,
-            adl_epoch_snap: 0,
-            matcher_program: [0; 32],
-            matcher_context: [0; 32],
-            owner: [0; 32],
-            fee_credits: I128::ZERO,
-            fees_earned_total: U128::ZERO,
-
-            exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
-            exact_cohort_count: 0,
-            overflow_older: ReserveCohort::EMPTY,
-            overflow_older_present: 0,
-            overflow_newest: ReserveCohort::EMPTY,
-            overflow_newest_present: 0,
-        };
-
-        if excess > 0 {
-            self.c_tot = U128::new(self.c_tot.get().checked_add(excess)
-                .ok_or(RiskError::Overflow)?);
-        }
-
-        Ok(idx)
-    }
-    }
-
-    test_visible! {
-    fn add_lp(
+    /// materialize_with_fee: public account materialization (spec §10.0).
+    /// Allocates a slot, charges fee to insurance, sets initial capital from excess.
+    /// Wrapper calls this directly — no manual capital surgery needed.
+    pub fn materialize_with_fee(
         &mut self,
-        matching_engine_program: [u8; 32],
-        matching_engine_context: [u8; 32],
+        kind: u8,
         fee_payment: u128,
+        matcher_program: [u8; 32],
+        matcher_context: [u8; 32],
     ) -> Result<u16> {
         let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {
@@ -2824,7 +2750,7 @@ impl RiskEngine {
         self.next_account_id = self.next_account_id.saturating_add(1);
 
         self.accounts[idx as usize] = Account {
-            kind: Account::KIND_LP,
+            kind,
             account_id,
             capital: U128::new(excess),
             pnl: 0i128,
@@ -2833,8 +2759,8 @@ impl RiskEngine {
             adl_a_basis: ADL_ONE,
             adl_k_snap: 0i128,
             adl_epoch_snap: 0,
-            matcher_program: matching_engine_program,
-            matcher_context: matching_engine_context,
+            matcher_program,
+            matcher_context,
             owner: [0; 32],
             fee_credits: I128::ZERO,
             fees_earned_total: U128::ZERO,
@@ -2853,6 +2779,24 @@ impl RiskEngine {
         }
 
         Ok(idx)
+    }
+
+    /// Convenience: materialize a user account.
+    test_visible! {
+    fn add_user(&mut self, fee_payment: u128) -> Result<u16> {
+        self.materialize_with_fee(Account::KIND_USER, fee_payment, [0; 32], [0; 32])
+    }
+    }
+
+    /// Convenience: materialize an LP account with matcher bindings.
+    test_visible! {
+    fn add_lp(
+        &mut self,
+        matching_engine_program: [u8; 32],
+        matching_engine_context: [u8; 32],
+        fee_payment: u128,
+    ) -> Result<u16> {
+        self.materialize_with_fee(Account::KIND_LP, fee_payment, matching_engine_program, matching_engine_context)
     }
     }
 
