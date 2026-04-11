@@ -1,6 +1,6 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v12.1.0
+//! Formally Verified Risk Engine for Perpetual DEX — v12.14.0
 //!
-//! Implements the v12.1.0 spec: Native 128-bit Architecture.
+//! Implements the v12.14.0 spec: Native 128-bit Architecture.
 //!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. Protected principal for flat accounts
@@ -96,8 +96,8 @@ pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000;
 /// MAX_FUNDING_DT = 65535 (spec §1.4)
 pub const MAX_FUNDING_DT: u64 = u16::MAX as u64;
 
-/// MAX_ABS_FUNDING_BPS_PER_SLOT = 10000 (spec §1.4)
-pub const MAX_ABS_FUNDING_BPS_PER_SLOT: i64 = 10_000;
+/// MAX_ABS_FUNDING_E9_PER_SLOT = 1_000_000_000 (spec §1.4, parts-per-billion)
+pub const MAX_ABS_FUNDING_E9_PER_SLOT: i128 = 1_000_000_000;
 
 // Normative bounds (spec §1.4)
 pub const MAX_VAULT_TVL: u128 = 10_000_000_000_000_000;
@@ -292,7 +292,7 @@ pub struct RiskEngine {
     pub current_slot: u64,
 
     /// Stored funding rate for anti-retroactivity
-    pub funding_rate_bps_per_slot_last: i64,
+    pub funding_rate_e9_per_slot_last: i128,
 
     // Keeper crank tracking
     pub last_crank_slot: u64,
@@ -556,7 +556,7 @@ impl RiskEngine {
             },
             params,
             current_slot: init_slot,
-            funding_rate_bps_per_slot_last: 0,
+            funding_rate_e9_per_slot_last: 0,
             last_crank_slot: 0,
             max_crank_staleness_slots: params.max_crank_staleness_slots,
             c_tot: U128::ZERO,
@@ -619,7 +619,7 @@ impl RiskEngine {
         self.insurance_fund = InsuranceFund { balance: U128::ZERO };
         self.params = params;
         self.current_slot = init_slot;
-        self.funding_rate_bps_per_slot_last = 0;
+        self.funding_rate_e9_per_slot_last = 0;
         self.last_crank_slot = 0;
         self.max_crank_staleness_slots = params.max_crank_staleness_slots;
         self.c_tot = U128::ZERO;
@@ -1408,8 +1408,8 @@ impl RiskEngine {
             }
         }
 
-        // Step 6: Funding transfer via sub-stepping (spec v12.1.0 §5.4)
-        let r_last = self.funding_rate_bps_per_slot_last;
+        // Step 6: Funding transfer via sub-stepping (spec v12.14.0 §5.4)
+        let r_last = self.funding_rate_e9_per_slot_last;
         if r_last != 0 && total_dt > 0 && long_live && short_live {
             let fund_px_0 = self.funding_price_sample_last;
 
@@ -1420,13 +1420,14 @@ impl RiskEngine {
                     let dt_sub = core::cmp::min(dt_remaining, MAX_FUNDING_DT);
                     dt_remaining -= dt_sub;
 
+                    // fund_num = fund_px_0 * funding_rate_e9_per_slot * dt_sub (spec §5.5)
                     let fund_num: i128 = (fund_px_0 as i128)
-                        .checked_mul(r_last as i128)
+                        .checked_mul(r_last)
                         .ok_or(RiskError::Overflow)?
                         .checked_mul(dt_sub as i128)
                         .ok_or(RiskError::Overflow)?;
 
-                    let fund_term = floor_div_signed_conservative_i128(fund_num, 10_000u128);
+                    let fund_term = floor_div_signed_conservative_i128(fund_num, 1_000_000_000u128);
 
                     if fund_term != 0 {
                         let dk_long = checked_u128_mul_i128(self.adl_mult_long, fund_term)?;
@@ -1451,23 +1452,23 @@ impl RiskEngine {
 
     /// Pre-validate funding rate bound (called at top of each instruction,
     /// before any mutations, so bad rates never cause partial-mutation errors).
-    fn validate_funding_rate(rate: i64) -> Result<()> {
-        if rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64 {
+    fn validate_funding_rate_e9(rate: i128) -> Result<()> {
+        if rate.unsigned_abs() > MAX_ABS_FUNDING_E9_PER_SLOT as u128 {
             return Err(RiskError::Overflow);
         }
         Ok(())
     }
 
-    /// recompute_r_last_from_final_state (spec v12.1.0 §4.12).
+    /// recompute_r_last_from_final_state (spec v12.14.0 §4.12).
     /// Stores the pre-validated funding rate for the next interval.
     test_visible! {
-    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) -> Result<()> {
+    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i128) -> Result<()> {
         // Rate already validated at instruction entry; store unconditionally.
         // Belt-and-suspenders: re-check here too.
-        if externally_computed_rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64 {
+        if externally_computed_rate.unsigned_abs() > MAX_ABS_FUNDING_E9_PER_SLOT as u128 {
             return Err(RiskError::Overflow);
         }
-        self.funding_rate_bps_per_slot_last = externally_computed_rate;
+        self.funding_rate_e9_per_slot_last = externally_computed_rate;
         Ok(())
     }
     }
@@ -1479,12 +1480,12 @@ impl RiskEngine {
     /// recompute_r_last_from_final_state in the canonical order.
     /// Callers that bypass `keeper_crank_not_atomic` (e.g. the resolved-market
     /// settlement crank) must invoke this before returning.
-    pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext, funding_rate: i64) -> Result<()> {
-                Self::validate_funding_rate(funding_rate)?;
+    pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext, funding_rate_e9: i128) -> Result<()> {
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         self.schedule_end_of_instruction_resets(ctx)?;
         self.finalize_end_of_instruction_resets(ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
         Ok(())
     }
 
@@ -1835,7 +1836,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// Compute haircut ratio (h_num, h_den) as u128 pair (spec §3.3)
-    /// Uses pnl_matured_pos_tot as denominator per v12.1.0.
+    /// Uses pnl_matured_pos_tot as denominator per v12.14.0.
     pub fn haircut_ratio(&self) -> (u128, u128) {
         if self.pnl_matured_pos_tot == 0 {
             return (1u128, 1u128);
@@ -2476,9 +2477,9 @@ impl RiskEngine {
         amount: u128,
         oracle_price: u64,
         now_slot: u64,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<()> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -2532,7 +2533,7 @@ impl RiskEngine {
         // Steps 8-9: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         Ok(())
     }
@@ -2548,9 +2549,9 @@ impl RiskEngine {
         idx: u16,
         oracle_price: u64,
         now_slot: u64,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<()> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -2567,7 +2568,7 @@ impl RiskEngine {
         // Steps 4-5: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         // Step 7: assert OI balance
         assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after settle");
@@ -2587,9 +2588,9 @@ impl RiskEngine {
         now_slot: u64,
         size_q: i128,
         exec_price: u64,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<()> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -2806,7 +2807,7 @@ impl RiskEngine {
         self.finalize_end_of_instruction_resets(&ctx);
 
         // Step 32: recompute r_last if funding-rate inputs changed (spec §10.5)
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         // Step 18: assert OI balance (spec §10.4)
         assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after trade");
@@ -2940,7 +2941,7 @@ impl RiskEngine {
         fee: u128,
     ) -> Result<()> {
         if *new_eff == 0 {
-            // v12.1.0 §10.5 step 29: flat-close guard uses exact Eq_maint_raw_i >= 0
+            // v12.14.0 §10.5 step 29: flat-close guard uses exact Eq_maint_raw_i >= 0
             // (not just PNL >= 0). Prevents flat exits with negative net wealth from fee debt.
             let maint_raw = self.account_equity_maint_raw_wide(&self.accounts[idx]);
             if maint_raw.is_negative() {
@@ -2972,7 +2973,7 @@ impl RiskEngine {
         } else if self.is_above_maintenance_margin(&self.accounts[idx], idx, oracle_price) {
             // Maintenance healthy: allow
         } else if strictly_reducing {
-            // v12.1.0 §10.5 step 29: strict risk-reducing exemption (fee-neutral).
+            // v12.14.0 §10.5 step 29: strict risk-reducing exemption (fee-neutral).
             // Both conditions must hold in exact widened I256:
             // 1. Fee-neutral buffer improves: (Eq_maint_raw_post + fee) - MM_req_post > buffer_pre
             // 2. Fee-neutral shortfall does not worsen: min(Eq_maint_raw_post + fee, 0) >= min(Eq_maint_raw_pre, 0)
@@ -3058,9 +3059,9 @@ impl RiskEngine {
         now_slot: u64,
         oracle_price: u64,
         policy: LiquidationPolicy,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<bool> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         // Bounds and existence check BEFORE touch_account_full_not_atomic to prevent
         // market-state mutation (accrue_market_to) on missing accounts.
@@ -3079,7 +3080,7 @@ impl RiskEngine {
         // touch_account_full_not_atomic mutates state even when liquidation doesn't proceed.
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         // Assert OI balance unconditionally (spec §10.6 step 11)
         assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after liquidation");
@@ -3231,9 +3232,9 @@ impl RiskEngine {
         oracle_price: u64,
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<CrankOutcome> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -3337,7 +3338,7 @@ impl RiskEngine {
         self.finalize_end_of_instruction_resets(&ctx);
 
         // Step 11: recompute r_last exactly once from final post-reset state
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         // Step 12: assert OI balance
         assert!(self.oi_eff_long_q == self.oi_eff_short_q,
@@ -3450,9 +3451,9 @@ impl RiskEngine {
         x_req: u128,
         oracle_price: u64,
         now_slot: u64,
-        funding_rate: i64,
+        funding_rate_e9: i128,
     ) -> Result<()> {
-                Self::validate_funding_rate(funding_rate)?;
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -3470,7 +3471,7 @@ impl RiskEngine {
         if self.accounts[idx as usize].position_basis_q == 0 {
             self.schedule_end_of_instruction_resets(&mut ctx)?;
             self.finalize_end_of_instruction_resets(&ctx);
-            self.recompute_r_last_from_final_state(funding_rate)?;
+            self.recompute_r_last_from_final_state(funding_rate_e9)?;
             return Ok(());
         }
 
@@ -3507,7 +3508,7 @@ impl RiskEngine {
         // Steps 11-12: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         Ok(())
     }
@@ -3516,8 +3517,8 @@ impl RiskEngine {
     // close_account_not_atomic
     // ========================================================================
 
-    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate: i64) -> Result<u128> {
-                Self::validate_funding_rate(funding_rate)?;
+    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128) -> Result<u128> {
+                Self::validate_funding_rate_e9(funding_rate_e9)?;
 
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
@@ -3558,7 +3559,7 @@ impl RiskEngine {
         // End-of-instruction resets before freeing
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate)?;
+        self.recompute_r_last_from_final_state(funding_rate_e9)?;
 
         self.free_slot(idx);
 

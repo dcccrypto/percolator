@@ -42,7 +42,7 @@ fn pos_q(qty: i64) -> i128 {
 /// Helper: crank to make trades/withdrawals work
 #[cfg(feature = "test")]
 fn crank(engine: &mut RiskEngine, slot: u64, oracle_price: u64) {
-    let _ = engine.keeper_crank_not_atomic(slot, oracle_price, &[], 64, 0i64);
+    let _ = engine.keeper_crank_not_atomic(slot, oracle_price, &[], 64, 0i128);
 }
 
 // ============================================================================
@@ -76,7 +76,7 @@ fn test_e2e_complete_user_journey() {
 
     // Alice goes long 50 base, Bob takes the other side (short)
     engine
-        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(50), oracle_price, 0i64)
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(50), oracle_price, 0i128)
         .unwrap();
 
     // Check effective positions
@@ -128,7 +128,7 @@ fn test_e2e_complete_user_journey() {
         let slot = engine.current_slot;
         // alice_pos > 0 (long), so closing means b buys from a (swap a,b with positive size)
         engine
-            .execute_trade_not_atomic(bob, alice, new_price, slot, abs_pos, new_price, 0i64)
+            .execute_trade_not_atomic(bob, alice, new_price, slot, abs_pos, new_price, 0i128)
             .unwrap();
     }
 
@@ -143,7 +143,7 @@ fn test_e2e_complete_user_journey() {
     let alice_cap = engine.accounts[alice as usize].capital.get();
     if alice_cap > 1000 {
         let slot = engine.current_slot;
-        engine.withdraw_not_atomic(alice, 1000, new_price, slot, 0i64).unwrap();
+        engine.withdraw_not_atomic(alice, 1000, new_price, slot, 0i128).unwrap();
     }
 
     assert!(engine.check_conservation(), "Conservation after withdrawal");
@@ -174,7 +174,7 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice goes long, Bob goes short
     engine
-        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i128)
         .unwrap();
 
     // Record capital before funding (settle_losses converts PnL to capital changes,
@@ -186,7 +186,7 @@ fn test_e2e_funding_complete_cycle() {
     // keeper_crank_not_atomic stores r_last = 500 via recompute_r_last_from_final_state
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
-    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 500i64).unwrap();
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 50_000_000i128).unwrap();
 
     // Now r_last = 500. Advance time so next accrue_market_to applies funding.
     engine.advance_slot(20);
@@ -196,7 +196,7 @@ fn test_e2e_funding_complete_cycle() {
     // then touches both accounts (settle_side_effects realizes the K delta into PnL,
     // then settle_losses transfers negative PnL from capital)
     engine.keeper_crank_not_atomic(slot2, oracle_price,
-        &[(alice, None), (bob, None)], 64, 500i64).unwrap();
+        &[(alice, None), (bob, None)], 64, 50_000_000i128).unwrap();
 
     let alice_cap_after = engine.accounts[alice as usize].capital.get();
     let bob_cap_after = engine.accounts[bob as usize].capital.get();
@@ -225,7 +225,7 @@ fn test_e2e_funding_complete_cycle() {
 
     // Alice closes long and opens short (total -200 base)
     engine
-        .execute_trade_not_atomic(bob, alice, oracle_price, slot, pos_q(200), oracle_price, 0i64)
+        .execute_trade_not_atomic(bob, alice, oracle_price, slot, pos_q(200), oracle_price, 0i128)
         .unwrap();
 
     // Now Alice is short and Bob is long
@@ -257,7 +257,7 @@ fn test_e2e_negative_funding_rate() {
 
     // Alice long, Bob short
     engine
-        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i128)
         .unwrap();
 
     let alice_cap_before = engine.accounts[alice as usize].capital.get();
@@ -266,13 +266,13 @@ fn test_e2e_negative_funding_rate() {
     // Store negative rate: shorts pay longs (-500 bps/slot)
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
-    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -500i64).unwrap();
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -50_000_000i128).unwrap();
 
     // Advance and settle
     engine.advance_slot(20);
     let slot2 = engine.current_slot;
     engine.keeper_crank_not_atomic(slot2, oracle_price,
-        &[(alice, None), (bob, None)], 64, -500i64).unwrap();
+        &[(alice, None), (bob, None)], 64, -50_000_000i128).unwrap();
 
     let alice_cap_after = engine.accounts[alice as usize].capital.get();
     let bob_cap_after = engine.accounts[bob as usize].capital.get();

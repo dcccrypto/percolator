@@ -95,7 +95,7 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
     let mut sum_pnl_pos = 0u128;
     let n = account_count(engine);
     for i in 0..n {
-        if is_account_used(engine, i as u16) {
+        if is_account_used(engine, i as u32) {
             let acc = &engine.accounts[i];
             sum_capital += acc.capital.get();
             let pnl = acc.pnl;
@@ -123,7 +123,7 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
 
     // 3. Account local sanity (for each used account)
     for i in 0..n {
-        if is_account_used(engine, i as u16) {
+        if is_account_used(engine, i as u32) {
             let acc = &engine.accounts[i];
 
             // reserved_pnl <= max(0, pnl)
@@ -499,7 +499,7 @@ impl FuzzState {
                 let vault_before = self.engine.vault;
 
                 let now_slot = self.engine.current_slot;
-                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i64);
+                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i128);
 
                 match result {
                     Ok(()) => {
@@ -538,7 +538,7 @@ impl FuzzState {
             } => {
                 let before = (*self.engine).clone();
                 // Set funding rate for next accrue_market_to call
-                self.engine.funding_rate_bps_per_slot_last = *rate_bps;
+                self.engine.funding_rate_e9_per_slot_last = *rate_bps;
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
                 let result = self
@@ -594,7 +594,7 @@ impl FuzzState {
 
                 let result =
                     self.engine
-                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i64);
+                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i128);
 
                 match result {
                     Ok(_) => {
@@ -640,7 +640,7 @@ impl FuzzState {
         let mut count = 0;
         let n = account_count(&self.engine);
         for i in 0..n {
-            if is_account_used(&self.engine, i as u16) {
+            if is_account_used(&self.engine, i as u32) {
                 count += 1;
             }
         }
@@ -833,7 +833,7 @@ fn random_selector(rng: &mut Rng) -> IdxSel {
         0 => IdxSel::Existing,
         1 => IdxSel::ExistingNonLp,
         2 => IdxSel::Lp,
-        _ => IdxSel::Random(rng.u64(0, 63) as u16),
+        _ => IdxSel::Random(rng.u64(0, 63) as u32),
     }
 }
 
@@ -1077,7 +1077,7 @@ proptest! {
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i64);
+        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i128);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1106,7 +1106,7 @@ proptest! {
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i64);
+            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i128);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1138,11 +1138,11 @@ fn conservation_after_trade_and_funding_regression() {
 
     // Execute trade to create positions
     engine
-        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i64)
+        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i128)
         .unwrap();
 
     // Accrue market with funding
-    engine.funding_rate_bps_per_slot_last = 500;
+    engine.funding_rate_e9_per_slot_last = 500;
     engine.advance_slot(1000);
     let slot = engine.current_slot;
     engine.accrue_market_to(slot, DEFAULT_ORACLE).unwrap();
@@ -1180,7 +1180,7 @@ fn harness_rollback_simulation_test() {
     // Accrue market to create state that could be mutated
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.funding_price_sample_last = DEFAULT_ORACLE;
-    engine.funding_rate_bps_per_slot_last = 100;
+    engine.funding_rate_e9_per_slot_last = 100;
     engine.advance_slot(100);
     let slot = engine.current_slot;
     engine.accrue_market_to(slot, DEFAULT_ORACLE).unwrap();
@@ -1194,7 +1194,7 @@ fn harness_rollback_simulation_test() {
     let expected_pnl = engine.accounts[user_idx as usize].pnl;
 
     // Try to withdraw_not_atomic more than available - will fail
-    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i64);
+    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i128);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"

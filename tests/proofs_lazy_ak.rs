@@ -53,7 +53,7 @@ fn t1_8_adl_deficit_only_lazy_equals_eager() {
 
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    let delta_k_abs = ((d as u32) * (a_side as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_side as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let k_after = k_init + delta_k;
     let k_diff = k_after - k_init;
@@ -91,7 +91,7 @@ fn t1_9_adl_quantity_plus_deficit_lazy_conservative() {
     assert!(lazy_q <= eager_q, "lazy must not exceed eager quantity");
     assert!(eager_q - lazy_q <= 1, "lazy error bounded by 1 base unit");
 
-    let delta_k_abs = ((d as u32) * (a_old as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_old as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss = -lazy_pnl(basis_q, delta_k, a_old);
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
@@ -124,7 +124,7 @@ fn t1_8b_adl_deficit_lazy_conservative_symbolic_a_basis() {
 
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    let delta_k_abs = ((d as u32) * (a_basis as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_basis as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss_raw = lazy_pnl(basis_q, delta_k, a_basis);
 
@@ -463,7 +463,7 @@ fn t6_24_worked_example_regression() {
     let oi_post = oi - q_close;
     assert!(oi_post > 0);
 
-    let delta_k_abs = ((d as u32) * (a_long as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_long as u16) + (oi as u16) - 1) / (oi as u16);
     assert!(delta_k_abs == 64);
     let delta_k = -(delta_k_abs as i32);
     k_long = k_long + delta_k;
@@ -495,7 +495,7 @@ fn t6_25_pure_pnl_bankruptcy_regression() {
     let a_opp = S_ADL_ONE;
     let basis_q = (q_base as u16) * S_POS_SCALE;
 
-    let delta_k_abs = ((d as u32) * (a_opp as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_opp as u16) + (oi as u16) - 1) / (oi as u16);
     assert!(delta_k_abs > 0);
 
     let delta_k = -(delta_k_abs as i32);
