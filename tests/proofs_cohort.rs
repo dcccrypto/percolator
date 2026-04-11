@@ -18,8 +18,8 @@ fn cohort_remaining_sum(engine: &RiskEngine, idx: usize) -> u128 {
     for i in 0..a.exact_cohort_count as usize {
         sum += a.exact_reserve_cohorts[i].remaining_q;
     }
-    if a.overflow_older_present { sum += a.overflow_older.remaining_q; }
-    if a.overflow_newest_present { sum += a.overflow_newest.remaining_q; }
+    if a.overflow_older_present != 0 { sum += a.overflow_older.remaining_q; }
+    if a.overflow_newest_present != 0 { sum += a.overflow_newest.remaining_q; }
     sum
 }
 
@@ -322,14 +322,14 @@ fn proof_c7_pending_non_maturity() {
         inject_reserve(&mut engine, idx, 10_000, DEFAULT_SLOT + i, 10);
     }
 
-    if engine.accounts[idx as usize].overflow_newest_present {
+    if engine.accounts[idx as usize].overflow_newest_present != 0 {
         let newest_q = engine.accounts[idx as usize].overflow_newest.remaining_q;
 
         engine.current_slot = DEFAULT_SLOT + 200; // well past any horizon
         engine.advance_profit_warmup_cohort(idx as usize);
 
         // C7: if still present as overflow_newest, remaining_q unchanged
-        if engine.accounts[idx as usize].overflow_newest_present {
+        if engine.accounts[idx as usize].overflow_newest_present != 0 {
             assert_eq!(engine.accounts[idx as usize].overflow_newest.remaining_q, newest_q,
                 "C7: pending overflow_newest must not be matured");
         }

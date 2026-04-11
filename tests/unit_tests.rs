@@ -2848,8 +2848,8 @@ fn test_prepare_account_for_resolved_touch() {
 
     assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0);
     assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 0);
-    assert!(!engine.accounts[idx as usize].overflow_older_present);
-    assert!(!engine.accounts[idx as usize].overflow_newest_present);
+    assert!(engine.accounts[idx as usize].overflow_older_present == 0);
+    assert!(engine.accounts[idx as usize].overflow_newest_present == 0);
 }
 
 

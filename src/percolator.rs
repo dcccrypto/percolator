@@ -142,7 +142,6 @@ use wide_math::{
     wide_mul_div_floor_u128,
     wide_signed_mul_div_floor_from_k_pair,
     wide_mul_div_ceil_u128_or_over_i128max, OverI128Magnitude,
-    saturating_mul_u128_u64,
     fee_debt_u128_checked,
     mul_div_floor_u256_with_rem,
     ceil_div_positive_checked,
@@ -303,12 +302,12 @@ pub struct Account {
     /// Exact reserve cohorts, oldest first. Only [0..exact_cohort_count) are active.
     pub exact_reserve_cohorts: [ReserveCohort; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
     pub exact_cohort_count: u8,
-    /// Preserved overflow (scheduled). Present iff overflow_older_present.
+    /// Preserved overflow (scheduled). Present iff overflow_older_present != 0.
     pub overflow_older: ReserveCohort,
-    pub overflow_older_present: bool,
-    /// Newest pending overflow. Present iff overflow_newest_present.
+    pub overflow_older_present: u8,
+    /// Newest pending overflow. Present iff overflow_newest_present != 0.
     pub overflow_newest: ReserveCohort,
-    pub overflow_newest_present: bool,
+    pub overflow_newest_present: u8,
 }
 
 impl Account {
@@ -343,9 +342,9 @@ fn empty_account() -> Account {
         exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
         exact_cohort_count: 0,
         overflow_older: ReserveCohort::EMPTY,
-        overflow_older_present: false,
+        overflow_older_present: 0,
         overflow_newest: ReserveCohort::EMPTY,
-        overflow_newest_present: false,
+        overflow_newest_present: 0,
     }
 }
 
@@ -450,10 +449,6 @@ pub struct RiskEngine {
     /// Signed funding remainder accumulator for exact carry (no per-step floor bias)
     pub funding_remainder: i128,
 
-    /// Resolved payout snapshot (computed once, used for all terminal closes)
-    pub resolved_payout_h_num: u128,
-    pub resolved_payout_h_den: u128,
-    pub resolved_payout_snapshot_ready: bool,
 
     // Insurance floor is read from self.params.insurance_floor (no duplicate field)
 
@@ -748,9 +743,6 @@ impl RiskEngine {
             last_market_slot: init_slot,
             funding_price_sample_last: init_oracle_price,
             funding_remainder: 0,
-            resolved_payout_h_num: 0,
-            resolved_payout_h_den: 0,
-            resolved_payout_snapshot_ready: false,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
             next_account_id: 0,
@@ -813,9 +805,6 @@ impl RiskEngine {
         self.last_market_slot = init_slot;
         self.funding_price_sample_last = init_oracle_price;
         self.funding_remainder = 0;
-        self.resolved_payout_h_num = 0;
-        self.resolved_payout_h_den = 0;
-        self.resolved_payout_snapshot_ready = false;
         // insurance_floor is now read directly from self.params.insurance_floor
         self.used = [0; BITMAP_WORDS];
         self.num_used_accounts = 0;
@@ -901,7 +890,7 @@ impl RiskEngine {
     /// materialize_account(i, slot_anchor) — spec §2.5.
     /// Materializes a missing account at a specific slot index.
     /// The slot must not be currently in use.
-    fn materialize_at(&mut self, idx: u16, slot_anchor: u64) -> Result<()> {
+    fn materialize_at(&mut self, idx: u16, _slot_anchor: u64) -> Result<()> {
         if idx as usize >= MAX_ACCOUNTS {
             return Err(RiskError::AccountNotFound);
         }
@@ -971,9 +960,9 @@ impl RiskEngine {
             exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
             exact_cohort_count: 0,
             overflow_older: ReserveCohort::EMPTY,
-            overflow_older_present: false,
+            overflow_older_present: 0,
             overflow_newest: ReserveCohort::EMPTY,
-            overflow_newest_present: false,
+            overflow_newest_present: 0,
         };
 
         Ok(())
@@ -1137,8 +1126,8 @@ impl RiskEngine {
             if new_pos == 0 && self.market_mode == MarketMode::Live {
                 assert!(self.accounts[idx].reserved_pnl == 0);
                 assert!(self.accounts[idx].exact_cohort_count == 0);
-                assert!(!self.accounts[idx].overflow_older_present);
-                assert!(!self.accounts[idx].overflow_newest_present);
+                assert!(self.accounts[idx].overflow_older_present == 0);
+                assert!(self.accounts[idx].overflow_newest_present == 0);
             }
 
             assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot);
@@ -2275,22 +2264,22 @@ impl RiskEngine {
         let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
 
         // Step 1: promote overflow_older if exact capacity available
-        if a.overflow_older_present && has_cap {
+        if a.overflow_older_present != 0 && has_cap {
             a.exact_reserve_cohorts[count] = a.overflow_older;
             a.exact_cohort_count += 1;
             a.overflow_older = ReserveCohort::EMPTY;
-            a.overflow_older_present = false;
+            a.overflow_older_present = 0;
         }
 
         let count = a.exact_cohort_count as usize;
         let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
 
         // Step 2: activate pending overflow_newest if overflow_older absent
-        if !a.overflow_older_present && a.overflow_newest_present {
+        if a.overflow_older_present == 0 && a.overflow_newest_present != 0 {
             let pending_q = a.overflow_newest.remaining_q;
             let pending_h = a.overflow_newest.horizon_slots;
             a.overflow_newest = ReserveCohort::EMPTY;
-            a.overflow_newest_present = false;
+            a.overflow_newest_present = 0;
             let activated = ReserveCohort {
                 remaining_q: pending_q, anchor_q: pending_q,
                 start_slot: now_slot, horizon_slots: pending_h, sched_release_q: 0,
@@ -2300,7 +2289,7 @@ impl RiskEngine {
                 a.exact_cohort_count += 1;
             } else {
                 a.overflow_older = activated;
-                a.overflow_older_present = true;
+                a.overflow_older_present = 1;
             }
         }
 
@@ -2308,7 +2297,7 @@ impl RiskEngine {
         let has_cap = count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT;
 
         // Step 3: exact merge into newest cohort (same slot, same horizon, not yet scheduled)
-        if !a.overflow_older_present && !a.overflow_newest_present && count > 0 {
+        if a.overflow_older_present == 0 && a.overflow_newest_present == 0 && count > 0 {
             let newest = &mut a.exact_reserve_cohorts[count - 1];
             if newest.start_slot == now_slot && newest.horizon_slots == h_lock && newest.sched_release_q == 0 {
                 newest.remaining_q = newest.remaining_q.checked_add(reserve_add).expect("reserve overflow");
@@ -2319,7 +2308,7 @@ impl RiskEngine {
         }
 
         // Step 4: exact merge into overflow_older
-        if a.overflow_older_present && !a.overflow_newest_present {
+        if a.overflow_older_present != 0 && a.overflow_newest_present == 0 {
             let o = &mut a.overflow_older;
             if o.start_slot == now_slot && o.horizon_slots == h_lock && o.sched_release_q == 0 {
                 o.remaining_q = o.remaining_q.checked_add(reserve_add).expect("reserve overflow");
@@ -2335,7 +2324,7 @@ impl RiskEngine {
         };
 
         // Step 5: append new exact cohort
-        if has_cap && !a.overflow_older_present && !a.overflow_newest_present {
+        if has_cap && a.overflow_older_present == 0 && a.overflow_newest_present == 0 {
             a.exact_reserve_cohorts[count] = new_cohort;
             a.exact_cohort_count += 1;
             a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
@@ -2343,21 +2332,21 @@ impl RiskEngine {
         }
 
         // Step 6: create overflow_older (overflow segments always use h_max)
-        if !a.overflow_older_present && !a.overflow_newest_present {
+        if a.overflow_older_present == 0 && a.overflow_newest_present == 0 {
             let mut overflow_cohort = new_cohort;
             overflow_cohort.horizon_slots = self.params.h_max;
             a.overflow_older = overflow_cohort;
-            a.overflow_older_present = true;
+            a.overflow_older_present = 1;
             a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
             return;
         }
 
         // Step 7: create overflow_newest (overflow segments always use h_max)
-        if a.overflow_older_present && !a.overflow_newest_present {
+        if a.overflow_older_present != 0 && a.overflow_newest_present == 0 {
             let mut overflow_cohort = new_cohort;
             overflow_cohort.horizon_slots = self.params.h_max;
             a.overflow_newest = overflow_cohort;
-            a.overflow_newest_present = true;
+            a.overflow_newest_present = 1;
             a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
             return;
         }
@@ -2380,26 +2369,26 @@ impl RiskEngine {
         let mut remaining = reserve_loss;
 
         // Step 2: overflow_newest first
-        if a.overflow_newest_present && remaining > 0 {
+        if a.overflow_newest_present != 0 && remaining > 0 {
             let take = core::cmp::min(remaining, a.overflow_newest.remaining_q);
             a.overflow_newest.remaining_q -= take;
             a.reserved_pnl -= take;
             remaining -= take;
             if a.overflow_newest.remaining_q == 0 {
                 a.overflow_newest = ReserveCohort::EMPTY;
-                a.overflow_newest_present = false;
+                a.overflow_newest_present = 0;
             }
         }
 
         // Step 3: overflow_older next
-        if a.overflow_older_present && remaining > 0 {
+        if a.overflow_older_present != 0 && remaining > 0 {
             let take = core::cmp::min(remaining, a.overflow_older.remaining_q);
             a.overflow_older.remaining_q -= take;
             a.reserved_pnl -= take;
             remaining -= take;
             if a.overflow_older.remaining_q == 0 {
                 a.overflow_older = ReserveCohort::EMPTY;
-                a.overflow_older_present = false;
+                a.overflow_older_present = 0;
             }
         }
 
@@ -2432,11 +2421,11 @@ impl RiskEngine {
         a.exact_cohort_count = write as u8;
 
         // Step 7: post-loss overflow promotion
-        if !a.overflow_older_present && a.overflow_newest_present {
+        if a.overflow_older_present == 0 && a.overflow_newest_present != 0 {
             let pending_q = a.overflow_newest.remaining_q;
             let pending_h = a.overflow_newest.horizon_slots;
             a.overflow_newest = ReserveCohort::EMPTY;
-            a.overflow_newest_present = false;
+            a.overflow_newest_present = 0;
             let activated = ReserveCohort {
                 remaining_q: pending_q, anchor_q: pending_q,
                 start_slot: self.current_slot, horizon_slots: pending_h, sched_release_q: 0,
@@ -2447,7 +2436,7 @@ impl RiskEngine {
                 a.exact_cohort_count += 1;
             } else {
                 a.overflow_older = activated;
-                a.overflow_older_present = true;
+                a.overflow_older_present = 1;
             }
         }
     }
@@ -2464,9 +2453,9 @@ impl RiskEngine {
         }
         a.exact_cohort_count = 0;
         a.overflow_older = ReserveCohort::EMPTY;
-        a.overflow_older_present = false;
+        a.overflow_older_present = 0;
         a.overflow_newest = ReserveCohort::EMPTY;
-        a.overflow_newest_present = false;
+        a.overflow_newest_present = 0;
         a.reserved_pnl = 0;
         // Do NOT mutate PNL_matured_pos_tot (already set globally at resolve time)
     }
@@ -2480,8 +2469,8 @@ impl RiskEngine {
         if r == 0 {
             // Require empty queue
             assert!(self.accounts[idx].exact_cohort_count == 0);
-            assert!(!self.accounts[idx].overflow_older_present);
-            assert!(!self.accounts[idx].overflow_newest_present);
+            assert!(self.accounts[idx].overflow_older_present == 0);
+            assert!(self.accounts[idx].overflow_newest_present == 0);
             return;
         }
 
@@ -2509,7 +2498,7 @@ impl RiskEngine {
         }
 
         // Process overflow_older if present
-        if self.accounts[idx].overflow_older_present {
+        if self.accounts[idx].overflow_older_present != 0 {
             let c = &mut self.accounts[idx].overflow_older;
             if c.remaining_q > 0 {
                 let elapsed = self.current_slot.saturating_sub(c.start_slot) as u128;
@@ -2550,32 +2539,32 @@ impl RiskEngine {
         self.accounts[idx].exact_cohort_count = write as u8;
 
         // Step 4: clear empty overflow_older
-        if self.accounts[idx].overflow_older_present && self.accounts[idx].overflow_older.remaining_q == 0 {
+        if self.accounts[idx].overflow_older_present != 0 && self.accounts[idx].overflow_older.remaining_q == 0 {
             self.accounts[idx].overflow_older = ReserveCohort::EMPTY;
-            self.accounts[idx].overflow_older_present = false;
+            self.accounts[idx].overflow_older_present = 0;
         }
 
         // Step 5: clear empty overflow_newest
-        if self.accounts[idx].overflow_newest_present && self.accounts[idx].overflow_newest.remaining_q == 0 {
+        if self.accounts[idx].overflow_newest_present != 0 && self.accounts[idx].overflow_newest.remaining_q == 0 {
             self.accounts[idx].overflow_newest = ReserveCohort::EMPTY;
-            self.accounts[idx].overflow_newest_present = false;
+            self.accounts[idx].overflow_newest_present = 0;
         }
 
         // Step 6: promote overflow_older into exact if capacity available
         let count = self.accounts[idx].exact_cohort_count as usize;
-        if self.accounts[idx].overflow_older_present && count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT {
+        if self.accounts[idx].overflow_older_present != 0 && count < MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT {
             self.accounts[idx].exact_reserve_cohorts[count] = self.accounts[idx].overflow_older;
             self.accounts[idx].exact_cohort_count += 1;
             self.accounts[idx].overflow_older = ReserveCohort::EMPTY;
-            self.accounts[idx].overflow_older_present = false;
+            self.accounts[idx].overflow_older_present = 0;
         }
 
         // Step 7: activate overflow_newest if overflow_older absent
-        if !self.accounts[idx].overflow_older_present && self.accounts[idx].overflow_newest_present {
+        if self.accounts[idx].overflow_older_present == 0 && self.accounts[idx].overflow_newest_present != 0 {
             let pending_q = self.accounts[idx].overflow_newest.remaining_q;
             let pending_h = self.accounts[idx].overflow_newest.horizon_slots;
             self.accounts[idx].overflow_newest = ReserveCohort::EMPTY;
-            self.accounts[idx].overflow_newest_present = false;
+            self.accounts[idx].overflow_newest_present = 0;
             let activated = ReserveCohort {
                 remaining_q: pending_q, anchor_q: pending_q,
                 start_slot: self.current_slot, horizon_slots: pending_h, sched_release_q: 0,
@@ -2586,7 +2575,7 @@ impl RiskEngine {
                 self.accounts[idx].exact_cohort_count += 1;
             } else {
                 self.accounts[idx].overflow_older = activated;
-                self.accounts[idx].overflow_older_present = true;
+                self.accounts[idx].overflow_older_present = 1;
             }
         }
 
@@ -2813,9 +2802,9 @@ impl RiskEngine {
             exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
             exact_cohort_count: 0,
             overflow_older: ReserveCohort::EMPTY,
-            overflow_older_present: false,
+            overflow_older_present: 0,
             overflow_newest: ReserveCohort::EMPTY,
-            overflow_newest_present: false,
+            overflow_newest_present: 0,
         };
 
         if excess > 0 {
@@ -2894,9 +2883,9 @@ impl RiskEngine {
             exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
             exact_cohort_count: 0,
             overflow_older: ReserveCohort::EMPTY,
-            overflow_older_present: false,
+            overflow_older_present: 0,
             overflow_newest: ReserveCohort::EMPTY,
-            overflow_newest_present: false,
+            overflow_newest_present: 0,
         };
 
         if excess > 0 {
@@ -3829,8 +3818,17 @@ impl RiskEngine {
             }
         }
 
+        // NOTE: touch_account_live_local's add_touched tracks at most
+        // MAX_TOUCHED_PER_INSTRUCTION = 4 accounts. Accounts beyond the
+        // first 4 still receive full live-touch (warmup, settle, losses,
+        // flat-negative) but do NOT get whole-only auto-conversion via
+        // finalize. This is an accepted liveness tradeoff — auto-conversion
+        // is optional convenience, not a safety requirement.
         // Finalize all touched accounts (whole-only conversion + fee sweep)
         self.finalize_touched_accounts_post_live(&ctx);
+
+        // GC dust accounts
+        self.garbage_collect_dust();
 
         // Steps 9-10: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -4062,7 +4060,7 @@ impl RiskEngine {
     #[cfg(any(feature = "test", feature = "stress", kani))]
     pub fn keeper_barrier_wave(
         &mut self,
-        caller_idx: u16,
+        _caller_idx: u16,
         now_slot: u64,
         oracle_price: u64,
         funding_rate_e9: i128,
@@ -4442,11 +4440,17 @@ impl RiskEngine {
             return Err(RiskError::Overflow); // price outside settlement band
         }
 
-        // Zero funding for final accrual (spec §10.7 step 6)
+        // Save and zero funding state for zero-funding final accrual.
+        // Restore on error to maintain validate-then-mutate contract.
+        let saved_rate = self.funding_rate_e9_per_slot_last;
+        let saved_rem = self.funding_remainder;
         self.funding_rate_e9_per_slot_last = 0;
         self.funding_remainder = 0;
-        // Step 6: final accrual at resolved price with zero funding
-        self.accrue_market_to(now_slot, resolved_price)?;
+        if let Err(e) = self.accrue_market_to(now_slot, resolved_price) {
+            self.funding_rate_e9_per_slot_last = saved_rate;
+            self.funding_remainder = saved_rem;
+            return Err(e);
+        }
 
         // Steps 7-13: set resolved state
         self.current_slot = now_slot;
@@ -4605,21 +4609,6 @@ impl RiskEngine {
         // Step 3: Absorb any remaining flat negative PnL
         self.resolve_flat_negative(i);
 
-        // Capture resolved payout snapshot once (first close after all stale cleared)
-        if !self.resolved_payout_snapshot_ready {
-            let senior_sum = self.c_tot.get().checked_add(
-                self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
-            let residual = if self.vault.get() >= senior_sum {
-                self.vault.get() - senior_sum
-            } else { 0u128 };
-            let h_den = self.pnl_matured_pos_tot;
-            let h_num = if h_den == 0 { 0 } else {
-                core::cmp::min(residual, h_den)
-            };
-            self.resolved_payout_h_num = h_num;
-            self.resolved_payout_h_den = h_den;
-            self.resolved_payout_snapshot_ready = true;
-        }
 
         // Step 4: Convert positive PnL to capital (bypass warmup for resolved market).
         // Uses the same release-then-haircut order as convert_released_pnl_not_atomic.
@@ -4628,11 +4617,13 @@ impl RiskEngine {
             // Release all reserves via prepare_account_for_resolved_touch (does NOT
             // adjust pnl_matured_pos_tot — resolve_market already matured everything).
             self.prepare_account_for_resolved_touch(i);
-            // Convert using resolved payout snapshot
+            // Resolved payouts use live haircut_ratio(), which is path-dependent —
+            // sequential closers see progressively smaller pnl_matured_pos_tot
+            // denominators. This is inherent to the haircut model's
+            // sequential-conversion semantics.
             let released = self.released_pos(i);
             if released > 0 {
-                let h_num = self.resolved_payout_h_num;
-                let h_den = self.resolved_payout_h_den;
+                let (h_num, h_den) = self.haircut_ratio();
                 let y = if h_den == 0 { released } else {
                     wide_mul_div_floor_u128(released, h_num, h_den)
                 };

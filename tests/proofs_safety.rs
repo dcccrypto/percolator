@@ -1928,9 +1928,6 @@ fn proof_audit4_init_in_place_canonical() {
     engine.last_market_slot = 55;
     engine.funding_price_sample_last = 777;
     engine.funding_remainder = 42;
-    engine.resolved_payout_h_num = 100;
-    engine.resolved_payout_h_den = 200;
-    engine.resolved_payout_snapshot_ready = true;
     engine.params.insurance_floor = U128::new(12345);
     engine.next_account_id = 99;
     engine.free_head = u16::MAX; // break the freelist
@@ -1954,9 +1951,6 @@ fn proof_audit4_init_in_place_canonical() {
     assert!(engine.gc_cursor == 0);
     assert!(engine.lifetime_liquidations == 0);
     assert!(engine.funding_remainder == 0);
-    assert!(engine.resolved_payout_h_num == 0);
-    assert!(engine.resolved_payout_h_den == 0);
-    assert!(engine.resolved_payout_snapshot_ready == false);
 
     // ---- ADL / side state ----
     assert!(engine.adl_mult_long == ADL_ONE);
