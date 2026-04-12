@@ -828,7 +828,12 @@ impl RiskEngine {
         self.num_used_accounts = 0;
         self.next_account_id = 0;
         self.free_head = 0;
-        self.accounts = [empty_account(); MAX_ACCOUNTS];
+        // Initialize accounts in-place to avoid stack overflow on SBF.
+        // The slab is zero-initialized by SystemProgram.createAccount.
+        // Only patch the non-zero field (adl_a_basis = ADL_ONE).
+        for i in 0..MAX_ACCOUNTS {
+            self.accounts[i].adl_a_basis = ADL_ONE;
+        }
         for i in 0..MAX_ACCOUNTS - 1 {
             self.next_free[i] = (i + 1) as u16;
         }
@@ -893,7 +898,28 @@ impl RiskEngine {
 
     test_visible! {
     fn free_slot(&mut self, idx: u16) {
-        self.accounts[idx as usize] = empty_account();
+        // Zero account fields in-place to avoid stack overflow (Account > 4KB).
+        let a = &mut self.accounts[idx as usize];
+        a.account_id = 0;
+        a.capital = U128::ZERO;
+        a.kind = Account::KIND_USER;
+        a.pnl = 0;
+        a.reserved_pnl = 0;
+        a.position_basis_q = 0;
+        a.adl_a_basis = ADL_ONE;
+        a.adl_k_snap = 0;
+        a.adl_epoch_snap = 0;
+        a.matcher_program = [0; 32];
+        a.matcher_context = [0; 32];
+        a.owner = [0; 32];
+        a.fee_credits = I128::ZERO;
+        a.fees_earned_total = U128::ZERO;
+        for c in a.exact_reserve_cohorts.iter_mut() { *c = ReserveCohort::EMPTY; }
+        a.exact_cohort_count = 0;
+        a.overflow_older = ReserveCohort::EMPTY;
+        a.overflow_older_present = 0;
+        a.overflow_newest = ReserveCohort::EMPTY;
+        a.overflow_newest_present = 0;
         self.clear_used(idx as usize);
         self.next_free[idx as usize] = self.free_head;
         self.free_head = idx;

@@ -277,3 +277,182 @@ fn proof_g4_drain_only_blocks_oi_increase() {
 
     kani::cover!(result.is_err(), "DrainOnly blocks");
 }
+
+// ############################################################################
+// Goal 5: No same-trade bootstrap from positive slippage
+// ############################################################################
+
+/// A trade whose own positive slippage would be needed to pass IM must be
+/// rejected. The trade-open equity excludes the candidate trade's gain.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_goal5_no_same_trade_bootstrap() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    // a gets just enough capital to pass IM for a small position,
+    // but NOT enough if the trade adds large positive slippage
+    engine.deposit(a, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Trade size: 100 units at oracle 1000 = 100k notional.
+    // IM = 100k * 10% = 10k. Capital = 10k. Just barely passes.
+    let size = (100 * POS_SCALE) as i128;
+
+    // Execute at exec_price BELOW oracle (a gains positive slippage)
+    // exec_price=900: trade_pnl_a = size * (oracle - exec) / POS_SCALE = 100*100 = 10_000
+    // Without bootstrap protection, the +10k gain would raise Eq and let
+    // a pass even with a bigger position. With protection, the gain is
+    // excluded from trade-open equity.
+    let exec_price = 900u64;
+    let result = engine.execute_trade_not_atomic(
+        a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, exec_price, 0i128, 0);
+
+    // The trade's own +10k slippage must NOT count toward IM.
+    // trade_open equity = C(10k) + min(PNL_trade_open, 0) + haircutted_released_trade_open
+    // PNL_trade_open = PNL - trade_gain = 10k - 10k = 0 (since PNL was 0 before,
+    //   becomes +10k from trade, then trade_gain=10k is subtracted)
+    // So Eq_trade_open ~ 10k only (capital), which barely passes IM=10k.
+    // This is borderline — the key property is that the +10k slippage
+    // does NOT inflate equity beyond the pre-trade capital.
+    // If it DID inflate equity, a much larger trade would pass.
+
+    // Verify: try a MUCH larger trade that would only pass with bootstrap
+    let big_size = (200 * POS_SCALE) as i128; // 200k notional, IM=20k
+    let big_result = engine.execute_trade_not_atomic(
+        a, b, DEFAULT_ORACLE, DEFAULT_SLOT, big_size, exec_price, 0i128, 0);
+
+    // With only 10k capital and slippage excluded, IM=20k cannot be met
+    assert!(big_result.is_err(),
+        "Goal 5: trade must NOT bootstrap itself via own positive slippage");
+
+    kani::cover!(big_result.is_err(), "bootstrap blocked");
+}
+
+// ############################################################################
+// Goal 7: Overflow segments always use H_max
+// ############################################################################
+
+/// When exact capacity is exhausted, new overflow segments must use H_max
+/// regardless of the wrapper-supplied h_lock.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_goal7_overflow_uses_h_max() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Fill exact capacity (3 under Kani) with h_lock=10
+    for i in 0..3u64 {
+        engine.accounts[idx as usize].pnl += 10_000;
+        engine.pnl_pos_tot += 10_000;
+        engine.append_or_route_new_reserve(idx as usize, 10_000, DEFAULT_SLOT + i, 10);
+    }
+    assert_eq!(engine.accounts[idx as usize].exact_cohort_count, 3, "exact full");
+
+    // Next append goes to overflow_older — must use h_max, NOT caller's h_lock
+    let short_hlock = 5u64; // caller wants short horizon
+    engine.accounts[idx as usize].pnl += 10_000;
+    engine.pnl_pos_tot += 10_000;
+    engine.append_or_route_new_reserve(idx as usize, 10_000, DEFAULT_SLOT + 10, short_hlock);
+
+    assert!(engine.accounts[idx as usize].overflow_older_present != 0,
+        "overflow_older must be created");
+    assert_eq!(engine.accounts[idx as usize].overflow_older.horizon_slots,
+        engine.params.h_max,
+        "Goal 7: overflow must use H_max, not caller h_lock");
+
+    // Same for overflow_newest
+    engine.accounts[idx as usize].pnl += 10_000;
+    engine.pnl_pos_tot += 10_000;
+    engine.append_or_route_new_reserve(idx as usize, 10_000, DEFAULT_SLOT + 11, short_hlock);
+
+    if engine.accounts[idx as usize].overflow_newest_present != 0 {
+        assert_eq!(engine.accounts[idx as usize].overflow_newest.horizon_slots,
+            engine.params.h_max,
+            "Goal 7: overflow_newest must also use H_max");
+    }
+
+    kani::cover!(true, "overflow H_max enforced");
+}
+
+// ############################################################################
+// Goal 23: No pure-capital insurance draw without accrual
+// ############################################################################
+
+/// deposit does not call accrue_market_to and must not draw from insurance.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_goal23_deposit_no_insurance_draw() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    engine.deposit(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    let ins_before = engine.insurance_fund.balance.get();
+
+    // Symbolic deposit amount
+    let amount: u128 = kani::any();
+    kani::assume(amount > 0 && amount <= 500_000);
+
+    let result = engine.deposit(idx, amount, DEFAULT_ORACLE, DEFAULT_SLOT + 1);
+    if result.is_ok() {
+        let ins_after = engine.insurance_fund.balance.get();
+        assert!(ins_after >= ins_before,
+            "Goal 23: deposit must never decrease insurance");
+    }
+
+    kani::cover!(result.is_ok(), "deposit succeeds without insurance draw");
+}
+
+// ############################################################################
+// Goal 27: Path-independent touched-account finalization
+// ############################################################################
+
+/// Finalize_touched_accounts_post_live produces the same conversion result
+/// regardless of which accounts are touched (order-independent within the
+/// touched set, since the shared snapshot is computed once).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_goal27_finalize_path_independent() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+    engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Give both flat positive PnL
+    engine.set_pnl(a as usize, 10_000);
+    engine.set_pnl(b as usize, 20_000);
+
+    // Touch a then b
+    let mut ctx1 = InstructionContext::new_with_h_lock(0);
+    ctx1.add_touched(a);
+    ctx1.add_touched(b);
+
+    // Clone engine for comparison
+    let mut engine2 = engine.clone();
+
+    // Touch b then a (reversed order)
+    let mut ctx2 = InstructionContext::new_with_h_lock(0);
+    ctx2.add_touched(b);
+    ctx2.add_touched(a);
+
+    engine.finalize_touched_accounts_post_live(&ctx1);
+    engine2.finalize_touched_accounts_post_live(&ctx2);
+
+    // Both orderings must produce identical state
+    assert_eq!(engine.accounts[a as usize].capital.get(),
+               engine2.accounts[a as usize].capital.get(),
+        "Goal 27: a's capital must be order-independent");
+    assert_eq!(engine.accounts[b as usize].capital.get(),
+               engine2.accounts[b as usize].capital.get(),
+        "Goal 27: b's capital must be order-independent");
+    assert_eq!(engine.pnl_matured_pos_tot, engine2.pnl_matured_pos_tot,
+        "Goal 27: matured aggregate must be order-independent");
+
+    kani::cover!(true, "finalize is order-independent");
+}
