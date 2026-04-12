@@ -4074,3 +4074,72 @@ fn test_reclaim_rejects_nonempty_queue_metadata() {
     assert!(result.is_err(),
         "reclaim must reject accounts with nonempty reserve queue metadata");
 }
+
+// ============================================================================
+// KF combined floor — partition invariance (TDD)
+// ============================================================================
+
+#[test]
+fn test_funding_partition_invariance() {
+    // The same total funding must produce the same PnL regardless of
+    // whether it arrives in one accrue call or two.
+    // This test fails if K and F are floored separately.
+    let oracle = 1000u64;
+    let slot = 100u64;
+    let params = default_params();
+
+    // --- Engine A: one accrue of 2 slots ---
+    let mut ea = RiskEngine::new_with_market(params, slot, oracle);
+    let a1 = ea.add_user(1000).unwrap();
+    let a2 = ea.add_user(1000).unwrap();
+    ea.deposit(a1, 500_000, oracle, slot).unwrap();
+    ea.deposit(a2, 500_000, oracle, slot).unwrap();
+    // Use a rate that produces a non-integer fund_term per slot:
+    // fund_num_per_slot = oracle * rate * 1 = 1000 * 500_000_001 = 500_000_001_000
+    // fund_term_per_slot = 500_000_001_000 / 1e9 = 500 (remainder = 1_000)
+    // Over 2 slots: fund_num = 1000 * 500_000_001 * 2 = 1_000_000_002_000
+    // fund_term = 1_000_000_002_000 / 1e9 = 1000 (remainder = 2_000)
+    let rate = 500_000_001i128; // produces fractional remainder
+    let size = make_size_q(100);
+    ea.execute_trade_not_atomic(a1, a2, oracle, slot, size, oracle, rate, 0).unwrap();
+    // One accrue of 2 slots
+    ea.accrue_market_to(slot + 2, oracle).unwrap();
+    ea.current_slot = slot + 2;
+    let mut ctx_a = InstructionContext::new_with_h_lock(0);
+    ea.touch_account_live_local(a1 as usize, &mut ctx_a).unwrap();
+    ea.finalize_touched_accounts_post_live(&ctx_a);
+    let cap_a = ea.accounts[a1 as usize].capital.get();
+
+    // --- Engine B: two accrues of 1 slot each ---
+    let mut eb = RiskEngine::new_with_market(params, slot, oracle);
+    let b1 = eb.add_user(1000).unwrap();
+    let b2 = eb.add_user(1000).unwrap();
+    eb.deposit(b1, 500_000, oracle, slot).unwrap();
+    eb.deposit(b2, 500_000, oracle, slot).unwrap();
+    eb.execute_trade_not_atomic(b1, b2, oracle, slot, size, oracle, rate, 0).unwrap();
+    // Two accrues of 1 slot each
+    eb.accrue_market_to(slot + 1, oracle).unwrap();
+    eb.accrue_market_to(slot + 2, oracle).unwrap();
+    eb.current_slot = slot + 2;
+    let mut ctx_b = InstructionContext::new_with_h_lock(0);
+    eb.touch_account_live_local(b1 as usize, &mut ctx_b).unwrap();
+    eb.finalize_touched_accounts_post_live(&ctx_b);
+    let cap_b = eb.accounts[b1 as usize].capital.get();
+
+    // Check K and F state for both engines
+    let k_a = ea.adl_coeff_long;
+    let f_a = ea.f_long_num;
+    let k_b = eb.adl_coeff_long;
+    let f_b = eb.f_long_num;
+
+    // K may differ between paths (different chunking → different integer parts).
+    // But K*FUNDING_DEN + F must be the same (exact total funding).
+    let total_a = (k_a as i128) * (FUNDING_DEN as i128) + f_a;
+    let total_b = (k_b as i128) * (FUNDING_DEN as i128) + f_b;
+    assert_eq!(total_a, total_b,
+        "K*DEN + F must be partition-invariant: A=({},{}) B=({},{})", k_a, f_a, k_b, f_b);
+
+    // Both must produce the same capital (= same PnL delta from funding)
+    assert_eq!(cap_a, cap_b,
+        "funding partition invariance: one-call cap={} != two-call cap={}", cap_a, cap_b);
+}
