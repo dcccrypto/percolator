@@ -296,7 +296,6 @@ struct FuzzState {
     engine: Box<RiskEngine>,
     live_accounts: Vec<u16>,
     lp_idx: Option<u16>,
-    account_ids: Vec<u64>, // Track allocated account IDs for uniqueness
     rng_state: u64,        // For deterministic selector resolution
     last_oracle_price: u64, // Track last oracle price for conservation checks with mark PnL
 }
@@ -307,7 +306,6 @@ impl FuzzState {
             engine: Box::new(RiskEngine::new(params)),
             live_accounts: Vec::new(),
             lp_idx: None,
-            account_ids: Vec::new(),
             rng_state: 12345,
             last_oracle_price: DEFAULT_ORACLE,
         }
@@ -375,9 +373,7 @@ impl FuzzState {
                 // Snapshot engine and harness state for rollback
                 let before = (*self.engine).clone();
                 let live_before = self.live_accounts.clone();
-                let ids_before = self.account_ids.clone();
                 let num_used_before = self.count_used();
-                let next_id_before = self.engine.next_account_id;
 
                 let result = self.engine.add_user(*fee_payment);
 
@@ -395,22 +391,7 @@ impl FuzzState {
                             "{}: num_used didn't increment",
                             context
                         );
-                        assert_eq!(
-                            self.engine.next_account_id,
-                            next_id_before + 1,
-                            "{}: next_account_id didn't increment",
-                            context
-                        );
 
-                        // Account ID should be unique
-                        let new_id = self.engine.accounts[idx as usize].account_id;
-                        assert!(
-                            !self.account_ids.contains(&new_id),
-                            "{}: duplicate account_id {}",
-                            context,
-                            new_id
-                        );
-                        self.account_ids.push(new_id);
                         self.live_accounts.push(idx);
                         assert_global_invariants(&self.engine, &context);
                     }
@@ -418,7 +399,6 @@ impl FuzzState {
                         // Simulate Solana rollback - restore engine and harness state
                         *self.engine = before;
                         self.live_accounts = live_before;
-                        self.account_ids = ids_before;
                     }
                 }
             }
@@ -427,7 +407,6 @@ impl FuzzState {
                 // Snapshot engine and harness state for rollback
                 let before = (*self.engine).clone();
                 let live_before = self.live_accounts.clone();
-                let ids_before = self.account_ids.clone();
                 let lp_before = self.lp_idx;
                 let num_used_before = self.count_used();
 
@@ -447,13 +426,6 @@ impl FuzzState {
                             context
                         );
 
-                        let new_id = self.engine.accounts[idx as usize].account_id;
-                        assert!(
-                            !self.account_ids.contains(&new_id),
-                            "{}: duplicate LP account_id",
-                            context
-                        );
-                        self.account_ids.push(new_id);
                         self.live_accounts.push(idx);
                         if self.lp_idx.is_none() {
                             self.lp_idx = Some(idx);
@@ -464,7 +436,6 @@ impl FuzzState {
                         // Simulate Solana rollback - restore engine and harness state
                         *self.engine = before;
                         self.live_accounts = live_before;
-                        self.account_ids = ids_before;
                         self.lp_idx = lp_before;
                     }
                 }
@@ -673,14 +644,12 @@ proptest! {
         if let Ok(idx) = lp_result {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
-            state.account_ids.push(state.engine.accounts[idx as usize].account_id);
         }
 
         for _ in 0..2 {
             if let Ok(idx) = state.engine.add_user(1) {
                 state.live_accounts.push(idx);
-                state.account_ids.push(state.engine.accounts[idx as usize].account_id);
-            }
+                }
         }
 
         // Initial deposits
@@ -713,14 +682,12 @@ proptest! {
         if let Ok(idx) = lp_result {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
-            state.account_ids.push(state.engine.accounts[idx as usize].account_id);
         }
 
         for _ in 0..2 {
             if let Ok(idx) = state.engine.add_user(1) {
                 state.live_accounts.push(idx);
-                state.account_ids.push(state.engine.accounts[idx as usize].account_id);
-            }
+                }
         }
 
         // Initial deposits
@@ -925,17 +892,11 @@ fn run_deterministic_fuzzer(
         if let Ok(idx) = state.engine.add_lp([0u8; 32], [0u8; 32], 1) {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
-            state
-                .account_ids
-                .push(state.engine.accounts[idx as usize].account_id);
         }
 
         for _ in 0..2 {
             if let Ok(idx) = state.engine.add_user(1) {
                 state.live_accounts.push(idx);
-                state
-                    .account_ids
-                    .push(state.engine.accounts[idx as usize].account_id);
             }
         }
 

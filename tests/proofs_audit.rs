@@ -102,9 +102,6 @@ fn proof_add_user_count_rollback_on_alloc_failure() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     // Fill all slots so alloc_slot will fail
-    for i in 0..MAX_ACCOUNTS {
-        engine.accounts[i].account_id = 1; // mark as used
-    }
     engine.num_used_accounts = MAX_ACCOUNTS as u16;
     engine.materialized_account_count = 0; // but count is low (simulating inconsistency path)
 
@@ -127,9 +124,6 @@ fn proof_add_lp_count_rollback_on_alloc_failure() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     // Fill all slots so alloc_slot will fail
-    for i in 0..MAX_ACCOUNTS {
-        engine.accounts[i].account_id = 1;
-    }
     engine.num_used_accounts = MAX_ACCOUNTS as u16;
     engine.materialized_account_count = 0;
 
@@ -933,7 +927,8 @@ fn proof_force_close_resolved_with_profit_conserves() {
     engine.market_mode = MarketMode::Resolved; engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
     let result = engine.force_close_resolved_not_atomic(idx, 100);
     assert!(result.is_ok(), "force_close must succeed with positive PnL");
-    assert!(result.unwrap() >= cap_before, "returned must include converted profit");
+    let payout = result.unwrap().expect_closed("must be Closed");
+    assert!(payout >= cap_before, "returned must include converted profit");
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
 }
@@ -953,7 +948,8 @@ fn proof_force_close_resolved_flat_returns_capital() {
     engine.market_mode = MarketMode::Resolved; engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
     let result = engine.force_close_resolved_not_atomic(idx, 100);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), dep as u128, "flat account must return exact capital");
+    let payout = result.unwrap().expect_closed("must be Closed");
+    assert_eq!(payout, dep as u128, "flat account must return exact capital");
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
 }

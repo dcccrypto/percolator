@@ -74,7 +74,7 @@ pub const MAX_ACCOUNTS: usize = 4;
 pub const MAX_ACCOUNTS: usize = 64;
 
 #[cfg(all(not(kani), not(feature = "test")))]
-pub const MAX_ACCOUNTS: usize = 2048; // v12.15: reduced from 4096 to fit 10MB Solana account limit with reserve cohort queues
+pub const MAX_ACCOUNTS: usize = 4096;
 
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
@@ -121,14 +121,14 @@ pub const MAX_LIQUIDATION_FEE_BPS: u64 = 10_000;
 pub const MAX_PROTOCOL_FEE_ABS: u128 = 1_000_000_000_000_000_000_000_000_000_000_000_000; // 10^36, spec §1.4
 
 // Reserve cohort queue bounds (spec §1.4)
-// Bounded to 3 under Kani per checklist §L — induction extends to 62 by hand.
+// Bounded to 3 under Kani per checklist §L — induction extends to 28 by hand.
 #[cfg(kani)]
 pub const MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT: usize = 3;
 #[cfg(not(kani))]
-pub const MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT: usize = 62;
+pub const MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT: usize = 28;
 pub const MAX_OVERFLOW_RESERVE_SEGMENTS: usize = 2;
 pub const MAX_RESERVE_SEGMENTS_PER_ACCOUNT: usize =
-    MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT + MAX_OVERFLOW_RESERVE_SEGMENTS; // = 64
+    MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT + MAX_OVERFLOW_RESERVE_SEGMENTS; // = 30
 pub const MAX_WARMUP_SLOTS: u64 = u64::MAX;
 pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
 
@@ -269,7 +269,6 @@ impl InstructionContext {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Account {
-    pub account_id: u64,
     pub capital: U128,
     pub kind: u8,  // 0 = User, 1 = LP (was AccountKind enum)
 
@@ -304,9 +303,6 @@ pub struct Account {
     /// Fee credits
     pub fee_credits: I128,
 
-    /// Cumulative LP trading fees
-    pub fees_earned_total: U128,
-
     // ---- Reserve cohort queue (spec §6.1) ----
     /// Exact reserve cohorts, oldest first. Only [0..exact_cohort_count) are active.
     pub exact_reserve_cohorts: [ReserveCohort; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
@@ -334,7 +330,6 @@ impl Account {
 
 fn empty_account() -> Account {
     Account {
-        account_id: 0,
         capital: U128::ZERO,
         kind: Account::KIND_USER,
         pnl: 0i128,
@@ -348,7 +343,6 @@ fn empty_account() -> Account {
         matcher_context: [0; 32],
         owner: [0; 32],
         fee_credits: I128::ZERO,
-        fees_earned_total: U128::ZERO,
         exact_reserve_cohorts: [ReserveCohort::EMPTY; MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT],
         exact_cohort_count: 0,
         overflow_older: ReserveCohort::EMPTY,
@@ -416,7 +410,6 @@ pub struct RiskEngine {
 
     // Keeper crank tracking
     pub last_crank_slot: u64,
-    pub max_crank_staleness_slots: u64,
 
     // O(1) aggregates (spec §2.2)
     pub c_tot: U128,
@@ -425,9 +418,6 @@ pub struct RiskEngine {
 
     // Crank cursors
     pub gc_cursor: u16,
-
-    // Lifetime counters
-    pub lifetime_liquidations: u64,
 
     // ADL side state (spec §2.2)
     pub adl_mult_long: u128,
@@ -456,8 +446,6 @@ pub struct RiskEngine {
 
     /// Last oracle price used in accrue_market_to
     pub last_oracle_price: u64,
-    /// 1 if accrue_market_to has been called at least once with a real oracle price.
-    pub oracle_initialized: u8,
     /// Last slot used in accrue_market_to
     pub last_market_slot: u64,
     /// Funding price sample (for anti-retroactivity)
@@ -478,7 +466,6 @@ pub struct RiskEngine {
     // Slab management
     pub used: [u64; BITMAP_WORDS],
     pub num_used_accounts: u16,
-    pub next_account_id: u64,
     pub free_head: u16,
     pub next_free: [u16; MAX_ACCOUNTS],
     pub accounts: [Account; MAX_ACCOUNTS],
@@ -493,13 +480,9 @@ pub enum RiskError {
     InsufficientBalance,
     Undercollateralized,
     Unauthorized,
-    InvalidMatchingEngine,
     PnlNotWarmedUp,
     Overflow,
     AccountNotFound,
-    NotAnLPAccount,
-    PositionSizeMismatch,
-    AccountKindMismatch,
     SideBlocked,
     CorruptState,
 }
@@ -545,61 +528,6 @@ pub struct CrankOutcome {
     pub advanced: bool,
     pub num_liquidations: u32,
     pub num_gc_closed: u32,
-}
-
-// ============================================================================
-// Two-phase barrier scan types (spec Addendum A2)
-// ============================================================================
-
-/// Classification result from phase-1 barrier scan (spec §A2.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReviewClass {
-    Safe,
-    ReviewLiquidation,
-    ReviewCleanupResetProgress,
-    ReviewCleanup,
-    Missing,
-}
-
-/// Frozen market snapshot for phase-1 read-only scan (spec §A2.0).
-#[derive(Clone, Copy, Debug)]
-pub struct BarrierSnapshot {
-    pub oracle_price_b: u64,
-    pub current_slot_b: u64,
-    pub a_long_b: u128,
-    pub a_short_b: u128,
-    pub k_long_b: i128,
-    pub k_short_b: i128,
-    pub epoch_long_b: u64,
-    pub epoch_short_b: u64,
-    pub k_epoch_start_long_b: i128,
-    pub k_epoch_start_short_b: i128,
-    pub mode_long_b: SideMode,
-    pub mode_short_b: SideMode,
-    pub oi_eff_long_b: u128,
-    pub oi_eff_short_b: u128,
-    pub maintenance_margin_bps: u64,
-}
-
-impl BarrierSnapshot {
-    pub fn a_side(&self, s: Side) -> u128 {
-        match s { Side::Long => self.a_long_b, Side::Short => self.a_short_b }
-    }
-    pub fn k_side(&self, s: Side) -> i128 {
-        match s { Side::Long => self.k_long_b, Side::Short => self.k_short_b }
-    }
-    pub fn epoch_side(&self, s: Side) -> u64 {
-        match s { Side::Long => self.epoch_long_b, Side::Short => self.epoch_short_b }
-    }
-    pub fn k_epoch_start_side(&self, s: Side) -> i128 {
-        match s { Side::Long => self.k_epoch_start_long_b, Side::Short => self.k_epoch_start_short_b }
-    }
-    pub fn mode_side(&self, s: Side) -> SideMode {
-        match s { Side::Long => self.mode_long_b, Side::Short => self.mode_short_b }
-    }
-    pub fn oi_eff_side(&self, s: Side) -> u128 {
-        match s { Side::Long => self.oi_eff_long_b, Side::Short => self.oi_eff_short_b }
-    }
 }
 
 // ============================================================================
@@ -766,12 +694,10 @@ impl RiskEngine {
             resolved_payout_h_den: 0,
             resolved_payout_ready: 0,
             last_crank_slot: 0,
-            max_crank_staleness_slots: params.max_crank_staleness_slots,
             c_tot: U128::ZERO,
             pnl_pos_tot: 0u128,
             pnl_matured_pos_tot: 0u128,
             gc_cursor: 0,
-            lifetime_liquidations: 0,
             adl_mult_long: ADL_ONE,
             adl_mult_short: ADL_ONE,
             adl_coeff_long: 0i128,
@@ -792,7 +718,6 @@ impl RiskEngine {
             phantom_dust_bound_short_q: 0u128,
             materialized_account_count: 0,
             last_oracle_price: init_oracle_price,
-            oracle_initialized: 0,
             last_market_slot: init_slot,
             funding_price_sample_last: init_oracle_price,
             f_long_num: 0,
@@ -801,7 +726,6 @@ impl RiskEngine {
             f_epoch_start_short_num: 0,
             used: [0; BITMAP_WORDS],
             num_used_accounts: 0,
-            next_account_id: 0,
             free_head: 0,
             next_free: [0; MAX_ACCOUNTS],
             accounts: [empty_account(); MAX_ACCOUNTS],
@@ -835,12 +759,10 @@ impl RiskEngine {
         self.resolved_payout_h_den = 0;
         self.resolved_payout_ready = 0;
         self.last_crank_slot = 0;
-        self.max_crank_staleness_slots = params.max_crank_staleness_slots;
         self.c_tot = U128::ZERO;
         self.pnl_pos_tot = 0;
         self.pnl_matured_pos_tot = 0;
         self.gc_cursor = 0;
-        self.lifetime_liquidations = 0;
         self.adl_mult_long = ADL_ONE;
         self.adl_mult_short = ADL_ONE;
         self.adl_coeff_long = 0;
@@ -861,7 +783,6 @@ impl RiskEngine {
         self.phantom_dust_bound_short_q = 0;
         self.materialized_account_count = 0;
         self.last_oracle_price = init_oracle_price;
-        self.oracle_initialized = 0;
         self.last_market_slot = init_slot;
         self.funding_price_sample_last = init_oracle_price;
         self.f_long_num = 0;
@@ -871,7 +792,6 @@ impl RiskEngine {
         // insurance_floor is now read directly from self.params.insurance_floor
         self.used = [0; BITMAP_WORDS];
         self.num_used_accounts = 0;
-        self.next_account_id = 0;
         self.free_head = 0;
         // Initialize accounts in-place to avoid stack overflow on SBF.
         // The slab is zero-initialized by SystemProgram.createAccount.
@@ -945,7 +865,6 @@ impl RiskEngine {
     fn free_slot(&mut self, idx: u16) {
         // Zero account fields in-place to avoid stack overflow (Account > 4KB).
         let a = &mut self.accounts[idx as usize];
-        a.account_id = 0;
         a.capital = U128::ZERO;
         a.kind = Account::KIND_USER;
         a.pnl = 0;
@@ -959,7 +878,6 @@ impl RiskEngine {
         a.matcher_context = [0; 32];
         a.owner = [0; 32];
         a.fee_credits = I128::ZERO;
-        a.fees_earned_total = U128::ZERO;
         for c in a.exact_reserve_cohorts.iter_mut() { *c = ReserveCohort::EMPTY; }
         a.exact_cohort_count = 0;
         a.overflow_older = ReserveCohort::EMPTY;
@@ -1027,15 +945,11 @@ impl RiskEngine {
         self.num_used_accounts = self.num_used_accounts.checked_add(1)
             .expect("num_used_accounts overflow — slot leak corruption");
 
-        let account_id = self.next_account_id;
-        self.next_account_id = self.next_account_id.saturating_add(1);
-
         // Initialize per spec §2.5 — field-by-field to avoid constructing
         // a ~4KB temporary Account on the stack (SBF stack limit is 4KB).
         {
             let a = &mut self.accounts[idx as usize];
             a.kind = Account::KIND_USER;
-            a.account_id = account_id;
             a.capital = U128::ZERO;
             a.pnl = 0i128;
             a.reserved_pnl = 0u128;
@@ -1048,7 +962,6 @@ impl RiskEngine {
             a.matcher_context = [0; 32];
             a.owner = [0; 32];
             a.fee_credits = I128::ZERO;
-            a.fees_earned_total = U128::ZERO;
             for i in 0..MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT {
                 a.exact_reserve_cohorts[i] = ReserveCohort::EMPTY;
             }
@@ -1671,7 +1584,6 @@ impl RiskEngine {
         if total_dt == 0 && self.last_oracle_price == oracle_price {
             // Step 5: no change — set current_slot and return (spec §5.4)
             self.current_slot = now_slot;
-            self.oracle_initialized = 1;
             return Ok(());
         }
 
@@ -1759,7 +1671,6 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.last_market_slot = now_slot;
         self.last_oracle_price = oracle_price;
-        self.oracle_initialized = 1;
         self.funding_price_sample_last = oracle_price;
 
         Ok(())
@@ -2968,14 +2879,10 @@ impl RiskEngine {
         self.vault = U128::new(v_candidate);
         self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
 
-        let account_id = self.next_account_id;
-        self.next_account_id = self.next_account_id.saturating_add(1);
-
         // Field-by-field init to avoid ~4KB Account temporary on SBF stack.
         {
             let a = &mut self.accounts[idx as usize];
             a.kind = kind;
-            a.account_id = account_id;
             a.capital = U128::new(excess);
             a.pnl = 0i128;
             a.reserved_pnl = 0u128;
@@ -2988,7 +2895,6 @@ impl RiskEngine {
             a.matcher_context = matcher_context;
             a.owner = [0; 32];
             a.fee_credits = I128::ZERO;
-            a.fees_earned_total = U128::ZERO;
             for i in 0..MAX_EXACT_RESERVE_COHORTS_PER_ACCOUNT {
                 a.exact_reserve_cohorts[i] = ReserveCohort::EMPTY;
             }
@@ -3428,21 +3334,6 @@ impl RiskEngine {
             fee_impact_b = impact_b;
         }
 
-        // Track LP fees: use total equity impact (capital paid + collectible debt).
-        // This is the nominal fee obligation from the counterparty's trade.
-        // Debt may be collected later via fee_debt_sweep or forgiven on dust
-        // reclamation — that's an insurance concern, not LP attribution.
-        if self.accounts[a as usize].is_lp() {
-            self.accounts[a as usize].fees_earned_total = U128::new(
-                add_u128(self.accounts[a as usize].fees_earned_total.get(), fee_impact_b)
-            );
-        }
-        if self.accounts[b as usize].is_lp() {
-            self.accounts[b as usize].fees_earned_total = U128::new(
-                add_u128(self.accounts[b as usize].fees_earned_total.get(), fee_impact_a)
-            );
-        }
-
         // Steps 25-26: flat-close PNL guard (spec §10.5)
         if new_eff_a == 0 && self.accounts[a as usize].pnl < 0 {
             return Err(RiskError::Undercollateralized);
@@ -3805,7 +3696,6 @@ impl RiskEngine {
                     return Err(RiskError::Undercollateralized);
                 }
 
-                self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
                 Ok(true)
             }
             LiquidationPolicy::FullClose => {
@@ -3850,7 +3740,6 @@ impl RiskEngine {
                     self.set_pnl(idx as usize, 0i128);
                 }
 
-                self.lifetime_liquidations = self.lifetime_liquidations.saturating_add(1);
                 Ok(true)
             }
         }
@@ -4063,336 +3952,6 @@ impl RiskEngine {
             }
         }
     }
-    }
-
-    // ========================================================================
-    // Two-phase barrier scan (spec Addendum A2)
-    // ========================================================================
-
-    /// Capture a frozen barrier snapshot of market-level state (spec §A2.0).
-    /// Pure &self reader. Called after accrue_market_to.
-    test_visible! {
-    fn capture_barrier_snapshot(&self, now_slot: u64, oracle_price: u64) -> BarrierSnapshot {
-        BarrierSnapshot {
-            oracle_price_b: oracle_price,
-            current_slot_b: now_slot,
-            a_long_b: self.adl_mult_long,
-            a_short_b: self.adl_mult_short,
-            k_long_b: self.adl_coeff_long,
-            k_short_b: self.adl_coeff_short,
-            epoch_long_b: self.adl_epoch_long,
-            epoch_short_b: self.adl_epoch_short,
-            k_epoch_start_long_b: self.adl_epoch_start_k_long,
-            k_epoch_start_short_b: self.adl_epoch_start_k_short,
-            mode_long_b: self.side_mode_long,
-            mode_short_b: self.side_mode_short,
-            oi_eff_long_b: self.oi_eff_long_q,
-            oi_eff_short_b: self.oi_eff_short_q,
-            maintenance_margin_bps: self.params.maintenance_margin_bps,
-        }
-    }
-    }
-
-    /// Read-only classifier: classify account against frozen barrier (spec §A2.1 + §A3).
-    test_visible! {
-    fn preview_account_at_barrier(&self, idx: u16, barrier: &BarrierSnapshot) -> ReviewClass {
-        let i = idx as usize;
-        if i >= MAX_ACCOUNTS || !self.is_used(i) {
-            return ReviewClass::Missing;
-        }
-
-        let basis = self.accounts[i].position_basis_q;
-
-        // Flat account (basis == 0)
-        if basis == 0 {
-            if self.accounts[i].pnl < 0 {
-                return ReviewClass::ReviewCleanup;
-            }
-            return ReviewClass::Safe;
-        }
-
-        // Open position
-        let side = match side_of_i128(basis) {
-            Some(s) => s,
-            None => return ReviewClass::ReviewLiquidation, // defensive
-        };
-        let abs_basis = basis.unsigned_abs();
-        let a_basis = self.accounts[i].adl_a_basis;
-        if a_basis == 0 {
-            return ReviewClass::ReviewLiquidation; // corrupt → conservative
-        }
-
-        let epoch_snap = self.accounts[i].adl_epoch_snap;
-        let epoch_side = barrier.epoch_side(side);
-
-        if epoch_snap == epoch_side {
-            // Same epoch: compute q_eff, pnl_delta, virtual equity lower bound
-            let a_side = barrier.a_side(side);
-            let q_eff_abs = mul_div_floor_u128(abs_basis, a_side, a_basis);
-
-            if q_eff_abs == 0 {
-                // Dust-zero: effective position is zero
-                let mode_s = barrier.mode_side(side);
-                if mode_s == SideMode::ResetPending {
-                    return ReviewClass::ReviewCleanupResetProgress;
-                }
-                return ReviewClass::ReviewCleanup;
-            }
-
-            // Compute pnl_delta using barrier K values
-            let k_side = barrier.k_side(side);
-            let k_snap = self.accounts[i].adl_k_snap;
-            let den = match a_basis.checked_mul(POS_SCALE) {
-                Some(d) if d > 0 => d,
-                _ => return ReviewClass::ReviewLiquidation, // overflow → conservative
-            };
-            let pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_side, den);
-
-            let pnl_virtual = match self.accounts[i].pnl.checked_add(pnl_delta) {
-                Some(v) => v,
-                None => return ReviewClass::ReviewLiquidation, // overflow → conservative
-            };
-
-            // Conservative equity lower bound: ignore positive PnL, use fee_debt upper bound
-            let capital = self.accounts[i].capital.get();
-            let fee_debt = fee_debt_u128_checked(self.accounts[i].fee_credits.get());
-            // eq_lb = max(0, C + min(pnl_virtual, 0) - fee_debt)
-            let pnl_neg_part = if pnl_virtual < 0 {
-                pnl_virtual.unsigned_abs()
-            } else {
-                0u128
-            };
-            let eq_lb = capital.saturating_sub(pnl_neg_part).saturating_sub(fee_debt);
-
-            // MM requirement
-            let notional = mul_div_floor_u128(q_eff_abs, barrier.oracle_price_b as u128, POS_SCALE);
-            let mm_req = core::cmp::max(
-                mul_div_floor_u128(notional, barrier.maintenance_margin_bps as u128, 10_000),
-                self.params.min_nonzero_mm_req,
-            );
-
-            if eq_lb <= mm_req {
-                return ReviewClass::ReviewLiquidation;
-            }
-            return ReviewClass::Safe;
-        }
-
-        // Epoch mismatch
-        let mode_s = barrier.mode_side(side);
-        if mode_s == SideMode::ResetPending {
-            if epoch_snap.checked_add(1) == Some(epoch_side) {
-                return ReviewClass::ReviewCleanupResetProgress;
-            }
-        }
-        // Any other epoch mismatch → conservative
-        ReviewClass::ReviewLiquidation
-    }
-    }
-
-    /// Two-phase keeper barrier wave (spec Addendum A2).
-    /// Phase 1: read-only scan to classify accounts.
-    /// Phase 2: bounded exact-state processing of shortlisted accounts.
-    #[cfg(any(feature = "test", feature = "stress", kani))]
-    pub fn keeper_barrier_wave(
-        &mut self,
-        _caller_idx: u16,
-        now_slot: u64,
-        oracle_price: u64,
-        funding_rate_e9: i128,
-        scan_window: &[u16],
-        max_phase2_revalidations: u16,
-        h_lock: u64,
-    ) -> Result<CrankOutcome> {
-        Self::validate_funding_rate_e9(funding_rate_e9)?;
-                Self::validate_h_lock(h_lock, &self.params)?;
-
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-
-        // Step 1: initialize instruction context
-        let mut ctx = InstructionContext::new_with_h_lock(h_lock);
-
-        // Steps 2-4: validate inputs
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        if now_slot < self.last_market_slot {
-            return Err(RiskError::Overflow);
-        }
-
-        // Step 5: accrue_market_to exactly once
-        self.accrue_market_to(now_slot, oracle_price)?;
-        self.current_slot = now_slot;
-
-        let advanced = now_slot > self.last_crank_slot;
-        if advanced {
-            self.last_crank_slot = now_slot;
-        }
-
-        // Step 6: capture barrier snapshot
-        let barrier = self.capture_barrier_snapshot(now_slot, oracle_price);
-
-        // Phase 1: read-only scan — classify accounts into buckets.
-        // NOTE: These stack arrays are BPF-incompatible at MAX_ACCOUNTS=4096 (24KB stack).
-        // On Solana BPF (4KB stack limit), this function must only be used with bounded
-        // scan_window.len(). Under test/kani (MAX_ACCOUNTS=4/64) this is safe.
-        let mut review_liq: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
-        let mut review_liq_count: usize = 0;
-        let mut review_reset: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
-        let mut review_reset_count: usize = 0;
-        let mut review_cleanup: [u16; MAX_ACCOUNTS] = [0; MAX_ACCOUNTS];
-        let mut review_cleanup_count: usize = 0;
-
-        for &candidate_idx in scan_window {
-            let class = self.preview_account_at_barrier(candidate_idx, &barrier);
-            match class {
-                ReviewClass::ReviewLiquidation => {
-                    if review_liq_count < MAX_ACCOUNTS {
-                        review_liq[review_liq_count] = candidate_idx;
-                        review_liq_count += 1;
-                    }
-                }
-                ReviewClass::ReviewCleanupResetProgress => {
-                    if review_reset_count < MAX_ACCOUNTS {
-                        review_reset[review_reset_count] = candidate_idx;
-                        review_reset_count += 1;
-                    }
-                }
-                ReviewClass::ReviewCleanup => {
-                    if review_cleanup_count < MAX_ACCOUNTS {
-                        review_cleanup[review_cleanup_count] = candidate_idx;
-                        review_cleanup_count += 1;
-                    }
-                }
-                ReviewClass::Safe | ReviewClass::Missing => {
-                    // Skip
-                }
-            }
-        }
-
-        // Phase 2: bounded exact-state processing
-        let mut attempts: u16 = 0;
-        let mut num_liquidations: u32 = 0;
-
-        // Reserve 1 revalidation slot for reset-progress if any exist
-        let reserve_for_reset = if review_reset_count > 0 { 1u16 } else { 0u16 };
-
-        // 2a: process review_liq (reserving 1 slot for reset-progress)
-        'phase2: {
-            let liq_budget = max_phase2_revalidations.saturating_sub(reserve_for_reset);
-            let mut liq_idx = 0usize;
-
-            while liq_idx < review_liq_count {
-                if attempts >= liq_budget { break; }
-                if ctx.pending_reset_long || ctx.pending_reset_short { break 'phase2; }
-
-                let cidx = review_liq[liq_idx] as usize;
-                liq_idx += 1;
-
-                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) { continue; }
-                attempts += 1;
-
-                // Exact touch + revalidate
-                self.touch_account_live_local(cidx, &mut ctx)?;
-                self.fee_debt_sweep(cidx);
-
-                // Check if still liquidatable after exact touch
-                let eff = self.effective_pos_q(cidx);
-                if eff != 0 && !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                    match self.liquidate_at_oracle_internal(review_liq[liq_idx - 1], now_slot, oracle_price, LiquidationPolicy::FullClose, &mut ctx) {
-                        Ok(true) => { num_liquidations += 1; }
-                        Ok(false) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            // 2b: process reserved reset-progress candidate
-            if review_reset_count > 0 && attempts < max_phase2_revalidations {
-                if ctx.pending_reset_long || ctx.pending_reset_short { break 'phase2; }
-
-                let cidx = review_reset[0] as usize;
-                if cidx < MAX_ACCOUNTS && self.is_used(cidx) {
-                    attempts += 1;
-                    self.touch_account_live_local(cidx, &mut ctx)?;
-                    self.fee_debt_sweep(cidx);
-                }
-            }
-
-            // 2c: continue remaining review_liq
-            while liq_idx < review_liq_count {
-                if attempts >= max_phase2_revalidations { break; }
-                if ctx.pending_reset_long || ctx.pending_reset_short { break 'phase2; }
-
-                let cidx = review_liq[liq_idx] as usize;
-                liq_idx += 1;
-
-                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) { continue; }
-                attempts += 1;
-
-                self.touch_account_live_local(cidx, &mut ctx)?;
-                self.fee_debt_sweep(cidx);
-
-                let eff = self.effective_pos_q(cidx);
-                if eff != 0 && !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                    match self.liquidate_at_oracle_internal(review_liq[liq_idx - 1], now_slot, oracle_price, LiquidationPolicy::FullClose, &mut ctx) {
-                        Ok(true) => { num_liquidations += 1; }
-                        Ok(false) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            // 2d: process remaining review_reset
-            for ri in 1..review_reset_count {
-                if attempts >= max_phase2_revalidations { break; }
-                if ctx.pending_reset_long || ctx.pending_reset_short { break 'phase2; }
-
-                let cidx = review_reset[ri] as usize;
-                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) { continue; }
-                attempts += 1;
-
-                self.touch_account_live_local(cidx, &mut ctx)?;
-                self.fee_debt_sweep(cidx);
-            }
-
-            // 2e: process review_cleanup
-            for ci in 0..review_cleanup_count {
-                if attempts >= max_phase2_revalidations { break; }
-                if ctx.pending_reset_long || ctx.pending_reset_short { break 'phase2; }
-
-                let cidx = review_cleanup[ci] as usize;
-                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) { continue; }
-                attempts += 1;
-
-                self.touch_account_live_local(cidx, &mut ctx)?;
-                self.fee_debt_sweep(cidx);
-            }
-        } // 'phase2
-
-        // Finalize: shared-snapshot whole-only conversion + fee sweep on all touched,
-        // then GC, end-of-instruction resets, OI balance.
-        // Without this, barrier-wave-touched accounts miss auto-conversion that the
-        // regular crank path provides via finalize_touched_accounts_post_live.
-        self.finalize_touched_accounts_post_live(&ctx);
-        self.garbage_collect_dust();
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx);
-        self.recompute_r_last_from_final_state(funding_rate_e9)?;
-
-        assert!(self.oi_eff_long_q == self.oi_eff_short_q,
-            "OI_eff_long != OI_eff_short after keeper_barrier_wave");
-
-        Ok(CrankOutcome {
-            advanced,
-            num_liquidations,
-            num_gc_closed: 0,
-        })
     }
 
     // ========================================================================
@@ -5118,18 +4677,6 @@ impl RiskEngine {
         self.insurance_fund.balance = U128::new(new_ins);
         self.accounts[idx as usize].fee_credits = new_credits;
         Ok(())
-    }
-
-    #[cfg(any(test, feature = "test", kani))]
-    test_visible! {
-    fn add_fee_credits(&mut self, idx: u16, amount: u128) -> Result<()> {
-        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
-            return Err(RiskError::Unauthorized);
-        }
-        self.accounts[idx as usize].fee_credits = self.accounts[idx as usize]
-            .fee_credits.saturating_add(amount as i128);
-        Ok(())
-    }
     }
 
     // ========================================================================

@@ -416,12 +416,12 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     let candidates = [(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose)), (c, Some(LiquidationPolicy::FullClose))];
     let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0);
     assert!(result.is_ok());
+    let outcome = result.unwrap();
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after liquidation+ADL");
 
     // Step 4: verify ADL fired — K should have changed (deficit socialized to b)
     // or A should have changed (quantity reduction)
-    let liqs = engine.lifetime_liquidations;
-    assert!(liqs > 0, "at least one liquidation must have occurred");
+    assert!(outcome.num_liquidations > 0, "at least one liquidation must have occurred");
 
     // Step 5: subsequent trade reopening the market
     // c goes long against b (new bilateral position after ADL)

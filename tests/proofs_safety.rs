@@ -1903,7 +1903,6 @@ fn proof_audit4_init_in_place_canonical() {
     engine.funding_rate_e9_per_slot_last = -99;
     engine.last_crank_slot = 77;
     engine.gc_cursor = 2;
-    engine.lifetime_liquidations = 100;
     engine.adl_mult_long = 42;
     engine.adl_mult_short = 43;
     engine.adl_coeff_long = 100;
@@ -1930,7 +1929,6 @@ fn proof_audit4_init_in_place_canonical() {
     engine.f_long_num = 42;
     engine.f_short_num = -42;
     engine.params.insurance_floor = U128::new(12345);
-    engine.next_account_id = 99;
     engine.free_head = u16::MAX; // break the freelist
 
     // Re-initialize — must fully reset all fields
@@ -1950,7 +1948,6 @@ fn proof_audit4_init_in_place_canonical() {
     assert!(engine.funding_rate_e9_per_slot_last == 0);
     assert!(engine.last_crank_slot == 0);
     assert!(engine.gc_cursor == 0);
-    assert!(engine.lifetime_liquidations == 0);
     assert!(engine.f_long_num == 0);
     assert!(engine.f_short_num == 0);
 
@@ -1981,7 +1978,6 @@ fn proof_audit4_init_in_place_canonical() {
     assert!(engine.last_market_slot == 0);
     assert!(engine.funding_price_sample_last == DEFAULT_ORACLE);
     assert!(engine.params.insurance_floor.get() == 0);
-    assert!(engine.next_account_id == 0);
 
     // ---- Used bitmap: all zeroed ----
     let mut any_used = false;
