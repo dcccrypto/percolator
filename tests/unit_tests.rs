@@ -3660,18 +3660,22 @@ fn test_kf_combined_floor_negative_boundary() {
 }
 
 #[test]
-fn test_h_lock_zero_rejected_when_h_min_nonzero() {
-    // If h_min > 0, h_lock = 0 must be rejected (no bypass to ImmediateRelease).
+fn test_h_lock_zero_always_legal() {
+    // Spec §1.4: H_lock == 0 (ImmediateRelease) is always legal,
+    // even when H_min > 0. Only nonzero H_lock below H_min is rejected.
     let mut params = default_params();
-    params.h_min = 5; // minimum horizon = 5 slots
+    params.h_min = 5;
     let mut engine = RiskEngine::new(params);
     let a = engine.add_user(1000).unwrap();
     engine.deposit(a, 100_000, 1000, 100).unwrap();
 
-    // h_lock = 0 should be rejected because h_min = 5
+    // h_lock = 0 must be accepted
     let result = engine.settle_account_not_atomic(a, 1000, 101, 0i128, 0);
-    assert!(result.is_err(),
-        "h_lock=0 must be rejected when h_min > 0");
+    assert!(result.is_ok(), "h_lock=0 must always be legal");
+
+    // h_lock = 3 (nonzero, below h_min=5) must be rejected
+    let result2 = engine.settle_account_not_atomic(a, 1000, 102, 0i128, 3);
+    assert!(result2.is_err(), "nonzero h_lock below h_min must be rejected");
 }
 
 #[test]
@@ -3939,14 +3943,15 @@ fn test_settle_flat_negative_rejects_nonflat() {
 }
 
 #[test]
-fn test_settle_flat_negative_rejects_positive_pnl() {
+fn test_settle_flat_negative_noop_on_positive_pnl() {
+    // Spec §9.2.4: noop when PnL >= 0 (not an error)
     let mut engine = RiskEngine::new(default_params());
     let a = engine.add_user(1000).unwrap();
     engine.deposit(a, 50_000, 1000, 100).unwrap();
     engine.set_pnl(a as usize, 1000); // positive PnL
 
     let result = engine.settle_flat_negative_pnl_not_atomic(a, 101);
-    assert!(result.is_err(), "must reject positive PnL accounts");
+    assert!(result.is_ok(), "noop on positive PnL, not an error");
 }
 
 #[test]

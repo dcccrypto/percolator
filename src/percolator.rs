@@ -1665,9 +1665,9 @@ impl RiskEngine {
     /// Validate h_lock before any state mutation.
     fn validate_h_lock(h_lock: u64, params: &RiskParams) -> Result<()> {
         if h_lock > params.h_max { return Err(RiskError::Overflow); }
-        // h_lock=0 only allowed when h_min=0 (ImmediateRelease permitted).
-        // When h_min > 0, zero bypasses the minimum warmup — reject it.
-        if h_lock < params.h_min { return Err(RiskError::Overflow); }
+        // H_lock == 0 (ImmediateRelease) is always legal per spec §1.4.
+        // Nonzero H_lock must be in [H_min, H_max].
+        if h_lock != 0 && h_lock < params.h_min { return Err(RiskError::Overflow); }
         Ok(())
     }
 
@@ -4160,9 +4160,15 @@ impl RiskEngine {
     /// Check if resolved market is terminal-ready for payouts.
     pub fn is_terminal_ready(&self) -> bool {
         if self.resolved_payout_ready != 0 { return true; }
+        // All positions zeroed
         if self.stored_pos_count_long != 0 || self.stored_pos_count_short != 0 {
             return false;
         }
+        // All stale accounts reconciled
+        if self.stale_account_count_long != 0 || self.stale_account_count_short != 0 {
+            return false;
+        }
+        // No negative PnL accounts remaining
         let mut has_negative = false;
         self.for_each_used(|_idx, acct| {
             if acct.pnl < 0 { has_negative = true; }
@@ -4207,10 +4213,11 @@ impl RiskEngine {
             self.prepare_account_for_resolved_touch(i);
             let released = self.released_pos(i);
             if released > 0 {
-                let y = if self.resolved_payout_h_den == 0 { released } else {
-                    wide_mul_div_floor_u128(released,
-                        self.resolved_payout_h_num, self.resolved_payout_h_den)
-                };
+                // Spec forbids h_den==0 with positive released PnL when snapshot is ready.
+                assert!(self.resolved_payout_h_den > 0,
+                    "resolved payout snapshot h_den must be > 0 with positive released PnL");
+                let y = wide_mul_div_floor_u128(released,
+                    self.resolved_payout_h_num, self.resolved_payout_h_den);
                 self.consume_released_pnl(i, released);
                 let new_cap = add_u128(self.accounts[i].capital.get(), y);
                 self.set_capital(i, new_cap);
@@ -4468,14 +4475,23 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         let i = idx as usize;
+        // Flat only, reserve state empty
         if self.accounts[i].position_basis_q != 0 {
             return Err(RiskError::Undercollateralized);
         }
+        if self.accounts[i].reserved_pnl != 0
+            || self.accounts[i].sched_present != 0
+            || self.accounts[i].pending_present != 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        // Noop if PnL >= 0 (per spec §9.2.4)
         if self.accounts[i].pnl >= 0 {
-            return Err(RiskError::Overflow); // no negative PnL to resolve
+            return Ok(());
         }
 
         self.current_slot = now_slot;
+        // Settle losses from principal first, then absorb remaining via insurance
+        self.settle_losses(i);
         self.resolve_flat_negative(i);
         Ok(())
     }
