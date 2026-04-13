@@ -813,7 +813,9 @@ fn t13_58_unilateral_empty_short_side() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn t13_60_conditional_dust_bound_only_on_truncation() {
+fn t13_60_unconditional_dust_bound_on_any_a_decay() {
+    // v12.15+: phantom dust bound increments unconditionally on ANY A_side decay,
+    // even when the truncation remainder is exactly zero.
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
@@ -831,8 +833,9 @@ fn t13_60_conditional_dust_bound_only_on_truncation() {
     assert!(result.is_ok());
     assert!(engine.adl_mult_long == 2);
 
-    assert!(engine.phantom_dust_bound_long_q == dust_before,
-        "no dust added when A_trunc_rem == 0");
+    // Unconditional: dust ALWAYS increments by at least 1 on A decay
+    assert!(engine.phantom_dust_bound_long_q >= dust_before + 1,
+        "dust must increment unconditionally on any A_side decay");
 }
 
 #[kani::proof]
@@ -1144,9 +1147,10 @@ fn proof_fee_shortfall_routes_to_fee_credits() {
     assert!(result.is_ok());
 
     // Zero a's capital so the fee can't be paid from principal.
-    // Give enough PnL to stay solvent for margin checks.
+    // Give enough PnL (as reserved, not released) to stay solvent for margin checks.
+    // Use set_pnl_with_reserve(UseHLock) so PnL goes to reserve, not matured.
     engine.set_capital(a as usize, 0);
-    engine.set_pnl(a as usize, 5_000_000i128);
+    engine.set_pnl_with_reserve(a as usize, 5_000_000i128, ReserveMode::UseHLock(10)).unwrap();
     engine.vault = U128::new(engine.vault.get() + 5_000_000);
 
     // Record fee_credits and PnL before the close.
