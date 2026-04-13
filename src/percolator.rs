@@ -467,7 +467,7 @@ pub type Result<T> = core::result::Result<T, RiskError>;
 pub enum ResolvedCloseResult {
     /// Phase 1 reconciled but terminal payout not yet ready.
     /// Account is still open. Re-call after all accounts reconciled.
-    Deferred,
+    ProgressOnly,
     /// Account closed and freed. Payout is the returned capital.
     Closed(u128),
 }
@@ -477,13 +477,13 @@ impl ResolvedCloseResult {
     pub fn expect_closed(self, msg: &str) -> u128 {
         match self {
             Self::Closed(cap) => cap,
-            Self::Deferred => panic!("{}", msg),
+            Self::ProgressOnly => panic!("{}", msg),
         }
     }
 
     /// True if the account was deferred (still open).
-    pub fn is_deferred(self) -> bool {
-        matches!(self, Self::Deferred)
+    pub fn is_progress_only(self) -> bool {
+        matches!(self, Self::ProgressOnly)
     }
 }
 
@@ -3943,26 +3943,37 @@ impl RiskEngine {
     /// Transition market from Live to Resolved at a price-bounded settlement price.
     /// Per spec §9.7 (v12.16.4): requires market already accrued through resolution slot
     /// (slot_last == current_slot == now_slot), eliminating retroactive funding erasure.
-    pub fn resolve_market(&mut self, resolved_price: u64, now_slot: u64) -> Result<()> {
+    /// Self-synchronizing resolve_market (spec §9.7, v12.16.6).
+    /// First accrues live state, then applies zero-funding settlement shift.
+    pub fn resolve_market(
+        &mut self,
+        resolved_price: u64,
+        live_oracle_price: u64,
+        now_slot: u64,
+        funding_rate_e9: i128,
+    ) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
-        // Spec §9.7: require slot_last == current_slot == now_slot
-        if now_slot != self.current_slot || now_slot != self.last_market_slot {
+        if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
         if resolved_price == 0 || resolved_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
+        if live_oracle_price == 0 || live_oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
 
-        // Step 5: price deviation check (exact wide arithmetic).
-        // P_last is initialized from new_with_market, so band is always enforceable.
+        // Step 5: self-synchronizing live accrual with trusted current oracle + funding
+        self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
+
+        // Step 6: price deviation check against REFRESHED P_last
         {
-            let p_last = self.last_oracle_price;
+            let p_last = self.last_oracle_price; // now == live_oracle_price
             let p_last_i = p_last as i128;
             let p_res = resolved_price as i128;
             let dev_bps = self.params.resolve_price_deviation_bps as i128;
-            // |resolved_price - P_last| * 10_000 <= dev_bps * P_last
             let diff_abs = (p_res - p_last_i).unsigned_abs();
             let lhs = (diff_abs as u128).checked_mul(10_000).ok_or(RiskError::Overflow)?;
             let rhs = (dev_bps as u128).checked_mul(p_last as u128).ok_or(RiskError::Overflow)?;
@@ -3971,7 +3982,8 @@ impl RiskEngine {
             }
         }
 
-        // Zero-funding final accrual at resolved price (v12.16.4: pass 0 directly).
+        // Step 7: zero-funding settlement shift from refreshed P_last to resolved_price.
+        // dt=0 since slot_last == now_slot after step 5, so only mark-to-market fires.
         self.accrue_market_to(now_slot, resolved_price, 0)?;
 
         // Steps 7-13: set resolved state
@@ -4028,7 +4040,7 @@ impl RiskEngine {
         // pnl > 0: needs terminal readiness for payout
         if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
             // Reconciled but not yet payable. Progress persisted.
-            return Ok(ResolvedCloseResult::Deferred);
+            return Ok(ResolvedCloseResult::ProgressOnly);
         }
 
         // Phase 2: terminal close

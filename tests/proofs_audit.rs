@@ -972,7 +972,7 @@ fn proof_force_close_resolved_position_conservation() {
 
     // Advance K via price movement, then resolve
     engine.keeper_crank_not_atomic(DEFAULT_SLOT + 1, DEFAULT_ORACLE, &[], 64, 0i128, 0).unwrap();
-    engine.resolve_market(DEFAULT_ORACLE, DEFAULT_SLOT + 1).unwrap();
+    engine.resolve_market(DEFAULT_ORACLE, DEFAULT_ORACLE, DEFAULT_SLOT + 1, 0).unwrap();
 
     // Reconcile both, then terminal close a
     engine.reconcile_resolved_not_atomic(a, DEFAULT_SLOT + 1).unwrap();
