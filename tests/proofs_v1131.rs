@@ -69,25 +69,24 @@ fn proof_funding_sign_and_floor() {
     kani::assume(rate != 0);
     kani::assume(rate.unsigned_abs() <= MAX_ABS_FUNDING_E9_PER_SLOT as u32);
 
-    let k_long_before = engine.adl_coeff_long;
-    let k_short_before = engine.adl_coeff_short;
+    let f_long_before = engine.f_long_num;
+    let f_short_before = engine.f_short_num;
 
-    // dt=1, same price → only funding changes K (rate passed directly)
+    // dt=1, same price → only funding changes F (v12.16.5: F-only, no K)
     let result = engine.accrue_market_to(1, DEFAULT_ORACLE, rate as i128);
     assert!(result.is_ok());
 
     if rate > 0 {
-        // Longs pay shorts
-        assert!(engine.adl_coeff_long <= k_long_before,
-            "positive rate: K_long must not increase");
-        assert!(engine.adl_coeff_short >= k_short_before,
-            "positive rate: K_short must not decrease");
+        // Longs pay shorts → F_long decreases, F_short increases
+        assert!(engine.f_long_num <= f_long_before,
+            "positive rate: F_long must not increase");
+        assert!(engine.f_short_num >= f_short_before,
+            "positive rate: F_short must not decrease");
     } else {
-        // Shorts pay longs (fund_term < 0 → floor rounds away from zero)
-        assert!(engine.adl_coeff_long >= k_long_before,
-            "negative rate: K_long must not decrease");
-        assert!(engine.adl_coeff_short <= k_short_before,
-            "negative rate: K_short must not increase");
+        assert!(engine.f_long_num >= f_long_before,
+            "negative rate: F_long must not decrease");
+        assert!(engine.f_short_num <= f_short_before,
+            "negative rate: F_short must not increase");
     }
 }
 
@@ -107,21 +106,21 @@ fn proof_funding_floor_not_truncation() {
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
-    let k_long_before = engine.adl_coeff_long;
-    let k_short_before = engine.adl_coeff_short;
+    let f_long_before = engine.f_long_num;
+    let f_short_before = engine.f_short_num;
 
-    // tiny negative rate passed directly
+    // tiny negative rate passed directly (v12.16.5: F-only, no K)
     let result = engine.accrue_market_to(1, DEFAULT_ORACLE, -1);
     assert!(result.is_ok());
 
-    // fund_num = 1000 * (-1) * 1 = -1000
-    // floor(-1000 / 1_000_000_000) = floor(-0.000001) = -1 (NOT 0 from truncation)
-    // K_long -= A_long * (-1) = K_long + ADL_ONE → longs gain
-    // K_short += A_short * (-1) = K_short - ADL_ONE → shorts lose
-    assert_eq!(engine.adl_coeff_long, k_long_before + (ADL_ONE as i128),
-        "floor(-0.1) must be -1: longs must gain ADL_ONE");
-    assert_eq!(engine.adl_coeff_short, k_short_before - (ADL_ONE as i128),
-        "floor(-0.1) must be -1: shorts must lose ADL_ONE");
+    // fund_num_total = 1000 * (-1) * 1 = -1000 (one exact delta, no floor/substep)
+    // F_long -= A_long * (-1000) = F_long + ADL_ONE * 1000
+    // F_short += A_short * (-1000) = F_short - ADL_ONE * 1000
+    let expected_f_delta = (ADL_ONE as i128) * 1000;
+    assert_eq!(engine.f_long_num, f_long_before + expected_f_delta,
+        "negative rate: F_long must increase by A_long * |fund_num_total|");
+    assert_eq!(engine.f_short_num, f_short_before - expected_f_delta,
+        "negative rate: F_short must decrease by A_short * |fund_num_total|");
 }
 
 // ############################################################################
@@ -224,20 +223,18 @@ fn proof_funding_substep_large_dt() {
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
-    // dt = MAX_FUNDING_DT + 1 → 2 sub-steps: MAX_FUNDING_DT and 1
+    // dt = MAX_FUNDING_DT + 1 → v12.16.5: one exact total delta, no substeps
     let dt = MAX_FUNDING_DT + 1;
     let result = engine.accrue_market_to(dt, DEFAULT_ORACLE, 100);
     assert!(result.is_ok());
 
-    // fund_term per sub-step with rate=100 ppb, price=1000, divisor=1e9:
-    // sub-step 1: fund_num = 1000 * 100 * 65535 = 6_553_500_000; fund_term = floor(6_553_500_000/1e9) = 6
-    // sub-step 2: fund_num = 1000 * 100 * 1 = 100_000; fund_term = floor(100_000/1e9) = 0
-    // total fund_term effect = 6 * ADL_ONE = 6_000_000
-    let expected_delta: i128 = 6i128 * (ADL_ONE as i128);
-    assert_eq!(engine.adl_coeff_long, -expected_delta,
-        "K_long must reflect sum of sub-step funding deltas");
-    assert_eq!(engine.adl_coeff_short, expected_delta,
-        "K_short must reflect sum of sub-step funding deltas");
+    // fund_num_total = 1000 * 100 * 65536 = 6_553_600_000
+    // F_long -= A_long * fund_num_total = ADL_ONE * 6_553_600_000
+    // K must NOT change from funding (F-only model)
+    assert_eq!(engine.adl_coeff_long, 0, "K_long must not change from funding");
+    let expected_f: i128 = -((ADL_ONE as i128) * 1000 * 100 * (dt as i128));
+    assert_eq!(engine.f_long_num, expected_f,
+        "F_long must reflect exact total funding delta");
 }
 
 // ############################################################################
@@ -262,17 +259,17 @@ fn proof_funding_price_basis_timing() {
     let result = engine.accrue_market_to(1, 1500, 100_000_000);
     assert!(result.is_ok());
 
-    // Funding should use fund_px_0=500, not oracle_price=1500
-    // fund_num = 500 * 100_000_000 * 1 = 50_000_000_000
-    // fund_term = floor(50_000_000_000 / 1_000_000_000) = 50
-    // (NOT 1500 * 100_000_000 * 1 / 1_000_000_000 = 150)
-    // Mark-to-market: ΔP = 1500-500 = 1000
-    // K_long += ADL_ONE * 1000 = 1_000_000_000 (mark)
-    // K_long -= ADL_ONE * 50 = 50_000_000 (funding)
-    // Net K_long = 1_000_000_000 - 50_000_000 = 950_000_000
-    let expected_k_long = 1_000_000_000i128 - 50_000_000i128;
+    // v12.16.5: Funding goes to F, mark goes to K.
+    // fund_px_0 = 500 (last_oracle_price before this call)
+    // fund_num_total = 500 * 100_000_000 * 1 = 50_000_000_000
+    // F_long -= ADL_ONE * 50_000_000_000
+    // K_long only has mark: ΔP = 1500-500 = 1000, K_long += ADL_ONE * 1000
+    let expected_k_long = (ADL_ONE as i128) * 1000; // mark only
     assert_eq!(engine.adl_coeff_long, expected_k_long,
-        "funding must use fund_px_0=500, not oracle=1500");
+        "K_long must reflect mark only, not funding");
+    let expected_f_long = -((ADL_ONE as i128) * 50_000_000_000i128);
+    assert_eq!(engine.f_long_num, expected_f_long,
+        "F_long must use fund_px_0=500, not oracle=1500");
 
     // After call, last_oracle_price must be updated to oracle_price
     assert_eq!(engine.last_oracle_price, 1500,
