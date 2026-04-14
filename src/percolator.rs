@@ -991,75 +991,78 @@ impl RiskEngine {
     /// Canonical PNL mutation that routes positive increases through the cohort queue.
     test_visible! {
     fn set_pnl_with_reserve(&mut self, idx: usize, new_pnl: i128, reserve_mode: ReserveMode) -> Result<()> {
-        assert!(new_pnl != i128::MIN, "set_pnl_with_reserve: i128::MIN forbidden");
+        if new_pnl == i128::MIN { return Err(RiskError::Overflow); }
 
         let old = self.accounts[idx].pnl;
         let old_pos = i128_clamp_pos(old);
         let old_rel = if self.market_mode == MarketMode::Live {
             old_pos - self.accounts[idx].reserved_pnl
         } else {
-            assert!(self.accounts[idx].reserved_pnl == 0);
+            if self.accounts[idx].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
             old_pos
         };
         let new_pos = i128_clamp_pos(new_pnl);
 
-        // Live markets enforce per-account cap; resolved markets may exceed (spec v12.17 §4.7)
+        // Pre-validate: reject NoPositiveIncreaseAllowed BEFORE any mutation
+        if new_pos > old_pos && matches!(reserve_mode, ReserveMode::NoPositiveIncreaseAllowed) {
+            return Err(RiskError::Overflow);
+        }
+
         if self.market_mode == MarketMode::Live && new_pos > MAX_ACCOUNT_POSITIVE_PNL {
             return Err(RiskError::Overflow);
         }
 
-        // Step 3: update PNL_pos_tot
+        // Pre-validate aggregate cap before mutation
         if new_pos > old_pos {
             let delta = new_pos - old_pos;
-            self.pnl_pos_tot = self.pnl_pos_tot.checked_add(delta)
-                .expect("set_pnl_with_reserve: pnl_pos_tot overflow");
-        } else if old_pos > new_pos {
-            let delta = old_pos - new_pos;
-            self.pnl_pos_tot = self.pnl_pos_tot.checked_sub(delta)
-                .expect("set_pnl_with_reserve: pnl_pos_tot underflow");
-        }
-        // Live markets enforce aggregate cap; resolved may exceed (spec v12.17 §0 goal 43)
-        if self.market_mode == MarketMode::Live && self.pnl_pos_tot > MAX_PNL_POS_TOT {
-            return Err(RiskError::Overflow);
+            let new_tot = self.pnl_pos_tot.checked_add(delta).ok_or(RiskError::Overflow)?;
+            if self.market_mode == MarketMode::Live && new_tot > MAX_PNL_POS_TOT {
+                return Err(RiskError::Overflow);
+            }
         }
 
         if new_pos > old_pos {
-            // Case A: positive increase
+            let delta = new_pos - old_pos;
+            self.pnl_pos_tot = self.pnl_pos_tot.checked_add(delta).ok_or(RiskError::Overflow)?;
+        } else if old_pos > new_pos {
+            let delta = old_pos - new_pos;
+            self.pnl_pos_tot = self.pnl_pos_tot.checked_sub(delta).ok_or(RiskError::Overflow)?;
+        }
+
+        if new_pos > old_pos {
             let reserve_add = new_pos - old_pos;
-            // Track neg_pnl_account_count sign transitions (spec §4.7)
             if old < 0 && new_pnl >= 0 {
                 self.neg_pnl_account_count = self.neg_pnl_account_count.checked_sub(1)
-                    .expect("neg_pnl_account_count underflow");
+                    .ok_or(RiskError::CorruptState)?;
             } else if old >= 0 && new_pnl < 0 {
                 self.neg_pnl_account_count = self.neg_pnl_account_count.checked_add(1)
-                    .expect("neg_pnl_account_count overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
             self.accounts[idx].pnl = new_pnl;
 
             match reserve_mode {
                 ReserveMode::NoPositiveIncreaseAllowed => {
-                    return Err(RiskError::Overflow);
+                    return Err(RiskError::Overflow); // unreachable: pre-validated
                 }
                 ReserveMode::ImmediateRelease => {
                     self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_add(reserve_add)
-                        .expect("pnl_matured_pos_tot overflow");
-                    assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot);
+                        .ok_or(RiskError::Overflow)?;
+                    if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
                     return Ok(());
                 }
                 ReserveMode::UseHLock(h_lock) => {
                     if h_lock == 0 {
                         self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_add(reserve_add)
-                            .expect("pnl_matured_pos_tot overflow");
-                        assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot);
+                            .ok_or(RiskError::Overflow)?;
+                        if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
                         return Ok(());
                     }
-                    assert!(self.market_mode == MarketMode::Live,
-                        "set_pnl_with_reserve: UseHLock requires Live market");
-                    assert!(h_lock >= self.params.h_min && h_lock <= self.params.h_max,
-                        "set_pnl_with_reserve: H_lock out of bounds");
+                    if self.market_mode != MarketMode::Live { return Err(RiskError::Unauthorized); }
+                    if h_lock < self.params.h_min || h_lock > self.params.h_max {
+                        return Err(RiskError::Overflow);
+                    }
                     self.append_or_route_new_reserve(idx, reserve_add, self.current_slot, h_lock);
-                    // PNL_matured_pos_tot unchanged (reserve is not yet matured)
-                    assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot);
+                    if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
                     return Ok(());
                 }
             }
@@ -1367,30 +1370,22 @@ impl RiskEngine {
         f_snap: i128, f_now: i128, den: u128
     ) -> Result<i128> {
         if abs_basis == 0 { return Ok(0); }
-        // K_diff * FUNDING_DEN in I256
+        // K_diff in I256 — can reach 2*i128::MAX for opposing-sign K snapshots.
         let k_diff = I256::from_i128(k_now).checked_sub(I256::from_i128(k_snap))
             .ok_or(RiskError::Overflow)?;
-        let funding_den_wide = I256::from_u128(FUNDING_DEN);
-        // Need I256 * I256. Use the signed multiply we have.
-        // K_diff * FUNDING_DEN in exact wide arithmetic (spec v12.17 §1.6).
-        // Use checked i128 mul first; fall back to wide U256 path on overflow.
-        let k_diff_i128 = k_diff.try_into_i128().ok_or(RiskError::Overflow)?;
-        let k_scaled = match k_diff_i128.checked_mul(FUNDING_DEN as i128) {
-            Some(v) => I256::from_i128(v),
-            None => {
-                // Overflow in i128: compute in U256 and convert
-                let neg = k_diff_i128 < 0;
-                let abs_k = k_diff_i128.unsigned_abs();
-                let prod_u256 = U256::from_u128(abs_k)
-                    .checked_mul(U256::from_u128(FUNDING_DEN))
-                    .ok_or(RiskError::Overflow)?;
-                // prod_u256 fits in I256 positive range (abs_k * 1e9 < 2^256/2)
-                let pos = I256::from_u128(
-                    prod_u256.try_into_u128().ok_or(RiskError::Overflow)?
-                );
-                if neg { I256::ZERO.checked_sub(pos).ok_or(RiskError::Overflow)? }
-                else { pos }
-            }
+        // K_diff * FUNDING_DEN in exact I256 via abs/sign decomposition.
+        // No narrowing through i128 or u128 — stays in U256/I256 throughout.
+        let k_scaled = if k_diff.is_zero() {
+            I256::ZERO
+        } else {
+            let neg = k_diff.is_negative();
+            let abs_k = k_diff.abs_u256();
+            let prod_u256 = abs_k.checked_mul(U256::from_u128(FUNDING_DEN))
+                .ok_or(RiskError::Overflow)?;
+            let pos = I256::from_u256_or_overflow(prod_u256)
+                .ok_or(RiskError::Overflow)?;
+            if neg { I256::ZERO.checked_sub(pos).ok_or(RiskError::Overflow)? }
+            else { pos }
         };
         // F_diff
         let f_diff = I256::from_i128(f_now).checked_sub(I256::from_i128(f_snap))
@@ -2173,15 +2168,20 @@ impl RiskEngine {
         if raw < 0 { 0i128 } else { raw }
     }
 
-    /// Eq_withdraw_raw_i (spec §3.4): withdrawal equity uses only physical capital
-    /// minus losses minus fee debt — does NOT include matured released PnL.
-    /// This prevents withdrawal approval against haircutted PnL claims that may
-    /// not survive other accounts' subsequent conversions.
-    pub fn account_equity_withdraw_raw(&self, account: &Account) -> i128 {
-        let cap = account.capital.get() as i128;
-        let pnl_neg = core::cmp::min(account.pnl, 0);
-        let fee_debt = fee_debt_u128_checked(account.fee_credits.get()) as i128;
-        cap.saturating_add(pnl_neg).saturating_sub(fee_debt)
+    /// Eq_withdraw_raw_i (spec §3.5): C + min(PNL, 0) + PNL_eff_matured - FeeDebt.
+    /// Uses exact I256 arithmetic. Includes haircutted matured released PnL.
+    pub fn account_equity_withdraw_raw(&self, account: &Account, idx: usize) -> i128 {
+        let cap = I256::from_u128(account.capital.get());
+        let neg_pnl = I256::from_i128(if account.pnl < 0 { account.pnl } else { 0i128 });
+        let eff_matured = I256::from_u128(self.effective_matured_pnl(idx));
+        let fee_debt = I256::from_u128(fee_debt_u128_checked(account.fee_credits.get()));
+        let sum = cap.checked_add(neg_pnl).expect("I256 add")
+            .checked_add(eff_matured).expect("I256 add")
+            .checked_sub(fee_debt).expect("I256 sub");
+        match sum.try_into_i128() {
+            Some(v) => v,
+            None => if sum.is_negative() { i128::MIN + 1 } else { i128::MAX },
+        }
     }
 
     /// max_safe_flat_conversion_released (spec §4.12).
@@ -2968,7 +2968,7 @@ impl RiskEngine {
         let eff = self.effective_pos_q(idx as usize);
         if eff != 0 {
             // Post-withdrawal equity: current withdraw equity minus withdrawal amount
-            let eq_withdraw = self.account_equity_withdraw_raw(&self.accounts[idx as usize]);
+            let eq_withdraw = self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize);
             let eq_post = eq_withdraw.saturating_sub(amount as i128);
             let notional = self.notional(idx as usize, oracle_price);
             // eff != 0 here, so always enforce min_nonzero_im_req even if
