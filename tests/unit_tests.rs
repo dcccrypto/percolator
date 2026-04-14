@@ -5180,7 +5180,7 @@ fn test_premium_funding_zero_when_mark_equals_index() {
         1_000_000, // index = 1.0
         1_000_000, // dampening = 1.0x
         100,       // max 100 bps/slot
-    );
+    ).unwrap();
     assert_eq!(rate, 0, "No premium when mark == index");
 }
 
@@ -5192,7 +5192,7 @@ fn test_premium_funding_positive_when_mark_above_index() {
         1_000_000, // index = 1.0
         1_000_000, // dampening = 1.0x (no dampening)
         100,       // max 100 bps/slot
-    );
+    ).unwrap();
     // premium = (1.01 - 1.0) / 1.0 = 1% = 100 bps
     // rate = 100 bps / dampening(1.0) = 100 bps/slot
     assert!(rate > 0, "Longs should pay when mark > index");
@@ -5207,7 +5207,7 @@ fn test_premium_funding_negative_when_mark_below_index() {
         1_000_000, // index = 1.0
         1_000_000, // dampening = 1.0x
         100,       // max
-    );
+    ).unwrap();
     assert!(rate < 0, "Shorts should pay when mark < index");
     assert_eq!(rate, -100);
 }
@@ -5220,7 +5220,7 @@ fn test_premium_funding_clamped_to_max() {
         1_000_000, // index = 1.0
         1_000_000, // dampening = 1.0x
         5,         // max 5 bps/slot
-    );
+    ).unwrap();
     assert_eq!(rate, 5, "Should clamp to max");
 }
 
@@ -5232,7 +5232,7 @@ fn test_premium_funding_with_dampening() {
         1_000_000, // index = 1.0
         8_000_000, // dampening = 8.0x
         100,       // max
-    );
+    ).unwrap();
     // premium = 100 bps, rate = 100 / 8 = 12 bps/slot
     assert_eq!(rate, 12);
 }
@@ -5240,15 +5240,15 @@ fn test_premium_funding_with_dampening() {
 #[test]
 fn test_premium_funding_zero_inputs() {
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(0, 1_000_000, 1_000_000, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(0, 1_000_000, 1_000_000, 5).unwrap(),
         0
     );
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 0, 1_000_000, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 0, 1_000_000, 5).unwrap(),
         0
     );
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 1_000_000, 0, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 1_000_000, 0, 5).unwrap(),
         0
     );
 }
