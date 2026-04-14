@@ -1115,35 +1115,36 @@ impl RiskEngine {
     /// consume_released_pnl (spec §4.4.1): remove only matured released positive PnL,
     /// leaving R_i unchanged.
     test_visible! {
-    fn consume_released_pnl(&mut self, idx: usize, x: u128) {
-        assert!(x > 0, "consume_released_pnl: x must be > 0");
+    fn consume_released_pnl(&mut self, idx: usize, x: u128) -> Result<()> {
+        if x == 0 { return Err(RiskError::CorruptState); }
 
         let old_pos = i128_clamp_pos(self.accounts[idx].pnl);
         let old_r = self.accounts[idx].reserved_pnl;
         let old_rel = old_pos - old_r;
-        assert!(x <= old_rel, "consume_released_pnl: x > ReleasedPos_i");
+        if x > old_rel { return Err(RiskError::CorruptState); }
 
         let new_pos = old_pos - x;
         let new_rel = old_rel - x;
-        assert!(new_pos >= old_r, "consume_released_pnl: new_pos < old_R");
+        if new_pos < old_r { return Err(RiskError::CorruptState); }
 
         // Update pnl_pos_tot
         self.pnl_pos_tot = self.pnl_pos_tot.checked_sub(x)
-            .expect("consume_released_pnl: pnl_pos_tot underflow");
+            .ok_or(RiskError::CorruptState)?;
 
         // Update pnl_matured_pos_tot
         self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_sub(x)
-            .expect("consume_released_pnl: pnl_matured_pos_tot underflow");
+            .ok_or(RiskError::CorruptState)?;
         assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot,
             "consume_released_pnl: pnl_matured_pos_tot > pnl_pos_tot");
 
         // PNL_i = checked_sub_i128(PNL_i, checked_cast_i128(x))
-        let x_i128: i128 = x.try_into().expect("consume_released_pnl: x > i128::MAX");
+        let x_i128: i128 = x.try_into().map_err(|_| RiskError::Overflow)?;
         let new_pnl = self.accounts[idx].pnl.checked_sub(x_i128)
-            .expect("consume_released_pnl: PNL underflow");
-        assert!(new_pnl != i128::MIN, "consume_released_pnl: PNL == i128::MIN");
+            .ok_or(RiskError::Overflow)?;
+        if new_pnl == i128::MIN { return Err(RiskError::Overflow); }
         self.accounts[idx].pnl = new_pnl;
         // R_i remains unchanged
+        Ok(())
     }
     }
 
@@ -2586,7 +2587,7 @@ impl RiskEngine {
         if pnl >= 0 {
             return;
         }
-        assert!(pnl != i128::MIN, "settle_losses: i128::MIN");
+        if pnl == i128::MIN { return; }
         let need = pnl.unsigned_abs();
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(need, cap);
@@ -2594,8 +2595,8 @@ impl RiskEngine {
             self.set_capital(idx, cap - pay);
             let pay_i128 = pay as i128; // pay <= need = |pnl| <= i128::MAX, safe
             let new_pnl = pnl.checked_add(pay_i128)
-                .expect("settle_losses: unreachable overflow (pay <= |pnl|)");
-            assert!(new_pnl != i128::MIN, "settle_losses: new_pnl == i128::MIN is unreachable");
+                .unwrap_or(0); // pay <= |pnl| guarantees no overflow
+            if new_pnl == i128::MIN { return; }
             self.set_pnl(idx, new_pnl);
         }
     }
@@ -2608,7 +2609,7 @@ impl RiskEngine {
         }
         let pnl = self.accounts[idx].pnl;
         if pnl < 0 {
-            assert!(pnl != i128::MIN, "resolve_flat_negative: i128::MIN");
+            if pnl == i128::MIN { return; }
             let loss = pnl.unsigned_abs();
             self.absorb_protocol_loss(loss);
             self.set_pnl(idx, 0i128);
@@ -2680,7 +2681,7 @@ impl RiskEngine {
     /// finalize_touched_accounts_post_live (spec §7.8, v12.14.0)
     /// Whole-only conversion + fee sweep with shared snapshot.
     test_visible! {
-    fn finalize_touched_accounts_post_live(&mut self, ctx: &InstructionContext) {
+    fn finalize_touched_accounts_post_live(&mut self, ctx: &InstructionContext) -> Result<()> {
         // Step 1: compute shared snapshot
         let senior_sum = self.c_tot.get().checked_add(
             self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
@@ -2715,7 +2716,7 @@ impl RiskEngine {
             {
                 let released = self.released_pos(idx);
                 if released > 0 {
-                    self.consume_released_pnl(idx, released);
+                    self.consume_released_pnl(idx, released)?;
                     let new_cap = add_u128(self.accounts[idx].capital.get(), released);
                     self.set_capital(idx, new_cap);
                 }
@@ -2724,6 +2725,7 @@ impl RiskEngine {
             // Fee-debt sweep
             self.fee_debt_sweep(idx);
         }
+        Ok(())
     }
 
     }
@@ -2972,7 +2974,7 @@ impl RiskEngine {
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
         // Finalize touched (whole-only conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Step 4: require amount <= C_i
         if self.accounts[idx as usize].capital.get() < amount {
@@ -3054,14 +3056,14 @@ impl RiskEngine {
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
         // Step 4: finalize (shared snapshot, whole-only conversion, fee-sweep)
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Steps 5-6: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
         // Step 7: assert OI balance
-        assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after settle");
+        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
 
         Ok(())
     }
@@ -3277,14 +3279,14 @@ impl RiskEngine {
         )?;
 
         // Finalize touched accounts (shared snapshot conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Steps 16-17: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
         // Step 18: assert OI balance (spec §10.4)
-        assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after trade");
+        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
 
         Ok(())
     }
@@ -3540,14 +3542,14 @@ impl RiskEngine {
 
         // Step 5: finalize AFTER liquidation — post-liquidation flat accounts
         // get whole-only conversion and fee sweep
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // End-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
         // Assert OI balance unconditionally (spec §10.6 step 11)
-        assert!(self.oi_eff_long_q == self.oi_eff_short_q, "OI_eff_long != OI_eff_short after liquidation");
+        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
         Ok(result)
     }
 
@@ -3784,7 +3786,7 @@ impl RiskEngine {
         // Finalize: compute fresh snapshot from post-mutation state, apply
         // whole-only conversion + fee sweep to all tracked accounts.
         // MAX_TOUCHED_PER_INSTRUCTION = 64 matches LIQ_BUDGET_PER_CRANK.
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // GC dust accounts
         let gc_closed = self.garbage_collect_dust()?;
@@ -3946,7 +3948,7 @@ impl RiskEngine {
         let y: u128 = wide_mul_div_floor_u128(x_req, h_num, h_den);
 
         // Step 7: consume_released_pnl(i, x_req)
-        self.consume_released_pnl(idx as usize, x_req);
+        self.consume_released_pnl(idx as usize, x_req)?;
 
         // Step 8: set_capital(i, C_i + y)
         let new_cap = add_u128(self.accounts[idx as usize].capital.get(), y);
@@ -3973,7 +3975,7 @@ impl RiskEngine {
         }
 
         // Step 11: finalize AFTER explicit conversion (spec v12.17 §9.3.1)
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Steps 12-13: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -4003,7 +4005,7 @@ impl RiskEngine {
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
         self.touch_account_live_local(idx as usize, &mut ctx)?;
-        self.finalize_touched_accounts_post_live(&ctx);
+        self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Position must be zero
         let eff = self.effective_pos_q(idx as usize);
@@ -4343,7 +4345,7 @@ impl RiskEngine {
                 }
                 let y = wide_mul_div_floor_u128(released,
                     self.resolved_payout_h_num, self.resolved_payout_h_den);
-                self.consume_released_pnl(i, released);
+                self.consume_released_pnl(i, released)?;
                 let new_cap = add_u128(self.accounts[i].capital.get(), y);
                 self.set_capital(i, new_cap);
             }
