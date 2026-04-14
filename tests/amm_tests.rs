@@ -1,74 +1,48 @@
-// End-to-end integration tests with realistic AMM matcher
+// End-to-end integration tests with realistic trading scenarios
 // Tests complete user journeys with multiple participants
 
+#[cfg(feature = "test")]
 use percolator::*;
+#[cfg(feature = "test")]
+use percolator::i128::U128;
 
+#[cfg(feature = "test")]
 fn default_params() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
         maintenance_margin_bps: 500, // 5%
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
-        max_accounts: MAX_ACCOUNTS as u64,
-        new_account_fee: U128::new(0),          // Zero fee for tests
-        risk_reduction_threshold: U128::new(0), // Default: only trigger on full depletion
-        maintenance_fee_per_slot: U128::new(0), // No maintenance fee by default
+        max_accounts: 64,
+        new_account_fee: U128::new(0),
+        maintenance_fee_per_slot: U128::new(0),
         max_crank_staleness_slots: u64::MAX,
-        liquidation_fee_bps: 50,                 // 0.5% liquidation fee
-        liquidation_fee_cap: U128::new(100_000), // Cap at 100k units
-        liquidation_buffer_bps: 100,             // 1% buffer above maintenance
-        min_liquidation_abs: U128::new(100_000), // Minimum 0.1 units
-        funding_premium_weight_bps: 0,
-        funding_settlement_interval_slots: 0,
-        funding_premium_dampening_e6: 1_000_000,
-        funding_premium_max_bps_per_slot: 5,
-        partial_liquidation_bps: 2000,
-        partial_liquidation_cooldown_slots: 30,
-        use_mark_price_for_liquidation: false,
-        emergency_liquidation_margin_bps: 0,
-        fee_tier2_bps: 0,
-        fee_tier3_bps: 0,
-        fee_tier2_threshold: 0,
-        fee_tier3_threshold: 0,
-        fee_split_lp_bps: 0,
-        fee_split_protocol_bps: 0,
-        fee_split_creator_bps: 0,
-        fee_utilization_surge_bps: 0,
-        min_nonzero_mm_req: 0,
-        min_nonzero_im_req: 0,
+        liquidation_fee_bps: 50,
+        liquidation_fee_cap: U128::new(100_000),
+        min_liquidation_abs: U128::new(0),
+        min_initial_deposit: U128::new(2),
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        insurance_floor: U128::ZERO,
     }
 }
 
-// Simple AMM-style matcher that always succeeds
-// In production, this would perform actual matching logic or CPI
-struct AMMatcher;
-
-impl MatchingEngine for AMMatcher {
-    fn execute_match(
-        &self,
-        _matching_engine_program: &[u8; 32],
-        _matching_engine_context: &[u8; 32],
-        _lp_account_id: u64,
-        oracle_price: u64,
-        size: i128,
-    ) -> Result<TradeExecution> {
-        // AMM always provides liquidity at requested price/size
-        Ok(TradeExecution {
-            price: oracle_price,
-            size,
-        })
-    }
-}
-
-const MATCHER: AMMatcher = AMMatcher;
-
-// Helper function to clamp to positive values
-fn clamp_pos_i128(val: i128) -> u128 {
-    if val > 0 {
-        val as u128
+/// Helper: create i128 position size from base quantity (scaled by POS_SCALE)
+#[cfg(feature = "test")]
+fn pos_q(qty: i64) -> i128 {
+    let abs_val = (qty as i128).unsigned_abs();
+    let scaled = abs_val.checked_mul(POS_SCALE).unwrap();
+    if qty < 0 {
+        -(scaled as i128)
     } else {
-        0
+        scaled as i128
     }
+}
+
+/// Helper: crank to make trades/withdrawals work
+#[cfg(feature = "test")]
+fn crank(engine: &mut RiskEngine, slot: u64, oracle_price: u64) {
+    let _ = engine.keeper_crank_not_atomic(slot, oracle_price, &[], 64, 0i64);
 }
 
 // ============================================================================
@@ -76,335 +50,251 @@ fn clamp_pos_i128(val: i128) -> u128 {
 // ============================================================================
 
 #[test]
+#[cfg(feature = "test")]
 fn test_e2e_complete_user_journey() {
-    // Scenario: Alice and Bob trade against LP, experience PNL, funding, warmup, withdrawal
+    // Scenario: Alice and Bob trade, experience PNL, warmup, withdrawal
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Initialize insurance fund
-    engine.insurance_fund.balance = U128::new(50_000);
+    let _ = engine.top_up_insurance_fund(50_000, 0);
 
-    // Add LP with capital (LP takes leveraged position opposite to users)
-    let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = U128::new(100_000);
-    engine.vault = U128::new(100_000);
+    // Add two users with capital
+    let alice = engine.add_user(0).unwrap();
+    let bob = engine.add_user(0).unwrap();
 
-    // Add two users
-    let alice = engine.add_user(10_000).unwrap();
-    let bob = engine.add_user(10_000).unwrap();
+    let oracle_price: u64 = 100; // 100 quote per base
 
     // Users deposit principal
-    engine.deposit(alice, 10_000, 0).unwrap();
-    engine.deposit(bob, 15_000, 0).unwrap();
-    engine.vault = U128::new(125_000); // 100k LP + 10k Alice + 15k Bob
+    engine.deposit(alice, 100_000, oracle_price, 0).unwrap();
+    engine.deposit(bob, 150_000, oracle_price, 0).unwrap();
+
+    // Make crank fresh
+    crank(&mut engine, 0, oracle_price);
 
     // === Phase 1: Trading ===
 
-    // Alice opens long position at $1000
-    let oracle_price = 1_000_000; // $1 in 6 decimal scale
+    // Alice goes long 50 base, Bob takes the other side (short)
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, oracle_price, 5_000)
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(50), oracle_price, 0i64)
         .unwrap();
 
-    // Bob opens short position at $1000
-    engine
-        .execute_trade(&MATCHER, lp, bob, 0, oracle_price, -3_000)
-        .unwrap();
+    // Check effective positions
+    let alice_eff = engine.effective_pos_q(alice as usize);
+    let bob_eff = engine.effective_pos_q(bob as usize);
+    assert!(alice_eff > 0, "Alice should be long");
+    assert!(bob_eff < 0, "Bob should be short");
 
-    // Check positions
-    assert_eq!(engine.accounts[alice as usize].position_size.get(), 5_000);
-    assert_eq!(engine.accounts[bob as usize].position_size.get(), -3_000);
-    assert_eq!(engine.accounts[lp as usize].position_size.get(), -2_000); // Net opposite to users
+    // Conservation should hold
+    assert!(engine.check_conservation(), "Conservation after trade");
 
-    // === Phase 2: Price Movement & Unrealized PNL ===
+    // === Phase 2: Price Movement ===
 
-    // Price moves to $1.20 (+20%)
-    let new_price = 1_200_000;
+    let new_price: u64 = 120; // +20%
 
-    // Alice closes half her position, realizing profit
-    let slot = engine.current_slot;
-    engine
-        .execute_trade(&MATCHER, lp, alice, slot, new_price, -2_500)
-        .unwrap();
-
-    // Alice should have positive PNL from the closed portion
-    // Profit = (1.20 - 1.00) × 2500 = 500
-    assert!(engine.accounts[alice as usize].pnl.is_positive());
-    let alice_pnl = engine.accounts[alice as usize].pnl;
-
-    // === Phase 3: Funding Accrual ===
-
-    // Accrue funding rate (longs pay shorts)
+    // Accrue market to new price
     engine.advance_slot(10);
-    engine
-        .accrue_funding_with_rate(engine.current_slot, new_price, 100)
-        .unwrap(); // 100 bps/slot, longs pay
+    let slot = engine.current_slot;
+    engine.accrue_market_to(slot, new_price).unwrap();
 
-    // Settle funding for users
-    engine.touch_account(alice).unwrap();
-    engine.touch_account(bob).unwrap();
+    // Settle side effects for Alice (should have positive PnL from long)
+    engine.settle_side_effects(alice as usize).unwrap();
 
-    // Alice (long) should have paid funding, Bob (short) should have received
-    assert!(engine.accounts[alice as usize].pnl < alice_pnl); // PNL reduced by funding
-    assert!(engine.accounts[bob as usize].pnl.is_positive()); // Received funding
+    let alice_pnl = engine.accounts[alice as usize].pnl;
+    // Long position + price up = positive PnL
+    assert!(alice_pnl > 0, "Alice should have positive PnL after price increase");
 
-    // === Phase 4: PNL Warmup ===
-
-    // Check that Alice's PNL needs to warm up before withdrawal
-    let alice_withdrawable = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
+    // === Phase 3: PNL Warmup ===
 
     // Advance some slots
-    engine.advance_slot(50); // Halfway through warmup
+    engine.advance_slot(50);
 
-    let alice_warmed_halfway = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
-    assert!(alice_warmed_halfway > alice_withdrawable);
-
-    // Advance to full warmup
-    engine.advance_slot(100);
-
-    let alice_fully_warmed = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
-    assert!(alice_fully_warmed >= alice_warmed_halfway);
-
-    // === Phase 5: Withdrawal ===
-
-    // Alice closes her remaining position first
+    // Touch to settle and convert warmup
     let slot = engine.current_slot;
-    engine
-        .execute_trade(
-            &MATCHER,
-            lp,
-            alice,
-            slot,
-            new_price,
-            -engine.accounts[alice as usize].position_size.get(),
-        )
-        .unwrap();
+    engine.touch_account_full_not_atomic(alice as usize, new_price, slot).unwrap();
 
-    // Advance time for full warmup
-    engine.advance_slot(100);
+    // The key invariant is conservation
+    assert!(engine.check_conservation(), "Conservation after warmup");
 
-    // Now Alice can withdraw her warmed PNL + principal
-    let alice_final_withdrawable = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
-    let alice_withdrawal = engine.accounts[alice as usize].capital.get() + alice_final_withdrawable;
+    // === Phase 4: Close positions and withdraw_not_atomic ===
 
-    if alice_withdrawal > 0 {
+    let slot = engine.current_slot;
+    crank(&mut engine, slot, new_price);
+
+    // Alice closes her position (sell)
+    let alice_pos = engine.effective_pos_q(alice as usize);
+    if alice_pos != 0 {
+        let abs_pos = alice_pos.unsigned_abs() as i128;
         let slot = engine.current_slot;
+        // alice_pos > 0 (long), so closing means b buys from a (swap a,b with positive size)
         engine
-            .withdraw(alice, alice_withdrawal, slot, 1_000_000)
+            .execute_trade_not_atomic(bob, alice, new_price, slot, abs_pos, new_price, 0i64)
             .unwrap();
-
-        // Alice should have minimal remaining balance
-        assert!(
-            engine.accounts[alice as usize].capital.get()
-                + clamp_pos_i128(engine.accounts[alice as usize].pnl.get())
-                < 100
-        );
     }
 
-    println!("E2E test passed: Complete user journey works correctly");
+    // Advance for full warmup
+    engine.advance_slot(200);
+    let slot = engine.current_slot;
+    engine.touch_account_full_not_atomic(alice as usize, new_price, slot).unwrap();
+
+    // Alice withdraws some capital
+    let slot = engine.current_slot;
+    crank(&mut engine, slot, new_price);
+    let alice_cap = engine.accounts[alice as usize].capital.get();
+    if alice_cap > 1000 {
+        let slot = engine.current_slot;
+        engine.withdraw_not_atomic(alice, 1000, new_price, slot, 0i64).unwrap();
+    }
+
+    assert!(engine.check_conservation(), "Conservation after withdrawal");
 }
 
 // ============================================================================
-// E2E Test 3: Warmup Rate Limiting Under Stress
-// NOTE: Commented out - warmup rate limiting was removed in slab 4096 redesign
-// ============================================================================
-
-/*
-#[test]
-fn test_e2e_warmup_rate_limiting_stress() {
-    // Scenario: Many users with large PNL, warmup capacity gets constrained
-
-    let mut engine = Box::new(RiskEngine::new(default_params()));
-
-    // Small insurance fund to test capacity limits
-    engine.insurance_fund.balance = U128::new(20_000);
-
-    let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = U128::new(500_000);
-    engine.vault = U128::new(500_000);
-
-    // Add 10 users
-    let mut users = Vec::new();
-    for _ in 0..10 {
-        let user = engine.add_user(10_000).unwrap();
-        engine.deposit(user, 5_000, 0).unwrap();
-        users.push(user);
-    }
-    engine.vault = U128::new(550_000);
-
-    // All users open large long positions
-    for &user in &users {
-        engine.execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000).unwrap();
-    }
-
-    // Price moves up 50% - huge unrealized PNL
-    let boom_price = 1_500_000;
-
-    // Close all positions to realize massive PNL
-    for &user in &users {
-        engine.execute_trade(&MATCHER, lp, user, 0, boom_price, -10_000).unwrap();
-        // execute_trade automatically calls update_warmup_slope() after PNL changes
-    }
-
-    // Each user should have large positive PNL (~5000 each = 50k total)
-    let mut total_pnl = 0i128;
-    for &user in &users {
-        assert!(engine.accounts[user as usize].pnl.get() > 1_000);
-        total_pnl += engine.accounts[user as usize].pnl.get();
-    }
-    println!("Total realized PNL across all users: {}", total_pnl);
-
-    // Verify warmup rate limiting is enforced
-    // Max warmup rate = insurance_fund * 0.5 / (T/2)
-    // Note: Insurance fund may have increased from fees, so max_rate may be slightly higher
-    let max_rate = engine.insurance_fund.balance * 5000 / 50 / 10_000;
-    assert!(max_rate >= 200, "Max rate should be at least 200");
-
-    println!("Insurance fund balance: {}", engine.insurance_fund.balance);
-    println!("Calculated max warmup rate: {}", max_rate);
-    println!("Actual total warmup rate: {}", engine.total_warmup_rate);
-
-    // CRITICAL: Verify that warmup slopes were actually set by update_warmup_slope()
-    // If total_warmup_rate is 0, it means update_warmup_slope() was never called
-    assert!(engine.total_warmup_rate > 0,
-            "Warmup slopes should be set after PNL changes (update_warmup_slope called by execute_trade)");
-
-    // Total warmup rate should not exceed this (allow small rounding tolerance)
-    assert!(engine.total_warmup_rate <= max_rate + 5,
-            "Warmup rate {} significantly exceeds limit {}", engine.total_warmup_rate, max_rate);
-
-    // CRITICAL: Verify rate limiting is actually constraining the system
-    // Calculate what the total would be WITHOUT rate limiting
-    let total_pnl_u128 = total_pnl as u128;
-    let ideal_total_slope = total_pnl_u128 / engine.params.warmup_period_slots as u128;
-    println!("Ideal total slope (no limiting): {}", ideal_total_slope);
-
-    // If ideal > max_rate, then rate limiting MUST be active
-    if ideal_total_slope > max_rate {
-        assert_eq!(engine.total_warmup_rate, max_rate,
-                   "Rate limiting should cap total slope at max_rate when demand exceeds capacity");
-        println!("✅ Rate limiting is ACTIVE: capped at {} (would be {} without limiting)",
-                 engine.total_warmup_rate, ideal_total_slope);
-    } else {
-        println!("ℹ️  Rate limiting not triggered: demand ({}) below capacity ({})",
-                 ideal_total_slope, max_rate);
-    }
-
-    // Users with higher PNL should get proportionally more capacity
-    // But sum of all slopes should be capped
-    let total_slope: u128 = users.iter()
-        .map(|&u| engine.accounts[u as usize].warmup_slope_per_step)
-        .sum();
-
-    assert_eq!(total_slope, engine.total_warmup_rate,
-               "Sum of individual slopes must equal total_warmup_rate");
-    assert!(total_slope <= max_rate,
-            "Total slope must not exceed max rate");
-
-    println!("✅ E2E test passed: Warmup rate limiting under stress works correctly");
-    println!("   Total slope: {}, Max rate: {}", total_slope, max_rate);
-}
-*/
-
-// ============================================================================
-// E2E Test 4: Complete Cycle with Funding
+// E2E Test 2: Funding Complete Cycle
 // ============================================================================
 
 #[test]
+#[cfg(feature = "test")]
 fn test_e2e_funding_complete_cycle() {
-    // Scenario: Users trade, funding accrues over time, positions flip, funding reverses
+    // Scenario: Users trade, positive funding rate accrues (longs pay shorts),
+    // then positions flip. Verifies funding actually changes account PnL.
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
-    engine.insurance_fund.balance = U128::new(50_000);
+    let _ = engine.top_up_insurance_fund(50_000, 0);
 
-    let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = U128::new(100_000);
-    engine.vault = U128::new(100_000);
+    let alice = engine.add_user(0).unwrap();
+    let bob = engine.add_user(0).unwrap();
 
-    let alice = engine.add_user(10_000).unwrap();
-    let bob = engine.add_user(10_000).unwrap();
+    let oracle_price: u64 = 100;
 
-    engine.deposit(alice, 20_000, 0).unwrap();
-    engine.deposit(bob, 20_000, 0).unwrap();
-    engine.vault = U128::new(140_000);
+    engine.deposit(alice, 200_000, oracle_price, 0).unwrap();
+    engine.deposit(bob, 200_000, oracle_price, 0).unwrap();
+
+    crank(&mut engine, 0, oracle_price);
 
     // Alice goes long, Bob goes short
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, 1_000_000, 10_000)
-        .unwrap();
-    engine
-        .execute_trade(&MATCHER, lp, bob, 0, 1_000_000, -10_000)
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
         .unwrap();
 
-    // Advance time and accrue funding (longs pay shorts)
+    // Record capital before funding (settle_losses converts PnL to capital changes,
+    // so we track capital, not PnL directly)
+    let alice_cap_before = engine.accounts[alice as usize].capital.get();
+    let bob_cap_before = engine.accounts[bob as usize].capital.get();
+
+    // Store a positive funding rate: longs pay shorts (500 bps/slot)
+    // keeper_crank_not_atomic stores r_last = 500 via recompute_r_last_from_final_state
+    engine.advance_slot(1);
+    let slot1 = engine.current_slot;
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 500i64).unwrap();
+
+    // Now r_last = 500. Advance time so next accrue_market_to applies funding.
     engine.advance_slot(20);
-    engine
-        .accrue_funding_with_rate(engine.current_slot, 1_000_000, 50)
-        .unwrap(); // 50 bps/slot
+    let slot2 = engine.current_slot;
 
-    // Settle funding
-    engine.touch_account(alice).unwrap();
-    engine.touch_account(bob).unwrap();
+    // This crank accrues the market (which applies 20 slots of funding at rate 500)
+    // then touches both accounts (settle_side_effects realizes the K delta into PnL,
+    // then settle_losses transfers negative PnL from capital)
+    engine.keeper_crank_not_atomic(slot2, oracle_price,
+        &[(alice, None), (bob, None)], 64, 500i64).unwrap();
 
-    let alice_pnl_after_funding = engine.accounts[alice as usize].pnl.get();
-    let bob_pnl_after_funding = engine.accounts[bob as usize].pnl.get();
+    let alice_cap_after = engine.accounts[alice as usize].capital.get();
+    let bob_cap_after = engine.accounts[bob as usize].capital.get();
 
-    // Alice (long) paid, Bob (short) received
-    assert!(alice_pnl_after_funding < 0); // Paid funding
-    assert!(bob_pnl_after_funding > 0); // Received funding
+    // Alice (long) paid funding → capital decreased (loss settled from principal)
+    assert!(alice_cap_after < alice_cap_before,
+        "positive rate: long capital must decrease from funding (before={}, after={})",
+        alice_cap_before, alice_cap_after);
 
-    // Verify zero-sum property (approximately, minus rounding)
-    let total_funding = alice_pnl_after_funding + bob_pnl_after_funding;
-    assert!(
-        total_funding.abs() < 100,
-        "Funding should be approximately zero-sum"
-    );
+    // Bob (short) received funding → PnL positive, but it goes to reserved_pnl
+    // (warmup). Bob's capital stays the same but PnL + reserved goes up.
+    // Check that bob didn't lose capital like alice did.
+    assert!(bob_cap_after >= bob_cap_before,
+        "positive rate: short capital must not decrease from funding (before={}, after={})",
+        bob_cap_before, bob_cap_after);
+
+    // Net check: alice lost more capital than bob (funding is zero-sum at K level,
+    // but floor rounding means payers lose weakly more than receivers gain)
+    let alice_loss = alice_cap_before - alice_cap_after;
+    assert!(alice_loss > 0, "alice must have lost capital from funding");
+
+    assert!(engine.check_conservation(), "Conservation after funding");
 
     // === Positions Flip ===
-
-    // Alice closes long and opens short
     let slot = engine.current_slot;
-    engine
-        .execute_trade(&MATCHER, lp, alice, slot, 1_000_000, -20_000)
-        .unwrap();
 
-    // Bob closes short and opens long
+    // Alice closes long and opens short (total -200 base)
     engine
-        .execute_trade(&MATCHER, lp, bob, slot, 1_000_000, 20_000)
+        .execute_trade_not_atomic(bob, alice, oracle_price, slot, pos_q(200), oracle_price, 0i64)
         .unwrap();
 
     // Now Alice is short and Bob is long
-    assert!(engine.accounts[alice as usize].position_size.is_negative());
-    assert!(engine.accounts[bob as usize].position_size.is_positive());
+    let alice_eff = engine.effective_pos_q(alice as usize);
+    let bob_eff = engine.effective_pos_q(bob as usize);
+    assert!(alice_eff < 0, "Alice should now be short");
+    assert!(bob_eff > 0, "Bob should now be long");
 
-    // Advance time and accrue more funding (now Alice receives, Bob pays)
-    engine.advance_slot(20);
-    engine
-        .accrue_funding_with_rate(engine.current_slot, 1_000_000, 50)
-        .unwrap();
-
-    engine.touch_account(alice).unwrap();
-    engine.touch_account(bob).unwrap();
-
-    // Now funding should have reversed
-    let alice_final = engine.accounts[alice as usize].pnl.get();
-    let bob_final = engine.accounts[bob as usize].pnl.get();
-
-    // Alice (now short) should have received some funding back
-    assert!(alice_final > alice_pnl_after_funding);
-
-    // Bob (now long) should have paid
-    assert!(bob_final < bob_pnl_after_funding);
-
-    println!("✅ E2E test passed: Funding complete cycle works correctly");
+    assert!(engine.check_conservation(), "Conservation after position flip");
 }
 
-// ============================================================================
-// E2E Test 5: Oracle Manipulation Attack Scenario
-// NOTE: Partially commented out - warmup rate limiting was removed in slab 4096 redesign
-// ============================================================================
+#[test]
+#[cfg(feature = "test")]
+fn test_e2e_negative_funding_rate() {
+    // Negative funding rate: shorts pay longs
 
-/*
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+    let _ = engine.top_up_insurance_fund(50_000, 0);
+
+    let alice = engine.add_user(0).unwrap();
+    let bob = engine.add_user(0).unwrap();
+
+    let oracle_price: u64 = 100;
+
+    engine.deposit(alice, 200_000, oracle_price, 0).unwrap();
+    engine.deposit(bob, 200_000, oracle_price, 0).unwrap();
+
+    crank(&mut engine, 0, oracle_price);
+
+    // Alice long, Bob short
+    engine
+        .execute_trade_not_atomic(alice, bob, oracle_price, 0, pos_q(100), oracle_price, 0i64)
+        .unwrap();
+
+    let alice_cap_before = engine.accounts[alice as usize].capital.get();
+    let bob_cap_before = engine.accounts[bob as usize].capital.get();
+
+    // Store negative rate: shorts pay longs (-500 bps/slot)
+    engine.advance_slot(1);
+    let slot1 = engine.current_slot;
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -500i64).unwrap();
+
+    // Advance and settle
+    engine.advance_slot(20);
+    let slot2 = engine.current_slot;
+    engine.keeper_crank_not_atomic(slot2, oracle_price,
+        &[(alice, None), (bob, None)], 64, -500i64).unwrap();
+
+    let alice_cap_after = engine.accounts[alice as usize].capital.get();
+    let bob_cap_after = engine.accounts[bob as usize].capital.get();
+
+    // Negative rate: shorts pay, longs receive
+    // Bob (short) paid funding → capital decreased (loss settled from principal)
+    assert!(bob_cap_after < bob_cap_before,
+        "negative rate: short capital must decrease (before={}, after={})",
+        bob_cap_before, bob_cap_after);
+
+    // Alice (long) received → capital must not decrease
+    assert!(alice_cap_after >= alice_cap_before,
+        "negative rate: long capital must not decrease (before={}, after={})",
+        alice_cap_before, alice_cap_after);
+
+    let bob_loss = bob_cap_before - bob_cap_after;
+    assert!(bob_loss > 0, "bob must have lost capital from negative funding");
+
+    assert!(engine.check_conservation(), "Conservation with negative funding");
+
+    // Fork-specific amm tests
+
 #[test]
 fn test_e2e_oracle_attack_protection() {
     // Scenario: Attacker tries to exploit oracle manipulation but gets limited by warmup + ADL
@@ -507,4 +397,99 @@ fn test_e2e_oracle_attack_protection() {
     println!("   Attacker after ADL: {}", attacker_after_adl);
     println!("   Attack mitigation: {}%", (attacker_fake_pnl - attacker_after_adl) * 100 / attacker_fake_pnl);
 }
-*/
+
+#[test]
+fn test_e2e_warmup_rate_limiting_stress() {
+    // Scenario: Many users with large PNL, warmup capacity gets constrained
+
+    let mut engine = Box::new(RiskEngine::new(default_params()));
+
+    // Small insurance fund to test capacity limits
+    engine.insurance_fund.balance = U128::new(20_000);
+
+    let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
+    engine.accounts[lp as usize].capital = U128::new(500_000);
+    engine.vault = U128::new(500_000);
+
+    // Add 10 users
+    let mut users = Vec::new();
+    for _ in 0..10 {
+        let user = engine.add_user(10_000).unwrap();
+        engine.deposit(user, 5_000, 0).unwrap();
+        users.push(user);
+    }
+    engine.vault = U128::new(550_000);
+
+    // All users open large long positions
+    for &user in &users {
+        engine.execute_trade(&MATCHER, lp, user, 0, 1_000_000, 10_000).unwrap();
+    }
+
+    // Price moves up 50% - huge unrealized PNL
+    let boom_price = 1_500_000;
+
+    // Close all positions to realize massive PNL
+    for &user in &users {
+        engine.execute_trade(&MATCHER, lp, user, 0, boom_price, -10_000).unwrap();
+        // execute_trade automatically calls update_warmup_slope() after PNL changes
+    }
+
+    // Each user should have large positive PNL (~5000 each = 50k total)
+    let mut total_pnl = 0i128;
+    for &user in &users {
+        assert!(engine.accounts[user as usize].pnl.get() > 1_000);
+        total_pnl += engine.accounts[user as usize].pnl.get();
+    }
+    println!("Total realized PNL across all users: {}", total_pnl);
+
+    // Verify warmup rate limiting is enforced
+    // Max warmup rate = insurance_fund * 0.5 / (T/2)
+    // Note: Insurance fund may have increased from fees, so max_rate may be slightly higher
+    let max_rate = engine.insurance_fund.balance * 5000 / 50 / 10_000;
+    assert!(max_rate >= 200, "Max rate should be at least 200");
+
+    println!("Insurance fund balance: {}", engine.insurance_fund.balance);
+    println!("Calculated max warmup rate: {}", max_rate);
+    println!("Actual total warmup rate: {}", engine.total_warmup_rate);
+
+    // CRITICAL: Verify that warmup slopes were actually set by update_warmup_slope()
+    // If total_warmup_rate is 0, it means update_warmup_slope() was never called
+    assert!(engine.total_warmup_rate > 0,
+            "Warmup slopes should be set after PNL changes (update_warmup_slope called by execute_trade)");
+
+    // Total warmup rate should not exceed this (allow small rounding tolerance)
+    assert!(engine.total_warmup_rate <= max_rate + 5,
+            "Warmup rate {} significantly exceeds limit {}", engine.total_warmup_rate, max_rate);
+
+    // CRITICAL: Verify rate limiting is actually constraining the system
+    // Calculate what the total would be WITHOUT rate limiting
+    let total_pnl_u128 = total_pnl as u128;
+    let ideal_total_slope = total_pnl_u128 / engine.params.warmup_period_slots as u128;
+    println!("Ideal total slope (no limiting): {}", ideal_total_slope);
+
+    // If ideal > max_rate, then rate limiting MUST be active
+    if ideal_total_slope > max_rate {
+        assert_eq!(engine.total_warmup_rate, max_rate,
+                   "Rate limiting should cap total slope at max_rate when demand exceeds capacity");
+        println!("✅ Rate limiting is ACTIVE: capped at {} (would be {} without limiting)",
+                 engine.total_warmup_rate, ideal_total_slope);
+    } else {
+        println!("ℹ️  Rate limiting not triggered: demand ({}) below capacity ({})",
+                 ideal_total_slope, max_rate);
+    }
+
+    // Users with higher PNL should get proportionally more capacity
+    // But sum of all slopes should be capped
+    let total_slope: u128 = users.iter()
+        .map(|&u| engine.accounts[u as usize].warmup_slope_per_step)
+        .sum();
+
+    assert_eq!(total_slope, engine.total_warmup_rate,
+               "Sum of individual slopes must equal total_warmup_rate");
+    assert!(total_slope <= max_rate,
+            "Total slope must not exceed max rate");
+
+    println!("✅ E2E test passed: Warmup rate limiting under stress works correctly");
+    println!("   Total slope: {}, Max rate: {}", total_slope, max_rate);
+}
+}

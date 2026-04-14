@@ -17,13 +17,11 @@
 //! ## Invariant Definitions
 //!
 //! ### Conservation (check_conservation)
-//! vault >= C_tot + sum(settled_pnl) + insurance
+//! vault >= C_tot + insurance
 //!
-//! Where settled_pnl accounts for lazy funding:
-//!   settled_pnl = account.pnl - (global_funding_index - account.funding_index) * position / 1e6
-//!
-//! Slack rule: actual >= expected, and (actual - expected) <= MAX_ROUNDING_SLACK
-//! This ensures vault has at least what is owed, with bounded dust.
+//! With the ADL K-coefficient funding model, funding is applied via side-global
+//! K coefficients and per-account snapshots. There is no lazy funding index.
+//! Conservation is simply: vault >= c_tot + insurance.
 //!
 //! ## Suite Components
 //! - Global invariants (conservation, aggregate consistency)
@@ -37,10 +35,8 @@ use percolator::*;
 use proptest::prelude::*;
 
 // ============================================================================
-// CONSTANTS AND MATCHER
+// CONSTANTS
 // ============================================================================
-
-const MATCHER: NoOpMatcher = NoOpMatcher;
 
 // Default oracle price for conservation checks
 const DEFAULT_ORACLE: u64 = 1_000_000;
@@ -67,20 +63,7 @@ fn is_account_used(engine: &RiskEngine, idx: u16) -> bool {
 /// Helper to get the safe upper bound for account iteration
 #[inline]
 fn account_count(engine: &RiskEngine) -> usize {
-    core::cmp::min(engine.params.max_accounts as usize, engine.accounts.len())
-}
-
-/// Compute funding payment with vault-favoring rounding.
-/// Round UP when account pays (raw > 0), truncate when account receives (raw < 0).
-/// This matches the engine's settle_account_funding and ensures one-sided conservation.
-#[inline]
-fn funding_payment(position: i128, delta_f: i128) -> i128 {
-    let raw = position.saturating_mul(delta_f);
-    if raw > 0 {
-        raw.saturating_add(999_999).saturating_div(1_000_000)
-    } else {
-        raw.saturating_div(1_000_000)
-    }
+    engine.accounts.len()
 }
 
 // ============================================================================
@@ -90,7 +73,7 @@ fn funding_payment(position: i128, delta_f: i128) -> i128 {
 /// Assert all global invariants hold
 /// IMPORTANT: This function is PURE - it does NOT mutate the engine.
 /// Invariant checks must reflect on-chain semantics (funding is lazy).
-fn assert_global_invariants(engine: &RiskEngine, context: &str, _oracle_price: u64) {
+fn assert_global_invariants(engine: &RiskEngine, context: &str) {
     // 1. Primary conservation: vault >= C_tot + insurance
     // This is oracle-independent (no mark PnL). The extended check with mark PnL
     // requires a consistent oracle across all account entry_prices, which the fuzzer
@@ -115,7 +98,7 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str, _oracle_price: u
         if is_account_used(engine, i as u16) {
             let acc = &engine.accounts[i];
             sum_capital += acc.capital.get();
-            let pnl = acc.pnl.get();
+            let pnl = acc.pnl;
             if pnl > 0 {
                 sum_pnl_pos += pnl as u128;
             }
@@ -130,11 +113,11 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str, _oracle_price: u
         sum_capital
     );
     assert_eq!(
-        engine.pnl_pos_tot.get(),
+        engine.pnl_pos_tot,
         sum_pnl_pos,
         "{}: pnl_pos_tot={} != sum(max(pnl,0))={}",
         context,
-        engine.pnl_pos_tot.get(),
+        engine.pnl_pos_tot,
         sum_pnl_pos
     );
 
@@ -144,10 +127,10 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str, _oracle_price: u
             let acc = &engine.accounts[i];
 
             // reserved_pnl <= max(0, pnl)
-            let pnl = acc.pnl.get();
+            let pnl = acc.pnl;
             let positive_pnl = if pnl > 0 { pnl as u128 } else { 0 };
             assert!(
-                (acc.reserved_pnl as u128) <= positive_pnl,
+                acc.reserved_pnl <= positive_pnl,
                 "{}: Account {} has reserved_pnl={} > positive_pnl={}",
                 context,
                 i,
@@ -162,7 +145,7 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str, _oracle_price: u
 // SECTION 3: PARAMETER REGIMES
 // ============================================================================
 
-/// Regime A: Normal mode (floor = 0 or small)
+/// Regime A: Normal mode (small floors)
 fn params_regime_a() -> RiskParams {
     RiskParams {
         warmup_period_slots: 100,
@@ -171,31 +154,15 @@ fn params_regime_a() -> RiskParams {
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
         new_account_fee: U128::new(0),
-        risk_reduction_threshold: U128::new(0),
         maintenance_fee_per_slot: U128::new(0),
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        liquidation_buffer_bps: 100,
         min_liquidation_abs: U128::new(100_000),
-        funding_premium_weight_bps: 0,
-        funding_settlement_interval_slots: 0,
-        funding_premium_dampening_e6: 1_000_000,
-        funding_premium_max_bps_per_slot: 5,
-        partial_liquidation_bps: 2000,
-        partial_liquidation_cooldown_slots: 30,
-        use_mark_price_for_liquidation: false,
-        emergency_liquidation_margin_bps: 0,
-        fee_tier2_bps: 0,
-        fee_tier3_bps: 0,
-        fee_tier2_threshold: 0,
-        fee_tier3_threshold: 0,
-        fee_split_lp_bps: 0,
-        fee_split_protocol_bps: 0,
-        fee_split_creator_bps: 0,
-        fee_utilization_surge_bps: 0,
-        min_nonzero_mm_req: 0,
-        min_nonzero_im_req: 0,
+        min_initial_deposit: U128::new(2),
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        insurance_floor: U128::ZERO,
     }
 }
 
@@ -208,31 +175,15 @@ fn params_regime_b() -> RiskParams {
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
         new_account_fee: U128::new(0),
-        risk_reduction_threshold: U128::new(1000),
         maintenance_fee_per_slot: U128::new(0),
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        liquidation_buffer_bps: 100,
         min_liquidation_abs: U128::new(100_000),
-        funding_premium_weight_bps: 0,
-        funding_settlement_interval_slots: 0,
-        funding_premium_dampening_e6: 1_000_000,
-        funding_premium_max_bps_per_slot: 5,
-        partial_liquidation_bps: 2000,
-        partial_liquidation_cooldown_slots: 30,
-        use_mark_price_for_liquidation: false,
-        emergency_liquidation_margin_bps: 0,
-        fee_tier2_bps: 0,
-        fee_tier3_bps: 0,
-        fee_tier2_threshold: 0,
-        fee_tier3_threshold: 0,
-        fee_split_lp_bps: 0,
-        fee_split_protocol_bps: 0,
-        fee_split_creator_bps: 0,
-        fee_utilization_surge_bps: 0,
-        min_nonzero_mm_req: 0,
-        min_nonzero_im_req: 0,
+        min_initial_deposit: U128::new(1000),
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        insurance_floor: U128::ZERO,
     }
 }
 
@@ -343,8 +294,8 @@ struct FuzzState {
     engine: Box<RiskEngine>,
     live_accounts: Vec<u16>,
     lp_idx: Option<u16>,
-    account_ids: Vec<u64>,  // Track allocated account IDs for uniqueness
-    rng_state: u64,         // For deterministic selector resolution
+    account_ids: Vec<u64>, // Track allocated account IDs for uniqueness
+    rng_state: u64,        // For deterministic selector resolution
     last_oracle_price: u64, // Track last oracle price for conservation checks with mark PnL
 }
 
@@ -459,7 +410,7 @@ impl FuzzState {
                         );
                         self.account_ids.push(new_id);
                         self.live_accounts.push(idx);
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback - restore engine and harness state
@@ -505,7 +456,7 @@ impl FuzzState {
                         if self.lp_idx.is_none() {
                             self.lp_idx = Some(idx);
                         }
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback - restore engine and harness state
@@ -522,7 +473,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.deposit(idx, *amount, 0);
+                let result = self.engine.deposit(idx, *amount, oracle, 0);
 
                 match result {
                     Ok(()) => {
@@ -533,7 +484,7 @@ impl FuzzState {
                             "{}: vault didn't increase correctly",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -547,7 +498,8 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.withdraw(idx, *amount, 0, 1_000_000);
+                let now_slot = self.engine.current_slot;
+                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i64);
 
                 match result {
                     Ok(()) => {
@@ -558,7 +510,7 @@ impl FuzzState {
                             "{}: vault didn't decrease correctly",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -576,7 +528,7 @@ impl FuzzState {
                     "{}: current_slot went backwards",
                     context
                 );
-                assert_global_invariants(&self.engine, &context, oracle);
+                assert_global_invariants(&self.engine, &context);
             }
 
             Action::AccrueFunding {
@@ -585,25 +537,18 @@ impl FuzzState {
                 rate_bps,
             } => {
                 let before = (*self.engine).clone();
-                let last_slot_before = self.engine.last_funding_slot;
+                // Set funding rate for next accrue_market_to call
+                self.engine.funding_rate_bps_per_slot_last = *rate_bps;
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
-                let result =
-                    self.engine
-                        .accrue_funding_with_rate(now_slot, *oracle_price, *rate_bps);
+                let result = self
+                    .engine
+                    .accrue_market_to(now_slot, *oracle_price);
 
                 match result {
                     Ok(()) => {
-                        // Only expect last_funding_slot to update if now_slot > old value
-                        if now_slot > last_slot_before {
-                            assert_eq!(
-                                self.engine.last_funding_slot, now_slot,
-                                "{}: last_funding_slot not updated",
-                                context
-                            );
-                        }
                         self.last_oracle_price = *oracle_price;
-                        assert_global_invariants(&self.engine, &context, self.last_oracle_price);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -615,19 +560,13 @@ impl FuzzState {
             Action::Touch { who } => {
                 let idx = self.resolve_selector(who);
                 let before = (*self.engine).clone();
+                let now_slot = self.engine.current_slot;
 
-                let result = self.engine.touch_account(idx);
+                let result = self.engine.touch_account_full_not_atomic(idx as usize, oracle, now_slot);
 
                 match result {
                     Ok(()) => {
-                        // funding_index should equal global index
-                        assert_eq!(
-                            self.engine.accounts[idx as usize].funding_index,
-                            self.engine.funding_index_qpb_e6,
-                            "{}: funding_index not synced",
-                            context
-                        );
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -651,16 +590,17 @@ impl FuzzState {
                 }
 
                 let before = (*self.engine).clone();
+                let now_slot = self.engine.current_slot;
 
                 let result =
                     self.engine
-                        .execute_trade(&MATCHER, lp_idx, user_idx, 0, *oracle_price, *size);
+                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i64);
 
                 match result {
                     Ok(_) => {
                         // Trade succeeded - update oracle price for mark PnL checks
                         self.last_oracle_price = *oracle_price;
-                        assert_global_invariants(&self.engine, &context, self.last_oracle_price);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -673,7 +613,8 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.top_up_insurance_fund(*amount);
+                let now_slot = self.engine.current_slot;
+                let result = self.engine.top_up_insurance_fund(*amount, now_slot);
 
                 match result {
                     Ok(_above_threshold) => {
@@ -684,7 +625,7 @@ impl FuzzState {
                             "{}: vault didn't increase",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context, oracle);
+                        assert_global_invariants(&self.engine, &context);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -735,13 +676,14 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, 10_000, 0);
+            let _ = state.engine.deposit(idx, 10_000, DEFAULT_ORACLE, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
         let current_insurance = state.engine.insurance_fund.balance.get();
         if initial_insurance > current_insurance {
-            let _ = state.engine.top_up_insurance_fund(initial_insurance - current_insurance);
+            let now_slot = state.engine.current_slot;
+            let _ = state.engine.top_up_insurance_fund(initial_insurance - current_insurance, now_slot);
         }
 
         // Execute actions - selectors resolved at runtime against live state
@@ -774,15 +716,16 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, 10_000, 0);
+            let _ = state.engine.deposit(idx, 10_000, DEFAULT_ORACLE, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.risk_reduction_threshold.get();
+        let floor = state.engine.params.insurance_floor.get();
         let target_insurance = initial_insurance.max(floor + 100);
         let current_insurance = state.engine.insurance_fund.balance.get();
         if target_insurance > current_insurance {
-            let _ = state.engine.top_up_insurance_fund(target_insurance - current_insurance);
+            let now_slot = state.engine.current_slot;
+            let _ = state.engine.top_up_insurance_fund(target_insurance - current_insurance, now_slot);
         }
 
         // Execute actions
@@ -798,161 +741,6 @@ proptest! {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
-
-    // 1. withdrawable_pnl monotone in slot for positive pnl
-    #[test]
-    fn fuzz_prop_withdrawable_monotone(
-        pnl in 1i128..100_000,
-        slope in 1u128..10_000,
-        slot1 in 0u64..500,
-        slot2 in 0u64..500
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
-        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
-
-        let earlier = slot1.min(slot2);
-        let later = slot1.max(slot2);
-
-        engine.current_slot = earlier;
-        let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
-
-        engine.current_slot = later;
-        let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
-
-        prop_assert!(w2 >= w1, "Withdrawable not monotone: {} -> {} at slots {} -> {}",
-                     w1, w2, earlier, later);
-    }
-
-    // 2. withdrawable_pnl == 0 if pnl<=0 or slope==0 or elapsed==0
-    #[test]
-    fn fuzz_prop_withdrawable_zero_conditions(
-        principal in 0u128..100_000,
-        pnl in -100_000i128..0, // Non-positive PnL
-        slope in 0u128..10_000,
-        slot in 0u64..500
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].capital = U128::new(principal);
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
-        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
-        engine.current_slot = slot;
-
-        let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
-
-        // If pnl <= 0, withdrawable must be 0
-        if pnl <= 0 {
-            prop_assert_eq!(withdrawable, 0, "Withdrawable should be 0 for non-positive pnl");
-        }
-    }
-
-    #[test]
-    fn fuzz_prop_withdrawable_zero_slope(
-        pnl in 1i128..100_000,
-        slot in 1u64..500
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0); // Zero slope
-        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
-        engine.current_slot = slot;
-
-        let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
-        prop_assert_eq!(withdrawable, 0, "Withdrawable should be 0 for zero slope");
-    }
-
-    // 4. settle_warmup_to_capital idempotent at same slot
-    #[test]
-    fn fuzz_prop_settle_idempotent(
-        capital in 100u128..10_000,
-        pnl in 1i128..5_000,
-        slope in 1u128..1000,
-        slot in 1u64..200
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_b()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.insurance_fund.balance = U128::new(100_000);
-        engine.vault = U128::new(100_000);
-        engine.deposit(user_idx, capital, 0).unwrap();
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
-        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
-        engine.current_slot = slot;
-
-        // First settlement
-        let _ = engine.settle_warmup_to_capital(user_idx);
-        let state1 = (
-            engine.accounts[user_idx as usize].capital,
-            engine.accounts[user_idx as usize].pnl,
-        );
-
-        // Second settlement at same slot
-        let _ = engine.settle_warmup_to_capital(user_idx);
-        let state2 = (
-            engine.accounts[user_idx as usize].capital,
-            engine.accounts[user_idx as usize].pnl,
-        );
-
-        prop_assert_eq!(state1, state2, "Settlement should be idempotent");
-    }
-
-    // 7. touch_account idempotent if global index unchanged
-    #[test]
-    fn fuzz_prop_touch_idempotent(
-        position in -100_000i128..100_000,
-        pnl in -50_000i128..50_000,
-        funding_delta in -1_000_000i128..1_000_000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].position_size = I128::new(position);
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.funding_index_qpb_e6 = I128::new(funding_delta);
-
-        // First touch
-        let _ = engine.touch_account(user_idx);
-        let state1 = (
-            engine.accounts[user_idx as usize].pnl,
-            engine.accounts[user_idx as usize].funding_index,
-        );
-
-        // Second touch without changing global index
-        let _ = engine.touch_account(user_idx);
-        let state2 = (
-            engine.accounts[user_idx as usize].pnl,
-            engine.accounts[user_idx as usize].funding_index,
-        );
-
-        prop_assert_eq!(state1, state2, "Touch should be idempotent");
-    }
-
-    // 8. accrue_funding with dt=0 is no-op
-    #[test]
-    fn fuzz_prop_funding_zero_dt_noop(
-        price in 100_000u64..10_000_000,
-        rate in -1000i64..1000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-
-        let index_before = engine.funding_index_qpb_e6;
-        let slot_before = engine.last_funding_slot;
-
-        // Accrue with same slot (dt=0)
-        let _ = engine.accrue_funding_with_rate(slot_before, price, rate);
-
-        prop_assert_eq!(engine.funding_index_qpb_e6, index_before,
-                        "Funding index changed with dt=0");
-    }
 
     // 10. add_user/add_lp fails when at max capacity
     #[test]
@@ -971,61 +759,6 @@ proptest! {
             let result = engine.add_user(1);
             prop_assert!(result.is_err(), "add_user should fail at capacity");
         }
-    }
-
-    // 11. Zero position pays no funding
-    #[test]
-    fn fuzz_prop_zero_position_no_funding(
-        pnl in -100_000i128..100_000,
-        funding_delta in -10_000_000i128..10_000_000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-
-        engine.accounts[user_idx as usize].position_size = I128::new(0);
-        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
-        engine.funding_index_qpb_e6 = I128::new(funding_delta);
-
-        let _ = engine.touch_account(user_idx);
-
-        prop_assert_eq!(engine.accounts[user_idx as usize].pnl.get(), pnl,
-                        "Zero position should not pay funding");
-    }
-
-    // 12. Funding is zero-sum between opposite positions
-    #[test]
-    fn fuzz_prop_funding_zero_sum(
-        position in 1i128..100_000,
-        funding_delta in -1_000_000i128..1_000_000
-    ) {
-        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
-        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-
-        // Opposite positions
-        engine.accounts[user_idx as usize].position_size = I128::new(position);
-        engine.accounts[lp_idx as usize].position_size = I128::new(-position);
-
-        let total_pnl_before = engine.accounts[user_idx as usize].pnl.get()
-            + engine.accounts[lp_idx as usize].pnl.get();
-
-        engine.funding_index_qpb_e6 = I128::new(funding_delta);
-
-        let _ = engine.touch_account(user_idx);
-        let _ = engine.touch_account(lp_idx);
-
-        let total_pnl_after = engine.accounts[user_idx as usize].pnl.get()
-            + engine.accounts[lp_idx as usize].pnl.get();
-
-        // Funding payments round UP when account pays, so total PNL may decrease
-        // (vault keeps rounding dust). This ensures one-sided conservation slack.
-        // The change should never be positive (no value created from thin air).
-        let change = total_pnl_after - total_pnl_before;
-        prop_assert!(change <= 0,
-                     "Funding should not create value: change={}", change);
-        // The absolute change should be bounded by rounding (at most 2 per account pair)
-        prop_assert!(change >= -2,
-                     "Funding change should be bounded: change={}", change);
     }
 }
 
@@ -1148,42 +881,19 @@ fn random_action(rng: &mut Rng) -> (Action, String) {
 }
 
 /// Compute conservation slack without panicking
+/// Compute conservation slack: vault - (c_tot + insurance).
+/// With the ADL K-coefficient funding model, there is no lazy funding index to settle.
 fn compute_conservation_slack(engine: &RiskEngine) -> (i128, u128, i128, u128, u128) {
-    let mut total_capital = 0u128;
-    let mut net_settled_pnl: i128 = 0;
-    let global_index = engine.funding_index_qpb_e6.get();
-
-    let n = account_count(engine);
-    for i in 0..n {
-        if is_account_used(engine, i as u16) {
-            let acc = &engine.accounts[i];
-            total_capital += acc.capital.get();
-
-            // Compute settled PNL using shared helper (matches engine rounding)
-            let mut settled_pnl = acc.pnl.get();
-            if acc.position_size.get() != 0 {
-                let delta_f = global_index.saturating_sub(acc.funding_index.get());
-                if delta_f != 0 {
-                    let payment = funding_payment(acc.position_size.get(), delta_f);
-                    settled_pnl = settled_pnl.saturating_sub(payment);
-                }
-            }
-            net_settled_pnl = net_settled_pnl.saturating_add(settled_pnl);
-        }
-    }
-    let base = total_capital + engine.insurance_fund.balance.get();
-    let expected = if net_settled_pnl >= 0 {
-        base + net_settled_pnl as u128
-    } else {
-        base.saturating_sub((-net_settled_pnl) as u128)
-    };
+    let total_capital = engine.c_tot.get();
+    let insurance = engine.insurance_fund.balance.get();
+    let base = total_capital + insurance;
     let actual = engine.vault.get();
-    let slack = actual as i128 - expected as i128;
+    let slack = actual as i128 - base as i128;
     (
         slack,
         total_capital,
-        net_settled_pnl,
-        engine.insurance_fund.balance.get(),
+        0i128, // net_settled_pnl no longer computed separately
+        insurance,
         actual,
     )
 }
@@ -1222,32 +932,31 @@ fn run_deterministic_fuzzer(
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, rng.u128(5_000, 50_000), 0);
+            let _ = state.engine.deposit(idx, rng.u128(5_000, 50_000), DEFAULT_ORACLE, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.risk_reduction_threshold.get();
+        let floor = state.engine.params.insurance_floor.get();
         let target_ins = floor + rng.u128(5_000, 100_000);
         let current_ins = state.engine.insurance_fund.balance.get();
         if target_ins > current_ins {
-            let _ = state.engine.top_up_insurance_fund(target_ins - current_ins);
+            let now_slot = state.engine.current_slot;
+            let _ = state.engine.top_up_insurance_fund(target_ins - current_ins, now_slot);
         }
 
         // Verify conservation after setup
-        if !state.engine.check_conservation(DEFAULT_ORACLE) {
+        if !state.engine.check_conservation() {
             eprintln!("Conservation failed after setup for seed {}", seed);
             eprintln!(
                 "  vault={}, insurance={}",
-                state.engine.vault.get(),
-                state.engine.insurance_fund.balance.get()
+                state.engine.vault.get(), state.engine.insurance_fund.balance.get()
             );
             eprintln!("  live_accounts={:?}", state.live_accounts);
             let mut total_cap = 0u128;
             for &idx in &state.live_accounts {
                 eprintln!(
                     "  account[{}]: capital={}",
-                    idx,
-                    state.engine.accounts[idx as usize].capital.get()
+                    idx, state.engine.accounts[idx as usize].capital.get()
                 );
                 total_cap += state.engine.accounts[idx as usize].capital.get();
             }
@@ -1338,10 +1047,6 @@ fn amount_strategy() -> impl Strategy<Value = u128> {
     0u128..1_000_000
 }
 
-fn position_strategy() -> impl Strategy<Value = i128> {
-    -100_000i128..100_000
-}
-
 proptest! {
     // Test that deposit always increases vault and principal
     #[test]
@@ -1352,7 +1057,7 @@ proptest! {
         let vault_before = engine.vault;
         let principal_before = engine.accounts[user_idx as usize].capital;
 
-        let _ = engine.deposit(user_idx, amount, 0);
+        let _ = engine.deposit(user_idx, amount, DEFAULT_ORACLE, 0);
 
         prop_assert_eq!(engine.vault, vault_before + amount);
         prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before + amount);
@@ -1367,12 +1072,12 @@ proptest! {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.deposit(user_idx, deposit_amount, 0).unwrap();
+        engine.deposit(user_idx, deposit_amount, DEFAULT_ORACLE, 0).unwrap();
 
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw(user_idx, withdraw_amount, 0, 1_000_000);
+        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i64);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1395,17 +1100,147 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
 
         for amount in deposits {
-            let _ = engine.deposit(user_idx, amount, 0);
+            let _ = engine.deposit(user_idx, amount, DEFAULT_ORACLE, 0);
         }
 
-        prop_assert!(engine.check_conservation(DEFAULT_ORACLE));
+        prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw(user_idx, amount, 0, 1_000_000);
+            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i64);
         }
 
-        prop_assert!(engine.check_conservation(DEFAULT_ORACLE));
+        prop_assert!(engine.check_conservation());
     }
+}
+
+// ============================================================================
+// SECTION 9: CONSERVATION REGRESSION TESTS
+// These verify that conservation invariant holds under various conditions
+// ============================================================================
+
+/// Verify check_conservation holds after trades and market accrual.
+/// Conservation: vault >= c_tot + insurance.
+#[test]
+fn conservation_after_trade_and_funding_regression() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create LP and user with positions
+    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(lp_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
+    engine.deposit(user_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
+
+    // Make crank fresh
+    engine.last_crank_slot = 0;
+    engine.last_market_slot = 0;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.funding_price_sample_last = DEFAULT_ORACLE;
+
+    // Execute trade to create positions
+    engine
+        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i64)
+        .unwrap();
+
+    // Accrue market with funding
+    engine.funding_rate_bps_per_slot_last = 500;
+    engine.advance_slot(1000);
+    let slot = engine.current_slot;
+    engine.accrue_market_to(slot, DEFAULT_ORACLE).unwrap();
+
+    // Verify conservation
+    assert!(
+        engine.check_conservation(),
+        "check_conservation failed after trade and market accrual"
+    );
+
+    // Also verify manually: vault >= c_tot + insurance
+    let vault = engine.vault.get();
+    let c_tot = engine.c_tot.get();
+    let insurance = engine.insurance_fund.balance.get();
+    assert!(
+        vault >= c_tot + insurance,
+        "Manual conservation check: vault={} < c_tot={} + insurance={}",
+        vault,
+        c_tot,
+        insurance
+    );
+}
+
+/// Verify the test harness correctly simulates Solana atomicity
+/// When an operation returns Err, the harness must restore the engine to pre-call state
+/// This ensures the fuzz suite accurately models on-chain behavior
+#[test]
+fn harness_rollback_simulation_test() {
+    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+
+    // Create user with some capital
+    let user_idx = engine.add_user(1).unwrap();
+    engine.deposit(user_idx, 1000, DEFAULT_ORACLE, 0).unwrap();
+
+    // Accrue market to create state that could be mutated
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.funding_price_sample_last = DEFAULT_ORACLE;
+    engine.funding_rate_bps_per_slot_last = 100;
+    engine.advance_slot(100);
+    let slot = engine.current_slot;
+    engine.accrue_market_to(slot, DEFAULT_ORACLE).unwrap();
+
+    // Capture complete state before failed operation (deep clone of RiskEngine)
+    let before = (*engine).clone();
+
+    // Capture expected values before any operation
+    let expected_vault = engine.vault;
+    let expected_capital = engine.accounts[user_idx as usize].capital;
+    let expected_pnl = engine.accounts[user_idx as usize].pnl;
+
+    // Try to withdraw_not_atomic more than available - will fail
+    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i64);
+    assert!(
+        result.is_err(),
+        "Withdraw should fail with insufficient balance"
+    );
+
+    // Simulate Solana rollback (this is what the harness does)
+    // Deep restore of RiskEngine contents
+    *engine = before;
+
+    // Verify state is exactly restored
+    assert_eq!(engine.vault, expected_vault, "vault must be restored");
+    assert_eq!(
+        engine.accounts[user_idx as usize].capital, expected_capital,
+        "capital must be restored"
+    );
+    assert_eq!(
+        engine.accounts[user_idx as usize].pnl, expected_pnl,
+        "pnl must be restored"
+    );
+
+    // Conservation must still hold after rollback
+    assert!(
+        engine.check_conservation(),
+        "Conservation must hold after harness rollback"
+    );
+
+    // ================================================================
+    // Fork-specific fuzzing tests (PERC-121 funding, premium funding)
+    // ================================================================
+
+fn position_strategy() -> impl Strategy<Value = i128> {
+    -100_000i128..100_000
+}
+
+/// Compute funding payment with vault-favoring rounding.
+/// Round UP when account pays (raw > 0), truncate when account receives (raw < 0).
+/// This matches the engine's settle_account_funding and ensures one-sided conservation.
+#[inline]
+fn funding_payment(position: i128, delta_f: i128) -> i128 {
+    let raw = position.saturating_mul(delta_f);
+    if raw > 0 {
+        raw.saturating_add(999_999).saturating_div(1_000_000)
+    } else {
+        raw.saturating_div(1_000_000)
+    }
+}
 
     // Test funding idempotence
     #[test]
@@ -1448,12 +1283,215 @@ proptest! {
                        "Funding must never modify principal");
     }
 
-}
+    // 8. accrue_funding with dt=0 is no-op
+    #[test]
+    fn fuzz_prop_funding_zero_dt_noop(
+        price in 100_000u64..10_000_000,
+        rate in -1000i64..1000
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
 
-// ============================================================================
-// SECTION 9: CONSERVATION REGRESSION TESTS
-// These verify that conservation invariant holds under various conditions
-// ============================================================================
+        let index_before = engine.funding_index_qpb_e6;
+        let slot_before = engine.last_funding_slot;
+
+        // Accrue with same slot (dt=0)
+        let _ = engine.accrue_funding_with_rate(slot_before, price, rate);
+
+        prop_assert_eq!(engine.funding_index_qpb_e6, index_before,
+                        "Funding index changed with dt=0");
+    }
+
+    // 12. Funding is zero-sum between opposite positions
+    #[test]
+    fn fuzz_prop_funding_zero_sum(
+        position in 1i128..100_000,
+        funding_delta in -1_000_000i128..1_000_000
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+        let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
+
+        // Opposite positions
+        engine.accounts[user_idx as usize].position_size = I128::new(position);
+        engine.accounts[lp_idx as usize].position_size = I128::new(-position);
+
+        let total_pnl_before = engine.accounts[user_idx as usize].pnl.get()
+            + engine.accounts[lp_idx as usize].pnl.get();
+
+        engine.funding_index_qpb_e6 = I128::new(funding_delta);
+
+        let _ = engine.touch_account(user_idx);
+        let _ = engine.touch_account(lp_idx);
+
+        let total_pnl_after = engine.accounts[user_idx as usize].pnl.get()
+            + engine.accounts[lp_idx as usize].pnl.get();
+
+        // Funding payments round UP when account pays, so total PNL may decrease
+        // (vault keeps rounding dust). This ensures one-sided conservation slack.
+        // The change should never be positive (no value created from thin air).
+        let change = total_pnl_after - total_pnl_before;
+        prop_assert!(change <= 0,
+                     "Funding should not create value: change={}", change);
+        // The absolute change should be bounded by rounding (at most 2 per account pair)
+        prop_assert!(change >= -2,
+                     "Funding change should be bounded: change={}", change);
+    }
+
+    // 4. settle_warmup_to_capital idempotent at same slot
+    #[test]
+    fn fuzz_prop_settle_idempotent(
+        capital in 100u128..10_000,
+        pnl in 1i128..5_000,
+        slope in 1u128..1000,
+        slot in 1u64..200
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_b()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.insurance_fund.balance = U128::new(100_000);
+        engine.vault = U128::new(100_000);
+        engine.deposit(user_idx, capital, 0).unwrap();
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+        engine.current_slot = slot;
+
+        // First settlement
+        let _ = engine.settle_warmup_to_capital(user_idx);
+        let state1 = (
+            engine.accounts[user_idx as usize].capital,
+            engine.accounts[user_idx as usize].pnl,
+        );
+
+        // Second settlement at same slot
+        let _ = engine.settle_warmup_to_capital(user_idx);
+        let state2 = (
+            engine.accounts[user_idx as usize].capital,
+            engine.accounts[user_idx as usize].pnl,
+        );
+
+        prop_assert_eq!(state1, state2, "Settlement should be idempotent");
+    }
+
+    // 7. touch_account idempotent if global index unchanged
+    #[test]
+    fn fuzz_prop_touch_idempotent(
+        position in -100_000i128..100_000,
+        pnl in -50_000i128..50_000,
+        funding_delta in -1_000_000i128..1_000_000
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.accounts[user_idx as usize].position_size = I128::new(position);
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.funding_index_qpb_e6 = I128::new(funding_delta);
+
+        // First touch
+        let _ = engine.touch_account(user_idx);
+        let state1 = (
+            engine.accounts[user_idx as usize].pnl,
+            engine.accounts[user_idx as usize].funding_index,
+        );
+
+        // Second touch without changing global index
+        let _ = engine.touch_account(user_idx);
+        let state2 = (
+            engine.accounts[user_idx as usize].pnl,
+            engine.accounts[user_idx as usize].funding_index,
+        );
+
+        prop_assert_eq!(state1, state2, "Touch should be idempotent");
+    }
+
+    // 1. withdrawable_pnl monotone in slot for positive pnl
+    #[test]
+    fn fuzz_prop_withdrawable_monotone(
+        pnl in 1i128..100_000,
+        slope in 1u128..10_000,
+        slot1 in 0u64..500,
+        slot2 in 0u64..500
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+
+        let earlier = slot1.min(slot2);
+        let later = slot1.max(slot2);
+
+        engine.current_slot = earlier;
+        let w1 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+        engine.current_slot = later;
+        let w2 = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+        prop_assert!(w2 >= w1, "Withdrawable not monotone: {} -> {} at slots {} -> {}",
+                     w1, w2, earlier, later);
+    }
+
+    // 2. withdrawable_pnl == 0 if pnl<=0 or slope==0 or elapsed==0
+    #[test]
+    fn fuzz_prop_withdrawable_zero_conditions(
+        principal in 0u128..100_000,
+        pnl in -100_000i128..0, // Non-positive PnL
+        slope in 0u128..10_000,
+        slot in 0u64..500
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.accounts[user_idx as usize].capital = U128::new(principal);
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(slope);
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+        engine.current_slot = slot;
+
+        let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+
+        // If pnl <= 0, withdrawable must be 0
+        if pnl <= 0 {
+            prop_assert_eq!(withdrawable, 0, "Withdrawable should be 0 for non-positive pnl");
+        }
+    }
+
+    #[test]
+    fn fuzz_prop_withdrawable_zero_slope(
+        pnl in 1i128..100_000,
+        slot in 1u64..500
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.accounts[user_idx as usize].warmup_slope_per_step = U128::new(0); // Zero slope
+        engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
+        engine.current_slot = slot;
+
+        let withdrawable = engine.withdrawable_pnl(&engine.accounts[user_idx as usize]);
+        prop_assert_eq!(withdrawable, 0, "Withdrawable should be 0 for zero slope");
+    }
+
+    // 11. Zero position pays no funding
+    #[test]
+    fn fuzz_prop_zero_position_no_funding(
+        pnl in -100_000i128..100_000,
+        funding_delta in -10_000_000i128..10_000_000
+    ) {
+        let mut engine = Box::new(RiskEngine::new(params_regime_a()));
+        let user_idx = engine.add_user(1).unwrap();
+
+        engine.accounts[user_idx as usize].position_size = I128::new(0);
+        engine.accounts[user_idx as usize].pnl = I128::new(pnl);
+        engine.funding_index_qpb_e6 = I128::new(funding_delta);
+
+        let _ = engine.touch_account(user_idx);
+
+        prop_assert_eq!(engine.accounts[user_idx as usize].pnl.get(), pnl,
+                        "Zero position should not pay funding");
+    }
 
 /// Verify check_conservation uses settled_pnl (accounts for lazy funding)
 /// This prevents "docs drift" - ensures engine matches documented formula
@@ -1535,61 +1573,4 @@ fn conservation_uses_settled_pnl_regression() {
         diff
     );
 }
-
-/// Verify the test harness correctly simulates Solana atomicity
-/// When an operation returns Err, the harness must restore the engine to pre-call state
-/// This ensures the fuzz suite accurately models on-chain behavior
-#[test]
-fn harness_rollback_simulation_test() {
-    let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-
-    // Create user with some capital
-    let user_idx = engine.add_user(1).unwrap();
-    engine.deposit(user_idx, 1000, 0).unwrap();
-
-    // Accrue some funding to create state that could be mutated
-    engine
-        .accrue_funding_with_rate(100, 1_000_000, 100)
-        .unwrap();
-
-    // Capture complete state before failed operation (deep clone of RiskEngine)
-    let before = (*engine).clone();
-
-    // Capture expected values before any operation
-    let expected_vault = engine.vault;
-    let expected_capital = engine.accounts[user_idx as usize].capital;
-    let expected_pnl = engine.accounts[user_idx as usize].pnl;
-    let expected_funding_index = engine.accounts[user_idx as usize].funding_index;
-
-    // Try to withdraw more than available - will fail
-    let result = engine.withdraw(user_idx, 999_999, 0, 1_000_000);
-    assert!(
-        result.is_err(),
-        "Withdraw should fail with insufficient balance"
-    );
-
-    // Simulate Solana rollback (this is what the harness does)
-    // Deep restore of RiskEngine contents
-    *engine = before;
-
-    // Verify state is exactly restored
-    assert_eq!(engine.vault, expected_vault, "vault must be restored");
-    assert_eq!(
-        engine.accounts[user_idx as usize].capital, expected_capital,
-        "capital must be restored"
-    );
-    assert_eq!(
-        engine.accounts[user_idx as usize].pnl, expected_pnl,
-        "pnl must be restored"
-    );
-    assert_eq!(
-        engine.accounts[user_idx as usize].funding_index, expected_funding_index,
-        "funding_index must be restored"
-    );
-
-    // Conservation must still hold after rollback
-    assert!(
-        engine.check_conservation(DEFAULT_ORACLE),
-        "Conservation must hold after harness rollback"
-    );
 }

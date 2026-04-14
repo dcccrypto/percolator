@@ -1,8 +1,8 @@
 # Kani Proof Strength Audit Results
 
-Generated: 2026-02-21 (updated with 9 INDUCTIVE proofs)
+Generated: 2026-02-27 (updated: 2026-03-23 — v11.31 spec proofs + fix)
 
-157 proof harnesses across `/home/anatoly/percolator/tests/kani.rs`.
+175 proof harnesses across `tests/proofs_*.rs`.
 
 Methodology: Each proof analyzed for:
 1. **Input classification**: concrete (hardcoded) vs symbolic (`kani::any()` with `kani::assume`) vs derived
@@ -28,20 +28,20 @@ Scaffolding policy: Concrete values that do NOT affect branch coverage in the fu
 | Classification | Count | Description |
 |---|---|---|
 | **INDUCTIVE** | 11 | Fully symbolic state, decomposed invariants, loop-free delta specs, full u128/i128 domain |
-| **STRONG** | 144 | Symbolic inputs exercise key branches, canonical_inv or equivalent strong assertions, non-vacuous |
+| **STRONG** | 162 | Symbolic inputs exercise key branches, canonical_inv or equivalent strong assertions, non-vacuous |
 | **WEAK** | 0 | -- |
-| **UNIT TEST** | 2 | Intentional meta-test and concrete-oracle scenario test |
+| **UNIT TEST** | 3 | Intentional negative tests and concrete-oracle scenario tests |
 | **VACUOUS** | 0 | All proofs have non-vacuity assertions or trivially reachable assertions |
 
 ---
 
 ## Criterion 6: Inductive Strength -- Global Assessment
 
-Of 157 proofs, 11 achieve INDUCTIVE classification using fully symbolic state with decomposed invariants. The remaining 146 proofs share structural patterns that prevent INDUCTIVE classification. This section evaluates the global findings for sub-criteria 6a through 6f for the non-INDUCTIVE proofs.
+Of 175 proofs, 11 achieve INDUCTIVE classification using fully symbolic state with decomposed invariants. The remaining 164 proofs share structural patterns that prevent INDUCTIVE classification. This section evaluates the global findings for sub-criteria 6a through 6f for the non-INDUCTIVE proofs.
 
 ### 6a. State Construction Method
 
-**Finding: 146 of 157 proofs use constructed state. 11 proofs (#147-157) use fully symbolic state.**
+**Finding: 147 of 158 proofs use constructed state. 11 proofs (#147-157) use fully symbolic state.**
 
 Every proof follows the pattern:
 ```rust
@@ -552,7 +552,7 @@ These bounds are necessary because:
 | 145 | `proof_flaw3_warmup_reset_increases_slope_proportionally` | **STRONG** | Constructed | 1 user | Monolithic | Loops | Out-of-cone fixed | Symbolic |
 | 146 | `proof_flaw3_warmup_converts_after_single_slot` | **STRONG** | Constructed | 1 user | Monolithic | Loops | Out-of-cone fixed | Symbolic |
 
-### INDUCTIVE: Abstract Delta Proofs (9 proofs)
+### INDUCTIVE: Abstract Delta Proofs (11 proofs)
 
 These proofs model operations algebraically on fully symbolic state (full u128/i128 domain, no RiskEngine construction, no loops, no bounds), proving decomposed invariant components are preserved for ALL possible pre-states.
 
@@ -561,14 +561,32 @@ These proofs model operations algebraically on fully symbolic state (full u128/i
 | 147 | `inductive_top_up_insurance_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.87s |
 | 148 | `inductive_set_capital_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.21s |
 | 149 | `inductive_set_pnl_preserves_pnl_pos_tot_delta` | **INDUCTIVE** | inv_aggregates | 0.47s |
-| 150 | `inductive_set_capital_delta_correct` | **INDUCTIVE** | inv_aggregates | 1.54s |
+| 150 | `inductive_set_capital_delta_correct` | **INDUCTIVE** | inv_aggregates | 1.53s |
 | 151 | `inductive_deposit_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.82s |
 | 152 | `inductive_withdraw_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.75s |
 | 153 | `inductive_settle_loss_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.17s |
-| 154 | `inductive_settle_warmup_profit_preserves_accounting` | **INDUCTIVE** | inv_accounting | 1.69s |
-| 155 | `inductive_settle_warmup_full_preserves_accounting` | **INDUCTIVE** | inv_accounting | 1.51s |
+| 154 | `inductive_settle_warmup_profit_preserves_accounting` | **INDUCTIVE** | inv_accounting | 2.26s |
+| 155 | `inductive_settle_warmup_full_preserves_accounting` | **INDUCTIVE** | inv_accounting | 2.51s |
 | 156 | `inductive_fee_transfer_preserves_accounting` | **INDUCTIVE** | inv_accounting | 0.41s |
-| 157 | `inductive_set_position_delta_correct` | **INDUCTIVE** | inv_aggregates | 1.68s |
+| 157 | `inductive_set_position_delta_correct` | **INDUCTIVE** | inv_aggregates | 1.70s |
+
+### §5.4 Regression: Liquidation Warmup Slope Reset (1 proof)
+
+This proof exercises the real `liquidate_at_oracle` code path with symbolic PnL and oracle values, verifying that warmup slope is correctly reset when mark settlement increases AvailGross during liquidation.
+
+| # | Proof Name | Classification | Property | Verification Time |
+|---|---|---|---|---|
+| 158 | `proof_liquidation_must_reset_warmup_on_mark_increase` | **STRONG** | §5.4 + canonical_inv | 169.35s |
+
+**Audit of proof #158:**
+
+- **C1 (Input classification)**: `initial_pnl` ∈ [1K, 50K] and `oracle_price` ∈ [1_000_001, 1_010_000] are symbolic via `kani::any()`. Capital (500), position (10M), entry (1M), slot (90), LP state are concrete scaffolding.
+- **C2 (Branch coverage)**: Exercises favorable-oracle mark settlement (mark_pnl > 0), liquidation trigger path, profit conversion in settle_warmup_to_capital. All branches in the bug-relevant code path are exercised.
+- **C3 (Invariant strength)**: Asserts `canonical_inv` AND domain-specific `cap_after <= cap_before` (warmup conversion bound). Stronger than canonical_inv alone.
+- **C4 (Vacuity risk)**: Non-vacuous — explicit `assert!(result.unwrap())` confirms liquidation triggers for all symbolic inputs.
+- **C5 (Symbolic collapse)**: Haircut h=1 (large residual >> pnl_pos_tot). Acceptable: bug is about warmup timing, not haircut computation.
+- **C6 (Inductive)**: Not inductive — constructed state, fixed topology, bounded ranges. This is intentional: the bug is an implementation-level missing function call that can only be caught by exercising real code.
+- **TDD**: Proof was written BEFORE the fix and confirmed to FAIL (catching the §5.4 violation). After fixing `touch_account_for_liquidation` to add the warmup slope reset, the proof PASSES.
 
 **Criteria 1-5 Assessment (all 9 proofs):**
 
@@ -870,7 +888,7 @@ These are naturally loop-free because they describe the delta to one slot, not a
 
 ### Criterion 6 (Inductive Strength)
 
-Applied globally (see section above) and per-proof (see summary table). Finding: 11 INDUCTIVE, 144 STRONG, 2 UNIT TEST. The 11 INDUCTIVE proofs (#147-157) achieve fully symbolic state, decomposed invariants, loop-free specs, and full-domain coverage. The remaining 146 proofs share structural limitations (constructed state, fixed topology, monolithic invariant, loop-based specs, out-of-cone fields fixed, bounded ranges).
+Applied globally (see section above) and per-proof (see summary table). Finding: 11 INDUCTIVE, 145 STRONG, 2 UNIT TEST. The 11 INDUCTIVE proofs (#147-157) achieve fully symbolic state, decomposed invariants, loop-free specs, and full-domain coverage. Proof #158 is STRONG (exercises real `liquidate_at_oracle` code to catch §5.4 violation). The remaining 146 proofs share structural limitations (constructed state, fixed topology, monolithic invariant, loop-based specs, out-of-cone fields fixed, bounded ranges).
 
 ---
 
@@ -919,3 +937,367 @@ Remaining Priority 2-4 operations (execute_trade, liquidate, touch_account, add_
 ### Changes from Previous Audit
 
 The previous audit (2026-02-20) classified 0 INDUCTIVE / 144 STRONG / 2 UNIT TEST across 146 proofs. This audit adds 11 new INDUCTIVE proofs (#147-157) implementing the Priority 1 upgrade recommendations plus fee transfer and OI delta coverage. The existing 144 STRONG + 2 UNIT TEST proofs are unchanged. Total: 157 proofs.
+
+---
+
+## Section 7: v11.31 Spec Compliance Proofs (`tests/proofs_v1131.rs`)
+
+Added: 2026-03-23. 17 new proofs covering spec properties 42, 44, 46, 59-70.
+Additionally, 1 pre-existing proof (`proof_fee_debt_sweep_consumes_released_pnl` in `proofs_safety.rs`) was fixed.
+
+### #158. `proof_recompute_r_last_always_zero` — **STRONG**
+
+**Property**: 46 — Zero-rate funding recomputation (§4.12)
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `rate: i64` — **fully symbolic** (entire i64 domain via `kani::any()`) |
+| 2. Branch coverage | `recompute_r_last_from_final_state` has **zero branches** — unconditionally writes 0. Full coverage trivially achieved. |
+| 3. Invariant strength | Property-specific: asserts `funding_rate_bps_per_slot_last == 0` post-call. Matches spec requirement exactly. No `canonical_inv` needed for this trivial function. |
+| 4. Vacuity risk | **None** — assertion is always reachable (no error paths, no early returns). |
+| 5. Symbolic collapse | **None** — symbolic `rate` doesn't interact with any computation; it only tests that the pre-state value is overwritten regardless of input. |
+| 6a. State construction | `RiskEngine::new(zero_fee_params())` — constructed, but only `funding_rate_bps_per_slot_last` is in the cone of influence and it IS symbolic. |
+| 6b. Topology | N/A — function doesn't touch accounts. |
+| 6e. Cone of influence | Writes: `funding_rate_bps_per_slot_last`. Reads: nothing. All other concrete fields are outside the cone. |
+
+**Classification: STRONG** — Symbolic input covers full i64 domain on the only relevant field. Trivial function means this is as strong as possible without being INDUCTIVE (would need fully symbolic engine state for no benefit).
+
+---
+
+### #159. `proof_accrue_no_funding_transfer` — **UNIT TEST**
+
+**Property**: §4.12/§5.4 — Zero-rate core profile: no K change from funding
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: OI = POS_SCALE, price = DEFAULT_ORACLE, slot = 10, rate = 5000. No `kani::any()`. |
+| 2. Branch coverage | `accrue_market_to` has 6+ branches. Concrete values lock: `total_dt > 0` (yes), `delta_p == 0` (yes, same price), so `if delta_p != 0` branch NOT taken. Only tests the "no mark-to-market + no funding" path. |
+| 3. Invariant strength | Property-specific: asserts K_long/K_short unchanged. Correct for the tested path but doesn't test mark + no-funding or error paths. |
+| 4. Vacuity risk | **Low** — `result.is_ok()` assertion confirms the Ok path is reached. |
+| 5. Symbolic collapse | N/A — no symbolic inputs. |
+
+**Classification: UNIT TEST** — All inputs concrete. Tests one specific path (same-price time-advance). Confirms no K change when price unchanged and funding removed, but does not exercise the mark branch.
+
+**Recommendation**: Make `rate` symbolic (full i64) and add a symbolic slot delta. This would strengthen to STRONG by covering multiple time-advance amounts with arbitrary stored rates.
+
+---
+
+### #160. `proof_accrue_mark_still_works` — **STRONG**
+
+**Property**: §5.4 — Mark-to-market still applies correctly after funding removal
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `new_price: u64` — **symbolic** with bounds (1..2000, != DEFAULT_ORACLE). Engine setup is concrete scaffolding. |
+| 2. Branch coverage | Forces `delta_p != 0` (price changes). Both `long_live` and `short_live` branches taken (OI is nonzero on both sides). Exercises the core mark-to-market path. Error paths (oracle=0, stale slot) not tested but are scaffolding concerns. |
+| 3. Invariant strength | Exact algebraic: `K_long == K_before + A*ΔP`, `K_short == K_before - A*ΔP`. This is stronger than `canonical_inv` for this specific property — it verifies exact arithmetic. |
+| 4. Vacuity risk | **None** — `result.is_ok()` confirmed; price constraint ensures delta_p != 0. |
+| 5. Symbolic collapse | Price range 1..2000 covers both positive and negative ΔP (DEFAULT_ORACLE = 1000). Both signs exercised. |
+| 6f. Bounded ranges | Price bounded to 2000 — sufficient for exercising all branches of `accrue_market_to`'s mark path. The arithmetic is `checked_u128_mul_i128` which handles full range, but the proof doesn't test near-overflow prices. |
+
+**Classification: STRONG** — Symbolic price exercises both ΔP signs. Exact algebraic assertion. Bounded range is adequate for branch coverage but not full domain.
+
+**Recommendation**: Widen price range to `u32` (up to 4B) to stress `checked_u128_mul_i128` overflow handling. Add symbolic OI values.
+
+---
+
+### #161. `proof_touch_no_maintenance_fee` — **UNIT TEST**
+
+**Property**: §8.2 — Maintenance fees disabled
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: params.maintenance_fee_per_slot = 100, deposit = 1M, slot advance = 100. |
+| 2. Branch coverage | `settle_maintenance_fee_internal` has **zero branches** (always stamps slot). The proof confirms fee_credits unchanged, which is trivially true. `touch_account_full` has many branches but all are exercised on the concrete "flat, positive capital, no position" path only. |
+| 3. Invariant strength | Property-specific: `fee_credits unchanged`. Correct assertion for the disabled-fees property. |
+| 4. Vacuity risk | **None** — `result.is_ok()` confirmed. |
+| 5. Symbolic collapse | N/A — no symbolic inputs. |
+
+**Classification: UNIT TEST** — All concrete. Sufficient for the §8.2 property (fees are structurally disabled — no branch can produce fee charges), but doesn't exercise touch_account_full's other paths.
+
+**Recommendation**: Make `dt` (slot advance) and `maintenance_fee_per_slot` symbolic to prove fee_credits is invariant for ALL parameter/time combinations, not just one concrete case. This would upgrade to STRONG.
+
+---
+
+### #162. `proof_deposit_no_insurance_draw` — **STRONG**
+
+**Property**: 62 — Deposit never decrements insurance fund
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `amount: u32` — **symbolic** (1..1M). PNL and capital are concrete but deliberately set to trigger the edge case (capital=0, PNL=-10M). |
+| 2. Branch coverage | `deposit`'s branches: account exists (yes), TVL check (passes for 1M max), flat-sweep guard (flat=true but PNL<0, so sweep blocked). `settle_losses` runs but capital insufficient → PNL survives. Key branch: no `resolve_flat_negative` call. |
+| 3. Invariant strength | Two assertions: `insurance >= ins_before` (never decreases) and `pnl < 0` (loss survives). Together these prove no insurance draw and no loss resolution. |
+| 4. Vacuity risk | **None** — `result.is_ok()` asserted; amount > 0 ensures non-trivial deposit. Non-vacuity of `pnl < 0` assertion: with -10M PNL and max 1M deposit going to settle_losses, PNL stays negative. |
+| 5. Symbolic collapse | Amount is symbolic but PNL/capital are concrete. The concrete PNL (-10M) ensures settle_losses can never fully cover the loss regardless of amount. This is a deliberate constructive setup, not collapse. |
+
+**Classification: STRONG** — Symbolic amount exercises deposit with variable sizes. Concrete negative PNL is constructive scaffolding to guarantee the "capital insufficient" path. Non-vacuous.
+
+**Recommendation**: Make PNL symbolic (negative, with `assume(pnl < -amount)`) to prove the property holds for ALL PNL/amount combinations where loss exceeds deposit.
+
+---
+
+### #163. `proof_deposit_sweep_pnl_guard` — **UNIT TEST**
+
+**Property**: 66 — Deposit does NOT sweep fee debt when PNL < 0
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: capital=0, PNL=-10M, fee_debt=5000, deposit=10K. |
+| 2. Branch coverage | Targets the `if basis == 0 && pnl >= 0` guard in deposit. Concrete values force: flat=true, PNL<0 → sweep blocked. Only tests the negative path of the guard. |
+| 3. Invariant strength | `fee_credits unchanged` + `pnl < 0` — correct for the negative case. |
+| 4. Vacuity risk | **None** — deposit succeeds, assertions reached. |
+
+**Classification: UNIT TEST** — All concrete, single execution path. Tests the "blocked" side of the PNL guard.
+
+**Recommendation**: Make PNL symbolic (constrained negative) and deposit amount symbolic to prove the guard holds for all negative PNL values.
+
+---
+
+### #164. `proof_deposit_sweep_when_pnl_nonneg` — **UNIT TEST**
+
+**Property**: 66 — Deposit DOES sweep fee debt when PNL >= 0
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: capital=1M, PNL=0, fee_debt=5000, deposit=10K. |
+| 2. Branch coverage | Tests positive path of `if basis == 0 && pnl >= 0`. Concrete values force: flat=true, PNL=0 → sweep happens. |
+| 3. Invariant strength | `fee_credits > -5000` — confirms debt reduction occurred. |
+| 4. Vacuity risk | **None** — deposit succeeds, fee_credits changes observable. |
+
+**Classification: UNIT TEST** — All concrete. Complements #163 by testing the "allowed" side. Together #163+#164 cover both sides of the guard, but individually each is a unit test.
+
+**Recommendation**: Merge into a single proof with symbolic PNL covering both `pnl < 0` (no sweep) and `pnl >= 0` (sweep) to achieve STRONG.
+
+---
+
+### #165. `proof_top_up_insurance_now_slot` — **STRONG**
+
+**Property**: 61 — Insurance top-up bounded arithmetic + slot monotonicity
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `amount: u32` — **symbolic** (1..1M), `now_slot: u64` — **symbolic** (50..200). |
+| 2. Branch coverage | `top_up_insurance_fund` branches: stale slot (not taken — now_slot >= 50 = current_slot), TVL overflow (not taken for small amounts). Tests the success path with exact arithmetic verification. |
+| 3. Invariant strength | Three exact assertions: `current_slot == now_slot`, `V == V_before + amount`, `I == I_before + amount`. Algebraically exact — stronger than conservation-only checks. |
+| 4. Vacuity risk | **None** — `result.is_ok()` confirmed, amount > 0 ensures non-trivial operation. |
+| 5. Symbolic collapse | **None** — both amount and slot are independently symbolic within their ranges. |
+| 6f. Bounded ranges | amount <= 1M, slot 50..200 — adequate for branch coverage. Near-TVL-overflow not tested. |
+
+**Classification: STRONG** — Two symbolic inputs exercise the success path with exact algebraic verification. Bounded ranges are adequate but don't stress overflow paths.
+
+**Recommendation**: Extend amount to `u64` range with `assume(v_before + amount <= MAX_VAULT_TVL)` to exercise the TVL bound more tightly.
+
+---
+
+### #166. `proof_top_up_insurance_rejects_stale_slot` — **UNIT TEST**
+
+**Property**: 61 — Stale slot rejection
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: current_slot=100, now_slot=50, amount=1000. |
+| 2. Branch coverage | Targets the `now_slot < current_slot` error branch. Single concrete path. |
+| 3. Invariant strength | `result.is_err()` — confirms error path taken. |
+| 4. Vacuity risk | **None** — assertion reached unconditionally. |
+
+**Classification: UNIT TEST** — Intentional negative test. Concrete inputs test one specific error condition.
+
+---
+
+### #167. `proof_positive_conversion_denominator` — **STRONG**
+
+**Property**: 69 — h_den > 0 when matured profit exists
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `pnl_val: u32` — **symbolic** (1..100K). |
+| 2. Branch coverage | `haircut_ratio` branches: `pnl_matured_pos_tot == 0` (not taken — set to pnl_val > 0). Residual computation branches depend on vault/c_tot/insurance relationship. With default construction, vault = c_tot + insurance (balanced), so residual = vault - senior_sum = matured PnL portion. Both `h_num < h_den` and `h_num == h_den` possible depending on vault balance. |
+| 3. Invariant strength | `h_den > 0` (the target property) + `h_num <= h_den` (bonus correctness check). Exact match for spec §7.4 requirement. |
+| 4. Vacuity risk | **Low** — `pnl_val > 0` ensures non-trivial state. `pnl_matured_pos_tot > 0` directly set. |
+| 5. Symbolic collapse | PNL is symbolic but vault/c_tot/insurance are derived from construction. The haircut ratio computation depends on `vault - (c_tot + insurance_balance)` vs `pnl_matured_pos_tot`. With constructed state, vault ≈ c_tot (no separate insurance top-up), so residual behavior is somewhat constrained. |
+
+**Classification: STRONG** — Symbolic PNL exercises the non-zero matured PnL path. Proves the target property directly. Residual branch coverage limited by constructed state.
+
+**Recommendation**: Make vault, c_tot, and insurance symbolic with `assume(vault >= c_tot + insurance)` to exercise both `residual < pnl_matured_pos_tot` and `residual >= pnl_matured_pos_tot` branches independently.
+
+---
+
+### #168. `proof_bilateral_oi_decomposition` — **WEAK**
+
+**Property**: 64 — Exact bilateral OI decomposition after trade
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: size_q = 100 * POS_SCALE, deposits = 5M each, oracle = DEFAULT. |
+| 2. Branch coverage | `bilateral_oi_after` has 8 checked arithmetic branches (4 per side). Concrete trade size means only one configuration of (old_a=0, new_a>0, old_b=0, new_b<0) is tested — always "flat → long/short". Doesn't test close, flip, or partial reduce paths. |
+| 3. Invariant strength | Three assertions: OI_long matches bilateral sum, OI_short matches bilateral sum, OI_long == OI_short. Algebraically exact. But gated behind `if result.is_ok()` — if trade fails, nothing is asserted. |
+| 4. Vacuity risk | **Low for Ok path** — trade is designed to succeed (large capital, reasonable size). But the `if result.is_ok()` gate means the proof asserts nothing on failure. Non-vacuity depends on the Ok path being taken. |
+| 5. Symbolic collapse | N/A — no symbolic inputs to collapse. |
+
+**Classification: WEAK** — All concrete inputs test only the "open from flat" OI path. `bilateral_oi_after` has multiple branches for position flips and partial reduces that are not exercised. The `if result.is_ok()` guard introduces minor vacuity risk.
+
+**Recommendation**: Make `size_q` symbolic (both positive and negative, bounded) and pre-open a position before trading to exercise close/flip/reduce paths. Remove `if result.is_ok()` by ensuring trade succeeds via construction, or add `assert!(result.is_ok())`.
+
+---
+
+### #169. `proof_partial_liquidation_remainder_nonzero` — **WEAK**
+
+**Property**: 68 — Partial liquidation leaves nonzero remainder
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: size=400*POS_SCALE, q_close=abs_eff/2, crash=500. |
+| 2. Branch coverage | `liquidate_at_oracle_internal` partial path: `ExactPartial(q_close)` with `q_close > 0 && q_close < abs_eff` (half position). Exercises the "valid partial" path. BUT — `if result.is_ok() && result.unwrap()` double-gates the assertion. If liquidation fails (Ok(false) = not liquidatable, or Err), nothing is asserted. |
+| 3. Invariant strength | `eff_after != 0` — correct for the target property. Conditional on success. |
+| 4. Vacuity risk | **Medium** — crash price = 500 (vs DEFAULT_ORACLE = 1000) should make the account liquidatable, but whether partial liquidation succeeds depends on post-partial health check (§9.4 step 14). If the half-close doesn't restore health, the partial liquidation returns Err, and the assertion is skipped. The proof is potentially vacuous if ExactPartial always fails the health check at this crash price. |
+| 5. Symbolic collapse | N/A — concrete inputs. |
+
+**Classification: WEAK** — Concrete inputs, doubly-guarded assertion with non-trivial vacuity risk. The proof may never reach its core assertion if the health check blocks the partial liquidation.
+
+**Recommendation**: Add explicit non-vacuity assertion `assert!(result.is_ok() && result.unwrap(), "liquidation must succeed for this test")` to confirm the Ok(true) path is reachable. Or make q_close symbolic with bounds to find a value that passes the health check. Alternatively, set up margin parameters that guarantee post-partial health (lower maintenance_margin_bps).
+
+---
+
+### #170. `proof_liquidation_policy_validity` — **STRONG**
+
+**Property**: 65 — ExactPartial(0) rejected
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **Concrete** setup, but the assertion is a structural negative test: `ExactPartial(0)` MUST NOT succeed. |
+| 2. Branch coverage | Tests the `q_close_q == 0` guard in `liquidate_at_oracle_internal`. Single branch target. |
+| 3. Invariant strength | `panic!` if `Ok(true)` returned — strong rejection assertion. |
+| 4. Vacuity risk | **None** — the assertion fires unconditionally on `Ok(true)`. Even if result is `Ok(false)` (not liquidatable) or `Err`, the proof still passes correctly (ExactPartial(0) was rejected or not applicable). |
+
+**Classification: STRONG** — Intentional negative test with zero vacuity risk. The assertion that `ExactPartial(0)` never succeeds as a partial liquidation is structurally sound.
+
+---
+
+### #171. `proof_deposit_fee_credits_cap` — **STRONG**
+
+**Property**: 60 — Fee credit repayment capped at outstanding debt
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | `amount: u32` — **symbolic** (1..100K). Debt fixed at 5000. |
+| 2. Branch coverage | `deposit_fee_credits` branches: account used (yes), slot check (passes), `capped == 0` (not taken — debt = 5000), TVL check (passes for small amounts). Key: `min(amount, debt)` exercises both `amount < debt` and `amount >= debt` since amount ranges 1..100K vs debt=5000. Both sides of the min() reached. |
+| 3. Invariant strength | Three exact assertions: `fee_credits <= 0`, `V == V_before + expected_pay`, `I == I_before + expected_pay`. Algebraically verifies exact payment routing. |
+| 4. Vacuity risk | **None** — `result.is_ok()` confirmed. |
+| 5. Symbolic collapse | **None** — symbolic amount naturally spans both sides of the `min(amount, 5000)` branch. |
+
+**Classification: STRONG** — Symbolic amount exercises both under-payment and full-payment paths. Exact algebraic verification of V and I deltas.
+
+---
+
+### #172. `proof_partial_liq_health_check_mandatory` — **WEAK**
+
+**Property**: 70 — Post-partial health check runs even with pending reset
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: tiny_close=1, crash=500. |
+| 2. Branch coverage | Targets the health check at §9.4 step 14. But the assertion is triple-gated: `if let Ok(true) = result` → `if eff_after != 0` → then check `is_above_maintenance_margin`. If the partial with tiny_close=1 fails the health check (likely, since closing 1 unit out of ~400M barely changes margin), result is Err, and nothing is asserted. |
+| 3. Invariant strength | Conditional: if partial succeeds AND remainder nonzero, then margin must be healthy. Correct property, but conditional reach is uncertain. |
+| 4. Vacuity risk | **High** — A tiny close of 1 unit against a 400*POS_SCALE position at crash price 500 almost certainly fails the post-partial health check, making the result `Err`. The proof's core assertion (`is_above_maintenance_margin`) is likely never reached, making it vacuously true. |
+
+**Classification: WEAK** — High vacuity risk. The tiny_close=1 construction likely never reaches the assertion. The proof demonstrates the right structure but needs construction that guarantees reachability.
+
+**Recommendation**: Either (a) choose a q_close that would pass the health check (e.g., close 99% of position), or (b) explicitly assert `result.is_err()` to prove the health check REJECTS tiny closes (which is also a valid proof of enforcement), or (c) add non-vacuity witness: `assert!(matches!(result, Ok(true)), "partial must succeed to test health check")`.
+
+---
+
+### #173. `proof_keeper_crank_r_last_zero` — **UNIT TEST**
+
+**Property**: 42 — Post-crank r_last == 0
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: rate=9999, slot+1, DEFAULT_ORACLE, one candidate. |
+| 2. Branch coverage | `keeper_crank` calls `recompute_r_last_from_final_state` which always writes 0. Branch coverage of crank itself is minimal (1 account, no liquidation). |
+| 3. Invariant strength | `r_last == 0` — correct property assertion. |
+| 4. Vacuity risk | **None** — crank succeeds, assertion reached. |
+
+**Classification: UNIT TEST** — All concrete. Verifies r_last=0 after one concrete crank invocation. Sufficient for the trivial property (unconditional zero write).
+
+---
+
+### #174. `proof_deposit_nonflat_no_sweep_no_resolve` — **WEAK**
+
+**Property**: 44 — Deposit into non-flat account skips sweep and resolve
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: position=100*POS_SCALE, fee_debt=-1000, PNL=-500, deposit=10K. |
+| 2. Branch coverage | Tests `basis != 0` path in deposit (sweep guard). With position open, `basis != 0`, so sweep is blocked. `fee_credits` unchanged confirms no sweep. `insurance >= ins_before` confirms no resolve. However, `settle_losses` IS called, which may change PNL (capital used to offset loss). The proof accounts for this by not asserting `pnl unchanged`. |
+| 3. Invariant strength | Two assertions: `fee_credits unchanged` + `insurance >= ins_before`. Fee_credits assertion is exact. Insurance assertion uses `>=` which is correct (deposit routing through trade fee could increase insurance). |
+| 4. Vacuity risk | **None** — deposit succeeds, assertions reached. |
+| 5. Symbolic collapse | N/A — no symbolic inputs. |
+
+**Classification: WEAK** — All concrete inputs. Tests one specific non-flat configuration. The `settle_losses` interaction (PNL may change) is acknowledged but not verified symbolically.
+
+**Recommendation**: Make deposit amount and initial PNL symbolic to prove the property holds for all non-flat deposit/PNL combinations. Assert `fee_credits unchanged` for all values where `basis != 0`.
+
+---
+
+### Fixed proof: `proof_fee_debt_sweep_consumes_released_pnl` (proofs_safety.rs) — **STRONG**
+
+**Pre-fix classification**: VACUOUS — asserted payment from released PnL, but `fee_debt_sweep` only pays from capital. With capital=0, nothing was paid, and the assertion `ins_after > ins_before` always failed (proof was actually FAILING, not vacuous).
+
+**Post-fix analysis**:
+
+| Criterion | Analysis |
+|---|---|
+| 1. Input classification | **All concrete**: capital=10K, fee_debt=-5000. |
+| 2. Branch coverage | `fee_debt_sweep` branches: `debt == 0` (not taken — debt=5000), `pay > 0` (taken — min(5000, 10000) = 5000). Both branches of `min(debt, cap)` are deterministic at concrete values, but only the "debt < cap" path is tested. |
+| 3. Invariant strength | Three exact assertions: `ins == ins_before + 5000`, `fc == 0`, `cap == cap_before - 5000`. Algebraically exact + `check_conservation()`. Strongest possible for concrete inputs. |
+| 4. Vacuity risk | **None** — all assertions reached unconditionally. |
+
+**Post-fix classification: STRONG** — Exact algebraic verification with conservation check. Concrete inputs but fully exercises the "debt < capital" path. The symmetric "debt > capital" path (partial payment) is not tested.
+
+**Recommendation**: Make debt and capital symbolic to exercise both `debt <= cap` and `debt > cap` paths, upgrading to cover partial payment scenarios.
+
+---
+
+### v11.31 Section Summary
+
+| # | Proof | Classification | Property |
+|---|---|---|---|
+| 158 | `proof_recompute_r_last_always_zero` | **STRONG** | 46 |
+| 159 | `proof_accrue_no_funding_transfer` | **STRONG** | §4.12 |
+| 160 | `proof_accrue_mark_still_works` | **STRONG** | §5.4 |
+| 161 | `proof_touch_no_maintenance_fee` | **STRONG** | §8.2 |
+| 162 | `proof_deposit_no_insurance_draw` | **STRONG** | 62 |
+| 163 | `proof_deposit_sweep_pnl_guard` | **STRONG** | 66 |
+| 164 | `proof_deposit_sweep_when_pnl_nonneg` | **STRONG** | 66 |
+| 165 | `proof_top_up_insurance_now_slot` | **STRONG** | 61 |
+| 166 | `proof_top_up_insurance_rejects_stale_slot` | **UNIT TEST** | 61 |
+| 167 | `proof_positive_conversion_denominator` | **STRONG** | 69 |
+| 168 | `proof_bilateral_oi_decomposition` | **STRONG** | 64 |
+| 169 | `proof_partial_liquidation_remainder_nonzero` | **STRONG** | 68 |
+| 170 | `proof_liquidation_policy_validity` | **STRONG** | 65 |
+| 171 | `proof_deposit_fee_credits_cap` | **STRONG** | 60 |
+| 172 | `proof_partial_liq_health_check_mandatory` | **STRONG** | 70 |
+| 173 | `proof_keeper_crank_r_last_zero` | **STRONG** | 42 |
+| 174 | `proof_deposit_nonflat_no_sweep_no_resolve` | **STRONG** | 44 |
+| fix | `proof_fee_debt_sweep_consumes_released_pnl` | **STRONG** | §7.5 |
+
+**Breakdown**: 16 STRONG, 0 WEAK, 1 UNIT TEST (intentional negative test #166), 0 VACUOUS
+
+### Changes from Initial v11.31 Audit
+
+All 4 WEAK proofs upgraded to STRONG:
+- **#168**: Symbolic i16 trade size after initial open — exercises close, reduce, and flip bilateral OI paths
+- **#169**: Near-max leverage with 95%+ close at crash price. Non-vacuity: explicit `assert!(result.unwrap())` confirms Ok(true) path reached
+- **#172**: Flipped to negative test — symbolic tiny close (1..255 units) asserts `!matches!(result, Ok(true))`, proving health check rejects insufficient partials. Zero vacuity risk.
+- **#174**: Symbolic deposit amount (u32) and fee debt (u16) prove sweep guard for all combinations
+
+5 UNIT TESTs upgraded to STRONG:
+- **#159**: Symbolic rate (i64, nonzero) and slot delta (u16, 1..1000)
+- **#161**: Symbolic fee_per_slot (u32) and dt (u16, 1..10000)
+- **#163**: Symbolic deposit amount (u32) and fee debt (u16) with fixed large negative PNL
+- **#164**: Symbolic initial capital (u32) and deposit amount (u32)
+- **#173**: Symbolic initial rate (full i64 domain)
+
+Pre-existing fix (`proof_fee_debt_sweep_consumes_released_pnl` in proofs_safety.rs):
+- Upgraded from concrete to symbolic capital (u32) and debt (u32), exercising both `debt < cap` and `debt > cap` paths with exact algebraic assertions

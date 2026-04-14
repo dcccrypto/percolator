@@ -5,7 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(target_os, values("solana"))'] }
 
 [lib]
 name = "percolator"
@@ -23,7 +23,7 @@ test = []    # Use MAX_ACCOUNTS=64 (~0.17 SOL rent)
 small = []   # Use MAX_ACCOUNTS=256 (~0.68 SOL rent)
 medium = []  # Use MAX_ACCOUNTS=1024 (~2.7 SOL rent)
 # No feature = MAX_ACCOUNTS=4096 (~6.9 SOL rent)
-fuzz = []    # Enable fuzzing tests
+fuzz = ["test"]  # Enable fuzzing tests (includes test feature for test_visible helpers)
 
 [profile.release]
 lto = "fat"
