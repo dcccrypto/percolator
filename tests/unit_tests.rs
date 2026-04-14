@@ -2438,7 +2438,7 @@ fn test_resolved_two_phase_no_deadlock() {
     // Price up within 10% band — a gets positive PnL, b negative
     let resolve_price = 1050u64;
     engine.accrue_market_to(200, resolve_price, 0).unwrap();
-    engine.resolve_market(resolve_price, resolve_price, 200, 0).unwrap();
+    engine.resolve_market_not_atomic(resolve_price, resolve_price, 200, 0).unwrap();
 
     // Phase 1: reconcile both (persists progress, no deadlock)
     engine.reconcile_resolved_not_atomic(a, 200).unwrap();
@@ -2472,7 +2472,7 @@ fn test_force_close_combined_convenience() {
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0).unwrap();
     let resolve_price = 1050u64;
     engine.accrue_market_to(200, resolve_price, 0).unwrap();
-    engine.resolve_market(resolve_price, resolve_price, 200, 0).unwrap();
+    engine.resolve_market_not_atomic(resolve_price, resolve_price, 200, 0).unwrap();
 
     // First call on positive-PnL account: reconciles, may be Deferred
     let a_result = engine.force_close_resolved_not_atomic(a, 200).unwrap();
@@ -2517,7 +2517,7 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
 
 
     // Resolve market via proper entry point
-    engine.resolve_market(1500, 1500, 200, 0).unwrap();
+    engine.resolve_market_not_atomic(1500, 1500, 200, 0).unwrap();
 
     // Phase 1: reconcile loser (b) first — zeroes their position
     let _b_returned = engine.force_close_resolved_not_atomic(b, 200).unwrap().expect_closed("force_close");
@@ -2678,7 +2678,7 @@ fn test_force_close_decrements_positions() {
     assert!(engine.stored_pos_count_short > 0);
 
     // resolve_market zeroes OI; force_close zeroes positions
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
     assert_eq!(engine.oi_eff_long_q, 0, "resolve_market zeroes OI");
 
     // Close both sides — position counts go to 0
@@ -2700,7 +2700,7 @@ fn test_force_close_both_sides_sequential() {
 
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0).unwrap();
 
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
 
     // Close a first (reconcile, may not get terminal payout yet)
     let a_returned = engine.force_close_resolved_not_atomic(a, 100).unwrap().expect_closed("force_close");
@@ -3078,7 +3078,7 @@ fn test_resolve_market_basic() {
     // Accrue to resolution slot first (v12.16.4 requirement)
     engine.accrue_market_to(200, 1000, 0).unwrap();
     // Resolve at the same price
-    let result = engine.resolve_market(1000, 1000, 200, 0);
+    let result = engine.resolve_market_not_atomic(1000, 1000, 200, 0);
     assert!(result.is_ok());
     assert!(engine.market_mode == MarketMode::Resolved);
     assert_eq!(engine.resolved_price, 1000);
@@ -3095,7 +3095,7 @@ fn test_resolve_market_rejects_out_of_band_price() {
     // resolve_price_deviation_bps = 1000 (10%)
     // Self-sync accrues at live_oracle=1000 first → P_last=1000
     // Then checks resolved=1200 against P_last=1000 → 20% deviation, rejected.
-    let result = engine.resolve_market(1200, 1000, 200, 0);
+    let result = engine.resolve_market_not_atomic(1200, 1000, 200, 0);
     assert!(result.is_err(), "price outside settlement band must be rejected");
 }
 
@@ -3107,7 +3107,7 @@ fn test_resolve_market_accepts_in_band_price() {
 
     // Accrue to resolution slot first (v12.16.4 requirement)
     engine.accrue_market_to(200, 1000, 0).unwrap();
-    let result = engine.resolve_market(1050, 1050, 200, 0); // 5% deviation, within 10% band
+    let result = engine.resolve_market_not_atomic(1050, 1050, 200, 0); // 5% deviation, within 10% band
     assert!(result.is_ok());
 }
 
@@ -3277,7 +3277,7 @@ fn audit_6_materialize_with_fee_needs_live_gate() {
     let _a = engine.add_user(1000).unwrap();
     engine.deposit(_a, 100_000, 1000, 100).unwrap();
     engine.accrue_market_to(100, 1000, 0).unwrap();
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
 
     let result = engine.materialize_with_fee(
         Account::KIND_USER, 1000, [0; 32], [0; 32]);
@@ -3295,7 +3295,7 @@ fn audit_8_resolve_must_enforce_band_before_first_accrue() {
     // resolve_price_deviation_bps = 1000 (10%)
     // v12.16.6: self-synchronizing — resolve accrues with live oracle first
     // Price 2000 is 100% deviation from live oracle 1000, well outside 10% band
-    let result = engine.resolve_market(2000, 1000, 200, 0);
+    let result = engine.resolve_market_not_atomic(2000, 1000, 200, 0);
     assert!(result.is_err(),
         "resolve must enforce price band from init P_last even before first accrue");
 }
@@ -3339,7 +3339,7 @@ fn audit_10_accrue_market_to_must_reject_on_resolved() {
     let _a = engine.add_user(1000).unwrap();
     engine.deposit(_a, 100_000, 1000, 100).unwrap();
     engine.accrue_market_to(100, 1000, 0).unwrap();
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
 
     let result = engine.accrue_market_to(200, 1100, 0);
     assert!(result.is_err(), "accrue_market_to must reject on resolved markets");
@@ -3843,7 +3843,7 @@ fn test_charge_account_fee_live_only() {
     let a = engine.add_user(1000).unwrap();
     engine.deposit(a, 100_000, 1000, 100).unwrap();
     engine.accrue_market_to(100, 1000, 0).unwrap();
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
 
     let result = engine.charge_account_fee_not_atomic(a, 1000, 200);
     assert!(result.is_err(), "account fee must be rejected on resolved markets");
@@ -3869,7 +3869,7 @@ fn test_force_close_returns_enum_deferred() {
 
     // Price up — a (long) has positive PnL
     engine.accrue_market_to(slot + 1, 1050, 0).unwrap();
-    engine.resolve_market(1050, 1050, slot + 1, 0).unwrap();
+    engine.resolve_market_not_atomic(1050, 1050, slot + 1, 0).unwrap();
 
     // force_close on positive-PnL account when b still has position → Deferred
     let result = engine.force_close_resolved_not_atomic(a, slot + 1).unwrap();
@@ -3949,7 +3949,7 @@ fn test_is_resolved_getter() {
     assert!(!engine.is_resolved(), "must be Live initially");
 
     engine.accrue_market_to(100, 1000, 0).unwrap();
-    engine.resolve_market(1000, 1000, 100, 0).unwrap();
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
 
     assert!(engine.is_resolved(), "must be Resolved after resolve_market");
 }
@@ -3962,7 +3962,7 @@ fn test_resolved_context_getter() {
     let _a = engine.add_user(1000).unwrap();
     engine.deposit(_a, 100_000, oracle, slot).unwrap();
     engine.accrue_market_to(slot, oracle, 0).unwrap();
-    engine.resolve_market(oracle, oracle, slot, 0).unwrap();
+    engine.resolve_market_not_atomic(oracle, oracle, slot, 0).unwrap();
 
     let (price, rslot) = engine.resolved_context();
     assert_eq!(price, oracle);

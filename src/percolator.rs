@@ -1,6 +1,6 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v12.15.0
+//! Formally Verified Risk Engine for Perpetual DEX — v12.17.0
 //!
-//! Implements the v12.15.0 spec: High-Precision Funding Architecture.
+//! Implements the v12.17.0 spec.
 //!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. Protected principal for flat accounts
@@ -379,6 +379,12 @@ pub struct RiskEngine {
     pub resolved_payout_h_num: u128,
     pub resolved_payout_h_den: u128,
     pub resolved_payout_ready: u8, // 0 = not ready, 1 = snapshot locked
+    /// Resolved terminal K deltas (spec §9.7 step 8).
+    /// Stored separately from live K_side to avoid K headroom exhaustion during resolution.
+    pub resolved_k_long_terminal_delta: i128,
+    pub resolved_k_short_terminal_delta: i128,
+    /// Live oracle price used for the live-sync leg of resolve_market
+    pub resolved_live_price: u64,
 
     // Keeper crank tracking
     pub last_crank_slot: u64,
@@ -664,6 +670,9 @@ impl RiskEngine {
             resolved_payout_h_num: 0,
             resolved_payout_h_den: 0,
             resolved_payout_ready: 0,
+            resolved_k_long_terminal_delta: 0,
+            resolved_k_short_terminal_delta: 0,
+            resolved_live_price: 0,
             last_crank_slot: 0,
             c_tot: U128::ZERO,
             pnl_pos_tot: 0u128,
@@ -728,6 +737,9 @@ impl RiskEngine {
         self.resolved_payout_h_num = 0;
         self.resolved_payout_h_den = 0;
         self.resolved_payout_ready = 0;
+        self.resolved_k_long_terminal_delta = 0;
+        self.resolved_k_short_terminal_delta = 0;
+        self.resolved_live_price = 0;
         self.last_crank_slot = 0;
         self.c_tot = U128::ZERO;
         self.pnl_pos_tot = 0;
@@ -1057,7 +1069,7 @@ impl RiskEngine {
             if self.market_mode == MarketMode::Live {
                 let reserve_loss = core::cmp::min(pos_loss, self.accounts[idx].reserved_pnl);
                 if reserve_loss > 0 {
-                    self.apply_reserve_loss_newest_first(idx, reserve_loss);
+                    self.apply_reserve_loss_newest_first(idx, reserve_loss)?;
                 }
                 let matured_loss = pos_loss - reserve_loss;
                 if matured_loss > 0 {
@@ -1842,16 +1854,14 @@ impl RiskEngine {
 
         // Step 10: A_candidate > 0
         if !a_candidate_u256.is_zero() {
-            let a_new = a_candidate_u256.try_into_u128().expect("A_candidate exceeds u128");
+            let a_new = a_candidate_u256.try_into_u128().ok_or(RiskError::Overflow)?;
             self.set_a_side(opp, a_new);
             self.set_oi_eff(opp, oi_post);
-            // Unconditionally increment phantom dust by 1 on any A_side decay
-            self.inc_phantom_dust_bound(opp);
-            // Additionally account for global A-truncation dust when actual truncation occurs
-            if !a_trunc_rem.is_zero() {
+            // Spec §5.6 step 10: increment phantom dust when OI actually decreased
+            if oi_post < oi {
                 let n_opp = self.get_stored_pos_count(opp) as u128;
                 let n_opp_u256 = U256::from_u128(n_opp);
-                // global_a_dust_bound = N_opp + ceil((OI + N_opp) / A_old)
+                // global_a_dust_bound = N_opp + ceil((OI_before + N_opp) / A_old)
                 let oi_plus_n = oi_u256.checked_add(n_opp_u256).unwrap_or(U256::MAX);
                 let ceil_term = ceil_div_positive_checked(oi_plus_n, a_old_u256);
                 let global_a_dust_bound = n_opp_u256.checked_add(ceil_term)
@@ -2173,6 +2183,21 @@ impl RiskEngine {
         cap.saturating_add(pnl_neg).saturating_sub(fee_debt)
     }
 
+    /// max_safe_flat_conversion_released (spec §4.12).
+    /// Returns largest x_safe <= x_cap such that converting x_safe released profit
+    /// on a live flat account cannot make Eq_maint_raw_i negative post-conversion.
+    /// Uses 256-bit exact intermediates per spec §1.6 item 29.
+    pub fn max_safe_flat_conversion_released(&self, idx: usize, x_cap: u128, h_num: u128, h_den: u128) -> u128 {
+        if x_cap == 0 { return 0; }
+        let e_before = self.account_equity_maint_raw(&self.accounts[idx]);
+        if e_before <= 0 { return 0; }
+        if h_den == 0 || h_num == h_den { return x_cap; }
+        let haircut_loss_num = h_den - h_num;
+        // min(x_cap, floor(E_before * h_den / haircut_loss_num))
+        let safe = wide_mul_div_floor_u128(e_before as u128, h_den, haircut_loss_num);
+        core::cmp::min(x_cap, safe)
+    }
+
     /// notional (spec §9.1): floor(|effective_pos_q| * oracle_price / POS_SCALE)
     pub fn notional(&self, idx: usize, oracle_price: u64) -> u128 {
         let eff = self.effective_pos_q(idx);
@@ -2367,7 +2392,7 @@ impl RiskEngine {
 
     /// apply_reserve_loss_newest_first (spec §4.4) — consume from pending first, then scheduled.
     test_visible! {
-    fn apply_reserve_loss_newest_first(&mut self, idx: usize, reserve_loss: u128) {
+    fn apply_reserve_loss_newest_first(&mut self, idx: usize, reserve_loss: u128) -> Result<()> {
         let a = &mut self.accounts[idx];
         let mut remaining = reserve_loss;
 
@@ -2398,11 +2423,12 @@ impl RiskEngine {
         }
 
         // Step 3: require full consumption
-        assert!(remaining == 0, "apply_reserve_loss_newest_first: loss exceeds R_i");
+        if remaining != 0 { return Err(RiskError::CorruptState); }
 
         // Step 4-5: R_i -= consumed, empty buckets cleared above
         a.reserved_pnl = a.reserved_pnl.checked_sub(reserve_loss)
-            .expect("apply_reserve_loss_newest_first: R_i underflow");
+            .ok_or(RiskError::CorruptState)?;
+        Ok(())
     }
 
     }
@@ -2834,22 +2860,30 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 2: if account missing, require amount >= MIN_INITIAL_DEPOSIT and materialize
-        // Per spec §10.3 step 2 and §2.3: deposit is the canonical materialization path.
+        // Step 2: if account missing, require amount >= MIN_INITIAL_DEPOSIT + fee, materialize,
+        // and route new_account_fee to insurance. Consistent with materialize_with_fee.
+        let mut capital_amount = amount;
         if !self.is_used(idx as usize) {
-            let min_dep = self.params.min_initial_deposit.get();
-            if amount < min_dep {
+            let required_fee = self.params.new_account_fee.get();
+            let total_needed = self.params.min_initial_deposit.get()
+                .checked_add(required_fee).ok_or(RiskError::Overflow)?;
+            if amount < total_needed {
                 return Err(RiskError::InsufficientBalance);
             }
             self.materialize_at(idx, now_slot)?;
+            // Route fee to insurance
+            if required_fee > 0 {
+                self.insurance_fund.balance = self.insurance_fund.balance + required_fee;
+                capital_amount = amount - required_fee; // safe: amount >= total_needed > required_fee
+            }
         }
 
         // Step 3: current_slot = now_slot
         self.current_slot = now_slot;
         self.vault = U128::new(v_candidate);
 
-        // Step 6: set_capital(i, C_i + amount)
-        let new_cap = add_u128(self.accounts[idx as usize].capital.get(), amount);
+        // Step 6: set_capital(i, C_i + capital_amount)
+        let new_cap = add_u128(self.accounts[idx as usize].capital.get(), capital_amount);
         self.set_capital(idx as usize, new_cap);
 
         // Step 7: settle_losses_from_principal
@@ -3187,8 +3221,8 @@ impl RiskEngine {
             if fee > MAX_PROTOCOL_FEE_ABS {
                 return Err(RiskError::Overflow);
             }
-            let (cash_a, impact_a) = self.charge_fee_to_insurance(a as usize, fee)?;
-            let (cash_b, impact_b) = self.charge_fee_to_insurance(b as usize, fee)?;
+            let (cash_a, impact_a, _dropped_a) = self.charge_fee_to_insurance(a as usize, fee)?;
+            let (cash_b, impact_b, _dropped_b) = self.charge_fee_to_insurance(b as usize, fee)?;
             fee_cash_a = cash_a;
             fee_cash_b = cash_b;
             fee_impact_a = impact_a;
@@ -3234,7 +3268,8 @@ impl RiskEngine {
     /// Returns (capital_paid_to_insurance, total_equity_impact).
     /// capital_paid is realized revenue; total includes collectible debt.
     /// Any excess beyond collectible headroom is silently dropped.
-    fn charge_fee_to_insurance(&mut self, idx: usize, fee: u128) -> Result<(u128, u128)> {
+    /// Returns (fee_paid_to_insurance, fee_equity_impact, fee_dropped) per spec §4.14.
+    fn charge_fee_to_insurance(&mut self, idx: usize, fee: u128) -> Result<(u128, u128, u128)> {
         if fee > MAX_PROTOCOL_FEE_ABS {
             return Err(RiskError::Overflow);
         }
@@ -3263,9 +3298,11 @@ impl RiskEngine {
                 self.accounts[idx].fee_credits = I128::new(new_fc);
             }
             // Any excess beyond collectible headroom is silently dropped
-            Ok((fee_paid, fee_paid + collectible))
+            let equity_impact = fee_paid + collectible;
+            let dropped = fee - equity_impact;
+            Ok((fee_paid, equity_impact, dropped))
         } else {
-            Ok((fee_paid, fee_paid))
+            Ok((fee_paid, fee_paid, 0))
         }
     }
 
@@ -3997,9 +4034,9 @@ impl RiskEngine {
     /// Transition market from Live to Resolved at a price-bounded settlement price.
     /// Per spec §9.7 (v12.16.4): requires market already accrued through resolution slot
     /// (slot_last == current_slot == now_slot), eliminating retroactive funding erasure.
-    /// Self-synchronizing resolve_market (spec §9.7, v12.16.6).
-    /// First accrues live state, then applies zero-funding settlement shift.
-    pub fn resolve_market(
+    /// Self-synchronizing resolve_market (spec §9.7, v12.17.0).
+    /// First accrues live state, then stores terminal K deltas separately.
+    pub fn resolve_market_not_atomic(
         &mut self,
         resolved_price: u64,
         live_oracle_price: u64,
@@ -4036,15 +4073,31 @@ impl RiskEngine {
             }
         }
 
-        // Step 7: zero-funding settlement shift from refreshed P_last to resolved_price.
-        // dt=0 since slot_last == now_slot after step 5, so only mark-to-market fires.
-        self.accrue_market_to(now_slot, resolved_price, 0)?;
+        // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
+        // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
+        // so resolution can succeed even near K headroom (spec §9.7 step 8).
+        let price_diff = resolved_price as i128 - live_oracle_price as i128;
+        let resolved_k_long_td = if self.side_mode_long == SideMode::ResetPending {
+            0i128
+        } else {
+            checked_u128_mul_i128(self.adl_mult_long, price_diff)?
+        };
+        let resolved_k_short_td = if self.side_mode_short == SideMode::ResetPending {
+            0i128
+        } else {
+            // Short side: negative of price_diff
+            let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
+            checked_u128_mul_i128(self.adl_mult_short, neg_price_diff)?
+        };
 
-        // Steps 7-13: set resolved state
+        // Steps 8-13: set resolved state
         self.current_slot = now_slot;
         self.market_mode = MarketMode::Resolved;
         self.resolved_price = resolved_price;
+        self.resolved_live_price = live_oracle_price;
         self.resolved_slot = now_slot;
+        self.resolved_k_long_terminal_delta = resolved_k_long_td;
+        self.resolved_k_short_terminal_delta = resolved_k_short_td;
 
         // Step 14: all positive PnL is now matured
         self.pnl_matured_pos_tot = self.pnl_pos_tot;
@@ -4129,13 +4182,26 @@ impl RiskEngine {
             let epoch_snap = self.accounts[i].adl_epoch_snap;
             let epoch_side = self.get_epoch_side(side);
 
+            // Resolved reconciliation uses K_epoch_start + resolved_k_terminal_delta
+            // as the target K (spec §5.4 steps 6-7). F uses F_epoch_start.
+            // All accounts are stale after resolution (epoch mismatch).
+            let resolved_k_td = match side {
+                Side::Long => self.resolved_k_long_terminal_delta,
+                Side::Short => self.resolved_k_short_terminal_delta,
+            };
             let (k_end, f_end) = if epoch_snap == epoch_side {
+                // Same-epoch: use live K+terminal delta, live F
+                // This can only happen if the side was already ResetPending before resolution
+                // (resolve_market doesn't increment its epoch), in which case terminal delta = 0.
                 (self.get_k_side(side), self.get_f_side(side))
             } else {
-                (self.get_k_epoch_start(side), self.get_f_epoch_start(side))
+                // Stale (normal resolved path): K_epoch_start + terminal delta, F_epoch_start
+                let k_base = self.get_k_epoch_start(side);
+                let k_terminal = k_base.checked_add(resolved_k_td).ok_or(RiskError::Overflow)?;
+                (k_terminal, self.get_f_epoch_start(side))
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-            // Combined K/F settlement for resolved reconciliation (spec v12.17 §1.6)
+            // Combined K/F settlement for resolved reconciliation (spec v12.17 §5.4)
             let pnl_delta = Self::compute_kf_pnl_delta(abs_basis, k_snap, k_end, f_snap_acct, f_end, den)?;
             let new_pnl = self.accounts[i].pnl.checked_add(pnl_delta)
                 .ok_or(RiskError::Overflow)?;

@@ -2013,7 +2013,7 @@ fn proof_audit4_materialize_at_freelist_integrity() {
     assert!(engine.num_used_accounts == used_before);
 
     // Free slot 0, verify it returns to freelist head
-    engine.free_slot(idx0);
+    engine.free_slot(idx0).unwrap();
     assert!(!engine.is_used(0));
     assert!(engine.free_head == 0);
     assert!(engine.num_used_accounts == 1);
