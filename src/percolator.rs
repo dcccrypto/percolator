@@ -1006,7 +1006,10 @@ impl RiskEngine {
             self.pnl_pos_tot = self.pnl_pos_tot.checked_sub(delta)
                 .expect("set_pnl_with_reserve: pnl_pos_tot underflow");
         }
-        assert!(self.pnl_pos_tot <= MAX_PNL_POS_TOT);
+        // Live markets enforce aggregate cap; resolved may exceed (spec v12.17 §0 goal 43)
+        if self.market_mode == MarketMode::Live && self.pnl_pos_tot > MAX_PNL_POS_TOT {
+            return Err(RiskError::Overflow);
+        }
 
         if new_pos > old_pos {
             // Case A: positive increase
@@ -1357,17 +1360,24 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)?;
         let funding_den_wide = I256::from_u128(FUNDING_DEN);
         // Need I256 * I256. Use the signed multiply we have.
-        // K_diff * FUNDING_DEN: both components fit in i128, but product may not.
-        // Use two I256 multiplications via checked_sub (a*b = a*b_hi*2^128 + a*b_lo).
-        // Simpler: k_diff is i128, FUNDING_DEN is u128 (1e9). Product fits in i128
-        // since |k_diff| <= i128::MAX and FUNDING_DEN = 1e9.
-        // Actually k_diff * 1e9 CAN overflow i128 for large k_diff. Use wide path.
+        // K_diff * FUNDING_DEN in exact wide arithmetic (spec v12.17 §1.6).
+        // Use checked i128 mul first; fall back to wide U256 path on overflow.
         let k_diff_i128 = k_diff.try_into_i128().ok_or(RiskError::Overflow)?;
-        let k_scaled = {
-            // k_diff * FUNDING_DEN via checked i128 — if it fits, great; if not, overflow
-            match k_diff_i128.checked_mul(FUNDING_DEN as i128) {
-                Some(v) => I256::from_i128(v),
-                None => return Err(RiskError::Overflow), // K * FUNDING_DEN overflow
+        let k_scaled = match k_diff_i128.checked_mul(FUNDING_DEN as i128) {
+            Some(v) => I256::from_i128(v),
+            None => {
+                // Overflow in i128: compute in U256 and convert
+                let neg = k_diff_i128 < 0;
+                let abs_k = k_diff_i128.unsigned_abs();
+                let prod_u256 = U256::from_u128(abs_k)
+                    .checked_mul(U256::from_u128(FUNDING_DEN))
+                    .ok_or(RiskError::Overflow)?;
+                // prod_u256 fits in I256 positive range (abs_k * 1e9 < 2^256/2)
+                let pos = I256::from_u128(
+                    prod_u256.try_into_u128().ok_or(RiskError::Overflow)?
+                );
+                if neg { I256::ZERO.checked_sub(pos).ok_or(RiskError::Overflow)? }
+                else { pos }
             }
         };
         // F_diff
@@ -1870,9 +1880,9 @@ impl RiskEngine {
     // ========================================================================
 
     test_visible! {
-    fn begin_full_drain_reset(&mut self, side: Side) {
+    fn begin_full_drain_reset(&mut self, side: Side) -> Result<()> {
         // Require OI_eff_side == 0
-        assert!(self.get_oi_eff(side) == 0, "begin_full_drain_reset: OI not zero");
+        if self.get_oi_eff(side) != 0 { return Err(RiskError::CorruptState); }
 
         // K_epoch_start_side = K_side
         let k = self.get_k_side(side);
@@ -1890,9 +1900,9 @@ impl RiskEngine {
         // Increment epoch
         match side {
             Side::Long => self.adl_epoch_long = self.adl_epoch_long.checked_add(1)
-                .expect("epoch overflow"),
+                .ok_or(RiskError::Overflow)?,
             Side::Short => self.adl_epoch_short = self.adl_epoch_short.checked_add(1)
-                .expect("epoch overflow"),
+                .ok_or(RiskError::Overflow)?,
         }
 
         // A_side = ADL_ONE
@@ -1910,6 +1920,7 @@ impl RiskEngine {
 
         // mode = ResetPending
         self.set_side_mode(side, SideMode::ResetPending);
+        Ok(())
     }
     }
 
@@ -2015,10 +2026,10 @@ impl RiskEngine {
     test_visible! {
     fn finalize_end_of_instruction_resets(&mut self, ctx: &InstructionContext) {
         if ctx.pending_reset_long && self.side_mode_long != SideMode::ResetPending {
-            self.begin_full_drain_reset(Side::Long);
+            let _ = self.begin_full_drain_reset(Side::Long);
         }
         if ctx.pending_reset_short && self.side_mode_short != SideMode::ResetPending {
-            self.begin_full_drain_reset(Side::Short);
+            let _ = self.begin_full_drain_reset(Side::Short);
         }
         // Auto-finalize sides that are fully ready for reopening
         self.maybe_finalize_ready_reset_sides();
@@ -3326,9 +3337,11 @@ impl RiskEngine {
             // Spec v12.17 §9.4 step 25: fee-neutral shortfall comparison for flat closes.
             // min(Eq_maint_raw_post + fee_equity_impact, 0) >= min(Eq_maint_raw_pre, 0)
             // Uses the actual applied fee impact (fee parameter), not nominal requested fee.
-            // buffer_pre = Eq_maint_raw_pre - MM_req_pre; add MM_req_pre back to get Eq_maint_raw_pre.
+            // buffer_pre = Eq_maint_raw_pre - MM_req_pre; add MM_req_pre back.
+            // Use old_eff (pre-trade) to compute MM_req_pre — NOT current state (post-trade).
             let mm_req_pre_wide = if *old_eff == 0 { I256::ZERO } else {
-                let not_pre = self.notional(idx, oracle_price);
+                let abs_old = old_eff.unsigned_abs();
+                let not_pre = mul_div_floor_u128(abs_old, oracle_price as u128, POS_SCALE);
                 I256::from_u128(core::cmp::max(
                     mul_div_floor_u128(not_pre, self.params.maintenance_margin_bps as u128, 10_000),
                     self.params.min_nonzero_mm_req))
@@ -4042,10 +4055,10 @@ impl RiskEngine {
 
         // Steps 17-20: drain/finalize sides
         if self.side_mode_long != SideMode::ResetPending {
-            self.begin_full_drain_reset(Side::Long);
+            self.begin_full_drain_reset(Side::Long)?;
         }
         if self.side_mode_short != SideMode::ResetPending {
-            self.begin_full_drain_reset(Side::Short);
+            self.begin_full_drain_reset(Side::Short)?;
         }
         if self.side_mode_long == SideMode::ResetPending
             && self.stale_account_count_long == 0

@@ -709,6 +709,13 @@ impl I256 {
     pub fn from_raw_u256(v: U256) -> Self {
         I256([v.lo(), v.hi()])
     }
+
+    /// Convert U256 to I256, returning None if the value exceeds i256 max (sign bit set).
+    pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+        // Sign bit is bit 255 = bit 127 of hi limb
+        if v.hi() >> 127 != 0 { return None; }
+        Some(Self::from_raw_u256(v))
+    }
 }
 
 // ============================================================================
@@ -881,6 +888,12 @@ impl I256 {
 
     pub fn from_raw_u256(v: U256) -> Self {
         Self::from_lo_hi(v.lo(), v.hi())
+    }
+
+    /// Convert U256 to I256, returning None if the value exceeds i256 max (sign bit set).
+    pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
+        if v.hi() >> 127 != 0 { return None; }
+        Some(Self::from_raw_u256(v))
     }
 }
 
