@@ -2543,8 +2543,12 @@ impl RiskEngine {
     fn advance_profit_warmup(&mut self, idx: usize) {
         let r = self.accounts[idx].reserved_pnl;
         if r == 0 {
+            // Zero reserve with ghost bucket flags is corrupt state
             if self.accounts[idx].sched_present != 0 || self.accounts[idx].pending_present != 0 {
-                return; // corrupt bucket metadata with zero reserve — tolerate conservatively
+                // Cannot return Err here (void fn called from touch paths).
+                // Clear ghost flags defensively to prevent downstream blocking.
+                self.accounts[idx].sched_present = 0;
+                self.accounts[idx].pending_present = 0;
             }
             return;
         }
@@ -2640,12 +2644,12 @@ impl RiskEngine {
     // ========================================================================
 
     /// settle_losses (spec §7.1): settle negative PnL from principal
-    fn settle_losses(&mut self, idx: usize) {
+    fn settle_losses(&mut self, idx: usize) -> Result<()> {
         let pnl = self.accounts[idx].pnl;
         if pnl >= 0 {
-            return;
+            return Ok(());
         }
-        if pnl == i128::MIN { return; }
+        if pnl == i128::MIN { return Err(RiskError::CorruptState); }
         let need = pnl.unsigned_abs();
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(need, cap);
@@ -2653,25 +2657,27 @@ impl RiskEngine {
             self.set_capital(idx, cap - pay);
             let pay_i128 = pay as i128; // pay <= need = |pnl| <= i128::MAX, safe
             let new_pnl = pnl.checked_add(pay_i128)
-                .unwrap_or(0); // pay <= |pnl| guarantees no overflow
-            if new_pnl == i128::MIN { return; }
+                .ok_or(RiskError::CorruptState)?;
+            if new_pnl == i128::MIN { return Err(RiskError::CorruptState); }
             self.set_pnl(idx, new_pnl);
         }
+        Ok(())
     }
 
     /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL
-    fn resolve_flat_negative(&mut self, idx: usize) {
+    fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
         let eff = self.effective_pos_q(idx);
         if eff != 0 {
-            return; // Not flat — must resolve through liquidation
+            return Ok(()); // Not flat
         }
         let pnl = self.accounts[idx].pnl;
         if pnl < 0 {
-            if pnl == i128::MIN { return; }
+            if pnl == i128::MIN { return Err(RiskError::CorruptState); }
             let loss = pnl.unsigned_abs();
             self.absorb_protocol_loss(loss);
             self.set_pnl(idx, 0i128);
         }
+        Ok(())
     }
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
@@ -2972,7 +2978,7 @@ impl RiskEngine {
         self.set_capital(idx as usize, new_cap);
 
         // Step 7: settle_losses_from_principal
-        self.settle_losses(idx as usize);
+        self.settle_losses(idx as usize)?;
 
         // Step 8: deposit MUST NOT invoke resolve_flat_negative (spec §7.3).
         // A pure deposit path that does not call accrue_market_to MUST NOT
@@ -3667,7 +3673,7 @@ impl RiskEngine {
                 self.attach_effective_position(idx as usize, new_eff);
 
                 // Step 9: settle realized losses from principal
-                self.settle_losses(idx as usize);
+                self.settle_losses(idx as usize)?;
 
                 // Step 10-11: charge liquidation fee on quantity closed
                 let liq_fee = {
@@ -3702,7 +3708,7 @@ impl RiskEngine {
                 self.attach_effective_position(idx as usize, 0i128);
 
                 // Settle losses from principal
-                self.settle_losses(idx as usize);
+                self.settle_losses(idx as usize)?;
 
                 // Charge liquidation fee (spec §8.3)
                 let liq_fee = if q_close_q == 0 {
@@ -3818,7 +3824,7 @@ impl RiskEngine {
 
             // Touch candidate (adds to ctx.touched_accounts, up to 64 slots).
             self.touch_account_live_local(cidx, &mut ctx)?;
-            self.fee_debt_sweep(cidx);
+            // Fee sweep deferred to finalize_touched_accounts_post_live (spec §10 rule 7).
 
             // Check if liquidatable after exact current-state touch.
             // Apply hint if present and current-state-valid (spec §11.1 rule 3).
@@ -4294,10 +4300,9 @@ impl RiskEngine {
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
             let pnl_delta = if epoch_snap == epoch_side {
-                // Same-epoch in resolved mode: side was already ResetPending before resolution,
-                // so terminal_delta = 0. Reconcile against current K/F.
-                Self::compute_kf_pnl_delta(abs_basis, k_snap, self.get_k_side(side),
-                    f_snap_acct, self.get_f_side(side), den)?
+                // Same-epoch with nonzero basis in resolved mode is corrupt state.
+                // After resolution, all nonzero-basis accounts must be stale.
+                return Err(RiskError::CorruptState);
             } else {
                 // Stale (normal resolved path): require one-epoch lag
                 if epoch_snap.checked_add(1) != Some(epoch_side) {
@@ -4335,8 +4340,8 @@ impl RiskEngine {
             self.accounts[i].adl_epoch_snap = 0;
         }
 
-        self.settle_losses(i);
-        self.resolve_flat_negative(i);
+        self.settle_losses(i)?;
+        self.resolve_flat_negative(i)?;
         Ok(())
     }
 
@@ -4672,8 +4677,8 @@ impl RiskEngine {
 
         self.current_slot = now_slot;
         // Settle losses from principal first, then absorb remaining via insurance
-        self.settle_losses(i);
-        self.resolve_flat_negative(i);
+        self.settle_losses(i)?;
+        self.resolve_flat_negative(i)?;
         Ok(())
     }
 

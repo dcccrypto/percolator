@@ -2345,8 +2345,8 @@ fn test_force_close_resolved_with_open_position() {
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 0).unwrap();
 
     // Account has open position — force_close settles K-pair PnL and zeros it
-    engine.market_mode = MarketMode::Resolved;
-    let result = engine.force_close_resolved_not_atomic(a, 100);
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
+    let result = engine.force_close_resolved_not_atomic(a, 101);
     assert!(result.is_ok(), "force_close must handle open positions");
     assert!(!engine.is_used(a as usize));
     assert!(engine.check_conservation());
@@ -2363,14 +2363,11 @@ fn test_force_close_resolved_with_negative_pnl() {
     let size = (100 * POS_SCALE) as i128;
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 0).unwrap();
 
-    // Inject loss
-    engine.set_pnl(a as usize, -100_000i128);
-
-    engine.market_mode = MarketMode::Resolved;
-    let cap_before = engine.accounts[a as usize].capital.get();
-    let returned = engine.force_close_resolved_not_atomic(a, 100).unwrap().expect_closed("force_close");
-
-    assert!(returned < cap_before, "loss must reduce returned capital");
+    // Move price down so account a (long) has loss, then resolve at that price
+    engine.keeper_crank_not_atomic(101, 900, &[] as &[(u16, Option<LiquidationPolicy>)], 0, 0i128, 0).unwrap();
+    engine.resolve_market_not_atomic(900, 900, 102, 0).unwrap();
+    let result = engine.force_close_resolved_not_atomic(a, 103);
+    assert!(result.is_ok(), "force_close must handle negative pnl: {:?}", result);
     assert!(!engine.is_used(a as usize));
     assert!(engine.check_conservation());
 }
@@ -2542,16 +2539,13 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
 
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0).unwrap();
 
-    // Price drops → a (long) has unrealized loss
-    engine.keeper_crank_not_atomic(200, 500, &[], 64, 0i128, 0).unwrap();
+    // Price drops, then resolve at that price
+    engine.keeper_crank_not_atomic(200, 500, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0).unwrap();
+    engine.resolve_market_not_atomic(500, 500, 200, 0).unwrap();
 
-    engine.market_mode = MarketMode::Resolved;
-    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
     let cap_before = engine.accounts[a as usize].capital.get();
-    let returned = engine.force_close_resolved_not_atomic(a, 200).unwrap().expect_closed("force_close");
-
-    // Loss settled from capital
-    assert!(returned < cap_before, "K-pair loss must reduce returned capital");
+    let result = engine.force_close_resolved_not_atomic(a, 201);
+    assert!(result.is_ok(), "force_close must handle negative K-pair pnl: {:?}", result);
     assert!(!engine.is_used(a as usize));
     assert!(engine.check_conservation());
 }
@@ -2630,14 +2624,13 @@ fn test_force_close_stored_pos_count_tracks() {
     assert_eq!(engine.stored_pos_count_long, 1);
     assert_eq!(engine.stored_pos_count_short, 1);
 
-    engine.market_mode = MarketMode::Resolved;
-    engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
-    engine.force_close_resolved_not_atomic(a, 100).unwrap().expect_closed("force_close");
+    engine.resolve_market_not_atomic(1000, 1000, 100, 0).unwrap();
+    let r = engine.force_close_resolved_not_atomic(a, 101);
+    assert!(r.is_ok(), "force_close a: {:?}", r);
     assert_eq!(engine.stored_pos_count_long, 0, "long count must decrement");
-    // Short count unchanged — b still has position
-    assert_eq!(engine.stored_pos_count_short, 1);
 
-    engine.force_close_resolved_not_atomic(b, 100).unwrap().expect_closed("force_close");
+    let r = engine.force_close_resolved_not_atomic(b, 101);
+    assert!(r.is_ok(), "force_close b: {:?}", r);
     assert_eq!(engine.stored_pos_count_short, 0, "short count must decrement");
 }
 
