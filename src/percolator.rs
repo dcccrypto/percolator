@@ -1070,7 +1070,7 @@ impl RiskEngine {
                         return Ok(());
                     }
                     // h_lock validity already pre-validated above
-                    self.append_or_route_new_reserve(idx, reserve_add, self.current_slot, h_lock);
+                    self.append_or_route_new_reserve(idx, reserve_add, self.current_slot, h_lock)?;
                     if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
                     return Ok(());
                 }
@@ -1086,34 +1086,34 @@ impl RiskEngine {
                 let matured_loss = pos_loss - reserve_loss;
                 if matured_loss > 0 {
                     self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_sub(matured_loss)
-                        .expect("pnl_matured_pos_tot underflow");
+                        .ok_or(RiskError::CorruptState)?;
                 }
             } else {
                 // Resolved: R_i must be 0
-                assert!(self.accounts[idx].reserved_pnl == 0);
+                if self.accounts[idx].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
                 if pos_loss > 0 {
                     self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_sub(pos_loss)
-                        .expect("pnl_matured_pos_tot underflow (resolved)");
+                        .ok_or(RiskError::CorruptState)?;
                 }
             }
             // Track neg_pnl_account_count sign transitions (spec §4.7)
             if old < 0 && new_pnl >= 0 {
                 self.neg_pnl_account_count = self.neg_pnl_account_count.checked_sub(1)
-                    .expect("neg_pnl_account_count underflow");
+                    .ok_or(RiskError::CorruptState)?;
             } else if old >= 0 && new_pnl < 0 {
                 self.neg_pnl_account_count = self.neg_pnl_account_count.checked_add(1)
-                    .expect("neg_pnl_account_count overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
             self.accounts[idx].pnl = new_pnl;
 
             // Step 20: if new_pos == 0 and Live, require empty queue
             if new_pos == 0 && self.market_mode == MarketMode::Live {
-                assert!(self.accounts[idx].reserved_pnl == 0);
-                assert!(self.accounts[idx].sched_present == 0);
-                assert!(self.accounts[idx].pending_present == 0);
+                if self.accounts[idx].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
+                if self.accounts[idx].sched_present != 0 { return Err(RiskError::CorruptState); }
+                if self.accounts[idx].pending_present != 0 { return Err(RiskError::CorruptState); }
             }
 
-            assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot);
+            if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
             return Ok(());
         }
     }
@@ -1141,8 +1141,7 @@ impl RiskEngine {
         // Update pnl_matured_pos_tot
         self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_sub(x)
             .ok_or(RiskError::CorruptState)?;
-        assert!(self.pnl_matured_pos_tot <= self.pnl_pos_tot,
-            "consume_released_pnl: pnl_matured_pos_tot > pnl_pos_tot");
+        if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
 
         // PNL_i = checked_sub_i128(PNL_i, checked_cast_i128(x))
         let x_i128: i128 = x.try_into().map_err(|_| RiskError::Overflow)?;
@@ -1174,7 +1173,7 @@ impl RiskEngine {
 
     /// set_position_basis_q (spec §4.4): update stored pos counts based on sign changes
     test_visible! {
-    fn set_position_basis_q(&mut self, idx: usize, new_basis: i128) {
+    fn set_position_basis_q(&mut self, idx: usize, new_basis: i128) -> Result<()> {
         let old = self.accounts[idx].position_basis_q;
         let old_side = side_of_i128(old);
         let new_side = side_of_i128(new_basis);
@@ -1184,11 +1183,11 @@ impl RiskEngine {
             match s {
                 Side::Long => {
                     self.stored_pos_count_long = self.stored_pos_count_long
-                        .checked_sub(1).expect("stored_pos_count_long underflow");
+                        .checked_sub(1).ok_or(RiskError::CorruptState)?;
                 }
                 Side::Short => {
                     self.stored_pos_count_short = self.stored_pos_count_short
-                        .checked_sub(1).expect("stored_pos_count_short underflow");
+                        .checked_sub(1).ok_or(RiskError::CorruptState)?;
                 }
             }
         }
@@ -1198,32 +1197,29 @@ impl RiskEngine {
             match s {
                 Side::Long => {
                     self.stored_pos_count_long = self.stored_pos_count_long
-                        .checked_add(1).expect("stored_pos_count_long overflow");
+                        .checked_add(1).ok_or(RiskError::CorruptState)?;
                     if self.stored_pos_count_long > MAX_ACTIVE_POSITIONS_PER_SIDE {
-                        self.stored_pos_count_long -= 1; // rollback
-                        self.accounts[idx].position_basis_q = old; // rollback
-                        return; // reject silently (caller checks OI)
+                        return Err(RiskError::Overflow);
                     }
                 }
                 Side::Short => {
                     self.stored_pos_count_short = self.stored_pos_count_short
-                        .checked_add(1).expect("stored_pos_count_short overflow");
+                        .checked_add(1).ok_or(RiskError::CorruptState)?;
                     if self.stored_pos_count_short > MAX_ACTIVE_POSITIONS_PER_SIDE {
-                        self.stored_pos_count_short -= 1; // rollback
-                        self.accounts[idx].position_basis_q = old; // rollback
-                        return; // reject silently (caller checks OI)
+                        return Err(RiskError::Overflow);
                     }
                 }
             }
         }
 
         self.accounts[idx].position_basis_q = new_basis;
+        Ok(())
     }
     }
 
     /// attach_effective_position (spec §4.5)
     test_visible! {
-    fn attach_effective_position(&mut self, idx: usize, new_eff_pos_q: i128) {
+    fn attach_effective_position(&mut self, idx: usize, new_eff_pos_q: i128) -> Result<()> {
         // Before replacing a nonzero same-epoch basis, account for the fractional
         // remainder that will be orphaned (dynamic dust accounting).
         let old_basis = self.accounts[idx].position_basis_q;
@@ -1253,7 +1249,7 @@ impl RiskEngine {
         }
 
         if new_eff_pos_q == 0 {
-            self.set_position_basis_q(idx, 0i128);
+            self.set_position_basis_q(idx, 0i128)?;
             // Reset to canonical zero-position defaults (spec §2.4)
             self.accounts[idx].adl_a_basis = ADL_ONE;
             self.accounts[idx].adl_k_snap = 0i128;
@@ -1261,12 +1257,11 @@ impl RiskEngine {
             self.accounts[idx].adl_epoch_snap = 0;
         } else {
             // Spec §4.6: abs(new_eff_pos_q) <= MAX_POSITION_ABS_Q
-            assert!(
-                new_eff_pos_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
-                "attach: abs(new_eff_pos_q) exceeds MAX_POSITION_ABS_Q"
-            );
-            let side = side_of_i128(new_eff_pos_q).expect("attach: nonzero must have side");
-            self.set_position_basis_q(idx, new_eff_pos_q);
+            if new_eff_pos_q.unsigned_abs() > MAX_POSITION_ABS_Q {
+                return Err(RiskError::Overflow);
+            }
+            let side = side_of_i128(new_eff_pos_q).ok_or(RiskError::CorruptState)?;
+            self.set_position_basis_q(idx, new_eff_pos_q)?;
 
             match side {
                 Side::Long => {
@@ -1283,6 +1278,7 @@ impl RiskEngine {
                 }
             }
         }
+        Ok(())
     }
     }
 
@@ -1616,7 +1612,7 @@ impl RiskEngine {
 
             if q_eff_new == 0 {
                 self.inc_phantom_dust_bound(side);
-                self.set_position_basis_q(idx, 0i128);
+                self.set_position_basis_q(idx, 0i128)?;
                 self.accounts[idx].adl_a_basis = ADL_ONE;
                 self.accounts[idx].adl_k_snap = 0i128;
                 self.accounts[idx].f_snap = 0i128;
@@ -1649,7 +1645,7 @@ impl RiskEngine {
 
             // Mutate
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseHLock(h_lock))?;
-            self.set_position_basis_q(idx, 0i128);
+            self.set_position_basis_q(idx, 0i128)?;
             self.set_stale_count(side, new_stale);
             self.accounts[idx].adl_a_basis = ADL_ONE;
             self.accounts[idx].adl_k_snap = 0i128;
@@ -2440,7 +2436,7 @@ impl RiskEngine {
 
     /// append_or_route_new_reserve (spec §4.3)
     test_visible! {
-    fn append_or_route_new_reserve(&mut self, idx: usize, reserve_add: u128, now_slot: u64, h_lock: u64) {
+    fn append_or_route_new_reserve(&mut self, idx: usize, reserve_add: u128, now_slot: u64, h_lock: u64) -> Result<()> {
         let a = &mut self.accounts[idx];
 
         // Step 1: if sched absent and pending present → promote pending to scheduled
@@ -2469,8 +2465,8 @@ impl RiskEngine {
             && a.sched_start_slot == now_slot && a.sched_horizon == h_lock && a.sched_release_q == 0
         {
             // Step 3: merge into scheduled (same slot, same horizon, not yet released)
-            a.sched_remaining_q = a.sched_remaining_q.checked_add(reserve_add).expect("reserve overflow");
-            a.sched_anchor_q = a.sched_anchor_q.checked_add(reserve_add).expect("anchor overflow");
+            a.sched_remaining_q = a.sched_remaining_q.checked_add(reserve_add).ok_or(RiskError::Overflow)?;
+            a.sched_anchor_q = a.sched_anchor_q.checked_add(reserve_add).ok_or(RiskError::Overflow)?;
         } else if a.pending_present == 0 {
             // Step 4: create pending bucket
             a.pending_present = 1;
@@ -2479,12 +2475,13 @@ impl RiskEngine {
             a.pending_created_slot = now_slot;
         } else {
             // Step 5: merge into pending (horizon = max)
-            a.pending_remaining_q = a.pending_remaining_q.checked_add(reserve_add).expect("reserve overflow");
+            a.pending_remaining_q = a.pending_remaining_q.checked_add(reserve_add).ok_or(RiskError::Overflow)?;
             a.pending_horizon = core::cmp::max(a.pending_horizon, h_lock);
         }
 
         // Step 6: R_i += reserve_add
-        a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).expect("R_i overflow");
+        a.reserved_pnl = a.reserved_pnl.checked_add(reserve_add).ok_or(RiskError::Overflow)?;
+        Ok(())
     }
 
     }
@@ -2735,7 +2732,7 @@ impl RiskEngine {
     /// Does NOT auto-convert, does NOT fee-sweep. Those happen in finalize.
     test_visible! {
     fn touch_account_live_local(&mut self, idx: usize, ctx: &mut InstructionContext) -> Result<()> {
-        assert!(self.market_mode == MarketMode::Live, "touch_account_live_local requires Live");
+        if self.market_mode != MarketMode::Live { return Err(RiskError::Unauthorized); }
         if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
             return Err(RiskError::AccountNotFound);
         }
@@ -3309,8 +3306,8 @@ impl RiskEngine {
         self.set_pnl_with_reserve(b as usize, pnl_b, ReserveMode::UseHLock(h_lock))?;
 
         // Step 8: attach effective positions
-        self.attach_effective_position(a as usize, new_eff_a);
-        self.attach_effective_position(b as usize, new_eff_b);
+        self.attach_effective_position(a as usize, new_eff_a)?;
+        self.attach_effective_position(b as usize, new_eff_b)?;
 
         // Step 9: write pre-computed OI (same values from step 5, spec §5.2.2)
         self.oi_eff_long_q = oi_long_after;
@@ -3697,7 +3694,7 @@ impl RiskEngine {
                     .ok_or(RiskError::Overflow)?;
 
                 // Step 7-8: close q_close_q at oracle, attach new position
-                self.attach_effective_position(idx as usize, new_eff);
+                self.attach_effective_position(idx as usize, new_eff)?;
 
                 // Step 9: settle realized losses from principal
                 self.settle_losses(idx as usize)?;
@@ -3732,7 +3729,7 @@ impl RiskEngine {
                 let q_close_q = abs_old_eff;
 
                 // Close entire position at oracle
-                self.attach_effective_position(idx as usize, 0i128);
+                self.attach_effective_position(idx as usize, 0i128)?;
 
                 // Settle losses from principal
                 self.settle_losses(idx as usize)?;
@@ -3753,7 +3750,7 @@ impl RiskEngine {
                 // Determine deficit D
                 let eff_post = self.effective_pos_q(idx as usize);
                 let d: u128 = if eff_post == 0 && self.accounts[idx as usize].pnl < 0 {
-                    assert!(self.accounts[idx as usize].pnl != i128::MIN, "liquidate: i128::MIN pnl");
+                    if self.accounts[idx as usize].pnl == i128::MIN { return Err(RiskError::CorruptState); }
                     self.accounts[idx as usize].pnl.unsigned_abs()
                 } else {
                     0u128
@@ -4359,7 +4356,7 @@ impl RiskEngine {
                 let old_stale = self.get_stale_count(side);
                 self.set_stale_count(side, old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?);
             }
-            self.set_position_basis_q(i, 0);
+            self.set_position_basis_q(i, 0)?;
             self.accounts[i].adl_a_basis = ADL_ONE;
             self.accounts[i].adl_k_snap = 0;
             self.accounts[i].f_snap = 0;
