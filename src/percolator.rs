@@ -73,7 +73,13 @@ pub const MAX_ACCOUNTS: usize = 4;
 #[cfg(all(feature = "test", not(kani)))]
 pub const MAX_ACCOUNTS: usize = 64;
 
-#[cfg(all(not(kani), not(feature = "test")))]
+#[cfg(all(feature = "small", not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 256;
+
+#[cfg(all(feature = "medium", not(feature = "small"), not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 1024;
+
+#[cfg(all(not(kani), not(feature = "test"), not(feature = "small"), not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
@@ -1156,18 +1162,19 @@ impl RiskEngine {
 
     /// set_capital (spec §4.2): checked signed-delta update of C_tot
     test_visible! {
-    fn set_capital(&mut self, idx: usize, new_capital: u128) {
+    fn set_capital(&mut self, idx: usize, new_capital: u128) -> Result<()> {
         let old = self.accounts[idx].capital.get();
         if new_capital >= old {
             let delta = new_capital - old;
             self.c_tot = U128::new(self.c_tot.get().checked_add(delta)
-                .expect("set_capital: c_tot overflow"));
+                .ok_or(RiskError::Overflow)?);
         } else {
             let delta = old - new_capital;
             self.c_tot = U128::new(self.c_tot.get().checked_sub(delta)
-                .expect("set_capital: c_tot underflow"));
+                .ok_or(RiskError::CorruptState)?);
         }
         self.accounts[idx].capital = U128::new(new_capital);
+        Ok(())
     }
     }
 
@@ -2672,7 +2679,7 @@ impl RiskEngine {
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(need, cap);
         if pay > 0 {
-            self.set_capital(idx, cap - pay);
+            self.set_capital(idx, cap - pay)?;
             let pay_i128 = pay as i128; // pay <= need = |pnl| <= i128::MAX, safe
             let new_pnl = pnl.checked_add(pay_i128)
                 .ok_or(RiskError::CorruptState)?;
@@ -2700,16 +2707,16 @@ impl RiskEngine {
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
     test_visible! {
-    fn fee_debt_sweep(&mut self, idx: usize) {
+    fn fee_debt_sweep(&mut self, idx: usize) -> Result<()> {
         let fc = self.accounts[idx].fee_credits.get();
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
-            return;
+            return Ok(());
         }
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(debt, cap);
         if pay > 0 {
-            self.set_capital(idx, cap - pay);
+            self.set_capital(idx, cap - pay)?;
             // pay <= debt = |fee_credits|, so fee_credits + pay <= 0: no overflow
             let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
             self.accounts[idx].fee_credits = I128::new(self.accounts[idx].fee_credits.get()
@@ -2721,6 +2728,7 @@ impl RiskEngine {
         // Per spec §7.5: unpaid fee debt remains as local fee_credits until
         // physical capital becomes available or manual profit conversion occurs.
         // MUST NOT consume junior PnL claims to mint senior insurance capital.
+        Ok(())
     }
     }
 
@@ -2800,12 +2808,12 @@ impl RiskEngine {
                 if released > 0 {
                     self.consume_released_pnl(idx, released)?;
                     let new_cap = add_u128(self.accounts[idx].capital.get(), released);
-                    self.set_capital(idx, new_cap);
+                    self.set_capital(idx, new_cap)?;
                 }
             }
 
             // Fee-debt sweep
-            self.fee_debt_sweep(idx);
+            self.fee_debt_sweep(idx)?;
         }
         Ok(())
     }
