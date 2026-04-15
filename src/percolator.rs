@@ -22,7 +22,7 @@
 //! and rolls back all account state automatically. This is the expected
 //! deployment model.
 //!
-//! Public functions WITHOUT the suffix (`deposit`, `top_up_insurance_fund`,
+//! Public functions WITHOUT the suffix (`top_up_insurance_fund`,
 //! `deposit_fee_credits`, `accrue_market_to`) use validate-then-mutate:
 //! `Err` means no state was changed.
 //!
@@ -1156,18 +1156,19 @@ impl RiskEngine {
 
     /// set_capital (spec §4.2): checked signed-delta update of C_tot
     test_visible! {
-    fn set_capital(&mut self, idx: usize, new_capital: u128) {
+    fn set_capital(&mut self, idx: usize, new_capital: u128) -> Result<()> {
         let old = self.accounts[idx].capital.get();
         if new_capital >= old {
             let delta = new_capital - old;
             self.c_tot = U128::new(self.c_tot.get().checked_add(delta)
-                .expect("set_capital: c_tot overflow"));
+                .ok_or(RiskError::Overflow)?);
         } else {
             let delta = old - new_capital;
             self.c_tot = U128::new(self.c_tot.get().checked_sub(delta)
-                .expect("set_capital: c_tot underflow"));
+                .ok_or(RiskError::CorruptState)?);
         }
         self.accounts[idx].capital = U128::new(new_capital);
+        Ok(())
     }
     }
 
@@ -1239,7 +1240,7 @@ impl RiskEngine {
                             let rem = p.checked_rem(U256::from_u128(a_basis));
                             if let Some(r) = rem {
                                 if !r.is_zero() {
-                                    self.inc_phantom_dust_bound(old_side);
+                                    self.inc_phantom_dust_bound(old_side)?;
                                 }
                             }
                         }
@@ -1500,35 +1501,37 @@ impl RiskEngine {
     }
 
     /// Spec §4.6: increment phantom dust bound by 1 q-unit (checked).
-    fn inc_phantom_dust_bound(&mut self, s: Side) {
+    fn inc_phantom_dust_bound(&mut self, s: Side) -> Result<()> {
         match s {
             Side::Long => {
                 self.phantom_dust_bound_long_q = self.phantom_dust_bound_long_q
                     .checked_add(1u128)
-                    .expect("phantom_dust_bound_long_q overflow");
+                    .ok_or(RiskError::Overflow)?;
             }
             Side::Short => {
                 self.phantom_dust_bound_short_q = self.phantom_dust_bound_short_q
                     .checked_add(1u128)
-                    .expect("phantom_dust_bound_short_q overflow");
+                    .ok_or(RiskError::Overflow)?;
             }
         }
+        Ok(())
     }
 
     /// Spec §4.6.1: increment phantom dust bound by amount_q (checked).
-    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) {
+    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
         match s {
             Side::Long => {
                 self.phantom_dust_bound_long_q = self.phantom_dust_bound_long_q
                     .checked_add(amount_q)
-                    .expect("phantom_dust_bound_long_q overflow");
+                    .ok_or(RiskError::Overflow)?;
             }
             Side::Short => {
                 self.phantom_dust_bound_short_q = self.phantom_dust_bound_short_q
                     .checked_add(amount_q)
-                    .expect("phantom_dust_bound_short_q overflow");
+                    .ok_or(RiskError::Overflow)?;
             }
         }
+        Ok(())
     }
 
     // ========================================================================
@@ -1949,7 +1952,7 @@ impl RiskEngine {
                 let global_a_dust_bound = n_opp_u256.checked_add(ceil_term)
                     .unwrap_or(U256::MAX);
                 let bound_u128 = global_a_dust_bound.try_into_u128().unwrap_or(u128::MAX);
-                self.inc_phantom_dust_bound_by(opp, bound_u128);
+                self.inc_phantom_dust_bound_by(opp, bound_u128)?;
             }
             if a_new < MIN_A_SIDE {
                 self.set_side_mode(opp, SideMode::DrainOnly);
@@ -2578,7 +2581,18 @@ impl RiskEngine {
 
         // If sched absent but R > 0 with no pending either -> corrupt
         if self.accounts[idx].sched_present == 0 {
-            // R > 0 but no buckets at all is corrupt
+            return Err(RiskError::CorruptState);
+        }
+
+
+        // Reserve-shape consistency: bucket totals must equal reserved_pnl
+        let bucket_total = {
+            let a = &self.accounts[idx];
+            let s = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
+            let p = if a.pending_present != 0 { a.pending_remaining_q } else { 0 };
+            s.checked_add(p).ok_or(RiskError::CorruptState)?
+        };
+        if bucket_total != r {
             return Err(RiskError::CorruptState);
         }
 
@@ -2610,8 +2624,8 @@ impl RiskEngine {
 
         // Step 9: if release > 0
         if release > 0 {
-            a.sched_remaining_q -= release;
-            a.reserved_pnl -= release;
+            a.sched_remaining_q = a.sched_remaining_q.checked_sub(release).ok_or(RiskError::CorruptState)?;
+            a.reserved_pnl = a.reserved_pnl.checked_sub(release).ok_or(RiskError::CorruptState)?;
             self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_add(release)
                 .ok_or(RiskError::Overflow)?;
         }
@@ -2672,7 +2686,7 @@ impl RiskEngine {
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(need, cap);
         if pay > 0 {
-            self.set_capital(idx, cap - pay);
+            self.set_capital(idx, cap - pay)?;
             let pay_i128 = pay as i128; // pay <= need = |pnl| <= i128::MAX, safe
             let new_pnl = pnl.checked_add(pay_i128)
                 .ok_or(RiskError::CorruptState)?;
@@ -2700,27 +2714,28 @@ impl RiskEngine {
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
     test_visible! {
-    fn fee_debt_sweep(&mut self, idx: usize) {
+    fn fee_debt_sweep(&mut self, idx: usize) -> Result<()> {
         let fc = self.accounts[idx].fee_credits.get();
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
-            return;
+            return Ok(());
         }
         let cap = self.accounts[idx].capital.get();
         let pay = core::cmp::min(debt, cap);
         if pay > 0 {
-            self.set_capital(idx, cap - pay);
+            self.set_capital(idx, cap - pay)?;
             // pay <= debt = |fee_credits|, so fee_credits + pay <= 0: no overflow
             let pay_i128 = core::cmp::min(pay, i128::MAX as u128) as i128;
             self.accounts[idx].fee_credits = I128::new(self.accounts[idx].fee_credits.get()
-                .checked_add(pay_i128).expect("fee_debt_sweep: pay <= debt guarantees no overflow"));
+                .checked_add(pay_i128).ok_or(RiskError::CorruptState)?);
             self.insurance_fund.balance = U128::new(
                 self.insurance_fund.balance.get().checked_add(pay)
-                    .expect("fee_debt_sweep: insurance overflow (I <= V <= MAX_VAULT_TVL)"));
+                    .ok_or(RiskError::Overflow)?);
         }
         // Per spec §7.5: unpaid fee debt remains as local fee_credits until
         // physical capital becomes available or manual profit conversion occurs.
         // MUST NOT consume junior PnL claims to mint senior insurance capital.
+        Ok(())
     }
     }
 
@@ -2800,12 +2815,12 @@ impl RiskEngine {
                 if released > 0 {
                     self.consume_released_pnl(idx, released)?;
                     let new_cap = add_u128(self.accounts[idx].capital.get(), released);
-                    self.set_capital(idx, new_cap);
+                    self.set_capital(idx, new_cap)?;
                 }
             }
 
             // Fee-debt sweep
-            self.fee_debt_sweep(idx);
+            self.fee_debt_sweep(idx)?;
         }
         Ok(())
     }
@@ -2999,7 +3014,7 @@ impl RiskEngine {
 
         // Step 6: set_capital(i, C_i + capital_amount)
         let new_cap = add_u128(self.accounts[idx as usize].capital.get(), capital_amount);
-        self.set_capital(idx as usize, new_cap);
+        self.set_capital(idx as usize, new_cap)?;
 
         // Step 7: settle_losses_from_principal
         self.settle_losses(idx as usize)?;
@@ -3015,7 +3030,7 @@ impl RiskEngine {
         if self.accounts[idx as usize].position_basis_q == 0
             && self.accounts[idx as usize].pnl >= 0
         {
-            self.fee_debt_sweep(idx as usize);
+            self.fee_debt_sweep(idx as usize)?;
         }
 
         Ok(())
@@ -3098,7 +3113,7 @@ impl RiskEngine {
 
         // Step 7: commit withdrawal
         self.set_capital(idx as usize, self.accounts[idx as usize].capital.get() - amount);
-        self.vault = U128::new(sub_u128(self.vault.get(), amount));
+        self.vault = U128::new(self.vault.get().checked_sub(amount).ok_or(RiskError::CorruptState)?);
 
         // Steps 8-9: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -3391,7 +3406,7 @@ impl RiskEngine {
         let cap = self.accounts[idx].capital.get();
         let fee_paid = core::cmp::min(fee, cap);
         if fee_paid > 0 {
-            self.set_capital(idx, cap - fee_paid);
+            self.set_capital(idx, cap - fee_paid)?;
             self.insurance_fund.balance = self.insurance_fund.balance + fee_paid;
         }
         let fee_shortfall = fee - fee_paid;
@@ -4039,10 +4054,10 @@ impl RiskEngine {
 
         // Step 8: set_capital(i, C_i + y)
         let new_cap = add_u128(self.accounts[idx as usize].capital.get(), y);
-        self.set_capital(idx as usize, new_cap);
+        self.set_capital(idx as usize, new_cap)?;
 
         // Step 9: sweep fee debt
-        self.fee_debt_sweep(idx as usize);
+        self.fee_debt_sweep(idx as usize)?;
 
         // Step 10: post-conversion health check
         let eff = self.effective_pos_q(idx as usize);
@@ -4120,7 +4135,7 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
         self.vault = self.vault - capital;
-        self.set_capital(idx as usize, 0);
+        self.set_capital(idx as usize, 0)?;
 
         // End-of-instruction resets before freeing
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -4429,17 +4444,17 @@ impl RiskEngine {
                     self.resolved_payout_h_num, self.resolved_payout_h_den);
                 self.consume_released_pnl(i, released)?;
                 let new_cap = add_u128(self.accounts[i].capital.get(), y);
-                self.set_capital(i, new_cap);
+                self.set_capital(i, new_cap)?;
             }
         }
-        self.fee_debt_sweep(i);
+        self.fee_debt_sweep(i)?;
         if self.accounts[i].fee_credits.get() < 0 {
             self.accounts[i].fee_credits = I128::ZERO;
         }
         let capital = self.accounts[i].capital;
         if capital > self.vault { return Err(RiskError::InsufficientBalance); }
         self.vault = self.vault - capital;
-        self.set_capital(i, 0);
+        self.set_capital(i, 0)?;
         self.free_slot(idx)?;
         Ok(capital.get())
     }
@@ -4497,7 +4512,7 @@ impl RiskEngine {
         // Step 7: reclamation effects (spec §2.6)
         let dust_cap = self.accounts[idx as usize].capital.get();
         if dust_cap > 0 {
-            self.set_capital(idx as usize, 0);
+            self.set_capital(idx as usize, 0)?;
             self.insurance_fund.balance = self.insurance_fund.balance + dust_cap;
         }
 
@@ -4566,7 +4581,7 @@ impl RiskEngine {
             // Sweep dust capital into insurance (spec §2.6)
             let dust_cap = self.accounts[idx].capital.get();
             if dust_cap > 0 {
-                self.set_capital(idx, 0);
+                self.set_capital(idx, 0)?;
                 self.insurance_fund.balance = self.insurance_fund.balance + dust_cap;
             }
 
