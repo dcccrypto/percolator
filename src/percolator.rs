@@ -73,7 +73,13 @@ pub const MAX_ACCOUNTS: usize = 4;
 #[cfg(all(feature = "test", not(kani)))]
 pub const MAX_ACCOUNTS: usize = 64;
 
-#[cfg(all(not(kani), not(feature = "test")))]
+#[cfg(all(feature = "small", not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 256;
+
+#[cfg(all(feature = "medium", not(feature = "small"), not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 1024;
+
+#[cfg(all(not(kani), not(feature = "test"), not(feature = "small"), not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
@@ -4445,6 +4451,114 @@ impl RiskEngine {
         self.set_capital(i, 0);
         self.free_slot(idx)?;
         Ok(capital.get())
+    }
+
+    // ========================================================================
+    // execute_adl_not_atomic (spec §9.6 — auto-deleveraging)
+    // ========================================================================
+
+    /// Close a winning trader's position to cover deficit socialized by an
+    /// insolvent bankrupt counterpart.
+    ///
+    /// Preconditions (caller enforces): insurance fund balance == 0, pnl_pos_tot > cap.
+    ///
+    /// The account slot is NOT freed — capital remains for normal withdrawal.
+    /// Vault balance is NOT changed — caller handles token transfer.
+    pub fn execute_adl_not_atomic(
+        &mut self,
+        target_idx: usize,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+        h_lock: u64,
+    ) -> Result<(u128, i128)> {
+        // Validate funding rate bounds
+        if funding_rate_e9.unsigned_abs() > MAX_ABS_FUNDING_E9_PER_SLOT as u128 {
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 1: bounds and bitmap check
+        if target_idx >= MAX_ACCOUNTS || !self.is_used(target_idx) {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // SECURITY M-2: Reject LP accounts — ADL bypasses LP withdrawal queue
+        // and share accounting. LP positions must be closed via normal LP flow.
+        if self.accounts[target_idx].is_lp() {
+            return Err(RiskError::AccountNotFound);
+        }
+
+        // Step 2: oracle price validity
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 3: position must be nonzero before touch
+        if self.accounts[target_idx].position_basis_q == 0 {
+            return Err(RiskError::Overflow);
+        }
+
+        let mut ctx = InstructionContext::new_with_h_lock(h_lock);
+
+        // Step 4: accrue market and touch account
+        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+        self.current_slot = now_slot;
+        self.touch_account_live_local(target_idx, &mut ctx)?;
+
+        // Step 5: read effective position after touch
+        let eff = self.effective_pos_q(target_idx);
+        let closed_abs = eff.unsigned_abs();
+        if eff == 0 {
+            self.finalize_touched_accounts_post_live(&ctx)?;
+            self.run_end_of_instruction_lifecycle(&mut ctx)?;
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 6: ADL only targets winning traders (positive PnL after touch)
+        if self.accounts[target_idx].pnl <= 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        let adl_side = side_of_i128(eff).expect("execute_adl: nonzero eff must have side");
+
+        // Step 7: zero the position
+        self.attach_effective_position(target_idx, 0i128);
+
+        // Step 8: bilaterally decrement OI via enqueue_adl (d=0, no deficit)
+        self.enqueue_adl(&mut ctx, adl_side, closed_abs, 0)?;
+
+        // Step 9: settle losses (no-op for pnl > 0)
+        self.settle_losses(target_idx)?;
+
+        // Step 10: convert positive PnL into capital, bypassing warmup
+        if self.accounts[target_idx].pnl > 0 {
+            self.prepare_account_for_resolved_touch(target_idx);
+            self.pnl_matured_pos_tot = self.pnl_pos_tot;
+            let released = self.released_pos(target_idx);
+            if released > 0 {
+                let (h_num, h_den) = self.haircut_ratio();
+                let y = if h_den == 0 {
+                    released
+                } else {
+                    wide_mul_div_floor_u128(released, h_num, h_den)
+                };
+                self.consume_released_pnl(target_idx, released)?;
+                let new_cap = add_u128(self.accounts[target_idx].capital.get(), y);
+                self.set_capital(target_idx, new_cap);
+            }
+        }
+        let final_pnl = self.accounts[target_idx].pnl;
+
+        // Step 11: finalize and run lifecycle
+        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.run_end_of_instruction_lifecycle(&mut ctx)?;
+
+        assert!(
+            self.oi_eff_long_q == self.oi_eff_short_q,
+            "execute_adl_not_atomic: OI_eff_long != OI_eff_short after ADL"
+        );
+
+        Ok((closed_abs, final_pnl))
     }
 
     // ========================================================================
