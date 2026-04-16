@@ -2573,6 +2573,9 @@ impl RiskEngine {
                 .ok_or(RiskError::CorruptState)?;
             if used > a.sched_anchor_q { return Err(RiskError::CorruptState); }
         }
+        if a.sched_present != 0 && a.sched_remaining_q == 0 {
+            return Err(RiskError::CorruptState);
+        }
         if a.pending_present == 0 {
             if a.pending_remaining_q != 0 || a.pending_horizon != 0
                 || a.pending_created_slot != 0
@@ -2581,6 +2584,7 @@ impl RiskEngine {
             }
         } else {
             if a.pending_horizon == 0 { return Err(RiskError::CorruptState); }
+            if a.pending_remaining_q == 0 { return Err(RiskError::CorruptState); }
         }
         let sched_r = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
         let pend_r = if a.pending_present != 0 { a.pending_remaining_q } else { 0 };
