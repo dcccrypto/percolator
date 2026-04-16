@@ -521,15 +521,8 @@ pub struct CrankOutcome {
 // Small Helpers
 // ============================================================================
 
-#[inline]
-fn add_u128(a: u128, b: u128) -> u128 {
-    a.checked_add(b).expect("add_u128 overflow")
-}
-
-#[inline]
-fn sub_u128(a: u128, b: u128) -> u128 {
-    a.checked_sub(b).expect("sub_u128 underflow")
-}
+// add_u128/sub_u128 removed — all callers now use inline checked_add/checked_sub
+// with proper Result propagation (upstream 57b5c00 + fork ADL fix).
 
 /// Determine which side a signed position is on. Positive = long, negative = short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4583,7 +4576,8 @@ impl RiskEngine {
                     wide_mul_div_floor_u128(released, h_num, h_den)
                 };
                 self.consume_released_pnl(target_idx, released)?;
-                let new_cap = add_u128(self.accounts[target_idx].capital.get(), y);
+                let new_cap = self.accounts[target_idx].capital.get()
+                    .checked_add(y).ok_or(RiskError::Overflow)?;
                 self.set_capital(target_idx, new_cap)?;
             }
         }
