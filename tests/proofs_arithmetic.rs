@@ -352,7 +352,7 @@ fn proof_haircut_mul_div_conservative() {
     // Set vault > c_tot so residual is positive
     let cap: u16 = kani::any();
     kani::assume(cap >= 100 && cap <= 10_000);
-    engine.set_capital(idx as usize, cap as u128);
+    engine.set_capital(idx as usize, cap as u128).unwrap();
     engine.vault = U128::new((cap as u128) + (pnl_val as u128));
 
     let (h_num, h_den) = engine.haircut_ratio();

@@ -140,7 +140,7 @@ fn inductive_set_capital_decrease_preserves_accounting() {
 
     let new_cap: u32 = kani::any();
     kani::assume(new_cap <= dep);
-    engine.set_capital(idx as usize, new_cap as u128);
+    engine.set_capital(idx as usize, new_cap as u128).unwrap();
     assert!(engine.check_conservation());
 }
 
@@ -281,7 +281,7 @@ fn prop_conservation_holds_after_all_ops() {
     let pnl_abs = if loss > 0 { loss as u128 } else { 0 };
     let pay = core::cmp::min(pnl_abs, cap_before);
     if pay > 0 {
-        engine.set_capital(idx as usize, cap_before - pay);
+        engine.set_capital(idx as usize, cap_before - pay).unwrap();
         let new_pnl_val = -(loss as i128) + (pay as i128);
         engine.set_pnl(idx as usize, new_pnl_val);
     }
@@ -384,7 +384,7 @@ fn proof_set_capital_maintains_c_tot() {
 
     let new_cap: u32 = kani::any();
     kani::assume((new_cap as u64) <= (initial as u64) * 2);
-    engine.set_capital(idx as usize, new_cap as u128);
+    engine.set_capital(idx as usize, new_cap as u128).unwrap();
 
     assert!(engine.c_tot.get() == new_cap as u128);
 }
@@ -466,15 +466,15 @@ fn proof_set_position_basis_q_count_tracking() {
 
     assert!(engine.stored_pos_count_long == 0);
 
-    engine.set_position_basis_q(idx as usize, POS_SCALE as i128);
+    engine.set_position_basis_q(idx as usize, POS_SCALE as i128).unwrap();
     assert!(engine.stored_pos_count_long == 1);
 
     let neg = -(POS_SCALE as i128);
-    engine.set_position_basis_q(idx as usize, neg);
+    engine.set_position_basis_q(idx as usize, neg).unwrap();
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 1);
 
-    engine.set_position_basis_q(idx as usize, 0i128);
+    engine.set_position_basis_q(idx as usize, 0i128).unwrap();
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.stored_pos_count_long == 0);
 }
@@ -519,8 +519,8 @@ fn proof_account_equity_net_nonnegative() {
     let cap_b: u16 = kani::any();
     kani::assume(cap_b > 0 && cap_b <= 10_000);
 
-    engine.set_capital(a as usize, cap_a as u128);
-    engine.set_capital(b as usize, cap_b as u128);
+    engine.set_capital(a as usize, cap_a as u128).unwrap();
+    engine.set_capital(b as usize, cap_b as u128).unwrap();
 
     // Vault has excess beyond c_tot so Residual > 0 and haircut is non-trivial
     let excess: u16 = kani::any();

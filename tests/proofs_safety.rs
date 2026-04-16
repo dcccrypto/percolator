@@ -133,7 +133,7 @@ fn bounded_equity_nonneg_flat() {
 
     let cap: u16 = kani::any();
     kani::assume(cap > 0 && cap <= 10_000);
-    engine.set_capital(idx as usize, cap as u128);
+    engine.set_capital(idx as usize, cap as u128).unwrap();
 
     let pnl_val: i16 = kani::any();
     kani::assume(pnl_val > i16::MIN);
@@ -855,7 +855,7 @@ fn proof_gc_dust_preserves_fee_credits() {
     engine.current_slot = 1;
 
     // Account has 0 capital, 0 position, but positive fee_credits (prepaid)
-    engine.set_capital(a as usize, 0);
+    engine.set_capital(a as usize, 0).unwrap();
     engine.accounts[a as usize].fee_credits = I128::new(5_000);
     engine.accounts[a as usize].position_basis_q = 0i128;
     engine.accounts[a as usize].reserved_pnl = 0u128;
@@ -874,7 +874,7 @@ fn proof_gc_dust_preserves_fee_credits() {
     // and the uncollectible debt written off
     let b = engine.add_user(0).unwrap();
     engine.deposit_not_atomic(b, 10_000, 100, 1).unwrap();
-    engine.set_capital(b as usize, 0);
+    engine.set_capital(b as usize, 0).unwrap();
     engine.accounts[b as usize].fee_credits = I128::new(-3_000); // debt
     engine.accounts[b as usize].position_basis_q = 0i128;
     engine.accounts[b as usize].reserved_pnl = 0u128;
@@ -1129,7 +1129,7 @@ fn proof_fee_debt_sweep_consumes_released_pnl() {
     let cap_before = engine.accounts[idx as usize].capital.get();
 
     // Run fee_debt_sweep
-    engine.fee_debt_sweep(idx as usize);
+    engine.fee_debt_sweep(idx as usize).unwrap();
 
     let ins_after = engine.insurance_fund.balance.get();
     let fc_after = engine.accounts[idx as usize].fee_credits.get();
@@ -1183,7 +1183,7 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
     engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0).unwrap();
 
     // Drain a's capital to 0, give positive PNL but massive fee debt
-    engine.set_capital(a as usize, 0);
+    engine.set_capital(a as usize, 0).unwrap();
     engine.set_pnl(a as usize, 1000i128); // positive PNL
     engine.accounts[a as usize].fee_credits = I128::new(-5000); // fee debt
 
@@ -1291,7 +1291,7 @@ fn proof_gc_reclaims_flat_dust_capital() {
 
     // Simulate dust: set capital to 1 (below MIN_INITIAL_DEPOSIT of 10_000)
     // This models an account whose capital was drained by fees/losses to dust level.
-    engine.set_capital(idx as usize, 1);
+    engine.set_capital(idx as usize, 1).unwrap();
 
     let cap = engine.accounts[idx as usize].capital.get();
     assert!(cap > 0 && cap < 10_000, "account must have dust capital");
@@ -1508,7 +1508,7 @@ fn proof_audit_fee_sweep_pnl_conservation() {
     engine.deposit_not_atomic(a, 100, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Set up: zero capital but positive released PnL
-    engine.set_capital(a as usize, 0);
+    engine.set_capital(a as usize, 0).unwrap();
     engine.set_pnl(a as usize, 50i128);
     // Mark PnL as fully matured (no reserve)
     engine.accounts[a as usize].reserved_pnl = 0;
@@ -1522,7 +1522,7 @@ fn proof_audit_fee_sweep_pnl_conservation() {
     // fee_debt = 50.
     assert!(engine.check_conservation(), "pre-sweep conservation");
 
-    engine.fee_debt_sweep(a as usize);
+    engine.fee_debt_sweep(a as usize).unwrap();
 
     // The rogue block consumed 50 of released PnL and added 50 to I.
     // V=100, C_tot=0, I=50. Conservation: 100 >= 0+50 ✓
@@ -2704,4 +2704,108 @@ fn proof_convert_released_pnl_exercises_conversion() {
         "capital must increase — proves conversion path was taken, not early-return");
 
     assert!(engine.check_conservation());
+}
+
+// ############################################################################
+// ADL REGRESSION PROOFS (F-1, F-3 — fork-specific execute_adl_not_atomic)
+// ############################################################################
+
+/// ADL must preserve c_tot == sum(capitals) invariant.
+/// Regression proof for F-3: set_capital Result was dropped in ADL step 10,
+/// which could have desynced c_tot if the checked_add failed.
+/// With the fix (.unwrap() / ?), Kani verifies no c_tot desync is reachable.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_adl_preserves_c_tot_invariant() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+
+    // Deposit bounded amounts
+    let dep_a: u32 = kani::any();
+    let dep_b: u32 = kani::any();
+    kani::assume(dep_a >= 100_000 && dep_a <= 1_000_000);
+    kani::assume(dep_b >= 100_000 && dep_b <= 1_000_000);
+    engine.deposit_not_atomic(a, dep_a as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, dep_b as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    // Trade: A long, B short
+    let size: u16 = kani::any();
+    kani::assume(size >= 10 && size <= 1000);
+    let size_q = (size as i128) * (POS_SCALE as i128);
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0).unwrap();
+
+    // Move price up so A has positive PnL (ADL target)
+    let new_oracle = DEFAULT_ORACLE + 100;
+    let _adl_result = engine.execute_adl_not_atomic(a as usize, DEFAULT_SLOT + 1, new_oracle, 0i128, 0);
+
+    // Whether ADL succeeded or failed, c_tot must equal sum of capitals
+    let sum_caps: u128 = (0..MAX_ACCOUNTS)
+        .filter(|&i| engine.is_used(i))
+        .map(|i| engine.accounts[i].capital.get())
+        .sum();
+    assert!(engine.c_tot.get() == sum_caps,
+        "F-3 PROOF: c_tot must equal sum of account capitals after ADL");
+}
+
+/// ADL must preserve OI balance: oi_eff_long == oi_eff_short.
+/// Regression proof for F-1: attach_effective_position Result was dropped in
+/// ADL step 7, which could have desynced OI counts. With the fix, the Result
+/// propagates and the engine never reaches a state where OI is imbalanced.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_adl_preserves_oi_balance() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+
+    let dep: u32 = kani::any();
+    kani::assume(dep >= 100_000 && dep <= 500_000);
+    engine.deposit_not_atomic(a, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    let size: u16 = kani::any();
+    kani::assume(size >= 10 && size <= 500);
+    let size_q = (size as i128) * (POS_SCALE as i128);
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0).unwrap();
+
+    // Pre-ADL: OI must already be balanced
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must be balanced before ADL");
+
+    let new_oracle = DEFAULT_ORACLE + 200;
+    let _adl_result = engine.execute_adl_not_atomic(a as usize, DEFAULT_SLOT + 1, new_oracle, 0i128, 0);
+
+    // Post-ADL: OI must still be balanced (whether ADL succeeded or failed)
+    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "F-1 PROOF: OI must be balanced after ADL");
+}
+
+/// ADL target position must be zeroed on success.
+/// Proves that attach_effective_position(target, 0) correctly fires when
+/// ADL succeeds — the Result propagation from F-1 ensures this path is
+/// actually reached (before the fix, a failure would be silently skipped).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_adl_zeroes_target_position() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let a = engine.add_user(0).unwrap();
+    let b = engine.add_user(0).unwrap();
+
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+
+    let size_q = 100 * (POS_SCALE as i128);
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0).unwrap();
+
+    let new_oracle = DEFAULT_ORACLE + 100;
+    let result = engine.execute_adl_not_atomic(a as usize, DEFAULT_SLOT + 1, new_oracle, 0i128, 0);
+
+    if result.is_ok() {
+        assert!(engine.accounts[a as usize].position_basis_q == 0,
+            "ADL target position must be zero after successful ADL");
+    }
 }

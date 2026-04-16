@@ -1142,7 +1142,7 @@ fn proof_fee_shortfall_routes_to_fee_credits() {
     // Zero a's capital so the fee can't be paid from principal.
     // Give enough PnL (as reserved, not released) to stay solvent for margin checks.
     // Use set_pnl_with_reserve(UseHLock) so PnL goes to reserve, not matured.
-    engine.set_capital(a as usize, 0);
+    engine.set_capital(a as usize, 0).unwrap();
     engine.set_pnl_with_reserve(a as usize, 5_000_000i128, ReserveMode::UseHLock(10)).unwrap();
     engine.vault = U128::new(engine.vault.get() + 5_000_000);
 

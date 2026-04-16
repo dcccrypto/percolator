@@ -40,7 +40,7 @@ fn proof_epoch_snap_zero_on_position_zeroout() {
     // Use set_position_basis_q to correctly track stored_pos_count.
     // Set epoch mismatch to skip the phantom dust U256 path
     // (irrelevant to the epoch_snap fix).
-    engine.set_position_basis_q(idx, signed_basis);
+    engine.set_position_basis_q(idx, signed_basis).unwrap();
     engine.accounts[idx].adl_a_basis = ADL_ONE;
     engine.accounts[idx].adl_k_snap = 0;
     // Epoch mismatch: snap=0 != epoch_long=5 / epoch_short=7
@@ -240,7 +240,7 @@ fn proof_fee_debt_sweep_checked_arithmetic() {
     let fc_before = engine.accounts[idx].fee_credits.get();
     let ins_before = engine.insurance_fund.balance.get();
 
-    engine.fee_debt_sweep(idx);
+    engine.fee_debt_sweep(idx).unwrap();
 
     let cap_after = engine.accounts[idx].capital.get();
     let fc_after = engine.accounts[idx].fee_credits.get();
