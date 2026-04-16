@@ -2569,7 +2569,9 @@ impl RiskEngine {
         } else {
             if a.sched_horizon == 0 { return Err(RiskError::CorruptState); }
             if a.sched_release_q > a.sched_anchor_q { return Err(RiskError::CorruptState); }
-            if a.sched_remaining_q > a.sched_anchor_q { return Err(RiskError::CorruptState); }
+            let used = a.sched_remaining_q.checked_add(a.sched_release_q)
+                .ok_or(RiskError::CorruptState)?;
+            if used > a.sched_anchor_q { return Err(RiskError::CorruptState); }
         }
         if a.pending_present == 0 {
             if a.pending_remaining_q != 0 || a.pending_horizon != 0
@@ -2577,6 +2579,8 @@ impl RiskEngine {
             {
                 return Err(RiskError::CorruptState);
             }
+        } else {
+            if a.pending_horizon == 0 { return Err(RiskError::CorruptState); }
         }
         let sched_r = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
         let pend_r = if a.pending_present != 0 { a.pending_remaining_q } else { 0 };
@@ -2591,9 +2595,7 @@ impl RiskEngine {
     fn advance_profit_warmup(&mut self, idx: usize) -> Result<()> {
         let r = self.accounts[idx].reserved_pnl;
         if r == 0 {
-            if self.accounts[idx].sched_present != 0 || self.accounts[idx].pending_present != 0 {
-                return Err(RiskError::CorruptState);
-            }
+            self.validate_reserve_shape(idx)?;
             return Ok(());
         }
 
