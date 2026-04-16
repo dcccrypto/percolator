@@ -850,7 +850,7 @@ impl RiskEngine {
         self.free_head = self.next_free[idx as usize];
         self.set_used(idx as usize);
         self.num_used_accounts = self.num_used_accounts.checked_add(1)
-            .expect("num_used_accounts overflow — slot leak corruption");
+            .ok_or(RiskError::CorruptState)?;
         Ok(idx)
     }
 
@@ -946,7 +946,7 @@ impl RiskEngine {
 
         self.set_used(idx as usize);
         self.num_used_accounts = self.num_used_accounts.checked_add(1)
-            .expect("num_used_accounts overflow — slot leak corruption");
+            .ok_or(RiskError::CorruptState)?;
 
         // Initialize per spec §2.5 — field-by-field to avoid constructing
         // a ~4KB temporary Account on the stack (SBF stack limit is 4KB).
@@ -1620,7 +1620,7 @@ impl RiskEngine {
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseHLock(h_lock))?;
 
             if q_eff_new == 0 {
-                self.inc_phantom_dust_bound(side);
+                self.inc_phantom_dust_bound(side)?;
                 self.set_position_basis_q(idx, 0i128)?;
                 self.accounts[idx].adl_a_basis = ADL_ONE;
                 self.accounts[idx].adl_k_snap = 0i128;
