@@ -1,6 +1,6 @@
 # Percolator
 
-**EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY. NOT AUDITED. Do NOT use with real funds.**
+Risk engine library for permissionless perpetual futures on Solana. Mainnet beta — live at [percolator.trade](https://percolator.trade).
 
 A predictable alternative to ADL queues.
 
@@ -102,15 +102,42 @@ A/K fairness is exact for open-position economics. H fairness is exact only for 
 
 ---
 
-## Open Source
+## Features
 
-Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
+- **v12.17 two-bucket warmup** — unrealized profit sits in a scheduled then pending reserve before entering the matured haircut denominator, bounding oracle-manipulation exposure
+- **Per-side funding** — long and short funding indices (F coefficients) are tracked independently, enabling asymmetric funding rates
+- **ADL via A/K coefficients** — position overhang is cleared lazily without singling out counterparties; O(1) per account, order-independent
+- **Three-phase side reset** — `DrainOnly` → `ResetPending` → `Normal` guarantees markets always recover without admin intervention
+- **No external dependencies** — pure `no_std` compatible Rust library; no CPI, no token transfers, no signer checks
+
+## Build and Test
 
 ```bash
+# Run the full test suite (uses MAX_ACCOUNTS=64 for speed)
+cargo test --features test
+
+# Run property tests and edge-case harnesses
+cargo test --features test -- --include-ignored
+
+# Run Kani formal verification proofs (one-time setup required)
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani
+
+# 471 Kani proof harnesses, 1,265 tests, 0 failures
 ```
+
+## Security
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the full trust model, known deferred findings, and deployment checklist.
+
+## Specification
+
+The normative spec for v12.17 is in [spec.md](spec.md). It covers the H haircut ratio, A/K coefficient mechanics, two-bucket warmup math, funding computation, and all state machine transitions.
+
+## Open Source
+
+Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
 
 ## References
 
