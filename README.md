@@ -1,6 +1,8 @@
 # Percolator
 
-Risk engine library for permissionless perpetual futures on Solana. Mainnet beta — live at [percolator.trade](https://percolator.trade).
+**EXPERIMENTAL RESEARCH PROJECT — NOT AUDITED. Do NOT use with real funds. This is experimental software provided for learning and research purposes only. Use at your own risk.**
+
+Risk engine library for permissionless perpetual futures on Solana.
 
 A predictable alternative to ADL queues.
 

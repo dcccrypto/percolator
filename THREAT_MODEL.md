@@ -1,6 +1,6 @@
 # Percolator Threat Model
 
-**Status:** Mainnet beta — external audit preparation  
+**Status:** Experimental — NOT AUDITED, NOT PRODUCTION READY  
 **Last updated:** 2026-04-16  
 **Spec version:** v12.17.0  
 
