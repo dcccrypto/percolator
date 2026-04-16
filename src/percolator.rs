@@ -4876,7 +4876,11 @@ impl RiskEngine {
 
                 // Phase 1: settle side effects and warmup
                 self.advance_profit_warmup(cidx);
-                let _ = self.settle_side_effects(cidx); // best-effort
+                // Best-effort: CorruptState (basis==0 or epoch non-adjacent) is
+                // possible during market resolution transitions. Swallowing leaves
+                // the ADL-style side effects unsettled for this candidate but does
+                // not cause capital loss; the crank continues to remaining candidates.
+                let _ = self.settle_side_effects(cidx);
                 self.settle_losses(cidx);
 
                 let eff = self.effective_pos_q(cidx);
@@ -4885,6 +4889,10 @@ impl RiskEngine {
                     self.resolve_flat_negative(cidx);
                 }
 
+                // Best-effort: clock regression (Overflow) is non-fatal in crank
+                // context. last_fee_slot may not advance on overflow, but the next
+                // crank will retry. See settle_maintenance_fee_best_effort_for_crank
+                // for the atomic-path equivalent.
                 let _ = self.settle_maintenance_fee_internal(cidx, now_slot);
 
                 let eff2 = self.effective_pos_q(cidx);
@@ -4942,7 +4950,11 @@ impl RiskEngine {
 
                 if is_occupied {
                     accounts_processed += 1;
+                    // Best-effort: fee settlement never fails due to margin; the
+                    // Result carries informational u128 that is unused here.
                     let _ = self.settle_maintenance_fee_best_effort_for_crank(idx as u16, now_slot);
+                    // Best-effort: AccountNotFound is harmless (slot reused between
+                    // bitmap read and this call). Crank must continue scanning.
                     let _ = self.touch_account(idx as u16);
                     self.settle_warmup_to_capital_for_crank(idx as u16);
 
@@ -4965,14 +4977,25 @@ impl RiskEngine {
                             let abs_pos = self.accounts[idx].position_size.unsigned_abs();
                             let is_dust = abs_pos < self.params.min_liquidation_abs.get();
                             if equity == 0 || is_dust {
-                                let _ = self.touch_account_for_liquidation(
+                                // Dust/zero-equity force-realize path. Best-effort:
+                                // if touch or close fails, the position remains open
+                                // but the counter is NOT incremented below (see `is_ok`
+                                // guard). Prior version incremented on any call attempt
+                                // which could have overreported lifetime_force_realize_closes.
+                                let touched = self.touch_account_for_liquidation(
                                     idx as u16,
                                     now_slot,
                                     oracle_price,
                                 );
-                                let _ = self.oracle_close_position_core(idx as u16, oracle_price);
-                                self.lifetime_force_realize_closes =
-                                    self.lifetime_force_realize_closes.saturating_add(1);
+                                if touched.is_ok() {
+                                    if self
+                                        .oracle_close_position_core(idx as u16, oracle_price)
+                                        .is_ok()
+                                    {
+                                        self.lifetime_force_realize_closes =
+                                            self.lifetime_force_realize_closes.saturating_add(1);
+                                    }
+                                }
                             }
                         }
                     }
