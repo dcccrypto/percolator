@@ -22,6 +22,9 @@ fuzz = ["test"]  # Enable fuzzing tests (includes test feature for test_visible 
 small = []  # MAX_ACCOUNTS=256 (~0.68 SOL rent)
 medium = []  # MAX_ACCOUNTS=1024 (~2.7 SOL rent)
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
