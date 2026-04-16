@@ -4534,7 +4534,7 @@ impl RiskEngine {
         let adl_side = side_of_i128(eff).expect("execute_adl: nonzero eff must have side");
 
         // Step 7: zero the position
-        self.attach_effective_position(target_idx, 0i128);
+        self.attach_effective_position(target_idx, 0i128)?;
 
         // Step 8: bilaterally decrement OI via enqueue_adl (d=0, no deficit)
         self.enqueue_adl(&mut ctx, adl_side, closed_abs, 0)?;
@@ -4556,7 +4556,7 @@ impl RiskEngine {
                 };
                 self.consume_released_pnl(target_idx, released)?;
                 let new_cap = add_u128(self.accounts[target_idx].capital.get(), y);
-                self.set_capital(target_idx, new_cap);
+                self.set_capital(target_idx, new_cap)?;
             }
         }
         let final_pnl = self.accounts[target_idx].pnl;

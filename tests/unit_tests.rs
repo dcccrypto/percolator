@@ -3965,3 +3965,81 @@ fn test_resolved_context_getter() {
     assert_eq!(price, oracle);
     assert_eq!(rslot, slot);
 }
+
+// ============================================================================
+// ADL regression tests (F-1, F-3 — dropped Result propagation)
+// ============================================================================
+
+#[test]
+fn adl_basic_happy_path() {
+    // Setup: two users trade, one has positive PnL.
+    // ADL should succeed and zero the winning position.
+    let (mut engine, a, b) = setup_two_users(100_000, 100_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size = make_size_q(50);
+
+    // A goes long, B goes short
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0).unwrap();
+
+    // Price moves: A wins. ADL calls accrue internally, so just pass new price.
+    let new_oracle = 1200u64;
+
+    // ADL: close A's winning position
+    let result = engine.execute_adl_not_atomic(a as usize, slot + 1, new_oracle, 0i128, 0);
+    assert!(result.is_ok(), "ADL should succeed: {:?}", result);
+
+    // After ADL, A's position should be zeroed
+    assert_eq!(engine.accounts[a as usize].position_basis_q, 0i128,
+        "ADL target position should be zero");
+
+    // OI must be balanced
+    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q,
+        "OI must be balanced after ADL");
+}
+
+#[test]
+fn adl_propagates_error_from_attach_on_corrupted_state() {
+    // Regression test for F-1: attach_effective_position Result must propagate.
+    // If stored_pos_count is zero but position exists, attach should fail.
+    let (mut engine, a, b) = setup_two_users(100_000, 100_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size = make_size_q(50);
+
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0).unwrap();
+
+    // Corrupt state: zero out pos counts (simulates prior accounting bug)
+    engine.stored_pos_count_long = 0;
+    engine.stored_pos_count_short = 0;
+
+    let new_oracle = 1200u64;
+
+    // ADL should return Err because attach_effective_position
+    // will fail to decrement stored_pos_count_long from 0.
+    let result = engine.execute_adl_not_atomic(a as usize, slot + 1, new_oracle, 0i128, 0);
+    assert!(result.is_err(), "ADL with corrupted pos count should return Err, not panic");
+}
+
+#[test]
+fn adl_c_tot_stays_consistent() {
+    // Regression test for F-3: set_capital Result must propagate in ADL.
+    // Verify c_tot = sum(account capitals) after ADL.
+    let (mut engine, a, b) = setup_two_users(100_000, 100_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size = make_size_q(50);
+
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0).unwrap();
+
+    let new_oracle = 1200u64;
+    let result = engine.execute_adl_not_atomic(a as usize, slot + 1, new_oracle, 0i128, 0);
+    assert!(result.is_ok(), "ADL should succeed: {:?}", result);
+
+    // c_tot must equal sum of all account capitals
+    let sum_capitals: u128 = (0..64).filter(|&i| engine.is_used(i))
+        .map(|i| engine.accounts[i].capital.get())
+        .sum();
+    assert_eq!(engine.c_tot.get(), sum_capitals,
+        "c_tot must equal sum of account capitals after ADL");
+}
