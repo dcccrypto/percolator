@@ -527,7 +527,7 @@ fn proof_gc_cursor_advances_by_scanned() {
     let cursor_before = engine.gc_cursor;
 
     // No accounts → nothing to GC, but cursor must advance by scanned count
-    let num_freed = engine.garbage_collect_dust();
+    let num_freed = engine.garbage_collect_dust().unwrap();
     assert_eq!(num_freed, 0, "no accounts to GC");
 
     let cursor_after = engine.gc_cursor;
@@ -557,7 +557,7 @@ fn proof_gc_cursor_with_dust_accounts() {
     engine.deposit_not_atomic(b, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     engine.gc_cursor = 0;
-    let num_freed = engine.garbage_collect_dust();
+    let num_freed = engine.garbage_collect_dust().unwrap();
 
     // Both accounts are dust (capital=1 < min_initial_deposit=2, flat, pnl=0)
     assert_eq!(num_freed, 2, "both dust accounts should be freed");
@@ -694,7 +694,7 @@ fn proof_gc_skips_negative_pnl() {
     let ins_before = engine.insurance_fund.balance.get();
 
     engine.gc_cursor = 0;
-    let num_freed = engine.garbage_collect_dust();
+    let num_freed = engine.garbage_collect_dust().unwrap();
 
     // GC must skip the account (PNL != 0 per §2.6 precondition)
     assert_eq!(num_freed, 0, "GC must not free account with PNL < 0");
