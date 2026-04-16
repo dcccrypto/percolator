@@ -3965,3 +3965,47 @@ fn test_resolved_context_getter() {
     assert_eq!(price, oracle);
     assert_eq!(rslot, slot);
 }
+
+// ============================================================================
+// SP-3 regression: MAX_FUNDING_DT cap prevents overflow in accrue_market_to
+// ============================================================================
+
+#[test]
+fn accrue_large_dt_does_not_overflow() {
+    // Before the MAX_FUNDING_DT cap, a large dt with high funding rate
+    // could overflow i128 in the funding product. The cap clips dt to
+    // 65535 so the computation stays within bounds.
+    let (mut engine, a, b) = setup_two_users(500_000, 500_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size = make_size_q(100);
+
+    // Create positions so funding has counterparties
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0).unwrap();
+
+    // Accrue with a very large dt gap (100,000 slots) and max funding rate.
+    // Without the cap, this would overflow. With the cap, dt is clipped to 65535.
+    let large_slot = slot + 100_000;
+    let max_funding = MAX_ABS_FUNDING_E9_PER_SLOT;
+    let result = engine.accrue_market_to(large_slot, oracle, max_funding);
+    assert!(result.is_ok(), "Large dt should succeed with MAX_FUNDING_DT cap: {:?}", result);
+
+    // Verify slot advanced to the actual requested slot (not clipped)
+    assert_eq!(engine.current_slot, large_slot);
+    assert_eq!(engine.last_market_slot, large_slot);
+}
+
+#[test]
+fn accrue_dt_at_cap_boundary() {
+    // Verify dt = MAX_FUNDING_DT exactly works
+    let (mut engine, a, b) = setup_two_users(500_000, 500_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let size = make_size_q(100);
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0).unwrap();
+
+    // Exactly at the cap
+    let cap_slot = slot + MAX_FUNDING_DT;
+    let result = engine.accrue_market_to(cap_slot, oracle, MAX_ABS_FUNDING_E9_PER_SLOT);
+    assert!(result.is_ok(), "dt=MAX_FUNDING_DT should succeed: {:?}", result);
+}

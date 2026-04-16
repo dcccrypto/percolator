@@ -1690,7 +1690,8 @@ impl RiskEngine {
         let long_live = self.oi_eff_long_q != 0;
         let short_live = self.oi_eff_short_q != 0;
 
-        let total_dt = now_slot.saturating_sub(self.last_market_slot);
+        let total_dt = now_slot.saturating_sub(self.last_market_slot)
+            .min(MAX_FUNDING_DT);
         if total_dt == 0 && self.last_oracle_price == oracle_price {
             // Step 5: no change — set current_slot and return (spec §5.4)
             self.current_slot = now_slot;
