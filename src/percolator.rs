@@ -3118,7 +3118,7 @@ impl RiskEngine {
         }
 
         // Step 7: commit withdrawal
-        self.set_capital(idx as usize, self.accounts[idx as usize].capital.get() - amount);
+        self.set_capital(idx as usize, self.accounts[idx as usize].capital.get() - amount)?;
         self.vault = U128::new(self.vault.get().checked_sub(amount).ok_or(RiskError::CorruptState)?);
 
         // Steps 8-9: end-of-instruction resets

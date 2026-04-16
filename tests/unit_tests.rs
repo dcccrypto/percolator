@@ -4043,3 +4043,25 @@ fn adl_c_tot_stays_consistent() {
     assert_eq!(engine.c_tot.get(), sum_capitals,
         "c_tot must equal sum of account capitals after ADL");
 }
+
+// ============================================================================
+// F-5 regression: set_capital Result must propagate in withdraw_not_atomic
+// ============================================================================
+
+#[test]
+fn withdraw_c_tot_stays_consistent() {
+    // After a normal withdrawal, c_tot must equal sum of all account capitals.
+    let (mut engine, a, _b) = setup_two_users(100_000, 50_000);
+    let oracle = 1000u64;
+    let slot = 2u64;
+
+    engine.withdraw_not_atomic(a, 30_000, oracle, slot, 0i128, 0).unwrap();
+
+    let sum_capitals: u128 = (0..64).filter(|&i| engine.is_used(i))
+        .map(|i| engine.accounts[i].capital.get())
+        .sum();
+    assert_eq!(engine.c_tot.get(), sum_capitals,
+        "c_tot must equal sum of account capitals after withdraw");
+    assert_eq!(engine.accounts[a as usize].capital.get(), 70_000,
+        "user capital should be 100k - 30k = 70k");
+}
