@@ -62,9 +62,9 @@ fn test_params() -> RiskParams {
         fee_tier3_bps: 0,
         fee_tier2_threshold: 0,
         fee_tier3_threshold: 0,
-        fee_split_lp_bps: 3334,
-        fee_split_protocol_bps: 3333,
-        fee_split_creator_bps: 3333,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
@@ -104,9 +104,9 @@ fn test_params_with_floor() -> RiskParams {
         fee_tier3_bps: 0,
         fee_tier2_threshold: 0,
         fee_tier3_threshold: 0,
-        fee_split_lp_bps: 3334,
-        fee_split_protocol_bps: 3333,
-        fee_split_creator_bps: 3333,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
@@ -146,9 +146,9 @@ fn test_params_with_maintenance_fee() -> RiskParams {
         fee_tier3_bps: 0,
         fee_tier2_threshold: 0,
         fee_tier3_threshold: 0,
-        fee_split_lp_bps: 3334,
-        fee_split_protocol_bps: 3333,
-        fee_split_creator_bps: 3333,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
@@ -3106,9 +3106,11 @@ fn proof_lq3a_profit_routes_through_adl() {
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_lq4_liquidation_fee_paid_to_insurance() {
-    // Use custom params with min_liquidation_abs larger than position to force full close
+    // Use custom params with min_liquidation_abs larger than position to force full close.
+    // Must also bump liquidation_fee_cap: validate_params requires min_liquidation_abs <= cap.
     let mut params = test_params();
-    params.min_liquidation_abs = U128::new(20_000_000); // Bigger than position, forces full close
+    params.min_liquidation_abs = U128::new(20_000_000);
+    params.liquidation_fee_cap = U128::new(20_000_000);
     let mut engine = RiskEngine::new(params);
 
     // Create user with enough capital to cover fee
@@ -5262,7 +5264,7 @@ fn proof_close_account_preserves_inv() {
 /// Each step is gated on previous success (models Solana tx atomicity)
 /// Optimized: Concrete deposits, reduced unwind. Uses LP (Kani is_lp uses kind field, no memcmp)
 #[kani::proof]
-#[kani::unwind(5)] // MAX_ACCOUNTS=4
+#[kani::unwind(70)]
 #[kani::solver(cadical)]
 fn proof_sequence_deposit_trade_liquidate() {
     let mut engine = RiskEngine::new(test_params());
@@ -10002,7 +10004,7 @@ fn proof_haircut_cascade_mixed_insurance_inviolable() {
 /// If enforce_post_trade_margin returns Ok, then account must be at or above
 /// initial margin after the trade (for the risk-increasing side).
 #[kani::proof]
-#[kani::unwind(8)]
+#[kani::unwind(33)]
 fn proof_t7_risk_increasing_requires_initial_margin() {
     let params = test_params();
     let mut engine = Box::new(RiskEngine::new(params));
@@ -10056,7 +10058,7 @@ fn proof_t7_risk_increasing_requires_initial_margin() {
 /// T7-K2: Flat close is only allowed when maint_raw_wide >= 0.
 /// A flat-close (new_eff == 0) must be rejected if the account has negative net equity.
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(33)]
 fn proof_t7_flat_close_requires_nonnegative_equity() {
     let params = test_params();
     let mut engine = Box::new(RiskEngine::new(params));
@@ -10099,7 +10101,7 @@ fn proof_t7_flat_close_requires_nonnegative_equity() {
 
 /// T7-K3: notional is zero when effective position is zero.
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(33)]
 fn proof_t7_notional_zero_when_flat() {
     let params = test_params();
     let mut engine = Box::new(RiskEngine::new(params));
@@ -10818,9 +10820,9 @@ fn test_params_with_account_fee() -> RiskParams {
         fee_tier3_bps: 0,
         fee_tier2_threshold: 0,
         fee_tier3_threshold: 0,
-        fee_split_lp_bps: 3334,
-        fee_split_protocol_bps: 3333,
-        fee_split_creator_bps: 3333,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
         fee_utilization_surge_bps: 0,
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
