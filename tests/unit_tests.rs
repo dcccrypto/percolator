@@ -25,6 +25,8 @@ fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
+        max_accrual_dt_slots: 1_000,
+        max_abs_funding_e9_per_slot: 100_000_000,
     }
 }
 
@@ -205,7 +207,7 @@ fn test_withdraw_succeeds_without_fresh_crank() {
 
     // Spec §10.4 + §0 goal 6: withdraw_not_atomic must not require a recent keeper crank.
     // touch_account_full_not_atomic accrues market state directly from the caller's oracle.
-    let result = engine.withdraw_not_atomic(idx, 1_000, oracle, 5000, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(idx, 1_000, oracle, 500, 0i128, 0, 100);
     assert!(result.is_ok(), "withdraw_not_atomic must succeed without fresh crank (spec §0 goal 6)");
 }
 
@@ -243,7 +245,7 @@ fn test_trade_succeeds_without_fresh_crank() {
 
     // Spec §10.5 + §0 goal 6: execute_trade_not_atomic must not require a recent keeper crank.
     let size_q = make_size_q(10);
-    let result = engine.execute_trade_not_atomic(a, b, oracle, 5000, size_q, oracle, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, oracle, 500, size_q, oracle, 0i128, 0, 100);
     assert!(result.is_ok(), "trade must succeed without fresh crank (spec §0 goal 6)");
 }
 
@@ -1394,7 +1396,8 @@ fn test_mul_div_ceil_u256_rounding() {
 // ============================================================================
 
 #[test]
-fn test_accrue_market_to_multi_substep_large_dt() {
+fn test_accrue_market_to_rejects_dt_over_envelope() {
+    // Spec §5.5 clause 6 (v12.18): dt > cfg_max_accrual_dt_slots must be rejected.
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
@@ -1403,16 +1406,10 @@ fn test_accrue_market_to_multi_substep_large_dt() {
     engine.oi_eff_long_q = POS_SCALE;
     engine.oi_eff_short_q = POS_SCALE;
 
-    // High funding rate, large time gap requiring multiple sub-steps
-    let large_dt = MAX_FUNDING_DT * 3 + 100; // triggers 4 sub-steps
-
-    let result = engine.accrue_market_to(large_dt, 1100, 500_000_000);
-    assert!(result.is_ok(), "multi-substep accrual must not overflow: {:?}", result);
-
-    // Price increased, so K_long must increase (mark + funding payer = long)
-    // K_short must also change from receiving funding
-    assert!(engine.last_market_slot == large_dt);
-    assert!(engine.last_oracle_price == 1100);
+    // dt one beyond the envelope
+    let big_dt = engine.params.max_accrual_dt_slots + 1;
+    let result = engine.accrue_market_to(big_dt, 1100, 500_000_000);
+    assert!(result.is_err(), "dt over envelope must be rejected");
 }
 
 #[test]
@@ -3758,7 +3755,7 @@ fn test_funding_partition_invariance() {
     // fund_term_per_slot = 500_000_001_000 / 1e9 = 500 (remainder = 1_000)
     // Over 2 slots: fund_num = 1000 * 500_000_001 * 2 = 1_000_000_002_000
     // fund_term = 1_000_000_002_000 / 1e9 = 1000 (remainder = 2_000)
-    let rate = 500_000_001i128; // produces fractional remainder
+    let rate = 50_000_001i128; // produces fractional remainder (within envelope)
     let size = make_size_q(100);
     ea.execute_trade_not_atomic(a1, a2, oracle, slot, size, oracle, rate, 0, 100).unwrap();
     // One accrue of 2 slots

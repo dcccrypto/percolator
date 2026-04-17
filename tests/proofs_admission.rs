@@ -452,3 +452,56 @@ fn k9_admission_pair_rejects_zero_max() {
         admit_h_min as u64, admit_h_max, &engine.params);
     assert!(r.is_err());
 }
+
+// ============================================================================
+// K-1: accrue_market_to rejects dt beyond cfg_max_accrual_dt_slots (Bug 1)
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn k1_accrue_rejects_dt_over_envelope() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    let before_slot = engine.last_market_slot;
+    let before_price = engine.last_oracle_price;
+
+    // dt > cfg_max_accrual_dt_slots
+    let over: u8 = kani::any();
+    let now_slot = engine.last_market_slot
+        .saturating_add(engine.params.max_accrual_dt_slots)
+        .saturating_add((over as u64).saturating_add(1));
+    let oracle: u8 = kani::any();
+    kani::assume(oracle > 0);
+
+    let r = engine.accrue_market_to(now_slot, oracle as u64, 0i128);
+    assert!(r.is_err());
+    // State unchanged
+    assert!(engine.last_market_slot == before_slot);
+    assert!(engine.last_oracle_price == before_price);
+}
+
+// ============================================================================
+// K-2: resolve_market degenerate branch bypasses dt cap (Bug 2)
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn k2_resolve_degenerate_bypasses_dt_cap() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    // Force dormancy past the dt cap
+    let dt_over = engine.params.max_accrual_dt_slots.saturating_add(1000);
+    let now_slot = engine.last_market_slot.saturating_add(dt_over);
+    kani::assume(now_slot >= engine.current_slot);
+
+    // Degenerate branch: live_oracle = P_last, rate = 0, resolved == P_last (in-band)
+    let live_price = engine.last_oracle_price;
+    let resolved_price = live_price;
+    let rate = 0i128;
+
+    let r = engine.resolve_market_not_atomic(resolved_price, live_price, now_slot, rate);
+    assert!(r.is_ok());
+    assert!(engine.market_mode == MarketMode::Resolved);
+}

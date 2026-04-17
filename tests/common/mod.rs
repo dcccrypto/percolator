@@ -120,6 +120,8 @@ pub fn zero_fee_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
+        max_accrual_dt_slots: 1_000,
+        max_abs_funding_e9_per_slot: 100_000_000,
     }
 }
 
@@ -141,5 +143,7 @@ pub fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
+        max_accrual_dt_slots: 1_000,
+        max_abs_funding_e9_per_slot: 100_000_000,
     }
 }

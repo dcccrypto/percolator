@@ -391,6 +391,13 @@ pub struct RiskParams {
     pub h_max: u64,
     /// Resolved settlement price deviation bound (spec §10.7)
     pub resolve_price_deviation_bps: u64,
+    /// Max dt allowed in a single accrue_market_to call (spec §5.5 clause 6).
+    /// Init-time invariant: ADL_ONE * MAX_ORACLE_PRICE *
+    /// max_abs_funding_e9_per_slot * max_accrual_dt_slots <= i128::MAX
+    /// ensures F_side_num cannot overflow in a single envelope-respecting call.
+    pub max_accrual_dt_slots: u64,
+    /// Max |funding_rate_e9_per_slot| allowed (spec §1.4).
+    pub max_abs_funding_e9_per_slot: u64,
 }
 
 /// Main risk engine state (spec §2.2)
@@ -674,6 +681,37 @@ impl RiskEngine {
         assert!(
             params.resolve_price_deviation_bps <= MAX_RESOLVE_PRICE_DEVIATION_BPS,
             "resolve_price_deviation_bps must be <= MAX_RESOLVE_PRICE_DEVIATION_BPS"
+        );
+
+        // Funding/accrual envelope (spec §1.4):
+        // ADL_ONE * MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot *
+        //   max_accrual_dt_slots <= i128::MAX
+        // This ensures F_side_num cannot overflow in a single envelope-respecting call.
+        assert!(
+            params.max_accrual_dt_slots > 0,
+            "max_accrual_dt_slots must be > 0 (spec §1.4)"
+        );
+        assert!(
+            (params.max_abs_funding_e9_per_slot as i128) <= MAX_ABS_FUNDING_E9_PER_SLOT,
+            "max_abs_funding_e9_per_slot must be <= MAX_ABS_FUNDING_E9_PER_SLOT"
+        );
+        // Check envelope: product must fit in i128. Use U256 to compute exactly.
+        let envelope_ok = {
+            let adl = U256::from_u128(ADL_ONE);
+            let px = U256::from_u128(MAX_ORACLE_PRICE as u128);
+            let rate = U256::from_u128(params.max_abs_funding_e9_per_slot as u128);
+            let dt = U256::from_u128(params.max_accrual_dt_slots as u128);
+            let p1 = adl.checked_mul(px);
+            let p2 = p1.and_then(|v| v.checked_mul(rate));
+            let p3 = p2.and_then(|v| v.checked_mul(dt));
+            let i128_max = U256::from_u128(i128::MAX as u128);
+            match p3 {
+                Some(v) => v <= i128_max,
+                None => false,
+            }
+        };
+        assert!(envelope_ok,
+            "funding envelope: ADL_ONE * MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot * max_accrual_dt_slots must fit i128 (spec §1.4)"
         );
     }
 
@@ -1776,7 +1814,7 @@ impl RiskEngine {
         }
 
         // Validate funding rate bound (spec §1.4, folded into accrue per v12.16.4)
-        if funding_rate_e9.unsigned_abs() > MAX_ABS_FUNDING_E9_PER_SLOT as u128 {
+        if funding_rate_e9.unsigned_abs() > self.params.max_abs_funding_e9_per_slot as u128 {
             return Err(RiskError::Overflow);
         }
 
@@ -1797,6 +1835,12 @@ impl RiskEngine {
             // Step 5: no change — set current_slot and return (spec §5.4)
             self.current_slot = now_slot;
             return Ok(());
+        }
+
+        // Spec §5.5 clause 6: enforce per-call dt envelope.
+        // Together with init-time envelope (§1.4), guarantees F_side_num fits i128.
+        if total_dt > self.params.max_accrual_dt_slots {
+            return Err(RiskError::Overflow);
         }
 
         // Use scratch K values for the entire mark + funding computation.
@@ -4342,8 +4386,20 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 5: self-synchronizing live accrual with trusted current oracle + funding
-        self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
+        // Spec §9.8 clause 5: degenerate recovery branch.
+        // If live_oracle_price == P_last and funding_rate == 0, accrue is a no-op;
+        // skip it so dormant markets (dt > max_accrual_dt_slots) can still resolve.
+        let degenerate = live_oracle_price == self.last_oracle_price && funding_rate_e9 == 0;
+
+        if degenerate {
+            // No accrue needed. Just advance slots.
+            self.current_slot = now_slot;
+            self.last_market_slot = now_slot;
+            // Band check still runs (against P_last == live_oracle_price).
+        } else {
+            // Step 5: self-synchronizing live accrual with trusted current oracle + funding
+            self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
+        }
 
         // Step 6: price deviation check against REFRESHED P_last
         {
