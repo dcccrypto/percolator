@@ -733,6 +733,103 @@ fn rs1_validate_rejects_reserved_exceeding_pos_pnl() {
 }
 
 // ============================================================================
+// RS-2 (strengthened): admit_outstanding_reserve_on_touch rejects bucket
+// sum mismatch instead of laundering corruption into matured.
+// Reviewer's Test A.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn rs2_admit_outstanding_rejects_bucket_sum_mismatch() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+
+    // Healthy residual (would admit if state were valid).
+    engine.vault = U128::new(10_000);
+    engine.c_tot = U128::new(0);
+
+    // Corrupt: reserved_pnl = 1 but sched_remaining_q = 10 (mismatch).
+    engine.accounts[idx].pnl = 10;
+    engine.pnl_pos_tot = 10;
+    engine.accounts[idx].reserved_pnl = 1;
+    engine.accounts[idx].sched_present = 1;
+    engine.accounts[idx].sched_remaining_q = 10;
+    engine.accounts[idx].sched_anchor_q = 10;
+    engine.accounts[idx].sched_horizon = engine.params.h_max;
+
+    let matured_before = engine.pnl_matured_pos_tot;
+    let reserved_before = engine.accounts[idx].reserved_pnl;
+    let sched_present_before = engine.accounts[idx].sched_present;
+
+    let r = engine.admit_outstanding_reserve_on_touch(idx);
+    assert!(r.is_err(), "bucket-sum mismatch MUST reject");
+    // No state change.
+    assert!(engine.pnl_matured_pos_tot == matured_before);
+    assert!(engine.accounts[idx].reserved_pnl == reserved_before);
+    assert!(engine.accounts[idx].sched_present == sched_present_before);
+}
+
+// ============================================================================
+// RS-3 (strengthened): apply_reserve_loss_newest_first rejects malformed
+// queue state. Reviewer's Test D.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn rs3_apply_reserve_loss_rejects_malformed_queue() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+
+    // Corrupt: sched_present=1 but reserved_pnl doesn't match queue sums.
+    engine.accounts[idx].pnl = 10;
+    engine.pnl_pos_tot = 10;
+    engine.accounts[idx].reserved_pnl = 5;
+    engine.accounts[idx].sched_present = 1;
+    engine.accounts[idx].sched_remaining_q = 10; // mismatch: sum=10 != R=5
+    engine.accounts[idx].sched_anchor_q = 10;
+    engine.accounts[idx].sched_horizon = engine.params.h_max;
+
+    let reserved_before = engine.accounts[idx].reserved_pnl;
+    let sched_remaining_before = engine.accounts[idx].sched_remaining_q;
+
+    let r = engine.apply_reserve_loss_newest_first(idx, 1);
+    assert!(r.is_err(), "malformed queue MUST reject");
+    // No state change.
+    assert!(engine.accounts[idx].reserved_pnl == reserved_before);
+    assert!(engine.accounts[idx].sched_remaining_q == sched_remaining_before);
+}
+
+// ============================================================================
+// RS-4 (strengthened): advance_profit_warmup validates BEFORE pending→sched
+// promotion. Pending fields with malformed horizon must fail before being
+// copied into the scheduled bucket.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn rs4_warmup_rejects_malformed_pending_before_promotion() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+
+    // Corrupt pending: horizon out of [h_min, h_max] range.
+    engine.accounts[idx].pnl = 5;
+    engine.pnl_pos_tot = 5;
+    engine.accounts[idx].reserved_pnl = 5;
+    engine.accounts[idx].pending_present = 1;
+    engine.accounts[idx].pending_remaining_q = 5;
+    engine.accounts[idx].pending_horizon = engine.params.h_max + 1; // OOB
+
+    let r = engine.advance_profit_warmup(idx);
+    assert!(r.is_err(), "malformed pending_horizon MUST reject before promotion");
+    // Pending must NOT have been promoted into sched.
+    assert!(engine.accounts[idx].sched_present == 0);
+    assert!(engine.accounts[idx].pending_present == 1);
+}
+
+// ============================================================================
 // K-104: OI >= sum of effective positions per side
 // ============================================================================
 

@@ -1140,6 +1140,13 @@ impl RiskEngine {
     fn admit_outstanding_reserve_on_touch(&mut self, idx: usize) -> Result<()> {
         if self.market_mode != MarketMode::Live { return Ok(()); }
 
+        // Validate reserve integrity BEFORE any arithmetic or mutation.
+        // Previously, malformed state (e.g., sched_remaining mismatching
+        // reserved_pnl, or reserved_pnl > max(pnl, 0)) could be accelerated
+        // through — turning "corrupt reserve" into "clean matured PnL" and
+        // laundering the corruption into aggregates.
+        self.validate_reserve_shape(idx)?;
+
         // Phase 1: compute everything with checked arithmetic. No mutation yet.
         // Previously used saturating_add/saturating_sub which could mask
         // overflow or a broken V >= C_tot + I invariant. Also, the
@@ -2760,6 +2767,12 @@ impl RiskEngine {
     /// apply_reserve_loss_newest_first (spec §4.4) — consume from pending first, then scheduled.
     test_visible! {
     fn apply_reserve_loss_newest_first(&mut self, idx: usize, reserve_loss: u128) -> Result<()> {
+        // Validate reserve integrity first — a malformed bucket (e.g., sums
+        // not matching reserved_pnl, horizons out of bounds, reserved_pnl
+        // exceeding positive PnL) must fail rather than be partially
+        // consumed and transformed into a different malformed state.
+        self.validate_reserve_shape(idx)?;
+
         // Phase 1: compute per-bucket takes WITHOUT mutating. Validates
         // feasibility (reserve_loss <= total available, reserve_loss <=
         // reserved_pnl). Previously mutated step-by-step and only checked
@@ -2891,9 +2904,15 @@ impl RiskEngine {
     /// Releases reserve from the scheduled bucket per linear maturity.
     test_visible! {
     fn advance_profit_warmup(&mut self, idx: usize) -> Result<()> {
+        // Validate reserve integrity BEFORE the pending→scheduled promotion.
+        // Previously validation ran after promotion, so malformed pending
+        // fields (e.g., pending_horizon == 0, or pending_remaining_q
+        // mismatching reserved_pnl) would be copied into the scheduled
+        // bucket before being caught.
+        self.validate_reserve_shape(idx)?;
+
         let r = self.accounts[idx].reserved_pnl;
         if r == 0 {
-            self.validate_reserve_shape(idx)?;
             return Ok(());
         }
 
@@ -2916,9 +2935,6 @@ impl RiskEngine {
         if self.accounts[idx].sched_present == 0 {
             return Err(RiskError::CorruptState);
         }
-
-
-        self.validate_reserve_shape(idx)?;
 
         // Step 4: elapsed = current_slot - sched_start_slot
         if self.current_slot < self.accounts[idx].sched_start_slot {
