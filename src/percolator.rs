@@ -4632,8 +4632,13 @@ impl RiskEngine {
                 self.resolved_payout_h_den = h_den;
                 self.resolved_payout_ready = 1;
             }
-            // prepare_account_for_resolved_touch already called above unconditionally
-            let released = self.released_pos(i);
+            // prepare_account_for_resolved_touch already cleared reserve to 0;
+            // assert the invariant explicitly as defense-in-depth before using
+            // live-formula released_pos in Resolved mode.
+            if self.accounts[i].reserved_pnl != 0 {
+                return Err(RiskError::CorruptState);
+            }
+            let released = self.released_pos(i); // == pnl here since reserved == 0
             if released > 0 {
                 // Spec forbids h_den==0 with positive released PnL when snapshot is ready.
                 if self.resolved_payout_h_den == 0 {
@@ -4641,7 +4646,14 @@ impl RiskEngine {
                 }
                 let y = wide_mul_div_floor_u128(released,
                     self.resolved_payout_h_num, self.resolved_payout_h_den);
-                self.consume_released_pnl(i, released)?;
+                // Canonical resolved-close path (spec): set_pnl_with_reserve to
+                // zero the account's PnL with NoPositiveIncreaseAllowed, then
+                // credit the haircutted payout y to capital. Unlike
+                // consume_released_pnl (which is a Live-mode matured-drain
+                // helper), this uses the same canonical PnL mutation primitive
+                // as the rest of the engine.
+                self.set_pnl_with_reserve(i, 0i128,
+                    ReserveMode::NoPositiveIncreaseAllowed, None)?;
                 let new_cap = self.accounts[i].capital.get()
                     .checked_add(y).ok_or(RiskError::Overflow)?;
                 self.set_capital(i, new_cap)?;
