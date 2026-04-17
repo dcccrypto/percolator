@@ -87,9 +87,14 @@ impl I128 {
         Self(self.0.wrapping_add(rhs))
     }
 
+    /// Saturating absolute value: `i128::MIN.abs()` returns `i128::MAX` instead of panicking.
     #[inline(always)]
     pub fn abs(self) -> Self {
-        Self(self.0.abs())
+        if self.0 == i128::MIN {
+            Self(i128::MAX)
+        } else {
+            Self(self.0.abs())
+        }
     }
 
     #[inline(always)]
@@ -305,9 +310,14 @@ impl I128 {
         Self::new(self.get().wrapping_add(rhs))
     }
 
+    /// Saturating absolute value: `i128::MIN.abs()` returns `i128::MAX` instead of panicking.
     #[inline]
     pub fn abs(self) -> Self {
-        Self::new(self.get().abs())
+        if self.get() == i128::MIN {
+            Self::new(i128::MAX)
+        } else {
+            Self::new(self.get().abs())
+        }
     }
 
     #[inline]

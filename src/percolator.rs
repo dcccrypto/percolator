@@ -3191,10 +3191,10 @@ impl RiskEngine {
         };
         let new_rel = new_pos.saturating_sub(new_r);
 
-        // Update pnl_pos_tot
+        // PERC-AUDIT: Update pnl_pos_tot with checked arithmetic.
         if new_pos > old_pos {
             let delta = new_pos - old_pos;
-            self.pnl_pos_tot = self.pnl_pos_tot.saturating_add(delta);
+            self.pnl_pos_tot = self.pnl_pos_tot.checked_add(delta).unwrap_or(u128::MAX);
         } else if old_pos > new_pos {
             let delta = old_pos - new_pos;
             self.pnl_pos_tot = self.pnl_pos_tot.saturating_sub(delta);
@@ -3770,8 +3770,12 @@ impl RiskEngine {
         if pnl_matured == 0 {
             return (1, 1);
         }
-        let total_insurance =
-            self.insurance_fund.balance.get() + self.insurance_fund.isolated_balance.get();
+        let total_insurance = self
+            .insurance_fund
+            .balance
+            .get()
+            .checked_add(self.insurance_fund.isolated_balance.get())
+            .unwrap_or(u128::MAX); // saturate on overflow — conservative (over-estimates insurance)
         let residual = self
             .vault
             .get()
@@ -4026,12 +4030,16 @@ impl RiskEngine {
             return Ok(0);
         }
 
-        // Calculate fee due (engine is purely slot-native)
+        // Calculate fee due (engine is purely slot-native).
+        // Cap at MAX_PROTOCOL_FEE_ABS to prevent absurd fee accruals on overflow.
+        const MAX_PROTOCOL_FEE_ABS: u128 = 1_000_000_000_000_000_000; // 1e18 — ~$1T at e6 scale
         let due = self
             .params
             .maintenance_fee_per_slot
             .get()
-            .saturating_mul(dt as u128);
+            .checked_mul(dt as u128)
+            .unwrap_or(MAX_PROTOCOL_FEE_ABS)
+            .min(MAX_PROTOCOL_FEE_ABS);
 
         // Update last_fee_slot
         self.accounts[idx as usize].last_fee_slot = now_slot;
@@ -4711,12 +4719,14 @@ impl RiskEngine {
                 if account.position_size != 0 {
                     continue;
                 }
-                // Spec §2.6: skip only if C_i >= MIN_INITIAL_DEPOSIT (not just nonzero).
-                // Dust capital (0 < C_i < min_initial_deposit) is swept to insurance below.
-                // Use new_account_fee as the minimum deposit floor (dcccrypto equivalent of min_initial_deposit)
-                if account.capital.get() >= self.params.new_account_fee.get()
-                    && !account.capital.is_zero()
-                {
+                // PERC-AUDIT: Use 1% of new_account_fee as dust threshold.
+                // Previously used new_account_fee itself, which caused freshly-funded
+                // accounts to get swept after a single maintenance fee deduction.
+                // Using capital == 0 would allow slot exhaustion attacks (dust squatting).
+                // 1% threshold (0.01 USDC at 1 USDC fee) sweeps true dust while
+                // protecting accounts with meaningful capital.
+                let dust_threshold = self.params.new_account_fee.get() / 100;
+                if account.capital.get() > dust_threshold {
                     continue;
                 }
                 if account.reserved_pnl != 0 {
@@ -5899,9 +5909,9 @@ impl RiskEngine {
         index_price_e6: u64,
         dampening_e6: u64,
         max_bps_per_slot: i64,
-    ) -> i64 {
+    ) -> Result<i64> {
         if mark_price_e6 == 0 || index_price_e6 == 0 || dampening_e6 == 0 {
-            return 0;
+            return Ok(0);
         }
 
         // premium_bps = (mark - index) * 10_000 / index
@@ -5921,8 +5931,10 @@ impl RiskEngine {
         // Simplify: rate = (mark - index) * 10_000_000_000 / (index * damp)
         let numerator = (mark - index)
             .checked_mul(10_000_000_000_i128) // 10_000 * 1e6
-            .unwrap_or(0);
-        let denominator = index.checked_mul(damp).unwrap_or(1).max(1); // never divide by 0
+            .ok_or(RiskError::Overflow)?;
+        let denominator = index.checked_mul(damp)
+            .ok_or(RiskError::Overflow)?
+            .max(1); // never divide by 0
 
         let rate_unclamped = numerator / denominator;
 
@@ -5930,7 +5942,7 @@ impl RiskEngine {
         let max_abs = max_bps_per_slot.unsigned_abs() as i128;
         let clamped = rate_unclamped.clamp(-max_abs, max_abs);
 
-        clamped as i64
+        Ok(clamped as i64)
     }
 
     /// Compute the combined (blended) funding rate from inventory-based and premium-based.
@@ -6073,7 +6085,7 @@ impl RiskEngine {
             index_price_e6,
             self.params.funding_premium_dampening_e6,
             self.params.funding_premium_max_bps_per_slot,
-        );
+        )?;
 
         // Step 3: Blend inventory and premium components
         let combined = Self::compute_combined_funding_rate(

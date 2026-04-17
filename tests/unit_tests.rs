@@ -7143,15 +7143,15 @@ fn test_premium_funding_with_dampening() {
 #[test]
 fn test_premium_funding_zero_inputs() {
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(0, 1_000_000, 1_000_000, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(0, 1_000_000, 1_000_000, 5).unwrap(),
         0
     );
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 0, 1_000_000, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 0, 1_000_000, 5).unwrap(),
         0
     );
     assert_eq!(
-        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 1_000_000, 0, 5),
+        RiskEngine::compute_premium_funding_bps_per_slot(1_000_000, 1_000_000, 0, 5).unwrap(),
         0
     );
 }

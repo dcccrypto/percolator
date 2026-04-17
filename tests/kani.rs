@@ -8290,7 +8290,8 @@ fn nightly_premium_funding_rate_bounded() {
     kani::assume(dampening <= 100_000_000); // 100x dampening
     kani::assume(max_bps >= 0 && max_bps <= 10_000);
 
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps)
+        .unwrap_or(0); // overflow → 0 is safe under these constraints
 
     let max_abs = max_bps.unsigned_abs() as i64;
     kani::assert(
@@ -8310,18 +8311,18 @@ fn kani_premium_funding_rate_zero_inputs() {
     let max_bps: i64 = kani::any();
     kani::assume(max_bps >= 0 && max_bps <= 10_000);
 
-    // If mark is zero → rate must be 0
+    // If mark is zero → rate must be Ok(0)
     let rate_mark_zero =
-        RiskEngine::compute_premium_funding_bps_per_slot(0, index, dampening, max_bps);
+        RiskEngine::compute_premium_funding_bps_per_slot(0, index, dampening, max_bps).unwrap();
     kani::assert(rate_mark_zero == 0, "mark=0 must return 0");
 
-    // If index is zero → rate must be 0
+    // If index is zero → rate must be Ok(0)
     let rate_index_zero =
-        RiskEngine::compute_premium_funding_bps_per_slot(mark, 0, dampening, max_bps);
+        RiskEngine::compute_premium_funding_bps_per_slot(mark, 0, dampening, max_bps).unwrap();
     kani::assert(rate_index_zero == 0, "index=0 must return 0");
 
-    // If dampening is zero → rate must be 0
-    let rate_damp_zero = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, 0, max_bps);
+    // If dampening is zero → rate must be Ok(0)
+    let rate_damp_zero = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, 0, max_bps).unwrap();
     kani::assert(rate_damp_zero == 0, "dampening=0 must return 0");
 }
 
@@ -8384,7 +8385,7 @@ fn kani_premium_funding_rate_zero_premium() {
     kani::assume(max_bps >= 0 && max_bps <= 10_000);
 
     // mark == index → premium = 0
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(price, price, dampening, max_bps);
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(price, price, dampening, max_bps).unwrap();
     kani::assert(rate == 0, "equal mark and index must give zero premium");
 }
 
@@ -8404,7 +8405,7 @@ fn kani_premium_funding_rate_sign_correctness() {
     kani::assume(dampening > 0 && dampening <= 100_000_000);
     kani::assume(max_bps > 0 && max_bps <= 10_000);
 
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps).unwrap();
 
     if mark > index {
         kani::assert(rate >= 0, "mark > index must give non-negative rate");
