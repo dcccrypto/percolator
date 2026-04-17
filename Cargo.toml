@@ -87,6 +87,10 @@ name = "proofs_phase_f"
 path = "tests/proofs_phase_f.rs"
 
 [[test]]
+name = "kani"
+path = "tests/kani.rs"
+
+[[test]]
 name = "unit_tests"
 path = "tests/unit_tests.rs"
 

@@ -3310,7 +3310,7 @@ impl RiskEngine {
 
     /// use_insurance_buffer (spec §4.11): deduct loss from insurance down to floor.
     #[allow(dead_code)]
-    fn use_insurance_buffer(&mut self, loss: u128) -> u128 {
+    pub fn use_insurance_buffer(&mut self, loss: u128) -> u128 {
         if loss == 0 {
             return 0;
         }
