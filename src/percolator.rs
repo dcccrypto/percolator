@@ -2622,6 +2622,26 @@ impl RiskEngine {
         }
     }
 
+    /// Assert global engine postconditions (spec §3.1 + §5.2).
+    ///
+    /// Called as the last step of every public `_not_atomic` entrypoint.
+    /// Verifies:
+    ///   1. Conservation: V >= C_tot + I (no underwater vault).
+    ///   2. Bilateral OI: OI_eff_long_q == OI_eff_short_q (no side imbalance).
+    ///
+    /// Per-instruction arithmetic should preserve both, but these are the
+    /// global spec-level invariants and the spec requires them checked at
+    /// the public surface.
+    fn assert_public_postconditions(&self) -> Result<()> {
+        if !self.check_conservation() {
+            return Err(RiskError::CorruptState);
+        }
+        if self.oi_eff_long_q != self.oi_eff_short_q {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(())
+    }
+
     // ========================================================================
     // Warmup Helpers (spec §6)
     // ========================================================================
@@ -3166,6 +3186,7 @@ impl RiskEngine {
             self.fee_debt_sweep(idx as usize)?;
         }
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -3253,6 +3274,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -3300,9 +3322,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
-        // Step 7: assert OI balance
-        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
-
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -3524,9 +3544,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
-        // Step 18: assert OI balance (spec §10.4)
-        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
-
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -3795,8 +3813,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
-        // Assert OI balance unconditionally (spec §10.6 step 11)
-        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
+        self.assert_public_postconditions()?;
         Ok(result)
     }
 
@@ -4050,9 +4067,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
-        // Step 12: assert OI balance
-        if self.oi_eff_long_q != self.oi_eff_short_q { return Err(RiskError::CorruptState); }
-
+        self.assert_public_postconditions()?;
         Ok(CrankOutcome {
             advanced,
             num_liquidations,
@@ -4237,6 +4252,7 @@ impl RiskEngine {
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -4306,6 +4322,7 @@ impl RiskEngine {
 
         self.free_slot(idx)?;
 
+        self.assert_public_postconditions()?;
         Ok(capital.get())
     }
 
@@ -4438,11 +4455,13 @@ impl RiskEngine {
             self.finalize_side_reset(Side::Short)?;
         }
 
-        // Step 21
+        // Step 21: resolve additionally requires both sides == 0 (stronger
+        // than bilateral balance).
         if self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0 {
             return Err(RiskError::CorruptState);
         }
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -4553,6 +4572,8 @@ impl RiskEngine {
 
         self.settle_losses(i)?;
         self.resolve_flat_negative(i)?;
+
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -4635,6 +4656,8 @@ impl RiskEngine {
         self.vault = self.vault - capital;
         self.set_capital(i, 0)?;
         self.free_slot(idx)?;
+
+        self.assert_public_postconditions()?;
         Ok(capital.get())
     }
 
@@ -4703,6 +4726,7 @@ impl RiskEngine {
         // Free the slot
         self.free_slot(idx)?;
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -4855,6 +4879,7 @@ impl RiskEngine {
             self.charge_fee_to_insurance(idx as usize, fee_abs)?;
         }
 
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -4898,6 +4923,8 @@ impl RiskEngine {
         // Settle losses from principal first, then absorb remaining via insurance
         self.settle_losses(i)?;
         self.resolve_flat_negative(i)?;
+
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
