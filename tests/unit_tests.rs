@@ -571,10 +571,14 @@ fn test_deposit_fee_credits() {
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0,
         "fee_credits must be zero after full payoff");
 
-    // Over-payment is capped — fee_credits stays at 0
-    engine.deposit_fee_credits(idx, 9999, slot).expect("no-op succeeds");
-    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0,
-        "fee_credits must not go positive");
+    // v12.18.1: over-payment must reject (previously silently capped).
+    // The caller externally moves `amount` tokens; engine booking < amount
+    // would desync real-token vs engine.vault. Reject explicitly instead.
+    let r = engine.deposit_fee_credits(idx, 9999, slot);
+    assert_eq!(r, Err(RiskError::Overflow),
+        "amount > outstanding debt MUST reject (no silent cap)");
+    // State unchanged: fee_credits still 0, vault still reflects prior payoffs.
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
 }
 
 #[test]
@@ -1023,6 +1027,55 @@ fn test_i128_size_q_construction() {
     // |pos| should equal POS_SCALE
     let abs_pos = pos.unsigned_abs();
     assert_eq!(abs_pos, POS_SCALE);
+}
+
+#[test]
+fn test_deposit_fee_credits_rejects_when_amount_exceeds_outstanding_debt() {
+    // Reviewer regression: engine must not silently cap. Real-token accounting
+    // requires that amount moved externally == amount booked by the engine,
+    // otherwise engine.vault drifts from actual vault tokens.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(-10);
+
+    let v_before = engine.vault.get();
+    let i_before = engine.insurance_fund.balance.get();
+
+    let r = engine.deposit_fee_credits(idx, 15, 100);
+    assert_eq!(r, Err(RiskError::Overflow),
+        "amount (15) > debt (10) MUST reject");
+    // No mutation on Err (validate-then-mutate contract).
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), -10);
+    assert_eq!(engine.vault.get(), v_before);
+    assert_eq!(engine.insurance_fund.balance.get(), i_before);
+}
+
+#[test]
+fn test_deposit_fee_credits_rejects_when_no_debt_exists() {
+    // If there's no debt, any positive amount is over-payment.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
+
+    let v_before = engine.vault.get();
+    let r = engine.deposit_fee_credits(idx, 1, 100);
+    assert_eq!(r, Err(RiskError::Overflow),
+        "amount > 0 with no debt MUST reject");
+    assert_eq!(engine.vault.get(), v_before);
+}
+
+#[test]
+fn test_deposit_fee_credits_exact_payment_updates_vault_and_insurance_exactly() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(-100);
+    let v_before = engine.vault.get();
+    let i_before = engine.insurance_fund.balance.get();
+
+    engine.deposit_fee_credits(idx, 100, 100).unwrap();
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
+    assert_eq!(engine.vault.get(), v_before + 100);
+    assert_eq!(engine.insurance_fund.balance.get(), i_before + 100);
 }
 
 #[test]
@@ -3346,6 +3399,35 @@ fn audit_6_deposit_materialize_needs_live_gate() {
         "deposit must be blocked on resolved markets with Unauthorized");
     assert!(!engine.is_used(unused_idx as usize),
         "no materialization on Resolved-mode deposit reject");
+}
+
+#[test]
+fn resolve_market_fresh_same_price_zero_funding_still_enforces_deviation_band() {
+    // Reviewer regression: previously the "degenerate branch" skipped the
+    // deviation-band check when live_oracle_price == last_oracle_price &&
+    // funding_rate_e9 == 0. That accidental value match is not a dead-oracle
+    // signal; a live but flat oracle should NOT permit out-of-band resolved
+    // prices. Fixed: band check always runs on both branches.
+    let mut engine = RiskEngine::new(default_params());
+    // Seed last_oracle_price = 1000 via an initial accrue.
+    let _a = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(_a, 100_000, 1000, 100).unwrap();
+    engine.accrue_market_to(100, 1000, 0).unwrap();
+    assert_eq!(engine.last_oracle_price, 1000);
+
+    // resolve_price_deviation_bps = 1000 (10%) in default_params.
+    // Fresh live oracle = 1000 (same), rate = 0 → "degenerate" branch taken
+    // for the skip-accrue optimization. Resolved = 1400 is 40% off, must
+    // reject via the band check.
+    let r = engine.resolve_market_not_atomic(
+        /* resolved */ 1400,
+        /* live */ 1000,
+        /* now_slot */ 200,
+        /* rate */ 0);
+    assert!(r.is_err(),
+        "out-of-band resolved_price MUST reject even when live == last");
+    assert_eq!(engine.market_mode, MarketMode::Live,
+        "rejected resolve MUST NOT transition market to Resolved");
 }
 
 #[test]

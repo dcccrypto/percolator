@@ -4444,22 +4444,32 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Spec §9.8 step 5/6: degenerate vs ordinary branch.
-        let used_degenerate = live_oracle_price == self.last_oracle_price && funding_rate_e9 == 0;
+        // Degenerate branch: when live_oracle_price equals last accrued price
+        // and funding rate is zero, accrue_market_to would be a no-op for K/F
+        // state, so we skip it. This is a pure performance optimization — NOT
+        // a trust bypass. The band check still runs unconditionally below.
+        //
+        // Prior versions skipped the band check in this branch, but the
+        // discriminator (accidental value match) does not distinguish "dead
+        // oracle, wrapper governance" from "live oracle that happens to be
+        // unchanged". Skipping band check for the latter accepted out-of-band
+        // resolved_price whenever the oracle was flat. Fixed: band check
+        // always runs; wrappers needing a dead-oracle override must widen
+        // resolve_price_deviation_bps via governance first.
+        let skip_accrue = live_oracle_price == self.last_oracle_price && funding_rate_e9 == 0;
 
-        if used_degenerate {
-            // Step 5: degenerate branch — no accrue, just advance slots.
+        if skip_accrue {
             self.current_slot = now_slot;
             self.last_market_slot = now_slot;
         } else {
-            // Step 6: ordinary branch — accrue with live_oracle_price + funding.
             self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
         }
 
-        // Spec §9.8 step 7: band check only on ordinary branch.
-        // Step 8: degenerate branch skips the ordinary band check entirely.
-        if !used_degenerate {
-            let p_last = self.last_oracle_price; // == live_oracle_price after accrue
+        // Band check runs on BOTH branches. In the skip-accrue case
+        // last_oracle_price is unchanged; in the accrue case it equals
+        // live_oracle_price after accrue.
+        {
+            let p_last = self.last_oracle_price;
             let p_last_i = p_last as i128;
             let p_res = resolved_price as i128;
             let dev_bps = self.params.resolve_price_deviation_bps as i128;
@@ -5042,27 +5052,34 @@ impl RiskEngine {
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
-        // Cap at outstanding debt to enforce spec §2.1 invariant: fee_credits <= 0
+        // Spec §2.1: fee_credits <= 0. The caller externally moves `amount`
+        // tokens; the engine must book exactly that. Previously the method
+        // silently capped at outstanding debt, which made the real-token ↔
+        // engine.vault correspondence divergent (amount moved > debt booked).
+        // Reject anything other than exact-or-smaller-than-debt payment.
         let debt = fee_debt_u128_checked(self.accounts[idx as usize].fee_credits.get());
-        let capped = amount.min(debt);
-        if capped == 0 {
-            self.current_slot = now_slot;
-            return Ok(()); // no debt to pay off
-        }
-        if capped > i128::MAX as u128 {
+        if amount > debt {
             return Err(RiskError::Overflow);
         }
-        let new_vault = self.vault.get().checked_add(capped)
+        if amount == 0 {
+            // Even zero: no debt, no mutation except current_slot.
+            self.current_slot = now_slot;
+            return Ok(());
+        }
+        if amount > i128::MAX as u128 {
+            return Err(RiskError::Overflow);
+        }
+        let new_vault = self.vault.get().checked_add(amount)
             .ok_or(RiskError::Overflow)?;
         if new_vault > MAX_VAULT_TVL {
             return Err(RiskError::Overflow);
         }
-        let new_ins = self.insurance_fund.balance.get().checked_add(capped)
+        let new_ins = self.insurance_fund.balance.get().checked_add(amount)
             .ok_or(RiskError::Overflow)?;
         let new_credits = self.accounts[idx as usize].fee_credits
-            .checked_add(capped as i128)
+            .checked_add(amount as i128)
             .ok_or(RiskError::Overflow)?;
-        // All checks passed — commit state
+        // All checks passed — commit state.
         self.current_slot = now_slot;
         self.vault = U128::new(new_vault);
         self.insurance_fund.balance = U128::new(new_ins);
