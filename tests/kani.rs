@@ -10419,18 +10419,19 @@ fn kani_P8321_premium_funding_no_overflow_full_range() {
     // max_bps must be non-negative (negative would invert clamp direction)
     kani::assume(max_bps >= 0);
 
-    // This call must not panic — i128 arithmetic is the mechanism for no-overflow
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    // This call must not panic — i128 arithmetic is the mechanism for no-overflow.
+    // Post Phase-3B arithmetic safety: function now returns Result<i64>.
+    // Err is permitted (structural input violations); Ok must be bounded.
+    let rate_res = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
 
-    // Output must fit in i64 (already guaranteed by clamp, but formally assert)
-    let _ = rate; // no panic is the proof
-
-    // Bounded by max_bps
-    let max_abs = max_bps.unsigned_abs() as i64;
-    kani::assert(
-        rate >= -max_abs && rate <= max_abs,
-        "P8321-A: premium rate must be bounded by max_bps for all u64 inputs",
-    );
+    if let Ok(rate) = rate_res {
+        // Bounded by max_bps
+        let max_abs = max_bps.unsigned_abs() as i64;
+        kani::assert(
+            rate >= -max_abs && rate <= max_abs,
+            "P8321-A: premium rate must be bounded by max_bps for all u64 inputs",
+        );
+    }
 }
 
 /// Proof P8321-B: No overflow in compute_combined_funding_rate over the FULL i64 range.
@@ -10487,12 +10488,19 @@ fn kani_P8321_premium_neutrality_mark_eq_index() {
     kani::assume(inv_rate >= -10_000 && inv_rate <= 10_000);
     kani::assume(weight <= 10_000);
 
-    // Premium rate is zero when mark == index (OI-equilibrium price equivalence)
+    // Constrain price*dampening to fit in i128 so the internal checked_mul
+    // succeeds (post Phase-3B guards). Bound both by 2^62 → product < 2^124 < i128::MAX.
+    kani::assume(price <= (1u64 << 62));
+    kani::assume(dampening <= (1u64 << 62));
+
+    // Premium rate is zero when mark == index (OI-equilibrium price equivalence).
+    // Post Phase-3B: function returns Result<i64>; with the input bounds above
+    // ruling out Overflow, the result must be Ok(0).
     let premium_rate =
         RiskEngine::compute_premium_funding_bps_per_slot(price, price, dampening, max_bps);
     kani::assert(
-        premium_rate == 0,
-        "P8321-C: mark==index must yield zero premium rate",
+        matches!(premium_rate, Ok(0)),
+        "P8321-C: mark==index must yield Ok(0) premium rate",
     );
 
     // With premium_rate=0, combined reduces to scaled inventory rate
@@ -10540,12 +10548,16 @@ fn kani_P8321_premium_funding_max_oi_params() {
     // No input restrictions — full u64 range (except zero handled separately)
     kani::assume(mark > 0 && index > 0 && dampening > 0);
 
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    // Post Phase-3B: function returns Result<i64>. Err on structural input issues
+    // is acceptable; Ok must be within [-max_bps, max_bps].
+    let rate_res = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
 
-    kani::assert(
-        rate >= -max_bps && rate <= max_bps,
-        "P8321-D: premium rate clamped within max_bps under any OI-driven price extreme",
-    );
+    if let Ok(rate) = rate_res {
+        kani::assert(
+            rate >= -max_bps && rate <= max_bps,
+            "P8321-D: premium rate clamped within max_bps under any OI-driven price extreme",
+        );
+    }
 }
 
 // ========================================
