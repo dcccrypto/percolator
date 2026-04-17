@@ -3402,6 +3402,84 @@ fn audit_6_deposit_materialize_needs_live_gate() {
 }
 
 #[test]
+fn free_slot_rejects_nonzero_capital() {
+    // Reviewer regression: free_slot's defense-in-depth must catch upstream
+    // bugs that would leave capital > 0 when the slot is freed. Otherwise
+    // capital disappears from the account while c_tot stays elevated.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.set_capital(idx as usize, 100).unwrap();
+    let c_tot_before = engine.c_tot.get();
+    assert!(engine.accounts[idx as usize].capital.get() > 0);
+
+    let res = engine.free_slot(idx);
+    assert_eq!(res, Err(RiskError::CorruptState));
+    // No mutation.
+    assert_eq!(engine.c_tot.get(), c_tot_before);
+    assert!(engine.is_used(idx as usize));
+}
+
+#[test]
+fn free_slot_rejects_nonzero_fee_credits() {
+    // Fee debt (fee_credits < 0) must not be silently forgiven by free_slot.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    // Capital 0, pnl 0, no buckets — all the pre-existing checks pass.
+    engine.accounts[idx as usize].fee_credits = I128::new(-1);
+
+    let res = engine.free_slot(idx);
+    assert_eq!(res, Err(RiskError::CorruptState));
+    assert!(engine.is_used(idx as usize));
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), -1);
+}
+
+#[test]
+fn init_in_place_fully_canonicalizes_nonzero_memory() {
+    // Reviewer regression: the doc says "safe even on non-zeroed memory".
+    // Previously the account loop only set adl_a_basis; everything else
+    // was left stale. Now every field is reset.
+    let mut engine = RiskEngine::new(default_params());
+    for a in engine.accounts.iter_mut() {
+        a.capital = U128::new(123);
+        a.kind = Account::KIND_LP;
+        a.pnl = -7;
+        a.reserved_pnl = 9;
+        a.position_basis_q = 11;
+        a.owner = [42; 32];
+        a.fee_credits = I128::new(-5);
+        a.sched_present = 1;
+        a.pending_present = 1;
+        a.adl_k_snap = 99;
+    }
+    engine.used = [u64::MAX; BITMAP_WORDS];
+    engine.num_used_accounts = 7;
+    engine.materialized_account_count = 7;
+    engine.c_tot = U128::new(999);
+    engine.vault = U128::new(999);
+
+    engine.init_in_place(default_params(), 0, 1);
+
+    assert!(engine.used.iter().all(|&w| w == 0));
+    assert_eq!(engine.num_used_accounts, 0);
+    assert_eq!(engine.materialized_account_count, 0);
+    assert_eq!(engine.c_tot.get(), 0);
+    assert_eq!(engine.vault.get(), 0);
+    for (i, a) in engine.accounts.iter().enumerate() {
+        assert_eq!(a.capital.get(), 0, "account {} capital", i);
+        assert_eq!(a.kind, Account::KIND_USER, "account {} kind", i);
+        assert_eq!(a.pnl, 0, "account {} pnl", i);
+        assert_eq!(a.reserved_pnl, 0, "account {} reserved_pnl", i);
+        assert_eq!(a.position_basis_q, 0, "account {} basis", i);
+        assert_eq!(a.owner, [0; 32], "account {} owner", i);
+        assert_eq!(a.fee_credits.get(), 0, "account {} fee_credits", i);
+        assert_eq!(a.sched_present, 0, "account {} sched_present", i);
+        assert_eq!(a.pending_present, 0, "account {} pending_present", i);
+        assert_eq!(a.adl_a_basis, ADL_ONE, "account {} a_basis", i);
+        assert_eq!(a.adl_k_snap, 0, "account {} k_snap", i);
+    }
+}
+
+#[test]
 fn resolve_market_fresh_same_price_zero_funding_still_enforces_deviation_band() {
     // Reviewer regression: previously the "degenerate branch" skipped the
     // deviation-band check when live_oracle_price == last_oracle_price &&

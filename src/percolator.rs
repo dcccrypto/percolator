@@ -744,6 +744,12 @@ impl RiskEngine {
 
     /// Create a new risk engine with explicit market initialization (spec §2.7).
     /// Requires `0 < init_oracle_price <= MAX_ORACLE_PRICE` per spec §1.2.
+    ///
+    /// Test/kani only. Returns Self by value, which on SBF would require
+    /// materializing ~MAX_ACCOUNTS * sizeof(Account) bytes on the stack
+    /// (>>4KB limit). Production callers MUST use `init_in_place` on
+    /// pre-allocated zero-initialized memory (SystemProgram.createAccount).
+    #[cfg(any(feature = "test", kani))]
     pub fn new_with_market(params: RiskParams, init_slot: u64, init_oracle_price: u64) -> Self {
         Self::validate_params(&params);
         assert!(
@@ -874,11 +880,37 @@ impl RiskEngine {
         self.used = [0; BITMAP_WORDS];
         self.num_used_accounts = 0;
         self.free_head = 0;
-        // Initialize accounts in-place to avoid stack overflow on SBF.
-        // The slab is zero-initialized by SystemProgram.createAccount.
-        // Only patch the non-zero field (adl_a_basis = ADL_ONE).
+        // Fully canonicalize every account in-place (SBF-safe: per-field
+        // assignment, never constructs a temporary Account on the stack).
+        // Previously only adl_a_basis was reset, relying on
+        // SystemProgram.createAccount zero-init. That's correct in normal
+        // Solana flow but the method's doc promises canonicalization of
+        // "non-zeroed memory", so we must reset every field explicitly.
         for i in 0..MAX_ACCOUNTS {
-            self.accounts[i].adl_a_basis = ADL_ONE;
+            let a = &mut self.accounts[i];
+            a.kind = Account::KIND_USER;
+            a.capital = U128::ZERO;
+            a.pnl = 0;
+            a.reserved_pnl = 0;
+            a.position_basis_q = 0;
+            a.adl_a_basis = ADL_ONE;
+            a.adl_k_snap = 0;
+            a.f_snap = 0;
+            a.adl_epoch_snap = 0;
+            a.matcher_program = [0; 32];
+            a.matcher_context = [0; 32];
+            a.owner = [0; 32];
+            a.fee_credits = I128::ZERO;
+            a.sched_present = 0;
+            a.sched_remaining_q = 0;
+            a.sched_anchor_q = 0;
+            a.sched_start_slot = 0;
+            a.sched_horizon = 0;
+            a.sched_release_q = 0;
+            a.pending_present = 0;
+            a.pending_remaining_q = 0;
+            a.pending_horizon = 0;
+            a.pending_created_slot = 0;
         }
         self.prev_free[0] = u16::MAX;
         for i in 0..MAX_ACCOUNTS - 1 {
@@ -956,6 +988,17 @@ impl RiskEngine {
         if self.accounts[i].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
         if self.accounts[i].position_basis_q != 0 { return Err(RiskError::CorruptState); }
         if self.accounts[i].sched_present != 0 || self.accounts[i].pending_present != 0 {
+            return Err(RiskError::CorruptState);
+        }
+        // Defense-in-depth: capital and fee_credits must be zero. Previously
+        // only pnl/reserved/basis/bucket-flags were checked; an upstream bug
+        // could leave capital > 0 or fee_credits != 0 and free_slot would
+        // silently zero them — leaking C_tot accounting vs account table
+        // (capital disappears from account but c_tot stays elevated).
+        if !self.accounts[i].capital.is_zero() {
+            return Err(RiskError::CorruptState);
+        }
+        if self.accounts[i].fee_credits.get() != 0 {
             return Err(RiskError::CorruptState);
         }
         let a = &mut self.accounts[i];
