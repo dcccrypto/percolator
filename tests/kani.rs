@@ -2115,7 +2115,15 @@ fn fast_maintenance_margin_uses_equity_including_negative_pnl() {
     let eff_equity = if eff_eq_i > 0 { eff_eq_i as u128 } else { 0 };
 
     let position_value = abs_i128_to_u128(position) * (oracle_price as u128) / 1_000_000;
-    let mm_required = position_value * (engine.params.maintenance_margin_bps as u128) / 10_000;
+    let bps = engine.params.maintenance_margin_bps as u128;
+
+    // Mirror `is_above_margin_bps_mtm` (spec §9.1): the effective margin is
+    // max(price_based_proportional, min_nonzero_mm_req floor, coin_margined_position_margin).
+    let proportional = position_value * bps / 10_000;
+    let floor = engine.params.min_nonzero_mm_req;
+    let price_required = core::cmp::max(proportional, floor);
+    let pos_margin = abs_i128_to_u128(position) * bps / 10_000;
+    let mm_required = core::cmp::max(price_required, pos_margin);
 
     let is_above =
         engine.is_above_maintenance_margin_mtm(&engine.accounts[idx as usize], oracle_price);
