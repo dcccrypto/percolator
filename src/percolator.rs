@@ -3056,6 +3056,17 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
+        // Pre-validate c_tot += excess to preserve validate-then-mutate contract (Bug 92).
+        // Bounded by v_candidate <= MAX_VAULT_TVL but we still check explicitly.
+        if excess > 0 {
+            self.c_tot.get().checked_add(excess).ok_or(RiskError::Overflow)?;
+        }
+        // Pre-validate insurance += required_fee (bounded by v_candidate but explicit check)
+        if required_fee > 0 {
+            self.insurance_fund.balance.get().checked_add(required_fee)
+                .ok_or(RiskError::Overflow)?;
+        }
+
         // Enforce materialized_account_count bound (spec §10.0)
         self.materialized_account_count = self.materialized_account_count
             .checked_add(1).ok_or(RiskError::Overflow)?;
@@ -4624,6 +4635,11 @@ impl RiskEngine {
             // Negative PnL means losses not yet absorbed — must reconcile first
             return Err(RiskError::Undercollateralized);
         }
+        // Bug 73 defense: unconditionally clear bucket metadata before free_slot
+        // to defend against accounts that reached pnl == 0 post-reconcile but
+        // retained stale bucket flags (shouldn't happen under normal flow, but
+        // fails conservatively rather than bricking free_slot).
+        self.prepare_account_for_resolved_touch(i);
         if self.accounts[i].pnl > 0 {
             if !self.is_terminal_ready() {
                 return Err(RiskError::Unauthorized);
@@ -4641,7 +4657,7 @@ impl RiskEngine {
                 self.resolved_payout_h_den = h_den;
                 self.resolved_payout_ready = 1;
             }
-            self.prepare_account_for_resolved_touch(i);
+            // prepare_account_for_resolved_touch already called above unconditionally
             let released = self.released_pos(i);
             if released > 0 {
                 // Spec forbids h_den==0 with positive released PnL when snapshot is ready.
