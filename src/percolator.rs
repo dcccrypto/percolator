@@ -1066,8 +1066,11 @@ impl RiskEngine {
     /// admit_fresh_reserve_h_lock (spec §4.7): decide effective horizon for fresh reserve.
     /// Returns admit_h_min if instant release preserves h=1, admit_h_max otherwise.
     /// Sticky: once an account gets h_max in this instruction, all later increments also get h_max.
-    #[cfg_attr(any(feature = "test", feature = "stress", kani), doc(hidden))]
-    pub fn admit_fresh_reserve_h_lock(
+    ///
+    /// Internal helper. Not part of the public engine surface — callers should
+    /// go through set_pnl_with_reserve with ReserveMode::UseAdmissionPair.
+    test_visible! {
+    fn admit_fresh_reserve_h_lock(
         &self, idx: usize, fresh_positive_pnl: u128,
         ctx: &mut InstructionContext, admit_h_min: u64, admit_h_max: u64,
     ) -> Result<u64> {
@@ -1106,10 +1109,14 @@ impl RiskEngine {
         }
         Ok(admitted_h_eff)
     }
+    }
 
     /// admit_outstanding_reserve_on_touch (spec §4.9): accelerate existing reserve if h=1 holds.
-    #[cfg_attr(any(feature = "test", feature = "stress", kani), doc(hidden))]
-    pub fn admit_outstanding_reserve_on_touch(&mut self, idx: usize) -> Result<()> {
+    ///
+    /// Internal helper. Not part of the public engine surface — called by
+    /// touch_account_live_local as part of the live-touch pipeline.
+    test_visible! {
+    fn admit_outstanding_reserve_on_touch(&mut self, idx: usize) -> Result<()> {
         if self.market_mode != MarketMode::Live { return Ok(()); }
         let a = &self.accounts[idx];
         let sched_r = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
@@ -1138,6 +1145,7 @@ impl RiskEngine {
             if self.pnl_matured_pos_tot > self.pnl_pos_tot { return Err(RiskError::CorruptState); }
         }
         Ok(())
+    }
     }
 
     /// set_pnl: thin wrapper routing through set_pnl_with_reserve(ImmediateRelease).
@@ -1972,17 +1980,6 @@ impl RiskEngine {
         if admit_h_max > params.h_max { return Err(RiskError::Overflow); }
         // if admit_h_min > 0, then admit_h_min >= cfg_h_min
         if admit_h_min > 0 && admit_h_min < params.h_min { return Err(RiskError::Overflow); }
-        Ok(())
-    }
-
-    /// Public entry-point for the end-of-instruction lifecycle
-    /// (spec §10.0 steps 4-7 / §10.8 steps 9-12).
-    ///
-    /// Runs schedule_end_of_instruction_resets and finalize in canonical order.
-    /// v12.16.4: no stored rate, so no recompute_r_last call.
-    pub fn run_end_of_instruction_lifecycle(&mut self, ctx: &mut InstructionContext) -> Result<()> {
-        self.schedule_end_of_instruction_resets(ctx)?;
-        self.finalize_end_of_instruction_resets(ctx)?;
         Ok(())
     }
 
@@ -3962,10 +3959,14 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        // Clamp max_revalidations to MAX_TOUCHED_PER_INSTRUCTION to ensure
-        // finalize_touched_accounts_post_live can process all touched accounts.
-        let max_revalidations = core::cmp::min(
-            max_revalidations, MAX_TOUCHED_PER_INSTRUCTION as u16);
+        // Reject requests exceeding MAX_TOUCHED_PER_INSTRUCTION instead of
+        // silently truncating. finalize_touched_accounts_post_live cannot
+        // process more than MAX_TOUCHED_PER_INSTRUCTION touched accounts, so
+        // any caller requesting more is asking for work we cannot do — fail
+        // explicitly rather than accept a reduced budget.
+        if max_revalidations > MAX_TOUCHED_PER_INSTRUCTION as u16 {
+            return Err(RiskError::Overflow);
+        }
 
         // Step 1: initialize instruction context
         let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
