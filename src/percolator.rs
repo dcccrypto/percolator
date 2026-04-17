@@ -2628,6 +2628,10 @@ impl RiskEngine {
     /// append_or_route_new_reserve (spec §4.3)
     test_visible! {
     fn append_or_route_new_reserve(&mut self, idx: usize, reserve_add: u128, now_slot: u64, h_lock: u64) -> Result<()> {
+        // Validate existing reserve shape before mutating on top of it.
+        // Malformed bucket state must fail rather than be merged through.
+        self.validate_reserve_shape(idx)?;
+
         let a = &mut self.accounts[idx];
 
         // Step 1: if sched absent and pending present → promote pending to scheduled
@@ -2755,7 +2759,13 @@ impl RiskEngine {
                 return Err(RiskError::CorruptState);
             }
         } else {
+            // Spec §4.4/§1.4: sched_horizon in [cfg_h_min, cfg_h_max] when present.
+            // Matches pending_horizon validation below — previously only pending
+            // was bounded-checked; malformed sched state could otherwise be
+            // accelerated or merged before detection.
             if a.sched_horizon == 0 { return Err(RiskError::CorruptState); }
+            if a.sched_horizon < self.params.h_min { return Err(RiskError::CorruptState); }
+            if a.sched_horizon > self.params.h_max { return Err(RiskError::CorruptState); }
             if a.sched_release_q > a.sched_anchor_q { return Err(RiskError::CorruptState); }
             let used = a.sched_remaining_q.checked_add(a.sched_release_q)
                 .ok_or(RiskError::CorruptState)?;
@@ -2975,6 +2985,12 @@ impl RiskEngine {
         if !ctx.add_touched(idx as u16) {
             return Err(RiskError::Overflow); // touched-set capacity exceeded
         }
+
+        // Fail-conservative: validate reserve shape BEFORE any acceleration or
+        // merge can act on it. Malformed sched_horizon (e.g., out of [h_min,
+        // h_max]) or bucket metadata inconsistency must cause the instruction
+        // to fail rather than be "healed" by downstream mutations.
+        self.validate_reserve_shape(idx)?;
 
         // Step 4: accelerate outstanding reserve if h=1 admits (spec §4.9)
         self.admit_outstanding_reserve_on_touch(idx)?;
