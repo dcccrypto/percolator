@@ -1014,7 +1014,8 @@ impl RiskEngine {
     /// admit_fresh_reserve_h_lock (spec §4.7): decide effective horizon for fresh reserve.
     /// Returns admit_h_min if instant release preserves h=1, admit_h_max otherwise.
     /// Sticky: once an account gets h_max in this instruction, all later increments also get h_max.
-    fn admit_fresh_reserve_h_lock(
+    #[cfg_attr(any(feature = "test", feature = "stress", kani), doc(hidden))]
+    pub fn admit_fresh_reserve_h_lock(
         &self, idx: usize, fresh_positive_pnl: u128,
         ctx: &mut InstructionContext, admit_h_min: u64, admit_h_max: u64,
     ) -> u64 {
@@ -1037,7 +1038,8 @@ impl RiskEngine {
     }
 
     /// admit_outstanding_reserve_on_touch (spec §4.9): accelerate existing reserve if h=1 holds.
-    fn admit_outstanding_reserve_on_touch(&mut self, idx: usize) -> Result<()> {
+    #[cfg_attr(any(feature = "test", feature = "stress", kani), doc(hidden))]
+    pub fn admit_outstanding_reserve_on_touch(&mut self, idx: usize) -> Result<()> {
         if self.market_mode != MarketMode::Live { return Ok(()); }
         let a = &self.accounts[idx];
         let sched_r = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
