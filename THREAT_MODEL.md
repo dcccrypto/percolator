@@ -68,35 +68,35 @@ The matcher is treated as adversarial input. All ABI fields from the matcher res
 
 The following findings were identified during internal audit and deferred. Each has a documented rationale and is tracked for resolution before full mainnet production.
 
-### F-6 — LP Identity Inconsistency
+### F-6 — LP Identity Inconsistency ✅ RESOLVED (2026-04-17)
 
-**Description:** `TradeNoCpi` uses a generation-table lookup for LP identity, while `TradeCpi` uses an FNV hash of the LP public key. These are two different identity-binding mechanisms for the same logical concept.  
-**Impact:** No current fund or position risk. The `NoOpMatcher` used by `TradeNoCpi` ignores the identity field. There is no path where this inconsistency allows an LP to impersonate another LP or bypass controls.  
-**Deferral rationale:** Cosmetic inconsistency. Will be unified in a future instruction set revision. No user funds at risk.
+**Description:** `TradeNoCpi` uses a generation-table lookup for LP identity, while `TradeCpi` uses an FNV hash of the LP public key. These are two different identity-binding mechanisms for the same logical concept.
+**Impact:** No current fund or position risk. The `NoOpMatcher` used by `TradeNoCpi` ignores the identity field. There is no path where this inconsistency allows an LP to impersonate another LP or bypass controls.
+**Resolution:** Pre-audit hygiene review confirmed the two schemes intentionally serve different contexts — `gen_table` (mat_counter) is strictly monotonic and used for internal lifecycle tracking, while FNV hash is used for matcher CPI binding and does not need to distinguish instance generations. Documented inline at `percolator-prog/src/percolator.rs` near the FNV compute site. Unifying would either break matcher binaries or lose slot-reuse detection. Not a bug; documented as intentional.
 
 ### C-7 — NFT Account ID Guard Inoperative on v12.17
 
-**Description:** The NFT program's `account_id` guard does not execute correctly under the v12.17 slab layout.  
-**Impact:** The guard failure allows a PDA to be created with an incorrect account ID, costing approximately 0.002 SOL in PDA rent. No position ownership bypass, no fund risk.  
-**Deferral rationale:** The blast radius is bounded to a small rent loss. No positions or funds can be accessed via this path. Fix requires a layout-aware account ID read, scheduled for next NFT program upgrade.
+**Description:** The NFT program's `account_id` guard does not execute correctly under the v12.17 slab layout.
+**Impact:** The guard failure allows a PDA to be created with an incorrect account ID, costing approximately 0.002 SOL in PDA rent. No position ownership bypass, no fund risk.
+**Status:** ACCEPTED RISK. Bounded blast radius (~0.002 SOL rent per occurrence), no fund or position access. Fix requires a layout-aware `account_id` read, scheduled for the next NFT program upgrade. Monitoring: count of NFT PDA creations per slab (alert if rate exceeds expected new-user rate).
 
 ### C-12 — NFT Transfer Hook Stale Oracle
 
-**Description:** The NFT transfer hook does not re-fetch the oracle price at transfer time. It uses the price cached at last crank.  
-**Impact:** In markets where the keeper cranks infrequently, the health check performed at NFT transfer time may use a stale price. This could allow a transfer when a freshly-priced health check would block it.  
-**Deferral rationale:** Bounded by keeper crank frequency. The fix requires an `ExtraAccountMeta` change (adding the oracle feed to the transfer hook accounts), which is a non-trivial interface change. Keeper SLA ensures crank staleness stays within `max_crank_staleness_slots`. Scheduled for next NFT program upgrade.
+**Description:** The NFT transfer hook does not re-fetch the oracle price at transfer time. It uses the price cached at last crank.
+**Impact:** In markets where the keeper cranks infrequently, the health check performed at NFT transfer time may use a stale price. This could allow a transfer when a freshly-priced health check would block it.
+**Status:** ACCEPTED RISK. Bounded by keeper crank frequency (`max_crank_staleness_slots`, configured to 200 slots). The fix requires an `ExtraAccountMeta` change (adding the oracle feed to the transfer hook accounts), which is a non-trivial Token-2022 interface change affecting wallet UX. Scheduled for next NFT program upgrade. Monitoring: staleness gap between last crank slot and NFT transfer signature slot.
 
-### SP-2 — `_reserved[8..16]` Market Start Slot Dead Write
+### SP-2 — `_reserved[8..16]` Market Start Slot Dead Write ✅ FIXED (2026-04-17)
 
-**Description:** The `_reserved[8..16]` field in the market header receives a write of `market_start_slot` that is never subsequently read by any instruction.  
-**Impact:** None. The field is cosmetic dead state.  
-**Deferral rationale:** Pure dead code / cosmetic. Will be cleaned up in a future header revision. No security implication.
+**Description:** The `_reserved[8..16]` field in the market header received a write of `market_start_slot` that was never subsequently read by any instruction.
+**Impact upgraded during review:** This was NOT purely cosmetic. The bytes `_reserved[8..16]` are also used by `mat_counter` (PERC-623 per-instance LP identity counter). The `market_start_slot` write at InitMarket was corrupting `mat_counter` with the slot value, causing the first `InitUser/InitLP` to receive `mat_counter = (creation_slot + 1)` instead of `1`.
+**Resolution:** Removed `write_market_start_slot` function and its call site at InitMarket. The slot value was never consumed as "market_start_slot" anywhere, so removal is safe. `mat_counter` now correctly starts at 0 and increments from 1 on the first account creation.
 
 ### SP-5 — Admin Can Disable HWM Without Timelock
 
-**Description:** The admin can disable the high-watermark (HWM) policy for insurance withdrawals without any timelock or delay. An operator could in principle reduce withdrawal protections immediately.  
-**Impact:** Governance policy risk, not a code vulnerability. The HWM mechanism provides withdrawal rate-limiting above and beyond the cooldown.  
-**Deferral rationale:** Mitigated by deployment policy. With Squads multisig as admin, any HWM disable requires M-of-N signers. The multisig migration eliminates the single-key risk. Tracked as a governance hardening item for post-launch.
+**Description:** The admin can disable the high-watermark (HWM) policy for insurance withdrawals without any timelock or delay. An operator could in principle reduce withdrawal protections immediately.
+**Impact:** Governance policy risk, not a code vulnerability. The HWM mechanism provides withdrawal rate-limiting above and beyond the cooldown.
+**Status:** GOVERNANCE POLICY ITEM. There is no on-chain setter for `hwm_floor_bps` in current code; the field is set once at `CreateLpVault` and cannot be changed. The finding becomes relevant only if a setter is added in the future. Mitigation: with Squads multisig as admin, any future HWM-disable setter would require M-of-N signers. Tracked for post-launch governance hardening. No code change needed in current release.
 
 ---
 
