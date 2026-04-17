@@ -117,13 +117,13 @@ fn inductive_top_up_insurance_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let ins_amt: u32 = kani::any();
     kani::assume(ins_amt <= 1_000_000);
-    engine.top_up_insurance_fund(ins_amt as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.top_up_insurance_fund(ins_amt as u128).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -135,13 +135,13 @@ fn inductive_set_capital_decrease_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let new_cap: u32 = kani::any();
     kani::assume(new_cap <= dep);
     engine.set_capital(idx as usize, new_cap as u128);
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -174,8 +174,8 @@ fn inductive_deposit_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -187,7 +187,7 @@ fn inductive_withdraw_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
 
     // Run keeper_crank_not_atomic to satisfy fresh-crank requirement for withdraw_not_atomic
     let _ = engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64);
@@ -197,7 +197,7 @@ fn inductive_withdraw_preserves_accounting() {
     let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
     kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
     if result.is_ok() {
-        assert!(engine.check_conservation());
+        assert!(engine.check_conservation(DEFAULT_ORACLE));
     }
 }
 
@@ -210,8 +210,8 @@ fn inductive_settle_loss_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let loss: i32 = kani::any();
     kani::assume(loss < 0 && loss > i32::MIN);
@@ -220,7 +220,7 @@ fn inductive_settle_loss_preserves_accounting() {
 
     // touch_account_full_not_atomic settles losses from principal (step 9)
     let _ = engine.touch_account_full_not_atomic(idx as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ============================================================================
@@ -261,18 +261,18 @@ fn prop_conservation_holds_after_all_ops() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 5_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let ins_amt: u32 = kani::any();
     kani::assume(ins_amt <= 1_000_000);
-    engine.top_up_insurance_fund(ins_amt as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation());
+    engine.top_up_insurance_fund(ins_amt as u128).unwrap();
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let loss: u32 = kani::any();
     kani::assume(loss <= dep);
     engine.set_pnl(idx as usize, -(loss as i128));
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     let cap_before = engine.accounts[idx as usize].capital.get();
     let pnl_abs = if loss > 0 { loss as u128 } else { 0 };
@@ -282,7 +282,7 @@ fn prop_conservation_holds_after_all_ops() {
         let new_pnl_val = -(loss as i128) + (pay as i128);
         engine.set_pnl(idx as usize, new_pnl_val);
     }
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ============================================================================
@@ -367,7 +367,7 @@ fn proof_set_capital_maintains_c_tot() {
 
     let initial: u32 = kani::any();
     kani::assume(initial > 0 && initial <= 1_000_000);
-    engine.deposit(idx, initial as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(idx, initial as u128, DEFAULT_SLOT).unwrap();
 
     assert!(engine.c_tot.get() == engine.accounts[idx as usize].capital.get());
 
@@ -391,10 +391,10 @@ fn proof_check_conservation_basic() {
     engine.vault = U128::new(100);
     engine.c_tot = U128::new(60);
     engine.insurance_fund.balance = U128::new(30);
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 
     engine.insurance_fund.balance = U128::new(50);
-    assert!(!engine.check_conservation());
+    assert!(!engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -477,8 +477,8 @@ fn proof_side_mode_gating() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 5_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 5_000_000, DEFAULT_SLOT).unwrap();
 
     engine.side_mode_long = SideMode::DrainOnly;
 

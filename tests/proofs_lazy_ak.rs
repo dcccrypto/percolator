@@ -264,7 +264,7 @@ fn t2_14_compose_mark_adl_mark() {
 fn t3_14_epoch_mismatch_forces_terminal_close() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 1_000_000, 0).unwrap();
 
     let pos_mul: u8 = kani::any();
     kani::assume(pos_mul > 0);
@@ -310,7 +310,7 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
 fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
@@ -515,7 +515,7 @@ fn t6_26_full_drain_reset_regression() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 1_000_000, 0).unwrap();
 
     let k_snap_val: i8 = kani::any();
     let k_snap = k_snap_val as i128;
@@ -580,7 +580,7 @@ fn proof_property_43_k_pair_chronology_correctness() {
     // If arguments were swapped, PnL would flip sign.
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(idx, 1_000_000, DEFAULT_SLOT).unwrap();
 
     // Set up a long position with k_snap = 100
     let pos = 10 * POS_SCALE as i128;

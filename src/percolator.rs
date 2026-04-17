@@ -3326,7 +3326,7 @@ impl RiskEngine {
 
     /// absorb_protocol_loss (spec §4.11): use insurance buffer, remainder is implicit haircut.
     #[allow(dead_code)]
-    fn absorb_protocol_loss(&mut self, loss: u128) {
+    pub fn absorb_protocol_loss(&mut self, loss: u128) {
         if loss == 0 {
             return;
         }
@@ -3334,8 +3334,7 @@ impl RiskEngine {
     }
 
     /// restart_warmup_after_reserve_increase (spec §4.9)
-    #[allow(dead_code)]
-    fn restart_warmup_after_reserve_increase(&mut self, idx: usize) {
+    pub fn restart_warmup_after_reserve_increase(&mut self, idx: usize) {
         let t = self.params.warmup_period_slots;
         if t == 0 {
             self.set_reserved_pnl(idx, 0);
@@ -3356,8 +3355,7 @@ impl RiskEngine {
     }
 
     /// advance_profit_warmup (spec §4.9): advance warmup clock for account idx.
-    #[allow(dead_code)]
-    fn advance_profit_warmup(&mut self, idx: usize) {
+    pub fn advance_profit_warmup(&mut self, idx: usize) {
         let r = self.accounts[idx].reserved_pnl;
         if r == 0 {
             self.accounts[idx].warmup_slope_per_step = 0u128;
@@ -3443,8 +3441,7 @@ impl RiskEngine {
     }
 
     /// fee_debt_sweep (spec §7.5): after capital increase, sweep fee debt.
-    #[allow(dead_code)]
-    fn fee_debt_sweep(&mut self, idx: usize) {
+    pub fn fee_debt_sweep(&mut self, idx: usize) {
         let fc = self.accounts[idx].fee_credits.get();
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
@@ -3637,7 +3634,7 @@ impl RiskEngine {
     /// accrue_market_to (spec §5.4): advance K/A coefficients for elapsed slots.
     /// Called once per keeper_crank invocation to update ADL market state.
     #[allow(dead_code)]
-    fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64) -> Result<()> {
+    pub fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64) -> Result<()> {
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
         }
@@ -3728,7 +3725,7 @@ impl RiskEngine {
     /// recompute_r_last_from_final_state (spec v12.1.0 §4.12).
     /// Stores the pre-validated funding rate for the next interval.
     #[allow(dead_code)]
-    fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) -> Result<()> {
+    pub fn recompute_r_last_from_final_state(&mut self, externally_computed_rate: i64) -> Result<()> {
         // Rate already validated at instruction entry; belt-and-suspenders re-check.
         if externally_computed_rate.unsigned_abs() > MAX_ABS_FUNDING_BPS_PER_SLOT as u64 {
             return Err(RiskError::Overflow);
@@ -4650,7 +4647,7 @@ impl RiskEngine {
     /// Free an account slot (internal helper).
     /// Clears the account, bitmap, and returns slot to freelist.
     /// Caller must ensure the account is safe to free (no capital, no positive pnl, etc).
-    fn free_slot(&mut self, idx: u16) {
+    pub fn free_slot(&mut self, idx: u16) {
         self.accounts[idx as usize] = empty_account();
         self.clear_used(idx as usize);
         self.next_free[idx as usize] = self.free_head;
