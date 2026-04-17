@@ -4701,7 +4701,7 @@ fn proof_execute_trade_margin_enforcement() {
 
     // NON-VACUITY: trade actually happened
     kani::assert(
-        !engine.accounts[user_idx as usize].position_size == 0,
+        engine.accounts[user_idx as usize].position_size != 0,
         "Trade must create a position",
     );
 
@@ -5387,11 +5387,11 @@ fn proof_trade_creates_funding_settled_positions() {
 
     // NON-VACUITY: Both accounts should have positions now
     kani::assert(
-        !engine.accounts[user as usize].position_size == 0,
+        engine.accounts[user as usize].position_size != 0,
         "User must have position after trade",
     );
     kani::assert(
-        !engine.accounts[lp as usize].position_size == 0,
+        engine.accounts[lp as usize].position_size != 0,
         "LP must have position after trade",
     );
 
@@ -7533,8 +7533,8 @@ fn proof_gap4_trade_extreme_size_no_panic() {
     engine.last_full_sweep_start_slot = 100;
     let user = engine.add_user(0).unwrap();
     let lp = engine.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
-    engine.deposit(user, 1_000_000_000_000_000_000, 0).unwrap();
-    engine.deposit(lp, 1_000_000_000_000_000_000, 0).unwrap();
+    engine.deposit(user, 1_000_000_000_000_000, 0).unwrap();
+    engine.deposit(lp, 1_000_000_000_000_000, 0).unwrap();
 
     let r1 = engine.execute_trade(&NoopMatchingEngine, lp, user, 100, 1_000_000, 1);
     if r1.is_ok() {
@@ -7551,9 +7551,9 @@ fn proof_gap4_trade_extreme_size_no_panic() {
     let user2 = engine2.add_user(0).unwrap();
     let lp2 = engine2.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
     engine2
-        .deposit(user2, 1_000_000_000_000_000_000, 0)
+        .deposit(user2, 1_000_000_000_000_000, 0)
         .unwrap();
-    engine2.deposit(lp2, 1_000_000_000_000_000_000, 0).unwrap();
+    engine2.deposit(lp2, 1_000_000_000_000_000, 0).unwrap();
 
     let half_max = (MAX_POSITION_ABS_Q / 2) as i128;
     let r2 = engine2.execute_trade(&NoopMatchingEngine, lp2, user2, 100, 1_000_000, half_max);
@@ -7571,9 +7571,9 @@ fn proof_gap4_trade_extreme_size_no_panic() {
     let user3 = engine3.add_user(0).unwrap();
     let lp3 = engine3.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
     engine3
-        .deposit(user3, 1_000_000_000_000_000_000, 0)
+        .deposit(user3, 1_000_000_000_000_000, 0)
         .unwrap();
-    engine3.deposit(lp3, 1_000_000_000_000_000_000, 0).unwrap();
+    engine3.deposit(lp3, 1_000_000_000_000_000, 0).unwrap();
 
     let max_pos = MAX_POSITION_ABS_Q as i128;
     let r3 = engine3.execute_trade(&NoopMatchingEngine, lp3, user3, 100, 1_000_000, max_pos);
@@ -7633,7 +7633,7 @@ fn proof_gap4_margin_extreme_values_no_panic() {
     let user = engine.add_user(0).unwrap();
 
     // Extreme values
-    engine.accounts[user as usize].capital = U128::new(1_000_000_000_000_000_000);
+    engine.accounts[user as usize].capital = U128::new(1_000_000_000_000_000);
     engine.accounts[user as usize].pnl = -1_000_000_000_000_000;
     engine.accounts[user as usize].position_size = 10_000_000_000;
     engine.accounts[user as usize].entry_price = 1_000_000;
@@ -7710,8 +7710,10 @@ fn proof_gap5_fee_settle_margin_or_err() {
 
     match result {
         Ok(_) => {
-            // After Ok, account must either be above maintenance margin or have no position
-            let has_position = !engine.accounts[user as usize].position_size == 0;
+            // After Ok, account must either be above maintenance margin or have no position.
+            // (Earlier revision mis-parenthesised this as `!pos == 0` which is bitwise-NOT
+            // compared to 0 — always false for any non-zero position.)
+            let has_position = engine.accounts[user as usize].position_size != 0;
             if has_position {
                 kani::assert(
                     engine.is_above_maintenance_margin_mtm(&engine.accounts[user as usize], oracle),
@@ -7720,9 +7722,10 @@ fn proof_gap5_fee_settle_margin_or_err() {
             }
         }
         Err(RiskError::Undercollateralized) => {
-            // Position exists and margin is insufficient
+            // Undercollateralized requires an open position (a flat account can't be
+            // undercollateralized on fee settlement alone).
             kani::assert(
-                !engine.accounts[user as usize].position_size == 0,
+                engine.accounts[user as usize].position_size != 0,
                 "Undercollateralized error requires open position",
             );
         }
@@ -10852,7 +10855,9 @@ fn proof_gc_dust_below_minimum_threshold() {
     engine.last_crank_slot = 100;
     engine.last_full_sweep_start_slot = 100;
 
-    let dust_idx = engine.add_user(0).unwrap();
+    // test_params_with_account_fee has new_account_fee=1_000, so add_user
+    // requires >= 1_000 fee_payment (else InsufficientBalance).
+    let dust_idx = engine.add_user(1_000).unwrap();
 
     // Symbolic dust capital: 0 < capital < new_account_fee (1_000)
     let dust_cap: u128 = kani::any();
@@ -10902,7 +10907,8 @@ fn proof_gc_preserves_above_threshold() {
     engine.last_crank_slot = 100;
     engine.last_full_sweep_start_slot = 100;
 
-    let idx = engine.add_user(0).unwrap();
+    // new_account_fee=1_000 in test_params_with_account_fee.
+    let idx = engine.add_user(1_000).unwrap();
 
     // Capital at or above the threshold
     let cap: u128 = kani::any();
@@ -11089,10 +11095,10 @@ fn proof_haircut_ratio_extreme_values_no_overflow() {
 
     // Constraint: values up to 1e18 (realistic maximum for Solana token amounts × 1e6 price)
     // This is large enough to stress saturating arithmetic
-    kani::assume(vault <= 1_000_000_000_000_000_000);
+    kani::assume(vault <= 1_000_000_000_000_000);
     kani::assume(c_tot <= vault);
     kani::assume(insurance <= vault.saturating_sub(c_tot));
-    kani::assume(pnl_matured <= 1_000_000_000_000_000_000);
+    kani::assume(pnl_matured <= 1_000_000_000_000_000);
 
     engine.vault = U128::new(vault);
     engine.c_tot = U128::new(c_tot);
