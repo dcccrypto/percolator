@@ -2537,21 +2537,27 @@ fn proof_require_fresh_crank_gates_stale() {
 #[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_stale_crank_blocks_withdraw() {
+    // Spec §10.4 (post-v12.17): withdraw does NOT require a fresh crank —
+    // touch_account_full accrues market state directly from the caller's
+    // slot/oracle, preserving liveness (spec §0 goal 6: keeper downtime
+    // must not freeze user funds). This proof now pins the inverse of
+    // its original claim: stale crank MUST NOT block withdraw.
     let mut engine = RiskEngine::new(test_params());
     let user = engine.add_user(0).unwrap();
     engine.deposit(user, 10_000, 0).unwrap();
 
-    // Advance crank, then let it go stale
     engine.last_crank_slot = 100;
     engine.max_crank_staleness_slots = 50;
     let stale_slot: u64 = kani::any();
-    kani::assume(stale_slot > 150); // strictly stale
-    kani::assume(stale_slot < u64::MAX - 1000);
+    kani::assume(stale_slot > 150 && stale_slot < u64::MAX - 1000);
 
     let result = engine.withdraw(user, 1_000, stale_slot, 1_000_000);
+    // Must NOT return Unauthorized due to stale crank alone. Other failure
+    // modes (e.g. Overflow, Undercollateralized) are fine — the proof
+    // only asserts the stale-crank gate is gone.
     assert!(
-        result == Err(RiskError::Unauthorized),
-        "withdraw must reject when crank is stale"
+        result != Err(RiskError::Unauthorized),
+        "withdraw must NOT reject with Unauthorized for stale crank (spec §10.4)"
     );
 }
 
@@ -3823,7 +3829,7 @@ fn proof_liq_partial_2_symbolic_dust_elimination() {
 /// User: deposit 200_000, position 10M long, pnl 0
 /// Counterparty: deposit 200_000, position 10M short, pnl 0
 #[kani::proof]
-#[kani::unwind(5)] // MAX_ACCOUNTS=4
+#[kani::unwind(33)] // MAX_ACCOUNTS=4
 #[kani::solver(cadical)]
 fn proof_liq_partial_3_routing_is_complete_via_conservation_and_n1() {
     let mut engine = RiskEngine::new(test_params());
@@ -6021,7 +6027,7 @@ fn proof_trade_pnl_zero_sum() {
 /// This proves that with variation margin, closing a position with a different LP
 /// than the one it was opened with does not create or destroy value.
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn kani_no_teleport_cross_lp_close() {
     let mut params = test_params();
@@ -8630,7 +8636,7 @@ fn proof_trade_with_tiered_fees_preserves_inv() {
 /// After a crank with non-zero funding rate, the net funding transfer is zero.
 /// SLOW: moved to nightly CI (nightly_* prefix) — too expensive for PR runners.
 #[kani::proof]
-#[kani::unwind(16)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn nightly_funding_zero_sum_across_accounts() {
     let mut engine = RiskEngine::new(test_params());
@@ -8860,9 +8866,12 @@ fn proof_gap4_trade_extreme_price_symbolic() {
 #[kani::solver(cadical)]
 fn nightly_liquidation_must_reset_warmup_on_mark_increase() {
     let mut params = test_params();
-    // Zero liquidation fee to isolate warmup conversion effect
+    // Zero liquidation fee to isolate warmup conversion effect.
+    // Must also zero min_liquidation_abs — validate_params requires
+    // min_liquidation_abs <= liquidation_fee_cap.
     params.liquidation_fee_bps = 0;
     params.liquidation_fee_cap = U128::ZERO;
+    params.min_liquidation_abs = U128::ZERO;
     let mut engine = RiskEngine::new(params);
     engine.current_slot = 90;
     engine.last_crank_slot = 90;
@@ -11155,7 +11164,7 @@ fn proof_haircut_ratio_vault_underfunded() {
 /// effective_pos_pnl with extreme haircut: never overflows via mul_u128 (saturating).
 /// Tests that floor(pos_pnl * h_num / h_den) doesn't panic at large values.
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_effective_pnl_extreme_no_overflow() {
     let mut engine = RiskEngine::new(test_params());
