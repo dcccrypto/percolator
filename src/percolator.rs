@@ -458,7 +458,9 @@ pub struct RiskParams {
     /// (the GLOBAL ceiling), the invariant forces
     /// `min_funding_lifetime_slots <= 170` — about 68 seconds at 400ms.
     /// Deployments that want a multi-year lifetime MUST lower the rate
-    /// ceiling (e.g., rate <= ~170 gives >=100-year lifetime).
+    /// ceiling. With ADL_ONE = 1e15 and MAX_ORACLE_PRICE = 1e12:
+    ///   rate <= ~170 ⇒ lifetime ~1e9 slots ≈ 12.7 years
+    ///   rate <= ~21  ⇒ lifetime ~8e9 slots ≈ 100 years
     ///
     /// Saturation at `max_abs_funding_e9_per_slot` is the worst case;
     /// realistic operating rates are orders of magnitude smaller, so the
@@ -2599,6 +2601,34 @@ impl RiskEngine {
         match side {
             Side::Long => self.f_epoch_start_long_num = self.f_long_num,
             Side::Short => self.f_epoch_start_short_num = self.f_short_num,
+        }
+
+        // Reset live K_side and F_side to 0 for the new epoch (spec §2.10).
+        //
+        // Without this, a side that was ADL-shrunk far (small A_side) and
+        // pushed K_side close to the i128 edge would carry that near-
+        // boundary K into the new epoch, where A_side is restored to
+        // ADL_ONE. The first mark-to-market after the side reopens would
+        // then overflow K because
+        //     |K_old_epoch| + ADL_ONE * delta_p
+        // exceeds i128, even though the enqueue_adl headroom check (which
+        // reserves only A_old * MAX_ORACLE_PRICE) accepted the K write.
+        //
+        // The zeroing is economically correct: stale accounts settle
+        // against K_epoch_start_side / F_epoch_start_side_num (just
+        // snapshotted above), not against the live indices. New-epoch
+        // accounts snapshot the live K_side/F_side_num at attach time;
+        // starting from 0 gives them a clean headroom baseline without
+        // changing settlement semantics.
+        match side {
+            Side::Long => {
+                self.adl_coeff_long = 0;
+                self.f_long_num = 0;
+            }
+            Side::Short => {
+                self.adl_coeff_short = 0;
+                self.f_short_num = 0;
+            }
         }
 
         // Increment epoch

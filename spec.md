@@ -200,7 +200,7 @@ Configured values MUST satisfy:
   - `cfg_min_funding_lifetime_slots >= cfg_max_accrual_dt_slots`
   - `ADL_ONE * MAX_ORACLE_PRICE * cfg_max_abs_funding_e9_per_slot * cfg_min_funding_lifetime_slots <= i128::MAX` (cumulative lifetime floor)
   - both validations MUST be performed in an exact wide signed domain of at least 256 bits, or a formally equivalent exact method
-  - `cfg_min_funding_lifetime_slots` is the deployment's guaranteed cumulative-F lifetime at sustained worst-case rate. Production deployments SHOULD pick a value comfortably beyond any planned market horizon (at 400ms slots: ~7.9e7 slots/year, so ~8e9 slots ≈ 100 years; ~1e10 slots ≈ 127 years). Deployments MUST NOT leave `cfg_max_abs_funding_e9_per_slot` at `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT` (1e9) while also expecting a long lifetime — at that ceiling the invariant forces `cfg_min_funding_lifetime_slots <= 170`, i.e. ~68 seconds at 400ms slots. Deployments that want a multi-year lifetime MUST lower `cfg_max_abs_funding_e9_per_slot` accordingly (e.g., rate <= ~170 for a 100-year lifetime). Realistic operating funding rates are orders of magnitude below the configured ceiling, so observed F-saturation horizons are typically far longer than this floor guarantees.
+  - `cfg_min_funding_lifetime_slots` is the deployment's guaranteed cumulative-F lifetime at sustained worst-case rate. Production deployments SHOULD pick a value comfortably beyond any planned market horizon (at 400ms slots: ~7.9e7 slots/year, so ~8e9 slots ≈ 100 years; ~1e10 slots ≈ 127 years). Deployments MUST NOT leave `cfg_max_abs_funding_e9_per_slot` at `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT` (1e9) while also expecting a long lifetime — at that ceiling the invariant forces `cfg_min_funding_lifetime_slots <= 170`, i.e. ~68 seconds at 400ms slots. With `ADL_ONE = 1e15` and `MAX_ORACLE_PRICE = 1e12`: `rate <= ~170` gives ~1e9 slots (~12.7 years); `rate <= ~21` gives ~8e9 slots (~100 years). Deployments that want a multi-year lifetime MUST lower `cfg_max_abs_funding_e9_per_slot` accordingly. Realistic operating funding rates are orders of magnitude below the configured ceiling, so observed F-saturation horizons are typically far longer than this floor guarantees.
 
 If the deployment also defines a stale-market resolution delay `permissionless_resolve_stale_slots` and expects permissionless resolution to remain callable after that delay, then initialization MUST additionally require:
 
@@ -600,11 +600,16 @@ A side may be in one of:
 
 1. set `K_epoch_start_side = K_side`
 2. set `F_epoch_start_side_num = F_side_num`
-3. require `epoch_side != u64::MAX`, then increment `epoch_side` by exactly `1` using checked arithmetic
-4. set `A_side = ADL_ONE`
-5. set `stale_account_count_side = stored_pos_count_side`
-6. set `phantom_dust_bound_side_q = 0`
-7. set `mode_side = ResetPending`
+3. set `K_side = 0` and `F_side_num = 0` (new-epoch numerical baseline)
+4. require `epoch_side != u64::MAX`, then increment `epoch_side` by exactly `1` using checked arithmetic
+5. set `A_side = ADL_ONE`
+6. set `stale_account_count_side = stored_pos_count_side`
+7. set `phantom_dust_bound_side_q = 0`
+8. set `mode_side = ResetPending`
+
+Step 3 is required for liveness. Without it, a side that was ADL-shrunk far (small `A_side`) and pushed `K_side` close to the `i128` boundary would carry that near-boundary `K_side` into the new epoch, where `A_side` is restored to `ADL_ONE`. The first valid mark-to-market after the side reopened would then overflow `K` because `|K_old_epoch| + ADL_ONE * delta_p` exceeds `i128`, even though the ADL headroom check at the time of the K write (§5.6 step 7) had reserved only `A_old * MAX_ORACLE_PRICE` of headroom.
+
+Step 3 is economically sound: stale accounts settle against the `K_epoch_start_side` / `F_epoch_start_side_num` snapshots taken in steps 1–2, not against the live indices. New-epoch accounts snapshot the live `K_side` / `F_side_num` at attach time; starting those at `0` gives them a clean headroom baseline and does not change settlement semantics for any account.
 
 `finalize_side_reset(side)` MAY succeed only if:
 

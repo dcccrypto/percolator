@@ -662,6 +662,50 @@ fn idle_market_can_fast_forward_before_late_deposit() {
 }
 
 #[test]
+fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
+    // Regression (reviewer pass 9): the ADL headroom check in enqueue_adl
+    // uses `a_old`, which is conservative ONLY until the side resets.
+    // begin_full_drain_reset restores A_side = ADL_ONE while previously
+    // preserving K_side and F_side unchanged. A K value that cleared the
+    // ADL headroom check with a small a_old can then become unsafe once
+    // A is restored to ADL_ONE and the side reopens.
+    //
+    // Expected behavior: begin_full_drain_reset MUST zero live K_side
+    // and F_side after snapshotting them into the epoch-start fields.
+    // Stale accounts still settle correctly because they read the
+    // epoch-start snapshots, not the live indices.
+    let mut params = default_params();
+    params.max_abs_funding_e9_per_slot = 0;
+    params.max_accrual_dt_slots = 1;
+    params.min_funding_lifetime_slots = 1;
+    let mut engine = RiskEngine::new_with_market(params, 0, 1);
+
+    // Construct the post-ADL shape the reviewer describes: small A, K
+    // near the i128 edge — passed the old a_old headroom check because
+    // a_old * MAX_ORACLE_PRICE was small.
+    engine.adl_mult_long = 1;                // A_long small after shrinks
+    engine.adl_coeff_long = i128::MAX - 100; // K near +i128::MAX
+    engine.oi_eff_long_q = 0;                // drained
+    engine.stored_pos_count_long = 0;
+    // Snapshot K into epoch-start and restore A = ADL_ONE.
+    engine.begin_full_drain_reset(percolator::Side::Long).expect("reset");
+    let finalize = engine.finalize_side_reset(percolator::Side::Long);
+    assert!(finalize.is_ok(), "reset must finalize with zero stored");
+    // After reset, A_long = ADL_ONE. K_long MUST have been zeroed; if it
+    // still carries the near-boundary pre-reset value, reopening the side
+    // and doing any valid mark-to-market will overflow K.
+    engine.oi_eff_long_q = POS_SCALE; // simulate a new-epoch long position
+    engine.last_oracle_price = 1;
+    engine.fund_px_last = 1;
+    // A minimal valid oracle move should always succeed.
+    let r = engine.accrue_market_to(1, 2, 0);
+    assert!(r.is_ok(),
+        "after begin_full_drain_reset + finalize + reopen, any valid \
+         accrue_market_to must succeed; K_side must not carry old-epoch \
+         near-boundary state into the new epoch (got {:?})", r);
+}
+
+#[test]
 fn adl_k_write_preserves_future_mark_headroom() {
     // Regression (reviewer pass 8): enqueue_adl's K-overflow fallback
     // only catches the moment where the ADL K add itself overflows i128.
