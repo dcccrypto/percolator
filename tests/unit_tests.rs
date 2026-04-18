@@ -586,6 +586,59 @@ fn top_up_cannot_jump_current_slot_past_accrual_envelope() {
     }
 }
 
+#[test]
+fn deposit_existing_zero_amount_cannot_brick_accrual() {
+    // Same DoS class as top_up: deposit_not_atomic advances current_slot
+    // without advancing last_market_slot. For an already-materialized
+    // account an amount=0 deposit is a free time-jump, so the envelope
+    // check must run before the current_slot commit.
+    let mut engine = RiskEngine::new(default_params());
+    let min = engine.params.min_initial_deposit.get();
+    // Materialize at slot 0.
+    engine.deposit_not_atomic(0, min, 1_000, 0).expect("first deposit");
+    assert_eq!(engine.last_market_slot, 0);
+    let max_dt = engine.params.max_accrual_dt_slots;
+    let hostile_slot = max_dt + 1;
+
+    let r = engine.deposit_not_atomic(0, 0, 1_000, hostile_slot);
+    if r.is_ok() {
+        assert!(engine.accrue_market_to(hostile_slot, 1_000, 0).is_ok(),
+            "if deposit accepts now_slot={}, a subsequent accrue must still \
+             succeed or the market is DoS-bricked", hostile_slot);
+    } else {
+        assert_eq!(r, Err(RiskError::Overflow));
+        assert_eq!(engine.current_slot, 0);
+        assert_eq!(engine.last_market_slot, 0);
+    }
+}
+
+#[test]
+fn deposit_new_account_cannot_brick_accrual() {
+    // Same class, but the deposit materializes a brand-new account (idx
+    // was unused). materialize_at runs first, then current_slot =
+    // now_slot. The envelope check must fire before any mutation.
+    let mut engine = RiskEngine::new(default_params());
+    let min = engine.params.min_initial_deposit.get();
+    let max_dt = engine.params.max_accrual_dt_slots;
+    let hostile_slot = max_dt + 1;
+    assert_eq!(engine.last_market_slot, 0);
+
+    let r = engine.deposit_not_atomic(0, min, 1_000, hostile_slot);
+    if r.is_ok() {
+        assert!(engine.accrue_market_to(hostile_slot, 1_000, 0).is_ok(),
+            "if deposit-materialize accepts now_slot={}, a subsequent \
+             accrue must still succeed or the market is DoS-bricked",
+            hostile_slot);
+    } else {
+        assert_eq!(r, Err(RiskError::Overflow));
+        // Validate-then-mutate: no slot should have been allocated.
+        assert!(!engine.is_used(0),
+            "deposit must not materialize when envelope check fails");
+        assert_eq!(engine.current_slot, 0);
+        assert_eq!(engine.last_market_slot, 0);
+    }
+}
+
 
 // ============================================================================
 // 10. Fee operations
@@ -3567,7 +3620,10 @@ fn materialize_anchors_last_fee_slot_at_materialize_slot() {
     let mut engine = RiskEngine::new(default_params());
     let unused_idx = engine.free_head;
     // Deposit is the sole materialization path; it passes now_slot as anchor.
-    let anchor = 1234u64;
+    // Anchor must stay within the live accrual envelope
+    // (last_market_slot + max_accrual_dt_slots = 0 + 1000) because
+    // deposit_not_atomic does not itself advance last_market_slot.
+    let anchor = 500u64;
     engine.deposit_not_atomic(unused_idx, 10_000, 1000, anchor).unwrap();
     assert_eq!(engine.accounts[unused_idx as usize].last_fee_slot, anchor);
 }

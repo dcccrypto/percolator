@@ -3454,6 +3454,10 @@ impl RiskEngine {
         if now_slot < self.last_market_slot {
             return Err(RiskError::Overflow);
         }
+        // deposit_not_atomic advances current_slot without calling
+        // accrue_market_to; enforce the live accrual envelope so a
+        // zero-amount (or any) deposit cannot brick subsequent accrual.
+        self.check_live_accrual_envelope(now_slot)?;
 
         // Pre-validate vault capacity before any mutations (prevents ghost account)
         let v_candidate = self.vault.get().checked_add(amount).ok_or(RiskError::Overflow)?;
