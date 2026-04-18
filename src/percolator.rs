@@ -3857,6 +3857,26 @@ impl RiskEngine {
         self.touch_account_live_local(a as usize, &mut ctx)?;
         self.touch_account_live_local(b as usize, &mut ctx)?;
 
+        // Step 12a (v12.19): flush dust-only empty sides BEFORE computing
+        // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
+        // branch zeros the account basis and decrements stored_pos_count
+        // but leaves oi_eff_side pointing at the old dust value — cleanup
+        // relies on the end-of-instruction bilateral-empty-dust branch.
+        // If the trade attaches fresh OI before that cleanup runs,
+        // stored_pos_count becomes nonzero again, the cleanup branch no
+        // longer fires, and the stale dust permanently inflates OI. A
+        // dedicated reset_ctx keeps the trade's pending_reset flags from
+        // re-resetting the freshly opened positions at end of instruction.
+        {
+            let mut reset_ctx = InstructionContext::new();
+            self.schedule_end_of_instruction_resets(&mut reset_ctx)?;
+            self.finalize_end_of_instruction_resets(&reset_ctx)?;
+        }
+        // After the flush, any real remaining stale/drain state is still
+        // reflected in side_mode_*; the existing ResetPending/DrainOnly
+        // OI-increase gate below will reject if a trade would grow a
+        // side that is still mid-reset.
+
         // Step 13: capture old effective positions
         let old_eff_a = self.effective_pos_q(a as usize);
         let old_eff_b = self.effective_pos_q(b as usize);

@@ -662,6 +662,69 @@ fn idle_market_can_fast_forward_before_late_deposit() {
 }
 
 #[test]
+fn execute_trade_clears_dust_before_opening_fresh_oi() {
+    // Regression (reviewer pass 10): execute_trade runs touch_account_live
+    // _local on both legs before computing bilateral OI. When a touch hits
+    // the "q_eff_new == 0" dust branch (small basis floored to zero), it
+    // zeros account.basis and decrements stored_pos_count but LEAVES
+    // oi_eff_side pointing at the old dust value (clearance is supposed
+    // to happen in schedule_end_of_instruction_resets bilateral-empty
+    // branch). If the trade then attaches fresh positions on the same
+    // side, the new OI is computed as (stale_dust + new_size) and the
+    // bilateral-empty clearance branch no longer fires (stored count > 0),
+    // so the dust silently inflates OI forever.
+    //
+    // Expected: the trade must flush dust-only empty sides BEFORE
+    // bilateral_oi_after is computed, so fresh OI is clean.
+    let mut params = default_params();
+    params.trading_fee_bps = 0;
+    params.maintenance_margin_bps = 0;
+    params.initial_margin_bps = 0;
+    params.min_nonzero_mm_req = 1;
+    params.min_nonzero_im_req = 2;
+    params.max_abs_funding_e9_per_slot = 0;
+    params.max_accrual_dt_slots = 10;
+    params.min_funding_lifetime_slots = 10;
+    let px = 1_000u64;
+    let mut e = RiskEngine::new_with_market(params, 0, px);
+    e.deposit_not_atomic(0, 1_000_000, px, 0).unwrap();
+    e.deposit_not_atomic(1, 1_000_000, px, 0).unwrap();
+
+    // Construct the dust-hit state: a_side = 1, account.adl_a_basis = 2,
+    // basis = ±1. Touch computes q_eff_new = floor(1 * 1 / 2) = 0, hits
+    // the dust branch, zeros basis, decrements stored_pos_count, leaves
+    // oi_eff_side at 1.
+    e.adl_mult_long = 1;
+    e.adl_mult_short = 1;
+    e.accounts[0].position_basis_q = 1;
+    e.accounts[0].adl_a_basis = 2;
+    e.accounts[0].adl_epoch_snap = e.adl_epoch_long;
+    e.accounts[0].adl_k_snap = 0;
+    e.accounts[0].f_snap = 0;
+    e.accounts[1].position_basis_q = -1;
+    e.accounts[1].adl_a_basis = 2;
+    e.accounts[1].adl_epoch_snap = e.adl_epoch_short;
+    e.accounts[1].adl_k_snap = 0;
+    e.accounts[1].f_snap = 0;
+    e.oi_eff_long_q = 1;
+    e.oi_eff_short_q = 1;
+    e.stored_pos_count_long = 1;
+    e.stored_pos_count_short = 1;
+
+    let q = POS_SCALE as i128;
+    e.execute_trade_not_atomic(0, 1, px, 1, q, px, 0, 1, 10).expect("trade");
+
+    // Post-trade invariant: OI should reflect ONLY the fresh trade, not
+    // fresh trade + stale dust residual.
+    assert_eq!(e.oi_eff_long_q, q as u128,
+        "post-trade oi_eff_long must equal real trade size, not size + stale dust \
+         (got {}, expected {})", e.oi_eff_long_q, q);
+    assert_eq!(e.oi_eff_short_q, q as u128,
+        "post-trade oi_eff_short must equal real trade size, not size + stale dust \
+         (got {}, expected {})", e.oi_eff_short_q, q);
+}
+
+#[test]
 fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
     // Regression (reviewer pass 9): the ADL headroom check in enqueue_adl
     // uses `a_old`, which is conservative ONLY until the side resets.
@@ -1092,10 +1155,17 @@ fn test_drain_only_blocks_new_trades() {
     let oracle = 1000u64;
     let slot = 1u64;
 
-    // Manually set long side to DrainOnly
+    // Open a real position first so OI_long > 0. This matches the only
+    // state in which DrainOnly is reachable by the engine (spec §5.6
+    // sets DrainOnly when A_side drops below MIN_A_SIDE with nonzero
+    // residual OI). With OI=0 the pre-open flush in execute_trade
+    // transitions DrainOnly → reset → Normal (spec §5.7.D).
+    let open_q = make_size_q(10);
+    engine.execute_trade_not_atomic(a, b, oracle, slot, open_q, oracle, 0i128, 0, 100)
+        .expect("open position");
     engine.side_mode_long = SideMode::DrainOnly;
 
-    // Try to open a new long position (a goes long) — should be blocked
+    // Try to open MORE long exposure (a buys again) — must be blocked.
     let size_q = make_size_q(50);
     let result = engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100);
     assert_eq!(result, Err(RiskError::SideBlocked));
@@ -2163,11 +2233,17 @@ fn test_drain_only_blocks_oi_increase() {
     let oracle = 1000u64;
     let slot = 2u64;
 
-    // Set long side to DrainOnly
+    // Open a real position first so OI_long > 0. Matches the spec §5.6
+    // reachable DrainOnly state (A_side below MIN_A_SIDE with residual
+    // OI). With OI=0 the pre-open flush resets DrainOnly → Normal via
+    // spec §5.7.D.
+    let open_q = make_size_q(10);
+    engine.execute_trade_not_atomic(a, b, oracle, slot, open_q, oracle, 0i128, 0, 100)
+        .expect("open position");
     engine.side_mode_long = SideMode::DrainOnly;
 
-    // Try to open a new long position — should fail
-    let size_q = make_size_q(1); // a goes long
+    // Try to open MORE long exposure — must fail.
+    let size_q = make_size_q(1);
     let result = engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100);
     assert!(result.is_err(), "DrainOnly side must reject OI-increasing trades");
 }

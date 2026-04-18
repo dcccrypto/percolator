@@ -1859,6 +1859,7 @@ Procedure:
 9. set `current_slot`
 10. if recurring fees are enabled, sync `a` and `b` to `current_slot`
 11. touch both accounts locally
+11a. **pre-open dust/reset flush.** Run `schedule_end_of_instruction_resets` and `finalize_end_of_instruction_resets` against a fresh local reset context (NOT the main instruction `ctx`). This clears any dust-only empty sides created by the live touches in step 11 (e.g., a touch that hit the `q_eff_new == 0` branch zeroed `basis_pos_q_i` and decremented `stored_pos_count_side` but left `oi_eff_side` at the stale dust value). Without this flush, the fresh OI computed in step 16 would include the stale dust residual, and the end-of-instruction bilateral-empty clearance branch would no longer fire (stored counts are nonzero again after attach), permanently inflating `oi_eff_side`. Using a separate reset context prevents the main-instruction end-of-instruction pass from re-resetting the freshly opened positions.
 12. capture pre-trade effective positions, maintenance requirements, and exact widened raw maintenance buffers
 13. finalize any already-ready reset sides before OI increase
 14. compute candidate post-trade effective positions
