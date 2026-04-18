@@ -108,7 +108,10 @@ fn t0_2_mul_div_ceil_algebraic_identity() {
     } else {
         floor
     };
-    assert!(ceil == expected_ceil, "ceil must equal floor + (r != 0 ? 1 : 0)");
+    assert!(
+        ceil == expected_ceil,
+        "ceil must equal floor + (r != 0 ? 1 : 0)"
+    );
 }
 
 #[kani::proof]
@@ -205,8 +208,10 @@ fn t0_4_fee_debt_i128_min() {
     if fc >= 0 {
         assert!(debt == 0, "non-negative fee_credits must have zero debt");
     } else {
-        assert!(debt == (-(fc as i128)) as u128,
-            "negative fee_credits debt must equal abs(fee_credits)");
+        assert!(
+            debt == (-(fc as i128)) as u128,
+            "negative fee_credits debt must equal abs(fee_credits)"
+        );
     }
 }
 
@@ -284,7 +289,10 @@ fn proof_warmup_release_bounded_by_reserved() {
     let r_after = engine.accounts[idx as usize].reserved_pnl;
 
     // reserved can only decrease or stay the same
-    assert!(r_after <= r_before, "advance_profit_warmup must not increase reserve");
+    assert!(
+        r_after <= r_before,
+        "advance_profit_warmup must not increase reserve"
+    );
 }
 
 /// advance_profit_warmup releases at most slope * elapsed (§4.9)
@@ -334,12 +342,16 @@ fn t13_59_fused_delta_k_no_double_rounding() {
 
     let new_delta_k = ((d as u32) * (a as u32) + (oi as u32) - 1) / (oi as u32);
 
-    assert!(new_delta_k <= old_delta_k,
-        "fused formula must not exceed old two-step formula");
+    assert!(
+        new_delta_k <= old_delta_k,
+        "fused formula must not exceed old two-step formula"
+    );
 
     let exact_times_oi = (d as u32) * (a as u32);
-    assert!(new_delta_k * (oi as u32) >= exact_times_oi,
-        "fused ceiling must be >= exact value");
+    assert!(
+        new_delta_k * (oi as u32) >= exact_times_oi,
+        "fused ceiling must be >= exact value"
+    );
 }
 
 // ============================================================================
@@ -355,14 +367,14 @@ fn proof_ceil_div_positive_checked() {
     let d: u8 = kani::any();
     kani::assume(d > 0);
 
-    let result = ceil_div_positive_checked(
-        U256::from_u128(n as u128),
-        U256::from_u128(d as u128),
-    );
+    let result = ceil_div_positive_checked(U256::from_u128(n as u128), U256::from_u128(d as u128));
 
     let expected = ((n as u32) + (d as u32) - 1) / (d as u32);
     let result_u128 = result.try_into_u128().unwrap();
-    assert!(result_u128 == expected as u128, "ceil_div_positive_checked mismatch");
+    assert!(
+        result_u128 == expected as u128,
+        "ceil_div_positive_checked mismatch"
+    );
 }
 
 // ============================================================================
@@ -393,8 +405,10 @@ fn proof_haircut_mul_div_conservative() {
 
     // effective_pnl = floor(pnl * h_num / h_den) <= pnl
     let effective = mul_div_floor_u128(pnl_val as u128, h_num, h_den);
-    assert!(effective <= pnl_val as u128,
-        "floor haircut must not overshoot pnl");
+    assert!(
+        effective <= pnl_val as u128,
+        "floor haircut must not overshoot pnl"
+    );
 }
 
 // ============================================================================
@@ -442,8 +456,10 @@ fn proof_wide_signed_mul_div_floor_sign_and_rounding() {
         result.abs_u256().lo() as i128
     };
 
-    assert!(result_i128 == expected as i128,
-        "wide_signed_mul_div_floor must match reference floor division");
+    assert!(
+        result_i128 == expected as i128,
+        "wide_signed_mul_div_floor must match reference floor division"
+    );
 }
 
 // ============================================================================
@@ -488,8 +504,10 @@ fn proof_k_pair_variant_sign_and_rounding() {
         -(((abs_num + d - 1) / d) as i32)
     };
 
-    assert!(result == expected as i128,
-        "K-pair variant must match reference floor division");
+    assert!(
+        result == expected as i128,
+        "K-pair variant must match reference floor division"
+    );
 }
 
 #[kani::proof]
@@ -504,9 +522,15 @@ fn proof_k_pair_variant_zero_diff() {
 
     // k_now == k_then → result must be 0
     let result = wide_signed_mul_div_floor_from_k_pair(
-        basis as u128, k_val as i128, k_val as i128, denom as u128,
+        basis as u128,
+        k_val as i128,
+        k_val as i128,
+        denom as u128,
     );
-    assert!(result == 0, "K-pair with equal k_now and k_then must return 0");
+    assert!(
+        result == 0,
+        "K-pair with equal k_now and k_then must return 0"
+    );
 }
 
 #[kani::proof]

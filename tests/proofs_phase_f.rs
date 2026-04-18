@@ -47,15 +47,25 @@ fn k_healthy_immune() {
     // Open a modest bilateral position at oracle price → both healthy by construction
     // (equity = capital ≫ MM_req since size is small vs capital).
     let size_q = (10 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(
-        a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64,
-    ).unwrap();
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            DEFAULT_ORACLE,
+            DEFAULT_SLOT,
+            size_q,
+            DEFAULT_ORACLE,
+            0i64,
+        )
+        .unwrap();
 
     // Pre-condition: account a is strictly above maintenance margin (healthy by spec §9.1).
     // If this assertion is false, the proof's premise doesn't hold — kani::assume it.
-    kani::assume(
-        engine.is_above_maintenance_margin(&engine.accounts[a as usize], a as usize, DEFAULT_ORACLE)
-    );
+    kani::assume(engine.is_above_maintenance_margin(
+        &engine.accounts[a as usize],
+        a as usize,
+        DEFAULT_ORACLE,
+    ));
 
     let cap_before = engine.accounts[a as usize].capital.get();
     let pos_before = engine.accounts[a as usize].position_size;
@@ -70,7 +80,10 @@ fn k_healthy_immune() {
         4,
         0i64,
     );
-    assert!(result.is_ok(), "healthy-account crank must not itself error");
+    assert!(
+        result.is_ok(),
+        "healthy-account crank must not itself error"
+    );
 
     // Post-condition: position_size unchanged → no liquidation happened.
     assert!(
@@ -114,8 +127,8 @@ fn k_fee_bounded() {
     let mut engine = RiskEngine::new(params);
     engine.last_crank_slot = DEFAULT_SLOT;
 
-    let a = engine.add_user(0).unwrap();  // taker
-    let b = engine.add_user(0).unwrap();  // maker/LP side
+    let a = engine.add_user(0).unwrap(); // taker
+    let b = engine.add_user(0).unwrap(); // maker/LP side
     engine.deposit(a, 10_000_000, DEFAULT_SLOT).unwrap();
     engine.deposit(b, 10_000_000, DEFAULT_SLOT).unwrap();
 
@@ -124,8 +137,8 @@ fn k_fee_bounded() {
     kani::assume(size_units >= 1 && size_units <= 50);
     let size_q = (size_units as i128) * (POS_SCALE as i128);
 
-    let notional = (size_units as u128) * (DEFAULT_ORACLE as u128);  // floor(|q| × p / POS_SCALE)
-    // Max fee per spec §3.4: notional × trading_fee_bps / 10_000
+    let notional = (size_units as u128) * (DEFAULT_ORACLE as u128); // floor(|q| × p / POS_SCALE)
+                                                                    // Max fee per spec §3.4: notional × trading_fee_bps / 10_000
     let max_fee = notional.saturating_mul(params.trading_fee_bps as u128) / 10_000;
     // Trading fee is charged per side; allow both sides to be charged independently.
     let max_fee_both_sides = max_fee.saturating_mul(2);
@@ -140,7 +153,13 @@ fn k_fee_bounded() {
     let pre_vault = engine.vault.get();
 
     let result = engine.execute_trade_not_atomic(
-        a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64,
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size_q,
+        DEFAULT_ORACLE,
+        0i64,
     );
     // Trade may be rejected by margin gates — that's fine, fees must still be bounded.
     kani::cover!(result.is_ok(), "trade succeeds");
@@ -154,7 +173,10 @@ fn k_fee_bounded() {
         let post_vault = engine.vault.get();
 
         // Conservation holds (vault unchanged — fees just reshuffle insurance vs capital).
-        assert!(post_vault == pre_vault, "vault unchanged after trade (no token move)");
+        assert!(
+            post_vault == pre_vault,
+            "vault unchanged after trade (no token move)"
+        );
 
         // Total "extraction" from users into insurance = ΔInsurance. This is the total fee
         // charged across both sides in the instruction. Must not exceed 2 × max_fee.
@@ -203,7 +225,10 @@ fn k_err_path_atomic() {
     // Deterministic-fail path: oracle_price = 0 triggers the Overflow guard at
     // percolator.rs:1893 before any state mutation.
     let result = engine.settle_account_not_atomic(a, 0u64, DEFAULT_SLOT + 1, 0i64);
-    assert!(result.is_err(), "settle with oracle=0 must fail (guard precondition)");
+    assert!(
+        result.is_err(),
+        "settle with oracle=0 must fail (guard precondition)"
+    );
 
     // State hash: equality of the PartialEq derive covers every field of
     // RiskEngine including the full accounts[] array, vault, insurance, aggregates.
@@ -234,7 +259,9 @@ fn k_no_overdraft() {
     let a = engine.add_user(0).unwrap();
     let deposit_amount: u32 = kani::any();
     kani::assume(deposit_amount >= 1000 && deposit_amount <= 1_000_000);
-    engine.deposit(a, deposit_amount as u128, DEFAULT_SLOT).unwrap();
+    engine
+        .deposit(a, deposit_amount as u128, DEFAULT_SLOT)
+        .unwrap();
 
     // Symbolic withdraw amount — possibly greater than capital.
     let withdraw_amount: u64 = kani::any();
@@ -244,7 +271,11 @@ fn k_no_overdraft() {
     let pre_vault = engine.vault.get();
 
     let result = engine.withdraw_not_atomic(
-        a, withdraw_amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT + 1, 0i64,
+        a,
+        withdraw_amount as u128,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT + 1,
+        0i64,
     );
 
     if withdraw_amount as u128 > pre_capital {
@@ -327,7 +358,13 @@ fn k_vault_worst_case() {
     // Open a bounded bilateral position.
     let size_q = (50 * POS_SCALE) as i128;
     let trade = engine.execute_trade_not_atomic(
-        a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64,
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size_q,
+        DEFAULT_ORACLE,
+        0i64,
     );
     kani::cover!(trade.is_ok(), "trade opens a position");
 
@@ -351,9 +388,8 @@ fn k_vault_worst_case() {
     // succeed under symbolic params). Invariant holds either way.
     let wd_amount: u32 = kani::any();
     kani::assume(wd_amount > 0 && wd_amount <= 100_000);
-    let _ = engine.withdraw_not_atomic(
-        b, wd_amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT + 1, 0i64,
-    );
+    let _ =
+        engine.withdraw_not_atomic(b, wd_amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT + 1, 0i64);
 
     let c_tot_final = engine.c_tot.get();
     let ins_final = engine
@@ -429,15 +465,14 @@ fn k_haircut_3account_cascade_bounded() {
     // Force under-funding: drop vault so residual = V - C_tot - I is LESS than
     // the matured PnL sum. This is the interesting branch where haircut < 1.
     let cap_sum = engine.c_tot.get();
-    let ins = engine.insurance_fund.balance.get()
-        + engine.insurance_fund.isolated_balance.get();
+    let ins = engine.insurance_fund.balance.get() + engine.insurance_fund.isolated_balance.get();
     // Target residual = total_pnl / 2 so each account's effective PnL is
     // roughly half its raw PnL — non-degenerate haircut.
     let target_residual = total_pnl / 2;
     engine.vault = U128::new(cap_sum + ins + target_residual);
 
     let (h_num, h_den) = engine.haircut_ratio();
-    kani::assume(h_den > 0);  // the non-degenerate branch we want to exercise
+    kani::assume(h_den > 0); // the non-degenerate branch we want to exercise
 
     // Sum the three effective PnLs.
     let eff_a = engine.effective_pos_pnl(engine.accounts[a as usize].pnl);

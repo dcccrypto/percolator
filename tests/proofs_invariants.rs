@@ -90,8 +90,7 @@ fn t0_4_conservation_check_handles_overflow() {
                     // Conservation: vault_new >= c_tot_new + insurance
                     let sum_new = cn.checked_add(insurance);
                     if let Some(sn) = sum_new {
-                        assert!(vn >= sn,
-                            "deposit preserves conservation when no overflow");
+                        assert!(vn >= sn, "deposit preserves conservation when no overflow");
                     }
                 }
             }
@@ -483,7 +482,15 @@ fn proof_side_mode_gating() {
     engine.side_mode_long = SideMode::DrainOnly;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size_q,
+        DEFAULT_ORACLE,
+        0i64,
+    );
     assert!(result == Err(RiskError::SideBlocked));
 
     engine.side_mode_long = SideMode::Normal;
@@ -491,7 +498,15 @@ fn proof_side_mode_gating() {
     engine.stale_account_count_short = 1;
 
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i64);
+    let result2 = engine.execute_trade_not_atomic(
+        b,
+        a,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        pos_size,
+        DEFAULT_ORACLE,
+        0i64,
+    );
     assert!(result2 == Err(RiskError::SideBlocked));
 }
 
@@ -528,8 +543,10 @@ fn proof_account_equity_net_nonnegative() {
 
     // Exercise both positive PnL (haircut path) and negative PnL
     let eq = engine.account_equity_net(&engine.accounts[a as usize], DEFAULT_ORACLE);
-    assert!(eq >= 0,
-        "flat account equity must be non-negative for any haircut level");
+    assert!(
+        eq >= 0,
+        "flat account equity must be non-negative for any haircut level"
+    );
 }
 
 #[kani::proof]

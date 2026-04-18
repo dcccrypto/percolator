@@ -489,8 +489,8 @@ fn inv_aggregates(engine: &RiskEngine) -> bool {
             if pnl > 0 {
                 sum_pnl_pos = sum_pnl_pos.saturating_add(pnl as u128);
             }
-            sum_abs_pos = sum_abs_pos
-                .saturating_add(abs_i128_to_u128(engine.accounts[idx].position_size));
+            sum_abs_pos =
+                sum_abs_pos.saturating_add(abs_i128_to_u128(engine.accounts[idx].position_size));
         }
     }
     engine.c_tot.get() == sum_capital
@@ -637,8 +637,7 @@ fn recompute_totals(engine: &RiskEngine) -> Totals {
             if account.pnl > 0 {
                 sum_pnl_pos = sum_pnl_pos.saturating_add(account.pnl as u128);
             } else if account.pnl < 0 {
-                sum_pnl_neg_abs =
-                    sum_pnl_neg_abs.saturating_add(neg_i128_to_u128(account.pnl));
+                sum_pnl_neg_abs = sum_pnl_neg_abs.saturating_add(neg_i128_to_u128(account.pnl));
             }
             // pnl == 0: no contribution to either sum
         }
@@ -4654,7 +4653,14 @@ fn proof_execute_trade_conservation() {
     kani::assume(delta_size >= -50 && delta_size <= 50 && delta_size != 0);
     kani::assume(price >= 900_000 && price <= 1_100_000);
 
-    let result = engine.execute_trade(&NoopMatchingEngine, lp_idx, user_idx, 100, price, delta_size);
+    let result = engine.execute_trade(
+        &NoopMatchingEngine,
+        lp_idx,
+        user_idx,
+        100,
+        price,
+        delta_size,
+    );
 
     // Non-vacuity: trade must succeed with bounded inputs
     assert!(result.is_ok(), "non-vacuity: execute_trade must succeed");
@@ -4694,7 +4700,14 @@ fn proof_execute_trade_margin_enforcement() {
     kani::assume(delta_size >= -100 && delta_size <= 100 && delta_size != 0);
     kani::assume(price >= 900_000 && price <= 1_100_000);
 
-    let result = engine.execute_trade(&NoopMatchingEngine, lp_idx, user_idx, 100, price, delta_size);
+    let result = engine.execute_trade(
+        &NoopMatchingEngine,
+        lp_idx,
+        user_idx,
+        100,
+        price,
+        delta_size,
+    );
 
     // Non-vacuity: trade must succeed with well-capitalized accounts
     assert!(result.is_ok(), "non-vacuity: execute_trade must succeed");
@@ -5886,12 +5899,25 @@ fn nightly_variation_margin_no_pnl_teleport() {
     let user1_capital_before = engine1.accounts[user1 as usize].capital.get();
 
     // Open position with LP1 at open_price
-    let open_res = engine1.execute_trade(&NoopMatchingEngine, lp1_a, user1, 0, open_price, size as i128);
+    let open_res = engine1.execute_trade(
+        &NoopMatchingEngine,
+        lp1_a,
+        user1,
+        0,
+        open_price,
+        size as i128,
+    );
     assert_ok!(open_res, "Engine1: open trade must succeed");
 
     // Close position with LP1 at close_price
-    let close_res1 =
-        engine1.execute_trade(&NoopMatchingEngine, lp1_a, user1, 0, close_price, -(size as i128));
+    let close_res1 = engine1.execute_trade(
+        &NoopMatchingEngine,
+        lp1_a,
+        user1,
+        0,
+        close_price,
+        -(size as i128),
+    );
     assert_ok!(close_res1, "Engine1: close trade must succeed");
 
     let user1_capital_after = engine1.accounts[user1 as usize].capital.get();
@@ -5913,12 +5939,25 @@ fn nightly_variation_margin_no_pnl_teleport() {
     let user2_capital_before = engine2.accounts[user2 as usize].capital.get();
 
     // Open position with LP2_A at open_price
-    let open_res2 = engine2.execute_trade(&NoopMatchingEngine, lp2_a, user2, 0, open_price, size as i128);
+    let open_res2 = engine2.execute_trade(
+        &NoopMatchingEngine,
+        lp2_a,
+        user2,
+        0,
+        open_price,
+        size as i128,
+    );
     assert_ok!(open_res2, "Engine2: open trade must succeed");
 
     // Close position with LP2_B (different LP!) at close_price
-    let close_res2 =
-        engine2.execute_trade(&NoopMatchingEngine, lp2_b, user2, 0, close_price, -(size as i128));
+    let close_res2 = engine2.execute_trade(
+        &NoopMatchingEngine,
+        lp2_b,
+        user2,
+        0,
+        close_price,
+        -(size as i128),
+    );
     assert_ok!(close_res2, "Engine2: close trade must succeed");
 
     let user2_capital_after = engine2.accounts[user2 as usize].capital.get();
@@ -7550,9 +7589,7 @@ fn proof_gap4_trade_extreme_size_no_panic() {
     engine2.last_full_sweep_start_slot = 100;
     let user2 = engine2.add_user(0).unwrap();
     let lp2 = engine2.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
-    engine2
-        .deposit(user2, 1_000_000_000_000_000, 0)
-        .unwrap();
+    engine2.deposit(user2, 1_000_000_000_000_000, 0).unwrap();
     engine2.deposit(lp2, 1_000_000_000_000_000, 0).unwrap();
 
     let half_max = (MAX_POSITION_ABS_Q / 2) as i128;
@@ -7570,9 +7607,7 @@ fn proof_gap4_trade_extreme_size_no_panic() {
     engine3.last_full_sweep_start_slot = 100;
     let user3 = engine3.add_user(0).unwrap();
     let lp3 = engine3.add_lp([1u8; 32], [0u8; 32], 0).unwrap();
-    engine3
-        .deposit(user3, 1_000_000_000_000_000, 0)
-        .unwrap();
+    engine3.deposit(user3, 1_000_000_000_000_000, 0).unwrap();
     engine3.deposit(lp3, 1_000_000_000_000_000, 0).unwrap();
 
     let max_pos = MAX_POSITION_ABS_Q as i128;
@@ -8022,7 +8057,7 @@ fn proof_force_close_with_set_pnl_preserves_invariant() {
 
     // THE CORRECT FIX: use set_pnl
     engine.set_pnl(user as usize, new_pnl);
-    engine.accounts[user as usize].position_size =  0i128;
+    engine.accounts[user as usize].position_size = 0i128;
     engine.accounts[user as usize].entry_price = 0;
 
     // Only update OI manually (position zeroed).
@@ -8071,7 +8106,7 @@ fn proof_multiple_force_close_preserves_invariant() {
         .pnl
         .saturating_add(pnl_delta1);
     engine.set_pnl(user1 as usize, new_pnl1);
-    engine.accounts[user1 as usize].position_size =  0i128;
+    engine.accounts[user1 as usize].position_size = 0i128;
 
     // Force-close user2
     let pnl_delta2 = pos2.saturating_mul(settlement_price as i128 - 1_000_000) / 1_000_000;
@@ -8079,7 +8114,7 @@ fn proof_multiple_force_close_preserves_invariant() {
         .pnl
         .saturating_add(pnl_delta2);
     engine.set_pnl(user2 as usize, new_pnl2);
-    engine.accounts[user2 as usize].position_size =  0i128;
+    engine.accounts[user2 as usize].position_size = 0i128;
 
     // Only update OI manually (both positions zeroed).
     // IMPORTANT: Do NOT call sync_engine_aggregates/recompute_aggregates!
@@ -8322,7 +8357,8 @@ fn kani_premium_funding_rate_zero_inputs() {
     kani::assert(rate_index_zero == 0, "index=0 must return 0");
 
     // If dampening is zero → rate must be Ok(0)
-    let rate_damp_zero = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, 0, max_bps).unwrap();
+    let rate_damp_zero =
+        RiskEngine::compute_premium_funding_bps_per_slot(mark, index, 0, max_bps).unwrap();
     kani::assert(rate_damp_zero == 0, "dampening=0 must return 0");
 }
 
@@ -8385,7 +8421,8 @@ fn kani_premium_funding_rate_zero_premium() {
     kani::assume(max_bps >= 0 && max_bps <= 10_000);
 
     // mark == index → premium = 0
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(price, price, dampening, max_bps).unwrap();
+    let rate =
+        RiskEngine::compute_premium_funding_bps_per_slot(price, price, dampening, max_bps).unwrap();
     kani::assert(rate == 0, "equal mark and index must give zero premium");
 }
 
@@ -8405,7 +8442,8 @@ fn kani_premium_funding_rate_sign_correctness() {
     kani::assume(dampening > 0 && dampening <= 100_000_000);
     kani::assume(max_bps > 0 && max_bps <= 10_000);
 
-    let rate = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps).unwrap();
+    let rate =
+        RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps).unwrap();
 
     if mark > index {
         kani::assert(rate >= 0, "mark > index must give non-negative rate");
@@ -9565,7 +9603,7 @@ fn proof_insurance_fund_balance_never_decreases_on_liquidation() {
     kani::assume(initial_insurance < 10_000);
     engine.insurance_fund.balance = U128::new(initial_insurance);
     engine.vault = U128::new(capital.saturating_add(initial_insurance));
-    engine.pnl_pos_tot =  0u128;
+    engine.pnl_pos_tot = 0u128;
 
     let insurance_before = engine.insurance_fund.balance.get();
 
@@ -10236,8 +10274,8 @@ fn proof_t8_execute_adl_rejects_nonprofitable_target() {
     // PnL = 0 (entry == oracle, no prior PnL)
     engine.set_pnl(user_idx as usize, 0);
     // Sync OI aggregates
-    engine.total_open_interest =  U128::new(pos_size as u128);
-    engine.long_oi =  U128::new(pos_size as u128);
+    engine.total_open_interest = U128::new(pos_size as u128);
+    engine.long_oi = U128::new(pos_size as u128);
 
     // Insurance depleted (ADL gate passes)
     engine.insurance_fund.balance = percolator::U128::ZERO;
@@ -10279,8 +10317,8 @@ fn proof_t8_execute_adl_partial_close_bounded() {
     engine.accounts[user_idx as usize].position_size = pos_size;
     engine.accounts[user_idx as usize].entry_price = entry_price;
     engine.set_pnl(user_idx as usize, 0);
-    engine.total_open_interest =  U128::new(pos_size as u128);
-    engine.long_oi =  U128::new(pos_size as u128);
+    engine.total_open_interest = U128::new(pos_size as u128);
+    engine.long_oi = U128::new(pos_size as u128);
 
     // Insurance depleted
     engine.insurance_fund.balance = percolator::U128::ZERO;
@@ -10327,8 +10365,8 @@ fn proof_t8_execute_adl_closes_at_least_one_unit() {
     engine.accounts[user_idx as usize].position_size = pos_size;
     engine.accounts[user_idx as usize].entry_price = entry_price;
     engine.set_pnl(user_idx as usize, 0);
-    engine.total_open_interest =  U128::new(pos_size as u128);
-    engine.long_oi =  U128::new(pos_size as u128);
+    engine.total_open_interest = U128::new(pos_size as u128);
+    engine.long_oi = U128::new(pos_size as u128);
 
     engine.insurance_fund.balance = percolator::U128::ZERO;
 
@@ -10374,8 +10412,8 @@ fn proof_t8_execute_adl_conservation() {
     engine.accounts[user_idx as usize].position_size = pos_size;
     engine.accounts[user_idx as usize].entry_price = entry_price;
     engine.set_pnl(user_idx as usize, 0);
-    engine.total_open_interest =  U128::new(pos_size as u128);
-    engine.long_oi =  U128::new(pos_size as u128);
+    engine.total_open_interest = U128::new(pos_size as u128);
+    engine.long_oi = U128::new(pos_size as u128);
 
     // Insurance depleted
     engine.insurance_fund.balance = percolator::U128::ZERO;
@@ -10422,7 +10460,8 @@ fn kani_P8321_premium_funding_no_overflow_full_range() {
     // This call must not panic — i128 arithmetic is the mechanism for no-overflow.
     // Post Phase-3B arithmetic safety: function now returns Result<i64>.
     // Err is permitted (structural input violations); Ok must be bounded.
-    let rate_res = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    let rate_res =
+        RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
 
     if let Ok(rate) = rate_res {
         // Bounded by max_bps
@@ -10550,7 +10589,8 @@ fn kani_P8321_premium_funding_max_oi_params() {
 
     // Post Phase-3B: function returns Result<i64>. Err on structural input issues
     // is acceptable; Ok must be within [-max_bps, max_bps].
-    let rate_res = RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
+    let rate_res =
+        RiskEngine::compute_premium_funding_bps_per_slot(mark, index, dampening, max_bps);
 
     if let Ok(rate) = rate_res {
         kani::assert(
