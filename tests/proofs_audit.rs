@@ -2,7 +2,7 @@
 //!
 //! Formal verification of fixes for confirmed external audit findings:
 //! 1. attach_effective_position epoch_snap canonical zero (spec §2.4)
-//! 2. add_user/add_lp materialized_account_count rollback on alloc_slot failure
+//! 2. add_user/add_lp materialized_account_count rollback on materialize_at failure
 //! 3. is_above_maintenance_margin / is_above_initial_margin eff==0 special case (spec §9.1)
 //! 4. fee_debt_sweep checked_add (defensive, invariant-guaranteed safe)
 
@@ -90,10 +90,10 @@ fn proof_epoch_snap_correct_on_nonzero_attach() {
 }
 
 // ############################################################################
-// FIX 2: materialized_account_count rollback on alloc_slot failure
+// FIX 2: materialized_account_count rollback on materialize_at failure
 // ############################################################################
 
-/// If alloc_slot fails in add_user, materialized_account_count must be
+/// If materialize_at fails in add_user, materialized_account_count must be
 /// rolled back to its pre-call value.
 #[kani::proof]
 #[kani::unwind(34)]
@@ -101,7 +101,7 @@ fn proof_epoch_snap_correct_on_nonzero_attach() {
 fn proof_add_user_count_rollback_on_alloc_failure() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    // Fill all slots so alloc_slot will fail
+    // Fill all slots so materialize_at will fail
     engine.num_used_accounts = MAX_ACCOUNTS as u16;
     engine.materialized_account_count = 0; // but count is low (simulating inconsistency path)
 
@@ -115,7 +115,7 @@ fn proof_add_user_count_rollback_on_alloc_failure() {
     );
 }
 
-/// If alloc_slot fails in add_lp, materialized_account_count must be
+/// If materialize_at fails in add_lp, materialized_account_count must be
 /// rolled back to its pre-call value.
 #[kani::proof]
 #[kani::unwind(34)]
@@ -123,7 +123,7 @@ fn proof_add_user_count_rollback_on_alloc_failure() {
 fn proof_add_lp_count_rollback_on_alloc_failure() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    // Fill all slots so alloc_slot will fail
+    // Fill all slots so materialize_at will fail
     engine.num_used_accounts = MAX_ACCOUNTS as u16;
     engine.materialized_account_count = 0;
 

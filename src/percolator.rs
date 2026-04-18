@@ -97,9 +97,6 @@ pub const MIN_A_SIDE: u128 = 100_000_000_000_000;
 /// MAX_ORACLE_PRICE = 1_000_000_000_000 (spec §1.4)
 pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000;
 
-/// MAX_FUNDING_DT = 65535 (spec §1.4)
-pub const MAX_FUNDING_DT: u64 = u16::MAX as u64;
-
 /// FUNDING_DEN = 1_000_000_000 (spec v12.15 §5.4)
 pub const FUNDING_DEN: u128 = 1_000_000_000;
 
@@ -290,7 +287,11 @@ impl InstructionContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Account {
     pub capital: U128,
-    pub kind: u8,  // 0 = User, 1 = LP (was AccountKind enum)
+    /// Wrapper-owned account-kind annotation (spec §2.1.1, non-normative).
+    /// The engine stores and canonicalizes `kind` but MUST NOT read it for
+    /// any spec-normative decision (margin, liquidation, fees, accrual,
+    /// resolution). `is_lp()` / `is_user()` are wrapper conveniences only.
+    pub kind: u8,  // 0 = User, 1 = LP
 
     /// Realized PnL (i128, spec §2.1)
     pub pnl: i128,
@@ -313,7 +314,10 @@ pub struct Account {
     /// Side epoch snapshot
     pub adl_epoch_snap: u64,
 
-    /// LP matching engine program ID
+    /// Wrapper-owned matching-engine bindings (spec §2.1.1, non-normative).
+    /// Opaque payload stored by the engine but never read for any
+    /// spec-normative decision. Typical use: CPI routing by the wrapper's
+    /// LP/matching-engine integration.
     pub matcher_program: [u8; 32],
     pub matcher_context: [u8; 32],
 
@@ -1003,23 +1007,6 @@ impl RiskEngine {
     // ========================================================================
     // Freelist
     // ========================================================================
-
-    fn alloc_slot(&mut self) -> Result<u16> {
-        if self.free_head == u16::MAX {
-            return Err(RiskError::Overflow);
-        }
-        let idx = self.free_head;
-        let next = self.next_free[idx as usize];
-        self.free_head = next;
-        // Maintain doubly-linked list: new head has no predecessor.
-        if next != u16::MAX {
-            self.prev_free[next as usize] = u16::MAX;
-        }
-        self.set_used(idx as usize);
-        self.num_used_accounts = self.num_used_accounts.checked_add(1)
-            .expect("num_used_accounts overflow — slot leak corruption");
-        Ok(idx)
-    }
 
     test_visible! {
     fn free_slot(&mut self, idx: u16) -> Result<()> {
@@ -3400,6 +3387,12 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::Unauthorized);
         }
+        // Preserve the "owner is claimed iff nonzero" convention.
+        // Rejecting zero here means set_owner cannot silently un-claim an
+        // account and callers cannot land the slot in an ambiguous state.
+        if owner == [0u8; 32] {
+            return Err(RiskError::Unauthorized);
+        }
         // Defense-in-depth: reject if owner is already claimed (non-zero).
         // Authorization is the wrapper layer's job, but the engine should
         // not silently overwrite an existing owner.
@@ -4619,10 +4612,8 @@ impl RiskEngine {
     // force_close_resolved_not_atomic (resolved/frozen market path)
     // ========================================================================
 
-    /// Force-close an account on a resolved market.
-    ///
-    /// `resolved_slot` is the market resolution boundary slot, used to anchor
-    /// `current_slot`.
+    /// Force-close an account on a resolved market. Uses `self.resolved_slot`
+    /// as the time anchor (no slot argument).
     ///
     /// Settles K-pair PnL, zeros position, settles losses, absorbs from
     /// insurance, converts profit (bypassing warmup), sweeps fee debt,
@@ -4651,6 +4642,12 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
         if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        // Degenerate branch also skips accrue_market_to's last_market_slot
+        // monotonicity check; enforce it here so the degenerate branch cannot
+        // move last_market_slot backward under corrupt state.
+        if now_slot < self.last_market_slot {
             return Err(RiskError::Overflow);
         }
         if resolved_price == 0 || resolved_price > MAX_ORACLE_PRICE {
@@ -4769,10 +4766,11 @@ impl RiskEngine {
     }
 
     /// Combined convenience: reconcile + terminal close if ready.
-    /// For pnl <= 0 accounts or terminal-ready markets, completes in one call.
+    /// For pnl <= 0 accounts or terminal-ready markets, completes in one call
+    /// and returns `ResolvedCloseResult::Closed(capital)`.
     /// For positive-PnL on non-terminal markets, reconciliation persists and
-    /// Ok(0) is returned (account stays open — re-call close_resolved_terminal
-    /// after all accounts reconciled).
+    /// `ResolvedCloseResult::ProgressOnly` is returned (account stays open —
+    /// re-call after terminal readiness is reached).
     pub fn force_close_resolved_not_atomic(&mut self, idx: u16) -> Result<ResolvedCloseResult> {
         // Phase 1: always reconcile (persists on success)
         self.reconcile_resolved_not_atomic(idx)?;
@@ -5029,10 +5027,18 @@ impl RiskEngine {
         }
 
         // Step 7: reclamation effects (spec §2.6)
+        // Validate-then-mutate: compute the new insurance balance with
+        // checked_add BEFORE zeroing capital, so an overflow cannot leave
+        // the account zeroed while the insurance add silently saturates.
+        // U128's default + is saturating, which would break conservation
+        // (C_tot + I invariant) if unchecked.
         let dust_cap = self.accounts[idx as usize].capital.get();
         if dust_cap > 0 {
+            let new_insurance = self.insurance_fund.balance
+                .checked_add(dust_cap)
+                .ok_or(RiskError::Overflow)?;
             self.set_capital(idx as usize, 0)?;
-            self.insurance_fund.balance = self.insurance_fund.balance + dust_cap;
+            self.insurance_fund.balance = new_insurance;
         }
 
         // Forgive uncollectible fee debt (spec §2.6)

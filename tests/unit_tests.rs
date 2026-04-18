@@ -830,6 +830,19 @@ fn test_set_owner_invalid_idx() {
 }
 
 #[test]
+fn test_set_owner_rejects_zero_pubkey() {
+    // The engine uses "owner == [0; 32]" to mean "unclaimed". Allowing
+    // set_owner to write the zero pubkey would leave the slot in an
+    // ambiguous state and effectively un-claim a claimed account.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 1000).expect("add_user");
+    let result = engine.set_owner(idx, [0u8; 32]);
+    assert_eq!(result, Err(RiskError::Unauthorized));
+    assert_eq!(engine.accounts[idx as usize].owner, [0u8; 32],
+        "owner must remain unchanged on rejected set_owner");
+}
+
+#[test]
 fn test_notional_computation() {
     let (mut engine, a, b) = setup_two_users(100_000, 100_000);
     let oracle = 1000u64;
@@ -3906,6 +3919,30 @@ fn resolve_market_ordinary_stays_ordinary_even_when_values_match_degenerate() {
 }
 
 #[test]
+fn resolve_market_degenerate_rejects_now_slot_before_last_market_slot() {
+    // The Degenerate branch skips accrue_market_to, which normally enforces
+    // now_slot >= last_market_slot. The branch must perform the same
+    // monotonicity check itself so a corrupt state (current_slot <
+    // last_market_slot) cannot rewind last_market_slot.
+    let mut engine = RiskEngine::new(default_params());
+    let _a = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(_a, 100_000, 1000, 100).unwrap();
+    engine.accrue_market_to(200, 1000, 0).unwrap();
+    // Induce the pathological state current_slot < last_market_slot.
+    engine.current_slot = 100;
+    assert_eq!(engine.last_market_slot, 200);
+
+    // now_slot = 150 satisfies now_slot >= current_slot but violates
+    // now_slot >= last_market_slot.
+    let r = engine.resolve_market_not_atomic(
+        ResolveMode::Degenerate, 1000, 1000, 150, 0);
+    assert_eq!(r, Err(RiskError::Overflow));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    assert_eq!(engine.last_market_slot, 200,
+        "last_market_slot must not move backward");
+}
+
+#[test]
 fn resolve_market_degenerate_rejects_mismatched_live_oracle() {
     // v12.18.5 §9.8 step 5: Degenerate requires live_oracle_price == P_last.
     let mut engine = RiskEngine::new(default_params());
@@ -4439,6 +4476,34 @@ fn test_h_lock_zero_always_legal() {
 // in v12.18.1. Dust-deposit-bypass no longer reachable because deposit into a
 // missing account requires amount >= min_initial_deposit (see
 // fix5_deposit_materialize_requires_min_deposit).
+
+#[test]
+fn test_reclaim_rejects_insurance_overflow() {
+    // reclaim_empty_account must propagate Overflow rather than silently
+    // saturating when insurance_fund.balance + dust_cap would overflow u128.
+    // Silent saturation would break conservation (C_tot + I invariant).
+    let mut engine = RiskEngine::new(default_params());
+    let a = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 100, 1000, 100).unwrap();
+
+    let idx = a as usize;
+    engine.accounts[idx].reserved_pnl = 0;
+    engine.accounts[idx].pnl = 0;
+    engine.accounts[idx].position_basis_q = 0;
+    engine.accounts[idx].sched_present = 0;
+    engine.accounts[idx].pending_present = 0;
+    engine.accounts[idx].fee_credits = percolator::i128::I128::new(0);
+    // Dust capital so reclaim engages the insurance-transfer branch.
+    engine.set_capital(idx, 1);
+    // Force insurance near-u128::MAX so dust_cap=1 would overflow.
+    engine.insurance_fund.balance = percolator::i128::U128::new(u128::MAX);
+
+    let result = engine.reclaim_empty_account_not_atomic(a, 200);
+    assert_eq!(result, Err(RiskError::Overflow));
+    // Account must remain intact on Err (validate-then-mutate).
+    assert_eq!(engine.accounts[idx].capital.get(), 1,
+        "capital must not be zeroed when insurance-add fails");
+}
 
 #[test]
 fn test_reclaim_rejects_nonempty_queue_metadata() {

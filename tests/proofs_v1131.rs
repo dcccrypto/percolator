@@ -216,11 +216,11 @@ fn proof_funding_skip_zero_oi_both() {
 }
 
 // ############################################################################
-// PROPERTY 71: Funding sub-stepping with dt > MAX_FUNDING_DT
+// PROPERTY 71: Funding with large dt bounded by max_accrual_dt_slots
 // ############################################################################
 
-/// When dt > MAX_FUNDING_DT, accrue_market_to splits funding into sub-steps.
-/// The total K delta must equal the sum of sub-step deltas.
+/// accrue_market_to applies one exact funding delta for any dt up to
+/// `max_accrual_dt_slots` (no internal sub-stepping in v12.16.5+).
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
