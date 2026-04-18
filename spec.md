@@ -212,7 +212,7 @@ The bounds `MAX_ACCOUNT_POSITIVE_PNL_LIVE` and `MAX_PNL_POS_TOT_LIVE` are **live
 - `oracle_price` inputs MUST come from validated configured oracle feeds or trusted privileged settlement sources, depending on the instruction’s trust boundary.
 - Any helper or instruction that accepts `now_slot` MUST require `now_slot >= current_slot`.
 - Any call to `accrue_market_to(now_slot, oracle_price, funding_rate_e9_per_slot)` MUST require `now_slot >= slot_last`.
-- Every live accrual MUST require `dt = now_slot - slot_last <= cfg_max_accrual_dt_slots`.
+- Every live accrual whose funding branch is *active* (`funding_rate_e9_per_slot != 0 && oi_eff_long_q != 0 && oi_eff_short_q != 0 && fund_px_last > 0`) MUST require `dt = now_slot - slot_last <= cfg_max_accrual_dt_slots`. When the funding branch is inactive (idle market, zero funding rate, or unilateral OI), no `F_side_num` delta is applied, so the envelope does NOT bound `dt`. This allows idle markets to fast-forward past `cfg_max_accrual_dt_slots` without bricking: `accrue_market_to(now_slot, oracle, 0)` on a zero-OI market is always safe and is the canonical recovery primitive after a long inactivity gap.
 - `current_slot` and `slot_last` MUST be monotonically nondecreasing.
 - The engine MUST NOT overload any strictly positive price value as an uninitialized sentinel for `P_last`, `fund_px_last`, or any equivalent stored price field.
 - Any recurring-fee sync anchor `fee_slot_anchor` MUST satisfy:
@@ -1234,23 +1234,24 @@ This helper MUST:
 3. require validated `0 < oracle_price <= MAX_ORACLE_PRICE`
 4. require `abs(funding_rate_e9_per_slot) <= cfg_max_abs_funding_e9_per_slot`
 5. let `dt = now_slot - slot_last`
-6. require `dt <= cfg_max_accrual_dt_slots`
-7. snapshot `OI_long_0 = OI_eff_long`, `OI_short_0 = OI_eff_short`, and `fund_px_0 = fund_px_last`
-8. mark-to-market once:
+6. let `funding_active = funding_rate_e9_per_slot != 0 && OI_eff_long != 0 && OI_eff_short != 0 && fund_px_last > 0`
+7. if `funding_active`, require `dt <= cfg_max_accrual_dt_slots`. Otherwise no `F_side_num` delta is applied, so `dt` is unbounded and idle markets can fast-forward past the envelope.
+8. snapshot `OI_long_0 = OI_eff_long`, `OI_short_0 = OI_eff_short`, and `fund_px_0 = fund_px_last`
+9. mark-to-market once:
    - `ΔP = oracle_price - P_last`
    - if `OI_long_0 > 0`, compute `delta_k_long = A_long * ΔP` in an exact wide signed domain; if the resulting persistent `K_long` would overflow `i128`, fail conservatively; else apply it
    - if `OI_short_0 > 0`, compute `delta_k_short = -A_short * ΔP` in an exact wide signed domain; if the resulting persistent `K_short` would overflow `i128`, fail conservatively; else apply it
-9. funding transfer:
-   - if `funding_rate_e9_per_slot != 0` and `dt > 0` and both snapped OI sides are nonzero:
-     - compute `fund_num_total = fund_px_0 * funding_rate_e9_per_slot * dt` in an exact wide signed domain of at least 256 bits, or a formally equivalent exact method
-     - compute each `A_side * fund_num_total` product in the same exact wide signed domain, or a formally equivalent exact method
-     - if the resulting persistent `F_long_num` or `F_short_num` would overflow `i128`, fail conservatively
-     - else apply both updates exactly:
-       - `F_long_num -= A_long * fund_num_total`
-       - `F_short_num += A_short * fund_num_total`
-10. update `slot_last = now_slot`
-11. update `P_last = oracle_price`
-12. update `fund_px_last = oracle_price`
+10. funding transfer:
+    - if `funding_active`:
+      - compute `fund_num_total = fund_px_0 * funding_rate_e9_per_slot * dt` in an exact wide signed domain of at least 256 bits, or a formally equivalent exact method
+      - compute each `A_side * fund_num_total` product in the same exact wide signed domain, or a formally equivalent exact method
+      - if the resulting persistent `F_long_num` or `F_short_num` would overflow `i128`, fail conservatively
+      - else apply both updates exactly:
+        - `F_long_num -= A_long * fund_num_total`
+        - `F_short_num += A_short * fund_num_total`
+11. update `slot_last = now_slot`
+12. update `P_last = oracle_price`
+13. update `fund_px_last = oracle_price`
 
 Because this helper is only defined as part of a top-level atomic instruction under §0, any overflow or conservative failure in a later leg of the helper or later instruction logic MUST roll back any earlier tentative `K_side`, `F_side_num`, `P_last`, or `fund_px_last` writes from the same top-level call.
 
@@ -2185,7 +2186,16 @@ The following are deployment-wrapper obligations.
    Because `resolve_market` is self-synchronizing in this revision, a compliant wrapper MUST invoke it directly with trusted live-sync inputs and `resolve_mode = Ordinary` for ordinary operation. A separate pre-accrual transaction is not required and MUST NOT be treated as the normative path, though a deployment MAY use an explicit pre-accrual or headroom-management flow as an operational recovery tool if it is trying to avoid cumulative `K` or `F` saturation before resolution. If live accrual would still be unsafe or impossible, the wrapper MAY instead use the privileged degenerate branch inside `resolve_market` by explicitly passing `resolve_mode = Degenerate`.
 
 4. **Respect the funding envelope operationally.**  
-   A compliant deployment MUST monitor `slot_last`, `cfg_max_accrual_dt_slots`, and `cfg_max_abs_funding_e9_per_slot` so the market is actively cranked or ordinarily resolved before the engine’s live accrual envelope is exceeded. If the deployment enables permissionless stale resolution, it MUST choose `permissionless_resolve_stale_slots <= cfg_max_accrual_dt_slots`. If the envelope is exceeded anyway, only the privileged degenerate branch remains available.
+   A compliant deployment MUST monitor `slot_last`, `cfg_max_accrual_dt_slots`, and `cfg_max_abs_funding_e9_per_slot` so the market is actively cranked or ordinarily resolved before the engine's live accrual envelope is exceeded. If the deployment enables permissionless stale resolution, it MUST choose `permissionless_resolve_stale_slots <= cfg_max_accrual_dt_slots`. If the envelope is exceeded anyway, only the privileged degenerate branch remains available.
+
+   Idle / zero-funding / unilateral-OI markets (funding branch inactive — see §1.5 and §5.5) are exempt from the per-call `dt` bound, so an idle market does NOT brick after `cfg_max_accrual_dt_slots` of inactivity. The canonical recovery primitive is `accrue_market_to(now_slot, oracle, 0)`; it fast-forwards `slot_last` to `now_slot` without F/K deltas and restores normal envelope headroom for subsequent non-accruing endpoints (§9.2 – §9.2.4).
+
+4a. **Cumulative `F_side_num` is an operational budget, not a per-call invariant.**  
+   The per-call envelope (§1.4) bounds *one* accrual's F delta to fit `i128`, but persisted `F_long_num` and `F_short_num` accumulate across calls. At the configured worst case (`rate = cfg_max_abs_funding_e9_per_slot`, sustained both-sided OI), cumulative F can saturate `i128` within a small number of envelope-valid calls. This is a config-scoped liveness bound, not a universal engine guarantee:
+
+   - At realistic operating rates (typical perpetual funding is orders of magnitude below the configured ceiling), cumulative saturation takes years to decades of continuous positive-sign funding in one direction, so this is not a human-timescale concern for most deployments.
+   - Deployments that intend to run at or near `cfg_max_abs_funding_e9_per_slot` as an operating rate MUST either (a) accept that cumulative saturation will eventually require `resolve_market` (ordinary, or degenerate if F headroom is already tight), or (b) implement a periodic market-rollover / settlement cycle shorter than the saturation horizon.
+   - A future engine revision MAY widen persisted `F_side_num` to an exact 256-bit signed domain or introduce a lazy F-renormalization to eliminate this bound. Until then, `cfg_max_abs_funding_e9_per_slot` is both a per-call safety bound and — when sustained — an upper bound on market lifetime.
 
 5. **Public wrappers SHOULD enforce execution-price admissibility.**  
    A sufficient rule is `abs(exec_price - oracle_price) * 10_000 <= max_trade_price_deviation_bps * oracle_price`, with `max_trade_price_deviation_bps <= 2 * cfg_trading_fee_bps`.

@@ -2088,9 +2088,26 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Spec §5.5 clause 6: enforce per-call dt envelope.
-        // Together with init-time envelope (§1.4), guarantees F_side_num fits i128.
-        if total_dt > self.params.max_accrual_dt_slots {
+        // Spec §5.5 clause 6 (v12.19): enforce per-call dt envelope only
+        // when funding would actually accumulate.
+        //
+        // The envelope exists to protect F_side_num from overflow in a
+        // single call. Funding only accrues when both sides have OI AND
+        // the wrapper-supplied rate is nonzero AND fund_px_last > 0 (see
+        // the funding branch below). In all other cases there is no F
+        // delta, so dt is safe to be unbounded. K (mark-to-market) does
+        // not depend on dt.
+        //
+        // Without this gate, idle markets (no OI) would brick after
+        // max_accrual_dt_slots of inactivity — accrue itself would fail,
+        // and every Live non-accruing endpoint also rejects now_slot >
+        // last_market_slot + max_dt, so no public path could advance
+        // last_market_slot.
+        let funding_active = funding_rate_e9 != 0
+            && long_live
+            && short_live
+            && self.fund_px_last > 0;
+        if funding_active && total_dt > self.params.max_accrual_dt_slots {
             return Err(RiskError::Overflow);
         }
 

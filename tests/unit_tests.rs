@@ -587,6 +587,71 @@ fn top_up_cannot_jump_current_slot_past_accrual_envelope() {
 }
 
 #[test]
+fn idle_market_can_fast_forward_beyond_max_accrual_dt() {
+    // Blocker 1: a market with no OI has no funding work to do, so dt
+    // > max_accrual_dt_slots MUST NOT be rejected. If it is, idle markets
+    // brick after max_dt slots of inactivity because (a) accrue itself
+    // fails, and (b) every Live non-accruing endpoint now calls
+    // check_live_accrual_envelope and also fails, leaving no public path
+    // to advance last_market_slot.
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    let max_dt = engine.params.max_accrual_dt_slots;
+
+    // Jump well past the envelope with no oracle change and no OI.
+    // There is no F delta and no K delta to apply, so this is safe.
+    let hostile_slot = max_dt + 100;
+    let r = engine.accrue_market_to(hostile_slot, 1_000, 0);
+    assert!(r.is_ok(),
+        "idle zero-OI market must fast-forward past max_dt (got {:?})", r);
+    assert_eq!(engine.last_market_slot, hostile_slot);
+    assert_eq!(engine.current_slot, hostile_slot);
+}
+
+#[test]
+fn zero_funding_rate_can_fast_forward_beyond_max_accrual_dt() {
+    // Same class: even with live OI, if funding_rate_e9 == 0 there is
+    // no F delta to accumulate, so dt > max_dt is safe. Mark-to-market
+    // (K delta) does not depend on dt.
+    let oracle = 1000u64;
+    let (mut engine, a, b) = setup_two_users(1_000_000_000, 1_000_000_000);
+    let size_q = make_size_q(100);
+    engine.execute_trade_not_atomic(a, b, oracle, 1, size_q, oracle, 0, 0, 100)
+        .expect("open OI");
+    assert!(engine.oi_eff_long_q > 0);
+    assert!(engine.oi_eff_short_q > 0);
+    let max_dt = engine.params.max_accrual_dt_slots;
+
+    // rate = 0 ⇒ no funding accumulation ⇒ dt unbounded is safe.
+    let hostile_slot = 1 + max_dt + 100;
+    let r = engine.accrue_market_to(hostile_slot, oracle, 0);
+    assert!(r.is_ok(),
+        "zero-funding market must fast-forward past max_dt (got {:?})", r);
+    assert_eq!(engine.last_market_slot, hostile_slot);
+}
+
+#[test]
+fn idle_market_deposit_still_works_after_long_gap() {
+    // Composition: after the idle fast-forward path works, a deposit
+    // at the new last_market_slot must also pass the envelope check.
+    let mut engine = RiskEngine::new(default_params());
+    let max_dt = engine.params.max_accrual_dt_slots;
+    let hostile_slot = max_dt + 100;
+
+    // Operator cranks an idle fast-forward first.
+    engine.accrue_market_to(hostile_slot, 1_000, 0).expect("idle accrue");
+    assert_eq!(engine.last_market_slot, hostile_slot);
+
+    // Now a deposit at the same slot must succeed — envelope is
+    // hostile_slot + max_dt, which covers now_slot = hostile_slot.
+    let min = engine.params.min_initial_deposit.get();
+    let r = engine.deposit_not_atomic(0, min, 1_000, hostile_slot);
+    assert!(r.is_ok(),
+        "deposit at the post-fast-forward slot must succeed (got {:?})", r);
+}
+
+#[test]
 fn deposit_existing_zero_amount_cannot_brick_accrual() {
     // Same DoS class as top_up: deposit_not_atomic advances current_slot
     // without advancing last_market_slot. For an already-materialized
