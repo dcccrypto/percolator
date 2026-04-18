@@ -20,8 +20,8 @@ fn t3_16_reset_pending_counter_invariant() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 1_000_000, 100, 0).unwrap();
-    engine.deposit(b, 1_000_000, 100, 0).unwrap();
+    engine.deposit(a, 1_000_000, 0).unwrap();
+    engine.deposit(b, 1_000_000, 0).unwrap();
 
     let k_val: i8 = kani::any();
     let k = k_val as i128;
@@ -59,8 +59,8 @@ fn t3_16b_reset_counter_with_nonzero_k_diff() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     let k_snap = 0i128;
 
@@ -123,8 +123,10 @@ fn t3_18_dust_bound_reset_in_begin_full_drain() {
 
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.phantom_dust_bound_long_q == 0,
-        "phantom_dust_bound must be zeroed by begin_full_drain_reset");
+    assert!(
+        engine.phantom_dust_bound_long_q == 0,
+        "phantom_dust_bound must be zeroed by begin_full_drain_reset"
+    );
 }
 
 #[kani::proof]
@@ -157,7 +159,7 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
@@ -198,7 +200,7 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
 fn t9_35_warmup_release_monotone_in_time() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let pnl_val: u8 = kani::any();
     kani::assume(pnl_val > 0);
@@ -223,7 +225,10 @@ fn t9_35_warmup_release_monotone_in_time() {
     e2.advance_profit_warmup(idx as usize);
     let released2 = r_initial - e2.accounts[idx as usize].reserved_pnl;
 
-    assert!(released2 >= released1, "warmup release must be monotone non-decreasing in time");
+    assert!(
+        released2 >= released1,
+        "warmup release must be monotone non-decreasing in time"
+    );
 }
 
 #[kani::proof]
@@ -232,7 +237,7 @@ fn t9_35_warmup_release_monotone_in_time() {
 fn t9_36_fee_seniority_after_restart() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let fc_val: i8 = kani::any();
     engine.accounts[idx as usize].fee_credits = I128::new(fc_val as i128);
@@ -253,7 +258,10 @@ fn t9_36_fee_seniority_after_restart() {
     let _ = engine.settle_side_effects(idx as usize);
 
     let fc_after = engine.accounts[idx as usize].fee_credits;
-    assert!(fc_after == fc_before, "fee_credits must be preserved across epoch restart");
+    assert!(
+        fc_after == fc_before,
+        "fee_credits must be preserved across epoch restart"
+    );
 }
 
 // ############################################################################
@@ -291,12 +299,17 @@ fn t10_37_accrue_mark_matches_eager() {
 
     let expected_delta = (ADL_ONE as i128) * (dp as i128);
     let actual_long_delta = k_long_after.checked_sub(k_long_before).unwrap();
-    assert!(actual_long_delta == expected_delta, "K_long delta must equal A_long * delta_p");
+    assert!(
+        actual_long_delta == expected_delta,
+        "K_long delta must equal A_long * delta_p"
+    );
 
     let actual_short_delta = k_short_after.checked_sub(k_short_before).unwrap();
     let expected_short_delta = expected_delta.checked_neg().unwrap_or(0i128);
-    assert!(actual_short_delta == expected_short_delta,
-        "K_short delta must equal -(A_short * delta_p)");
+    assert!(
+        actual_short_delta == expected_short_delta,
+        "K_short delta must equal -(A_short * delta_p)"
+    );
 }
 
 #[kani::proof]
@@ -339,14 +352,26 @@ fn t10_38_accrue_funding_payer_driven() {
     let expected_long = k_long_before - a_long * fund_term;
     let expected_short = k_short_before + a_long * fund_term;
 
-    assert!(k_long_after == expected_long, "K_long must match fund_term computation");
-    assert!(k_short_after == expected_short, "K_short must match fund_term computation");
+    assert!(
+        k_long_after == expected_long,
+        "K_long must match fund_term computation"
+    );
+    assert!(
+        k_short_after == expected_short,
+        "K_short must match fund_term computation"
+    );
 
     if rate > 0 {
         assert!(k_long_after <= k_long_before, "positive rate: longs pay");
-        assert!(k_short_after >= k_short_before, "positive rate: shorts receive");
+        assert!(
+            k_short_after >= k_short_before,
+            "positive rate: shorts receive"
+        );
     } else {
-        assert!(k_long_after >= k_long_before, "negative rate: longs receive");
+        assert!(
+            k_long_after >= k_long_before,
+            "negative rate: longs receive"
+        );
         assert!(k_short_after <= k_short_before, "negative rate: shorts pay");
     }
 }
@@ -360,7 +385,7 @@ fn t10_38_accrue_funding_payer_driven() {
 fn t11_39_same_epoch_settle_idempotent_real_engine() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
@@ -382,8 +407,10 @@ fn t11_39_same_epoch_settle_idempotent_real_engine() {
     assert!(r2.is_ok());
     let pnl_after_second = engine.accounts[idx as usize].pnl;
 
-    assert!(pnl_after_second == pnl_after_first,
-        "second settle with unchanged K must produce zero incremental PnL");
+    assert!(
+        pnl_after_second == pnl_after_first,
+        "second settle with unchanged K must produce zero incremental PnL"
+    );
     assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
     assert!(engine.accounts[idx as usize].position_basis_q == pos);
 }
@@ -393,7 +420,7 @@ fn t11_39_same_epoch_settle_idempotent_real_engine() {
 fn t11_40_non_compounding_quantity_basis_two_touches() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
@@ -424,7 +451,7 @@ fn t11_40_non_compounding_quantity_basis_two_touches() {
 fn t11_41_attach_effective_position_remainder_accounting() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     // Use a_basis=7, a_side=6 so that POS_SCALE * 6 % 7 != 0 (nonzero remainder)
     engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
@@ -439,8 +466,10 @@ fn t11_41_attach_effective_position_remainder_accounting() {
     let new_pos = (2 * POS_SCALE) as i128;
     engine.attach_effective_position(idx as usize, new_pos);
 
-    assert!(engine.phantom_dust_bound_long_q > dust_before,
-        "dust bound must increment on nonzero remainder");
+    assert!(
+        engine.phantom_dust_bound_long_q > dust_before,
+        "dust bound must increment on nonzero remainder"
+    );
 
     // Now test zero remainder: a_basis == a_side → product evenly divisible
     engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
@@ -450,8 +479,10 @@ fn t11_41_attach_effective_position_remainder_accounting() {
     let dust_before2 = engine.phantom_dust_bound_long_q;
     engine.attach_effective_position(idx as usize, (3 * POS_SCALE) as i128);
 
-    assert!(engine.phantom_dust_bound_long_q == dust_before2,
-        "dust bound must not increment on zero remainder");
+    assert!(
+        engine.phantom_dust_bound_long_q == dust_before2,
+        "dust bound must not increment on zero remainder"
+    );
 }
 
 #[kani::proof]
@@ -460,8 +491,8 @@ fn t11_42_dynamic_dust_bound_inductive() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
     engine.accounts[a as usize].position_basis_q = 1i128;
@@ -494,8 +525,8 @@ fn t11_50_execute_trade_atomic_oi_update_sign_flip() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 100_000_000, 100, 0).unwrap();
-    engine.deposit(b, 100_000_000, 100, 0).unwrap();
+    engine.deposit(a, 100_000_000, 0).unwrap();
+    engine.deposit(b, 100_000_000, 0).unwrap();
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
@@ -512,7 +543,10 @@ fn t11_50_execute_trade_atomic_oi_update_sign_flip() {
     let r2 = engine.execute_trade_not_atomic(b, a, 100, 2, flip_size, 100, 0i64);
     assert!(r2.is_ok());
 
-    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must be balanced after sign flip");
+    assert!(
+        engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must be balanced after sign flip"
+    );
 }
 
 #[kani::proof]
@@ -522,8 +556,8 @@ fn t11_51_execute_trade_slippage_zero_sum() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
@@ -537,8 +571,11 @@ fn t11_51_execute_trade_slippage_zero_sum() {
     assert!(result.is_ok());
 
     let vault_after = engine.vault.get();
-    assert!(vault_after == vault_before, "vault must be unchanged with zero fees at oracle price");
-    assert!(engine.check_conservation());
+    assert!(
+        vault_after == vault_before,
+        "vault must be unchanged with zero fees at oracle price"
+    );
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -549,7 +586,7 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
     let mut engine = RiskEngine::new(params);
 
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
@@ -582,13 +619,22 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
     assert!(engine.accounts[idx as usize].adl_k_snap == engine.adl_coeff_long);
 
     let fc_after = engine.accounts[idx as usize].fee_credits.get();
-    assert!(fc_after > -500i128, "fee debt must be swept after restart conversion");
+    assert!(
+        fc_after > -500i128,
+        "fee debt must be swept after restart conversion"
+    );
 
     let ins_after = engine.insurance_fund.balance.get();
-    assert!(ins_after > ins_before, "insurance fund must receive fee sweep payment");
+    assert!(
+        ins_after > ins_before,
+        "insurance fund must receive fee sweep payment"
+    );
 
     let cap_after = engine.accounts[idx as usize].capital.get();
-    assert!(cap_after != cap_before, "capital must change after restart conversion + fee sweep");
+    assert!(
+        cap_after != cap_before,
+        "capital must change after restart conversion + fee sweep"
+    );
 }
 
 #[kani::proof]
@@ -598,8 +644,8 @@ fn t11_54_worked_example_regression() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
@@ -624,7 +670,7 @@ fn t11_54_worked_example_regression() {
     let _ = engine.settle_side_effects(a as usize);
 
     assert!(engine.accounts[a as usize].adl_k_snap == engine.adl_coeff_long);
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -635,8 +681,8 @@ fn t5_24_dynamic_dust_bound_sufficient() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
     engine.accounts[a as usize].position_basis_q = 1i128;
@@ -738,8 +784,14 @@ fn t13_55_empty_opposing_side_deficit_fallback() {
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    assert!(engine.adl_coeff_long == k_before, "K must not change when stored_pos_count_opp == 0");
-    assert!(engine.insurance_fund.balance.get() < ins_before, "insurance must absorb deficit");
+    assert!(
+        engine.adl_coeff_long == k_before,
+        "K must not change when stored_pos_count_opp == 0"
+    );
+    assert!(
+        engine.insurance_fund.balance.get() < ins_before,
+        "insurance must absorb deficit"
+    );
     assert!(engine.oi_eff_long_q == 3 * POS_SCALE);
 }
 
@@ -822,14 +874,14 @@ fn t13_60_conditional_dust_bound_only_on_truncation() {
 
     let dust_before = engine.phantom_dust_bound_long_q;
 
-    let result = engine.enqueue_adl(
-        &mut ctx, Side::Short, 2 * POS_SCALE, 0u128,
-    );
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, 2 * POS_SCALE, 0u128);
     assert!(result.is_ok());
     assert!(engine.adl_mult_long == 2);
 
-    assert!(engine.phantom_dust_bound_long_q == dust_before,
-        "no dust added when A_trunc_rem == 0");
+    assert!(
+        engine.phantom_dust_bound_long_q == dust_before,
+        "no dust added when A_trunc_rem == 0"
+    );
 }
 
 #[kani::proof]
@@ -840,8 +892,8 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a, 10_000_000, 0).unwrap();
+    engine.deposit(b, 10_000_000, 0).unwrap();
 
     // One long (a) at A=7, one short (b) for OI balance.
     engine.adl_mult_long = 7;
@@ -868,9 +920,7 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
 
     // ADL: close POS_SCALE from short side → shrinks A_long via truncation
     // enqueue_adl decrements both sides by q_close, then A-truncates opposing
-    let result = engine.enqueue_adl(
-        &mut ctx, Side::Short, POS_SCALE, 0u128,
-    );
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, POS_SCALE, 0u128);
     assert!(result.is_ok());
     // A_new = floor(7 * 9M / 10M) = 6
     assert!(engine.adl_mult_long == 6);
@@ -883,11 +933,16 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
 
     // eff_a = floor(10_000_000 * 6 / 7) = 8_571_428 (< 9_000_000)
     let eff_a = engine.effective_pos_q(a as usize);
-    let dust = engine.oi_eff_long_q.checked_sub(eff_a.unsigned_abs()).unwrap_or(0);
+    let dust = engine
+        .oi_eff_long_q
+        .checked_sub(eff_a.unsigned_abs())
+        .unwrap_or(0);
 
     // Verify phantom_dust_bound covers the A-truncation dust
-    assert!(engine.phantom_dust_bound_long_q >= dust,
-        "dust bound must cover A-truncation phantom OI");
+    assert!(
+        engine.phantom_dust_bound_long_q >= dust,
+        "dust bound must cover A-truncation phantom OI"
+    );
 
     // Simulate final state: all positions closed via balanced trades,
     // which maintain OI_long == OI_short. Residual dust is equal on both sides.
@@ -897,7 +952,10 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
     engine.oi_eff_short_q = dust;
 
     let reset_result = engine.schedule_end_of_instruction_resets(&mut ctx);
-    assert!(reset_result.is_ok(), "ADL truncation dust must not deadlock market reset");
+    assert!(
+        reset_result.is_ok(),
+        "ADL truncation dust must not deadlock market reset"
+    );
 }
 
 // ############################################################################
@@ -936,13 +994,19 @@ fn t14_61_dust_bound_adl_a_truncation_sufficient() {
     let q_eff_new_2 = ((basis_2 as u16) * (a_new as u16)) / (a_basis_2 as u16);
     let sum_new = q_eff_new_1 + q_eff_new_2;
 
-    let phantom_dust = if oi_post >= sum_new { oi_post - sum_new } else { 0 };
+    let phantom_dust = if oi_post >= sum_new {
+        oi_post - sum_new
+    } else {
+        0
+    };
 
     let n: u16 = 2;
     let global_a_dust = n + ((oi + n + (a_old as u16) - 1) / (a_old as u16));
 
-    assert!(global_a_dust >= phantom_dust,
-        "A-truncation dust bound must cover phantom OI from A change");
+    assert!(
+        global_a_dust >= phantom_dust,
+        "A-truncation dust bound must cover phantom OI from A change"
+    );
 }
 
 /// Same-epoch zeroing: when settle_side_effects zeros a position (q_eff_new == 0),
@@ -952,7 +1016,7 @@ fn t14_61_dust_bound_adl_a_truncation_sufficient() {
 fn t14_62_dust_bound_same_epoch_zeroing() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(idx, 10_000_000, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
     engine.accounts[idx as usize].position_basis_q = 1i128;
@@ -975,8 +1039,10 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
     // Dust bound must have incremented by 1
     let dust_after = engine.phantom_dust_bound_long_q;
-    assert!(dust_after == dust_before + 1u128,
-        "same-epoch zeroing must increment phantom_dust_bound by 1");
+    assert!(
+        dust_after == dust_before + 1u128,
+        "same-epoch zeroing must increment phantom_dust_bound by 1"
+    );
 }
 
 /// Position reattach: floor(|basis| * A_new / A_old) loses at most 1 unit per position.
@@ -996,19 +1062,25 @@ fn t14_63_dust_bound_position_reattach_remainder() {
     let remainder = product % (a_basis as u32);
 
     // Floor division: q_eff * a_basis + remainder == product
-    assert!(q_eff * (a_basis as u32) + remainder == product,
-        "floor division identity");
+    assert!(
+        q_eff * (a_basis as u32) + remainder == product,
+        "floor division identity"
+    );
 
     // Remainder is strictly less than divisor
     assert!(remainder < (a_basis as u32), "remainder < a_basis");
 
     // The effective quantity never exceeds the true (unrounded) quantity
-    assert!(q_eff * (a_basis as u32) <= product,
-        "floor never overshoots");
+    assert!(
+        q_eff * (a_basis as u32) <= product,
+        "floor never overshoots"
+    );
 
     if remainder > 0 {
-        assert!((q_eff + 1) * (a_basis as u32) > product,
-            "next integer exceeds product → loss < 1 unit");
+        assert!(
+            (q_eff + 1) * (a_basis as u32) > product,
+            "next integer exceeds product → loss < 1 unit"
+        );
     }
 }
 
@@ -1040,9 +1112,9 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     let a_idx = engine.add_user(0).unwrap();
     let b_idx = engine.add_user(0).unwrap();
     let c_idx = engine.add_user(0).unwrap();
-    engine.deposit(a_idx, 10_000_000, 100, 0).unwrap();
-    engine.deposit(b_idx, 10_000_000, 100, 0).unwrap();
-    engine.deposit(c_idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit(a_idx, 10_000_000, 0).unwrap();
+    engine.deposit(b_idx, 10_000_000, 0).unwrap();
+    engine.deposit(c_idx, 10_000_000, 0).unwrap();
 
     engine.adl_mult_long = 13;
     engine.adl_mult_short = ADL_ONE;
@@ -1074,9 +1146,7 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     engine.oi_eff_short_q = 12 * POS_SCALE;
 
     // ADL: close 3*POS_SCALE from short side → shrinks A_long via truncation
-    let result = engine.enqueue_adl(
-        &mut ctx, Side::Short, 3 * POS_SCALE, 0u128,
-    );
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, 3 * POS_SCALE, 0u128);
     assert!(result.is_ok());
     // A_new = floor(13 * 9M / 12M) = 9
     assert!(engine.adl_mult_long == 9);
@@ -1099,8 +1169,10 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     let dust = engine.oi_eff_long_q.checked_sub(sum_eff).unwrap_or(0);
 
     // Verify phantom_dust_bound covers the multi-account A-truncation dust
-    assert!(engine.phantom_dust_bound_long_q >= dust,
-        "dust bound must cover A-truncation phantom OI for multiple accounts");
+    assert!(
+        engine.phantom_dust_bound_long_q >= dust,
+        "dust bound must cover A-truncation phantom OI for multiple accounts"
+    );
 
     // Close all positions and set OI to balanced dust level
     // (simulating trade-based closing which maintains OI_long == OI_short)
@@ -1111,7 +1183,10 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     engine.oi_eff_short_q = dust;
 
     let reset_result = engine.schedule_end_of_instruction_resets(&mut ctx);
-    assert!(reset_result.is_ok(), "dust bound must be sufficient for reset after all positions closed");
+    assert!(
+        reset_result.is_ok(),
+        "dust bound must be sufficient for reset after all positions closed"
+    );
 }
 
 // ############################################################################
@@ -1132,12 +1207,20 @@ fn proof_fee_shortfall_routes_to_fee_credits() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 10_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 10_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 10_000_000, DEFAULT_SLOT).unwrap();
 
     // Open a position: a goes long, b goes short
     let size = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size,
+        DEFAULT_ORACLE,
+        0i64,
+    );
     assert!(result.is_ok());
 
     // Zero a's capital so the fee can't be paid from principal.
@@ -1152,14 +1235,24 @@ fn proof_fee_shortfall_routes_to_fee_credits() {
     // Close position: a sells back (trade fee will be charged).
     // Capital is 0, so the entire fee must be shortfall → fee_credits.
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i64);
+    let result2 = engine.execute_trade_not_atomic(
+        b,
+        a,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        pos_size,
+        DEFAULT_ORACLE,
+        0i64,
+    );
 
     match result2 {
         Ok(()) => {
             let fc_after = engine.accounts[a as usize].fee_credits.get();
             // fee_credits must have decreased (become more negative) by the shortfall
-            assert!(fc_after < fc_before,
-                "fee shortfall must decrease fee_credits (create debt)");
+            assert!(
+                fc_after < fc_before,
+                "fee shortfall must decrease fee_credits (create debt)"
+            );
         }
         Err(_) => {
             // Trade rejected for margin or other reasons — acceptable.
@@ -1178,11 +1271,19 @@ fn proof_organic_close_bankruptcy_guard() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 10_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 10_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 10_000_000, DEFAULT_SLOT).unwrap();
 
     let size = (90 * POS_SCALE) as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size,
+        DEFAULT_ORACLE,
+        0i64,
+    );
     assert!(result.is_ok());
 
     let crash_price = 800u64;
@@ -1190,10 +1291,13 @@ fn proof_organic_close_bankruptcy_guard() {
     engine.last_crank_slot = crash_slot;
 
     let pos_size = (90 * POS_SCALE) as i128;
-    let result2 = engine.execute_trade_not_atomic(b, a, crash_price, crash_slot, pos_size, crash_price, 0i64);
+    let result2 =
+        engine.execute_trade_not_atomic(b, a, crash_price, crash_slot, pos_size, crash_price, 0i64);
 
-    assert!(result2.is_err(),
-        "organic close that leaves uncovered negative PnL must be rejected");
+    assert!(
+        result2.is_err(),
+        "organic close that leaves uncovered negative PnL must be rejected"
+    );
 }
 
 // ############################################################################
@@ -1207,12 +1311,20 @@ fn proof_solvent_flat_close_succeeds() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 1_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 1_000_000, DEFAULT_SLOT).unwrap();
 
     // Open a small position
     let size = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i64);
+    let result = engine.execute_trade_not_atomic(
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        size,
+        DEFAULT_ORACLE,
+        0i64,
+    );
     assert!(result.is_ok());
 
     // Price drops modestly — a has losses but plenty of capital to cover
@@ -1222,11 +1334,17 @@ fn proof_solvent_flat_close_succeeds() {
 
     // Close to flat: a sells their long position
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade_not_atomic(b, a, new_price, slot2, pos_size, new_price, 0i64);
+    let result2 =
+        engine.execute_trade_not_atomic(b, a, new_price, slot2, pos_size, new_price, 0i64);
 
-    assert!(result2.is_ok(),
-        "solvent trader closing to flat must not be rejected");
-    assert!(engine.check_conservation(), "conservation must hold after flat close");
+    assert!(
+        result2.is_ok(),
+        "solvent trader closing to flat must not be rejected"
+    );
+    assert!(
+        engine.check_conservation(DEFAULT_ORACLE),
+        "conservation must hold after flat close"
+    );
 }
 
 // ############################################################################
@@ -1249,15 +1367,21 @@ fn proof_property_23_deposit_materialization_threshold() {
     let missing: u16 = 3;
     assert!(!engine.is_used(missing as usize));
 
-    let result = engine.deposit(missing, 999, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(result.is_err(), "deposit below MIN_INITIAL_DEPOSIT must be rejected for missing account");
+    let result = engine.deposit(missing, 999, DEFAULT_SLOT);
+    assert!(
+        result.is_err(),
+        "deposit below MIN_INITIAL_DEPOSIT must be rejected for missing account"
+    );
 
     // But an existing materialized account can receive a small top-up
-    engine.deposit(existing, 5000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    let topup = engine.deposit(existing, 1, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(topup.is_ok(), "existing account must accept small top-up below MIN_INITIAL_DEPOSIT");
+    engine.deposit(existing, 5000, DEFAULT_SLOT).unwrap();
+    let topup = engine.deposit(existing, 1, DEFAULT_SLOT);
+    assert!(
+        topup.is_ok(),
+        "existing account must accept small top-up below MIN_INITIAL_DEPOSIT"
+    );
 
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ############################################################################
@@ -1275,20 +1399,26 @@ fn proof_property_51_withdrawal_dust_guard() {
     let mut engine = RiskEngine::new(params);
 
     let a = engine.add_user(0).unwrap();
-    engine.deposit(a, 5000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
+    engine.deposit(a, 5000, DEFAULT_SLOT).unwrap();
+    engine
+        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64)
+        .unwrap();
 
     // Withdraw leaving exactly 500 (< MIN_INITIAL_DEPOSIT=1000) → must fail
     let result = engine.withdraw_not_atomic(a, 4500, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    assert!(result.is_err(),
-        "withdrawal leaving dust capital (500 < 1000) must be rejected");
+    assert!(
+        result.is_err(),
+        "withdrawal leaving dust capital (500 < 1000) must be rejected"
+    );
 
     // Withdraw leaving exactly 0 → must succeed
     let result_zero = engine.withdraw_not_atomic(a, 5000, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    assert!(result_zero.is_ok(),
-        "withdrawal leaving zero capital must succeed");
+    assert!(
+        result_zero.is_ok(),
+        "withdrawal leaving zero capital must succeed"
+    );
 
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ############################################################################
@@ -1306,38 +1436,83 @@ fn proof_property_31_missing_account_safety() {
 
     // Add one real user for counterparty testing
     let real = engine.add_user(0).unwrap();
-    engine.deposit(real, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
+    engine.deposit(real, 100_000, DEFAULT_SLOT).unwrap();
+    engine
+        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64)
+        .unwrap();
 
     // Pick an index that was never add_user'd — it's missing
     let missing: u16 = 3; // MAX_ACCOUNTS=4 in kani, index 3 never materialized
-    assert!(!engine.is_used(missing as usize), "account must be unmaterialized");
+    assert!(
+        !engine.is_used(missing as usize),
+        "account must be unmaterialized"
+    );
 
     // settle_account_not_atomic must reject missing account
-    let settle_result = engine.settle_account_not_atomic(missing, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    assert!(settle_result.is_err(), "settle_account_not_atomic must reject missing account");
+    let settle_result =
+        engine.settle_account_not_atomic(missing, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
+    assert!(
+        settle_result.is_err(),
+        "settle_account_not_atomic must reject missing account"
+    );
 
     // withdraw_not_atomic must reject missing account
-    let withdraw_result = engine.withdraw_not_atomic(missing, 100, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    assert!(withdraw_result.is_err(), "withdraw_not_atomic must reject missing account");
+    let withdraw_result =
+        engine.withdraw_not_atomic(missing, 100, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
+    assert!(
+        withdraw_result.is_err(),
+        "withdraw_not_atomic must reject missing account"
+    );
 
     // execute_trade_not_atomic with missing account as party a
-    let trade_result = engine.execute_trade_not_atomic(missing, real, DEFAULT_ORACLE, DEFAULT_SLOT,
-        POS_SCALE as i128, DEFAULT_ORACLE, 0i64);
-    assert!(trade_result.is_err(), "execute_trade_not_atomic must reject missing account (party a)");
+    let trade_result = engine.execute_trade_not_atomic(
+        missing,
+        real,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        POS_SCALE as i128,
+        DEFAULT_ORACLE,
+        0i64,
+    );
+    assert!(
+        trade_result.is_err(),
+        "execute_trade_not_atomic must reject missing account (party a)"
+    );
 
     // execute_trade_not_atomic with missing account as party b
-    let trade_result_b = engine.execute_trade_not_atomic(real, missing, DEFAULT_ORACLE, DEFAULT_SLOT,
-        POS_SCALE as i128, DEFAULT_ORACLE, 0i64);
-    assert!(trade_result_b.is_err(), "execute_trade_not_atomic must reject missing account (party b)");
+    let trade_result_b = engine.execute_trade_not_atomic(
+        real,
+        missing,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        POS_SCALE as i128,
+        DEFAULT_ORACLE,
+        0i64,
+    );
+    assert!(
+        trade_result_b.is_err(),
+        "execute_trade_not_atomic must reject missing account (party b)"
+    );
 
     // liquidate_at_oracle_not_atomic on missing account — returns Ok(false) (no-op)
-    let liq_result = engine.liquidate_at_oracle_not_atomic(missing, DEFAULT_SLOT, DEFAULT_ORACLE, LiquidationPolicy::FullClose, 0i64);
+    let liq_result = engine.liquidate_at_oracle_not_atomic(
+        missing,
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        LiquidationPolicy::FullClose,
+        0i64,
+    );
     assert!(liq_result.is_ok(), "liquidate must not error on missing");
-    assert!(!liq_result.unwrap(), "liquidate must return false (no-op) for missing account");
+    assert!(
+        !liq_result.unwrap(),
+        "liquidate must return false (no-op) for missing account"
+    );
 
     // Verify no account was materialized
-    assert!(!engine.is_used(missing as usize), "missing account must remain unmaterialized");
+    assert!(
+        !engine.is_used(missing as usize),
+        "missing account must remain unmaterialized"
+    );
 }
 
 // ############################################################################
@@ -1355,7 +1530,7 @@ fn proof_property_44_deposit_true_flat_guard() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let a = engine.add_user(0).unwrap();
 
-    engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 500_000, DEFAULT_SLOT).unwrap();
 
     // Directly set up open position with negative PnL (bypassing trade to isolate deposit behavior)
     engine.accounts[a as usize].position_basis_q = (10 * POS_SCALE) as i128;
@@ -1371,24 +1546,30 @@ fn proof_property_44_deposit_true_flat_guard() {
     let pnl_before = engine.accounts[a as usize].pnl;
 
     // Deposit — with basis != 0, resolve_flat_negative must NOT run
-    engine.deposit(a, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, 50_000, DEFAULT_SLOT).unwrap();
 
     // resolve_flat_negative calls absorb_protocol_loss which changes insurance_fund.
     // If it did NOT run, insurance_fund must be unchanged.
-    assert!(engine.insurance_fund.balance.get() == ins_before,
-        "insurance must not change: resolve_flat_negative must not run when basis != 0");
+    assert!(
+        engine.insurance_fund.balance.get() == ins_before,
+        "insurance must not change: resolve_flat_negative must not run when basis != 0"
+    );
 
     // Position must still be intact
-    assert!(engine.accounts[a as usize].position_basis_q != 0,
-        "position must still be intact after deposit");
+    assert!(
+        engine.accounts[a as usize].position_basis_q != 0,
+        "position must still be intact after deposit"
+    );
 
     // PnL may have been partially settled by settle_losses (step 7),
     // but it must NOT have been zeroed by resolve_flat_negative
     // (which zeros PnL and routes the loss through insurance).
     // settle_losses reduces PnL magnitude while reducing capital, without touching insurance.
     let pnl_after = engine.accounts[a as usize].pnl;
-    assert!(pnl_after >= pnl_before,
-        "PnL must not decrease further than settle_losses allows");
+    assert!(
+        pnl_after >= pnl_before,
+        "PnL must not decrease further than settle_losses allows"
+    );
 }
 
 // ############################################################################
@@ -1405,22 +1586,38 @@ fn proof_property_49_profit_conversion_reserve_preservation() {
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
 
-    engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
+    engine.deposit(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine
+        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64)
+        .unwrap();
 
     // Open positions
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            DEFAULT_ORACLE,
+            DEFAULT_SLOT,
+            size_q,
+            DEFAULT_ORACLE,
+            0i64,
+        )
+        .unwrap();
 
     // Oracle up — a gets profit
     let high_oracle = 1_100u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64)
+        .unwrap();
 
     // Wait for warmup to partially release
     let slot3 = slot2 + 60; // 60 of 100 slots
-    engine.keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64)
+        .unwrap();
 
     let released = engine.released_pos(a as usize);
     if released == 0 {
@@ -1437,16 +1634,22 @@ fn proof_property_49_profit_conversion_reserve_preservation() {
     engine.consume_released_pnl(a as usize, x);
 
     // R_i must be unchanged
-    assert!(engine.accounts[a as usize].reserved_pnl == r_before,
-        "R_i must be unchanged after consume_released_pnl");
+    assert!(
+        engine.accounts[a as usize].reserved_pnl == r_before,
+        "R_i must be unchanged after consume_released_pnl"
+    );
 
     // PNL_pos_tot decreased by exactly x
-    assert!(engine.pnl_pos_tot == ppt_before - x,
-        "pnl_pos_tot must decrease by exactly x");
+    assert!(
+        engine.pnl_pos_tot == ppt_before - x,
+        "pnl_pos_tot must decrease by exactly x"
+    );
 
     // PNL_matured_pos_tot decreased by exactly x
-    assert!(engine.pnl_matured_pos_tot == pmpt_before - x,
-        "pnl_matured_pos_tot must decrease by exactly x");
+    assert!(
+        engine.pnl_matured_pos_tot == pmpt_before - x,
+        "pnl_matured_pos_tot must decrease by exactly x"
+    );
 }
 
 // ############################################################################
@@ -1463,41 +1666,63 @@ fn proof_property_50_flat_only_auto_conversion() {
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
 
-    engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
+    engine.deposit(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine
+        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64)
+        .unwrap();
 
     // Open positions
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            DEFAULT_ORACLE,
+            DEFAULT_SLOT,
+            size_q,
+            DEFAULT_ORACLE,
+            0i64,
+        )
+        .unwrap();
 
     // Oracle up, then wait for full warmup
     let high_oracle = 1_100u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64)
+        .unwrap();
 
     // Full warmup elapsed
     let slot3 = slot2 + 200; // well past warmup_period_slots=100
-    engine.keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64)
+        .unwrap();
 
     // a still has position, so should have released profit but NOT auto-converted
-    assert!(engine.accounts[a as usize].position_basis_q != 0,
-        "account must still have open position");
+    assert!(
+        engine.accounts[a as usize].position_basis_q != 0,
+        "account must still have open position"
+    );
 
     let released = engine.released_pos(a as usize);
     // After full warmup, released profit should exist (R_i decreased or zeroed)
     // Capital should NOT have increased from auto-conversion
     // The key test: capital only changes from settle_losses, not from do_profit_conversion
     let cap_a = engine.accounts[a as usize].capital.get();
-    assert!(cap_a <= 500_000,
+    assert!(
+        cap_a <= 500_000,
         "capital must not increase from auto-conversion while position is open: cap={}",
-        cap_a);
+        cap_a
+    );
 
     // Verify released profit exists but wasn't consumed
-    assert!(released > 0 || engine.accounts[a as usize].reserved_pnl == 0,
-        "warmup must have released profit or reserve is zero");
+    assert!(
+        released > 0 || engine.accounts[a as usize].reserved_pnl == 0,
+        "warmup must have released profit or reserve is zero"
+    );
 
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ############################################################################
@@ -1514,22 +1739,38 @@ fn proof_property_52_convert_released_pnl_instruction() {
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
 
-    engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64).unwrap();
+    engine.deposit(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine
+        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64)
+        .unwrap();
 
     // Open positions
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i64).unwrap();
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            DEFAULT_ORACLE,
+            DEFAULT_SLOT,
+            size_q,
+            DEFAULT_ORACLE,
+            0i64,
+        )
+        .unwrap();
 
     // Oracle up
     let high_oracle = 1_200u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i64)
+        .unwrap();
 
     // Wait for warmup to fully release
     let slot3 = slot2 + 200;
-    engine.keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64).unwrap();
+    engine
+        .keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i64)
+        .unwrap();
 
     // Check released amount
     let released_before = engine.released_pos(a as usize);
@@ -1543,29 +1784,42 @@ fn proof_property_52_convert_released_pnl_instruction() {
     let pmpt_before = engine.pnl_matured_pos_tot;
 
     // Convert all released profit
-    let result = engine.convert_released_pnl_not_atomic(a, released_before, high_oracle, slot3, 0i64);
-    assert!(result.is_ok(), "convert_released_pnl_not_atomic must succeed for healthy account");
+    let result =
+        engine.convert_released_pnl_not_atomic(a, released_before, high_oracle, slot3, 0i64);
+    assert!(
+        result.is_ok(),
+        "convert_released_pnl_not_atomic must succeed for healthy account"
+    );
 
     // R_i must be unchanged
-    assert!(engine.accounts[a as usize].reserved_pnl == r_before,
-        "R_i must be unchanged after convert_released_pnl_not_atomic");
+    assert!(
+        engine.accounts[a as usize].reserved_pnl == r_before,
+        "R_i must be unchanged after convert_released_pnl_not_atomic"
+    );
 
     // Capital must have increased (by haircutted amount)
-    assert!(engine.accounts[a as usize].capital.get() > cap_before,
-        "capital must increase after converting released profit");
+    assert!(
+        engine.accounts[a as usize].capital.get() > cap_before,
+        "capital must increase after converting released profit"
+    );
 
     // PNL_pos_tot and PNL_matured_pos_tot must have decreased
-    assert!(engine.pnl_pos_tot < ppt_before,
-        "pnl_pos_tot must decrease after conversion");
-    assert!(engine.pnl_matured_pos_tot < pmpt_before,
-        "pnl_matured_pos_tot must decrease after conversion");
+    assert!(
+        engine.pnl_pos_tot < ppt_before,
+        "pnl_pos_tot must decrease after conversion"
+    );
+    assert!(
+        engine.pnl_matured_pos_tot < pmpt_before,
+        "pnl_matured_pos_tot must decrease after conversion"
+    );
 
     // Account must still be maintenance healthy (conversion rejects if not)
-    assert!(engine.is_above_maintenance_margin(
-        &engine.accounts[a as usize], a as usize, high_oracle),
-        "account must be maintenance healthy after conversion");
+    assert!(
+        engine.is_above_maintenance_margin(&engine.accounts[a as usize], a as usize, high_oracle),
+        "account must be maintenance healthy after conversion"
+    );
 
-    assert!(engine.check_conservation());
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 // ############################################################################
@@ -1576,8 +1830,13 @@ fn proof_property_52_convert_released_pnl_instruction() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_audit2_deposit_materializes_missing_account() {
-    // Per spec §10.3 step 2 and §2.3: deposit with amount >= MIN_INITIAL_DEPOSIT
-    // on a missing account must materialize it, not reject with AccountNotFound.
+    // Spec §2.5 permits (but does not require) deposit to materialize a
+    // missing account. In our fork, materialization is explicit via
+    // add_user / add_lp (both enforce the MIN_INITIAL_DEPOSIT anti-spam
+    // threshold per spec §2.5 "Any implementation-defined alternative
+    // creation path is non-compliant unless it enforces an economically
+    // equivalent anti-spam threshold"), and deposit to a missing slot
+    // rejects with AccountNotFound. This proof pins down that rejection.
     let mut engine = RiskEngine::new(zero_fee_params());
 
     // Slot 0 is free (no add_user called for it)
@@ -1587,23 +1846,27 @@ fn proof_audit2_deposit_materializes_missing_account() {
     let min_dep = engine.params.min_initial_deposit.get() as u32;
     kani::assume(amount >= min_dep && amount <= 1_000_000);
 
-    // Deposit directly on the missing slot — must succeed and materialize
-    let result = engine.deposit(0, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(result.is_ok(), "deposit must succeed and materialize missing account");
+    let vault_before = engine.vault.get();
 
-    // Account must now be materialized
-    assert!(engine.is_used(0), "account must be materialized after deposit");
+    // Deposit to missing slot MUST fail — fork requires explicit add_user first.
+    let result = engine.deposit(0, amount as u128, DEFAULT_SLOT);
+    assert!(
+        result.is_err(),
+        "deposit to missing slot must reject with AccountNotFound"
+    );
 
-    // Capital must equal deposited amount
-    assert!(engine.accounts[0].capital.get() == amount as u128,
-        "capital must equal deposited amount");
-
-    // Vault must contain the deposited amount
-    assert!(engine.vault.get() == amount as u128,
-        "vault must contain deposited amount");
-
-    // Conservation must hold
-    assert!(engine.check_conservation());
+    // Account must NOT be materialized by the failed deposit.
+    assert!(
+        !engine.is_used(0),
+        "failed deposit must not materialize account"
+    );
+    // Vault must not change.
+    assert!(
+        engine.vault.get() == vault_before,
+        "vault unchanged on rejected deposit"
+    );
+    // Conservation must hold.
+    assert!(engine.check_conservation(DEFAULT_ORACLE));
 }
 
 #[kani::proof]
@@ -1624,12 +1887,21 @@ fn proof_audit2_deposit_rejects_below_min_initial_for_missing() {
     let amount: u16 = kani::any();
     kani::assume((amount as u128) < min_dep);
 
-    let result = engine.deposit(0, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(result.is_err(), "deposit below MIN_INITIAL_DEPOSIT must fail for missing account");
+    let result = engine.deposit(0, amount as u128, DEFAULT_SLOT);
+    assert!(
+        result.is_err(),
+        "deposit below MIN_INITIAL_DEPOSIT must fail for missing account"
+    );
     // Account must NOT be materialized
-    assert!(!engine.is_used(0), "account must not be materialized on failed deposit");
+    assert!(
+        !engine.is_used(0),
+        "account must not be materialized on failed deposit"
+    );
     // Vault must be unchanged
-    assert!(engine.vault.get() == 0, "vault must not change on rejected deposit");
+    assert!(
+        engine.vault.get() == 0,
+        "vault must not change on rejected deposit"
+    );
 }
 
 #[kani::proof]
@@ -1643,11 +1915,11 @@ fn proof_audit2_deposit_existing_accepts_small_topup() {
 
     // First deposit to establish the account
     let min_dep = engine.params.min_initial_deposit.get();
-    engine.deposit(a, min_dep, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit(a, min_dep, DEFAULT_SLOT).unwrap();
 
     // Small top-up below MIN_INITIAL_DEPOSIT must succeed
     let small_amount = 1u128;
-    let result = engine.deposit(a, small_amount, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.deposit(a, small_amount, DEFAULT_SLOT);
     assert!(result.is_ok(), "existing account must accept small top-ups");
     assert!(engine.accounts[a as usize].capital.get() == min_dep + small_amount);
 }
@@ -1677,12 +1949,18 @@ fn proof_audit4_add_user_atomic_on_failure() {
     let result = engine.add_user(100);
     assert!(result.is_err());
 
-    assert!(engine.vault.get() == vault_before,
-        "vault must not change on failed add_user (no slots)");
-    assert!(engine.insurance_fund.balance.get() == ins_before,
-        "insurance must not change on failed add_user (no slots)");
-    assert!(engine.c_tot.get() == c_tot_before,
-        "c_tot must not change on failed add_user (no slots)");
+    assert!(
+        engine.vault.get() == vault_before,
+        "vault must not change on failed add_user (no slots)"
+    );
+    assert!(
+        engine.insurance_fund.balance.get() == ins_before,
+        "insurance must not change on failed add_user (no slots)"
+    );
+    assert!(
+        engine.c_tot.get() == c_tot_before,
+        "c_tot must not change on failed add_user (no slots)"
+    );
 }
 
 /// Proof: add_user atomicity on MAX_VAULT_TVL failure path.
@@ -1706,12 +1984,18 @@ fn proof_audit4_add_user_atomic_on_tvl_failure() {
     let result = engine.add_user(100);
     assert!(result.is_err());
 
-    assert!(engine.vault.get() == vault_before,
-        "vault must not change on MAX_VAULT_TVL rejection");
-    assert!(engine.insurance_fund.balance.get() == ins_before,
-        "insurance must not change on MAX_VAULT_TVL rejection");
-    assert!(engine.num_used_accounts == used_before,
-        "num_used_accounts must not change on MAX_VAULT_TVL rejection");
+    assert!(
+        engine.vault.get() == vault_before,
+        "vault must not change on MAX_VAULT_TVL rejection"
+    );
+    assert!(
+        engine.insurance_fund.balance.get() == ins_before,
+        "insurance must not change on MAX_VAULT_TVL rejection"
+    );
+    assert!(
+        engine.num_used_accounts == used_before,
+        "num_used_accounts must not change on MAX_VAULT_TVL rejection"
+    );
 }
 
 /// Proof: deposit_fee_credits enforces MAX_VAULT_TVL.
@@ -1731,6 +2015,12 @@ fn proof_audit4_deposit_fee_credits_max_tvl() {
 
     // Deposit must fail (vault already at MAX)
     let result = engine.deposit_fee_credits(idx, 500, 0);
-    assert!(result.is_err(), "must reject deposit that would exceed MAX_VAULT_TVL");
-    assert!(engine.vault.get() == MAX_VAULT_TVL, "vault unchanged on failure");
+    assert!(
+        result.is_err(),
+        "must reject deposit that would exceed MAX_VAULT_TVL"
+    );
+    assert!(
+        engine.vault.get() == MAX_VAULT_TVL,
+        "vault unchanged on failure"
+    );
 }

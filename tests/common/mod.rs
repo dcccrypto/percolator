@@ -1,24 +1,14 @@
 //! Shared helpers, constants, and param factories for proof files.
 
-pub use percolator::*;
 pub use percolator::i128::{I128, U128};
 pub use percolator::wide_math::{
-    U256, I256,
-    floor_div_signed_conservative,
-    saturating_mul_u256_u64,
-    fee_debt_u128_checked,
-    mul_div_floor_u256,
-    mul_div_floor_u256_with_rem,
-    mul_div_ceil_u256,
-    wide_signed_mul_div_floor,
-    ceil_div_positive_checked,
-    mul_div_floor_u128,
-    mul_div_ceil_u128,
-    wide_mul_div_floor_u128,
-    wide_signed_mul_div_floor_from_k_pair,
-    saturating_mul_u128_u64,
-    floor_div_signed_conservative_i128,
+    ceil_div_positive_checked, fee_debt_u128_checked, floor_div_signed_conservative,
+    floor_div_signed_conservative_i128, mul_div_ceil_u128, mul_div_ceil_u256, mul_div_floor_u128,
+    mul_div_floor_u256, mul_div_floor_u256_with_rem, saturating_mul_u128_u64,
+    saturating_mul_u256_u64, wide_mul_div_floor_u128, wide_signed_mul_div_floor,
+    wide_signed_mul_div_floor_from_k_pair, I256, U256,
 };
+pub use percolator::*;
 
 // ============================================================================
 // Small-model constants
@@ -54,7 +44,9 @@ pub fn eager_mark_pnl_short(q_base: i32, delta_p: i32) -> i32 {
 /// pnl_delta = floor(|basis_q| * (K_cur - k_snap) / (a_basis * POS_SCALE))
 pub fn lazy_pnl(basis_q_abs: u16, k_diff: i32, a_basis: u16) -> i32 {
     let den = (a_basis as i32) * (S_POS_SCALE as i32);
-    if den == 0 { return 0; }
+    if den == 0 {
+        return 0;
+    }
     let num = (basis_q_abs as i32) * k_diff;
     if num >= 0 {
         num / den
@@ -66,7 +58,9 @@ pub fn lazy_pnl(basis_q_abs: u16, k_diff: i32, a_basis: u16) -> i32 {
 
 /// Small-model: lazy effective quantity.
 pub fn lazy_eff_q(basis_q_abs: u16, a_cur: u16, a_basis: u16) -> u16 {
-    if a_basis == 0 { return 0; }
+    if a_basis == 0 {
+        return 0;
+    }
     let product = (basis_q_abs as i32) * (a_cur as i32);
     (product / (a_basis as i32)) as u16
 }
@@ -93,7 +87,9 @@ pub fn k_after_fund_short(k_before: i32, a_short: u16, delta_f: i32) -> i32 {
 
 /// Small-model: A update for ADL quantity shrink.
 pub fn a_after_adl(a_old: u16, oi_post: u16, oi: u16) -> u16 {
-    if oi == 0 { return a_old; }
+    if oi == 0 {
+        return a_old;
+    }
     let product = (a_old as i32) * (oi_post as i32);
     (product / (oi as i32)) as u16
 }
@@ -119,6 +115,24 @@ pub fn zero_fee_params() -> RiskParams {
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
         insurance_floor: U128::ZERO,
+        risk_reduction_threshold: U128::ZERO,
+        liquidation_buffer_bps: 0,
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 0,
+        funding_premium_max_bps_per_slot: 0,
+        partial_liquidation_bps: 0,
+        partial_liquidation_cooldown_slots: 0,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
 
@@ -139,5 +153,23 @@ pub fn default_params() -> RiskParams {
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
         insurance_floor: U128::ZERO,
+        risk_reduction_threshold: U128::ZERO,
+        liquidation_buffer_bps: 0,
+        funding_premium_weight_bps: 0,
+        funding_settlement_interval_slots: 0,
+        funding_premium_dampening_e6: 0,
+        funding_premium_max_bps_per_slot: 0,
+        partial_liquidation_bps: 0,
+        partial_liquidation_cooldown_slots: 0,
+        use_mark_price_for_liquidation: false,
+        emergency_liquidation_margin_bps: 0,
+        fee_tier2_bps: 0,
+        fee_tier3_bps: 0,
+        fee_tier2_threshold: 0,
+        fee_tier3_threshold: 0,
+        fee_split_lp_bps: 0,
+        fee_split_protocol_bps: 0,
+        fee_split_creator_bps: 0,
+        fee_utilization_surge_bps: 0,
     }
 }
