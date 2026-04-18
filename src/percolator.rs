@@ -725,6 +725,16 @@ impl RiskEngine {
             params.h_min <= params.h_max,
             "h_min must be <= h_max (spec §6.1)"
         );
+        // A market with cfg_h_max == 0 is dead on arrival: every live
+        // instruction that creates fresh reserve requires admit_h_max > 0
+        // AND admit_h_max <= cfg_h_max. The intersection is empty when
+        // cfg_h_max == 0, so every live op would later fail at the
+        // admission_pair gate. Reject the misconfiguration here for a
+        // clear init-time error rather than a cryptic runtime brick.
+        assert!(
+            params.h_max > 0,
+            "h_max must be > 0 (live admission_pair requires h_max > 0 per spec §1.4)"
+        );
 
         // Resolve price deviation (spec §10.7)
         assert!(
@@ -1106,8 +1116,30 @@ impl RiskEngine {
         let i = idx as usize;
         let next = self.next_free[i];
         let prev = self.prev_free[i];
+        // Freelist-link consistency: the linear-scan predecessor used to
+        // implicitly guarantee that idx was reachable from the head. The
+        // doubly-linked O(1) unlink trusts the stored prev/next pointers;
+        // verify them before mutating neighbors so a corrupt prev_free or
+        // next_free cannot silently relink the wrong nodes.
         if prev == u16::MAX {
-            // idx is the head — advance head to next.
+            if self.free_head != idx {
+                self.materialized_account_count -= 1;
+                return Err(RiskError::CorruptState);
+            }
+        } else {
+            if self.next_free[prev as usize] != idx {
+                self.materialized_account_count -= 1;
+                return Err(RiskError::CorruptState);
+            }
+        }
+        if next != u16::MAX {
+            if self.prev_free[next as usize] != idx {
+                self.materialized_account_count -= 1;
+                return Err(RiskError::CorruptState);
+            }
+        }
+        // Links verified — perform the unlink.
+        if prev == u16::MAX {
             self.free_head = next;
         } else {
             self.next_free[prev as usize] = next;
@@ -4714,9 +4746,9 @@ impl RiskEngine {
     /// For positive-PnL on non-terminal markets, reconciliation persists and
     /// Ok(0) is returned (account stays open — re-call close_resolved_terminal
     /// after all accounts reconciled).
-    pub fn force_close_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64) -> Result<ResolvedCloseResult> {
+    pub fn force_close_resolved_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<ResolvedCloseResult> {
         // Phase 1: always reconcile (persists on success)
-        self.reconcile_resolved_not_atomic(idx, resolved_slot)?;
+        self.reconcile_resolved_not_atomic(idx, now_slot)?;
 
         let i = idx as usize;
 
@@ -4738,17 +4770,25 @@ impl RiskEngine {
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,
     /// zeroes position, settles losses, absorbs insurance. Always persists
     /// on success. Idempotent on already-reconciled accounts.
-    pub fn reconcile_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64) -> Result<()> {
+    pub fn reconcile_resolved_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Resolved {
             return Err(RiskError::Unauthorized);
         }
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
-        if resolved_slot < self.current_slot {
+        if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
-        self.current_slot = resolved_slot;
+        // Spec §9.9: once Resolved, current_slot MUST NOT advance past
+        // self.resolved_slot. Previously the caller-supplied slot could
+        // ratchet current_slot arbitrarily high, breaking later honest
+        // calls and interfering with fee_slot_anchor <= resolved_slot
+        // checks. Cap advancement at the engine-stored resolution boundary.
+        if now_slot > self.resolved_slot {
+            return Err(RiskError::Overflow);
+        }
+        self.current_slot = now_slot;
         let i = idx as usize;
 
         // Always clear reserve metadata (even flat accounts may have ghost bucket flags)
@@ -5102,8 +5142,18 @@ impl RiskEngine {
     // Account fees (wrapper-owned)
     // ========================================================================
 
-    /// charge_account_fee_not_atomic: public pure fee instruction for
-    /// wrapper-owned account fees (recurring, inactivity, subscription, etc.).
+    /// charge_account_fee_not_atomic: public pure one-shot fee instruction.
+    ///
+    /// USE FOR: ad-hoc wrapper-owned charges (e.g., manual adjustments,
+    /// one-time penalties). The engine does NOT track which interval this
+    /// represents.
+    ///
+    /// DO NOT USE FOR recurring time-based fees. The canonical recurring
+    /// path is `sync_account_fee_to_slot_not_atomic` which reads and
+    /// advances `last_fee_slot` atomically. Mixing these two APIs for the
+    /// same economic interval will double-charge — this method leaves
+    /// `last_fee_slot` unchanged, so a subsequent sync call will re-charge
+    /// the same dt.
     ///
     /// Only mutates: C_i, fee_credits_i, I, C_tot, current_slot.
     /// Never calls accrue_market_to or touches PNL, reserves, A/K, OI,
