@@ -1630,6 +1630,44 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 
 
 #[test]
+fn keeper_crank_skips_candidates_with_stale_fee_slot() {
+    // Regression (reviewer pass 13, keeper_crank fee sync): if the
+    // wrapper forgot to call sync_account_fee_to_slot_not_atomic on a
+    // candidate before passing it to keeper_crank, the candidate's
+    // realized fee debt is stale — touch_account_live_local evaluates
+    // maintenance margin on state that omits the unpaid fee interval.
+    // Engine must skip such candidates silently (so a single unsynced
+    // candidate doesn't DoS the whole crank) until the wrapper re-syncs.
+    let (mut engine, a, b) = setup_two_users(50_000, 50_000);
+    let oracle = 1000u64;
+    let slot = 1u64;
+    let size_q = make_size_q(450);
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100)
+        .expect("trade");
+
+    let slot2 = 2u64;
+    let crash = 870u64;
+
+    // Leave account `a`'s last_fee_slot unsynced; sync only `b`.
+    engine.accounts[b as usize].last_fee_slot = slot2;
+    assert_ne!(engine.accounts[a as usize].last_fee_slot, slot2,
+        "precondition: a is deliberately unsynced");
+
+    let outcome = engine.keeper_crank_not_atomic(
+        slot2, crash,
+        &[(a, Some(LiquidationPolicy::FullClose)),
+          (b, Some(LiquidationPolicy::FullClose))],
+        64, 0i128, 0, 100,
+    ).expect("crank");
+    // `a` should have been skipped (not counted against revalidations,
+    // not liquidated). `b` is synced so it's evaluated normally.
+    assert!(engine.is_used(a as usize),
+        "unsynced candidate must not be liquidated by the crank");
+    assert!(engine.check_conservation());
+    let _ = outcome;
+}
+
+#[test]
 fn test_keeper_crank_liquidates_underwater_accounts() {
     let (mut engine, a, b) = setup_two_users(50_000, 50_000);
     let oracle = 1000u64;
@@ -1642,6 +1680,11 @@ fn test_keeper_crank_liquidates_underwater_accounts() {
     // Crash price
     let slot2 = 2u64;
     let crash = 870u64;
+    // Wrapper must sync each candidate to now_slot before the crank —
+    // keeper_crank skips candidates whose last_fee_slot != now_slot so
+    // it cannot evaluate stale fee state (spec §11.1, v12.19).
+    engine.accounts[a as usize].last_fee_slot = slot2;
+    engine.accounts[b as usize].last_fee_slot = slot2;
     let outcome = engine.keeper_crank_not_atomic(slot2, crash, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).expect("crank");
     // The crank should have liquidated the underwater account
     assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account");
@@ -2262,6 +2305,9 @@ fn test_liquidation_triggers_on_underwater_account() {
     let crash_price = 500u64; // 50% drop
     let slot2 = 3;
 
+    // Wrapper syncs each candidate's fee checkpoint to now_slot before the crank.
+    engine.accounts[a as usize].last_fee_slot = slot2;
+    engine.accounts[b as usize].last_fee_slot = slot2;
     // Crank at crash price — accrues market internally then liquidates
     let outcome = engine.keeper_crank_not_atomic(slot2, crash_price, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).unwrap();
     assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account after 50% price drop");

@@ -239,7 +239,10 @@ fn test_e2e_funding_complete_cycle() {
 
     // This crank accrues the market (which applies 20 slots of funding at rate 500)
     // then touches both accounts (settle_side_effects realizes the K delta into PnL,
-    // then settle_losses transfers negative PnL from capital)
+    // then settle_losses transfers negative PnL from capital).
+    // Wrapper syncs each candidate's fee checkpoint to now_slot first.
+    engine.accounts[alice as usize].last_fee_slot = slot2;
+    engine.accounts[bob as usize].last_fee_slot = slot2;
     engine.keeper_crank_not_atomic(slot2, oracle_price,
         &[(alice, None), (bob, None)], 64, 50_000_000i128, 0, 100).unwrap();
 
@@ -316,6 +319,9 @@ fn test_e2e_negative_funding_rate() {
     // Advance and settle
     engine.advance_slot(20);
     let slot2 = engine.current_slot;
+    // Wrapper syncs each candidate's fee checkpoint to now_slot first.
+    engine.accounts[alice as usize].last_fee_slot = slot2;
+    engine.accounts[bob as usize].last_fee_slot = slot2;
     engine.keeper_crank_not_atomic(slot2, oracle_price,
         &[(alice, None), (bob, None)], 64, -50_000_000i128, 0, 100).unwrap();
 

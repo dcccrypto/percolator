@@ -4601,6 +4601,21 @@ impl RiskEngine {
                 continue;
             }
 
+            // Skip candidates whose recurring-fee checkpoint has not been
+            // advanced to `now_slot`. Recurring maintenance fees are
+            // wrapper-driven (engine doesn't store `fee_rate_per_slot`);
+            // if the wrapper hasn't called
+            // `sync_account_fee_to_slot_not_atomic(cidx, now_slot, rate)`,
+            // the account's realized fee debt may be stale. Evaluating
+            // maintenance margin on stale state can spare an account that
+            // is actually below MM after fees, or liquidate one that isn't.
+            // Silent skip (matches the missing-account skip pattern) lets
+            // the wrapper re-sweep after syncing, without DoS-ing the crank
+            // on a single unsynced candidate.
+            if self.accounts[candidate_idx as usize].last_fee_slot != now_slot {
+                continue;
+            }
+
             // Count as an attempt
             attempts += 1;
             let cidx = candidate_idx as usize;
