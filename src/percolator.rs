@@ -90,7 +90,13 @@ const _: () = assert!(MAX_ACCOUNTS.is_power_of_two());
 
 pub const GC_CLOSE_BUDGET: u32 = 32;
 pub const ACCOUNTS_PER_CRANK: u16 = 128;
-pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
+/// Max liquidations processed in a single crank tx.
+/// Set to 24 because the MTM-margin-check path (insurance funded, not
+/// force-realize) costs ~26K CU per liquidation; at 24 liqs the crank uses
+/// ~1.18M CU (84.5% of the 1.4M Solana tx budget). 32 liqs reliably exceeds
+/// the budget and Solana runtime rejects the tx. Measured via
+/// `percolator-prog/tests/cu_benchmark.rs` Scenario 9 density sweep.
+pub const LIQ_BUDGET_PER_CRANK: u16 = 24;
 
 /// POS_SCALE = 1_000_000 (spec §1.2)
 pub const POS_SCALE: u128 = 1_000_000;
@@ -3913,7 +3919,8 @@ impl RiskEngine {
 
         // Finalize: compute fresh snapshot from post-mutation state, apply
         // whole-only conversion + fee sweep to all tracked accounts.
-        // MAX_TOUCHED_PER_INSTRUCTION = 64 matches LIQ_BUDGET_PER_CRANK.
+        // MAX_TOUCHED_PER_INSTRUCTION (=64) is the buffer upper bound; the
+        // actual per-crank liquidation count is capped by LIQ_BUDGET_PER_CRANK.
         self.finalize_touched_accounts_post_live(&ctx)?;
 
         // GC dust accounts
