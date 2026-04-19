@@ -3063,6 +3063,55 @@ impl RiskEngine {
         }
     }
 
+    /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.19).
+    ///
+    /// When the last account closes, signed-floor rounding on PnL can
+    /// leave `vault > c_tot + insurance_fund.balance` with no junior
+    /// claim (positive PnL floored to 0 while the matched negative PnL
+    /// floored toward -∞ to -1). Without a sweep, that rounding residual
+    /// stays in `vault` forever: `c_tot == 0`, `pnl_pos_tot == 0`,
+    /// `insurance_fund.balance == 0` — but `vault > 0`. The wrapper's
+    /// slab-close check requires `vault == 0`, so the market cannot be
+    /// retired.
+    ///
+    /// Called after `free_slot` from every terminal-close path. The
+    /// sweep fires ONLY when the engine is fully empty:
+    ///   - num_used_accounts == 0
+    ///   - c_tot == 0, pnl_pos_tot == 0, pnl_matured_pos_tot == 0
+    ///   - oi_eff_long_q == 0, oi_eff_short_q == 0
+    /// In all other states it is a no-op and safe to call unconditionally.
+    /// The sweep moves `vault - insurance` into `insurance`, after which
+    /// `vault == insurance` and the wrapper's insurance-withdraw path
+    /// can drain both together.
+    fn sweep_empty_market_surplus_to_insurance(&mut self) -> Result<()> {
+        if self.num_used_accounts != 0 {
+            return Ok(());
+        }
+        if !self.c_tot.is_zero()
+            || self.pnl_pos_tot != 0
+            || self.pnl_matured_pos_tot != 0
+            || self.oi_eff_long_q != 0
+            || self.oi_eff_short_q != 0
+        {
+            // Not a fully-empty terminal state. The sweep is only sound
+            // when there are no outstanding junior claims.
+            return Ok(());
+        }
+        let v = self.vault.get();
+        let i = self.insurance_fund.balance.get();
+        if v < i {
+            return Err(RiskError::CorruptState);
+        }
+        let surplus = v - i;
+        if surplus != 0 {
+            // v = i + surplus, so the new balance fits whatever vault fit.
+            self.insurance_fund.balance = U128::new(
+                i.checked_add(surplus).ok_or(RiskError::Overflow)?
+            );
+        }
+        Ok(())
+    }
+
     /// Assert global engine postconditions (spec §3.1 + §5.2).
     ///
     /// Called as the last step of every public `_not_atomic` entrypoint.
@@ -4848,6 +4897,7 @@ impl RiskEngine {
         self.finalize_end_of_instruction_resets(&ctx)?;
 
         self.free_slot(idx)?;
+        self.sweep_empty_market_surplus_to_insurance()?;
 
         self.assert_public_postconditions()?;
         Ok(capital.get())
@@ -5047,6 +5097,24 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        // Recurring maintenance-fee sync is wrapper-driven; the engine
+        // does not store fee_rate_per_slot. For a Resolved market, the
+        // canonical terminal fee anchor is `resolved_slot` (spec §4.6.1,
+        // Goal 49). Any account with `last_fee_slot < resolved_slot` has
+        // an unpaid interval that free_slot would silently zero on close,
+        // over-paying the user and under-charging insurance.
+        //
+        // Precondition: the wrapper MUST call
+        // `sync_account_fee_to_slot_not_atomic(idx, clock_slot, rate)`
+        // before invoking reconcile/force_close/close_resolved_terminal.
+        // Even when the wrapper's fee rate is 0, the call advances
+        // `last_fee_slot` to `resolved_slot` (the engine-picked anchor
+        // on Resolved) and clears this gate. Accounts materialized after
+        // resolution already have `last_fee_slot == resolved_slot` via
+        // `materialize_at`'s anchor logic.
+        if self.accounts[idx as usize].last_fee_slot != self.resolved_slot {
+            return Err(RiskError::CorruptState);
+        }
         // Resolved market is frozen at self.resolved_slot. No caller input
         // for the slot anchor — the engine uses the stored boundary. This
         // removes the earlier ratchet-past-resolved_slot footgun and
@@ -5216,6 +5284,7 @@ impl RiskEngine {
         self.vault = self.vault - capital;
         self.set_capital(i, 0)?;
         self.free_slot(idx)?;
+        self.sweep_empty_market_surplus_to_insurance()?;
 
         self.assert_public_postconditions()?;
         Ok(capital.get())
@@ -5295,6 +5364,7 @@ impl RiskEngine {
 
         // Free the slot
         self.free_slot(idx)?;
+        self.sweep_empty_market_surplus_to_insurance()?;
 
         self.assert_public_postconditions()?;
         Ok(())
