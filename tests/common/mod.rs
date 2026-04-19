@@ -184,21 +184,6 @@ pub fn set_pnl_test(engine: &mut RiskEngine, idx: usize, new_pnl: i128) -> Resul
     }
 }
 
-/// Test helper: advance `last_fee_slot` for an account to `resolved_slot`
-/// so `reconcile_resolved_not_atomic` / `force_close_resolved_not_atomic`
-/// / `close_resolved_terminal_not_atomic` satisfy the fee-sync
-/// precondition. Mirrors what a real wrapper would do by calling
-/// `sync_account_fee_to_slot_not_atomic(idx, clock.slot, fee_rate)` before
-/// resolved close.
-pub fn sync_for_resolved_close(engine: &mut RiskEngine, idx: u16) {
-    // On Resolved markets the engine picks `resolved_slot` as the anchor
-    // regardless of `now_slot`; `now_slot` only needs to satisfy
-    // `now_slot >= current_slot`. Use the max of the two to stay safe.
-    let now = core::cmp::max(engine.resolved_slot, engine.current_slot);
-    engine.sync_account_fee_to_slot_not_atomic(idx, now, 0)
-        .expect("sync_for_resolved_close");
-}
-
 pub fn default_params() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,

@@ -4601,20 +4601,14 @@ impl RiskEngine {
                 continue;
             }
 
-            // Skip candidates whose recurring-fee checkpoint has not been
-            // advanced to `now_slot`. Recurring maintenance fees are
-            // wrapper-driven (engine doesn't store `fee_rate_per_slot`);
-            // if the wrapper hasn't called
-            // `sync_account_fee_to_slot_not_atomic(cidx, now_slot, rate)`,
-            // the account's realized fee debt may be stale. Evaluating
-            // maintenance margin on stale state can spare an account that
-            // is actually below MM after fees, or liquidate one that isn't.
-            // Silent skip (matches the missing-account skip pattern) lets
-            // the wrapper re-sweep after syncing, without DoS-ing the crank
-            // on a single unsynced candidate.
-            if self.accounts[candidate_idx as usize].last_fee_slot != now_slot {
-                continue;
-            }
+            // Recurring maintenance-fee ordering is a WRAPPER responsibility.
+            // If a deployment enables recurring fees, the wrapper MUST call
+            // `sync_account_fee_to_slot_not_atomic(candidate, now_slot, rate)`
+            // on every candidate before the crank, so that
+            // `touch_account_live_local` evaluates margin on state that
+            // includes the realized fee debt. The engine does not enforce
+            // this here because it has no way to tell whether recurring
+            // fees are even enabled (rate is not stored in engine state).
 
             // Count as an attempt
             attempts += 1;
@@ -5112,24 +5106,16 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
-        // Recurring maintenance-fee sync is wrapper-driven; the engine
-        // does not store fee_rate_per_slot. For a Resolved market, the
-        // canonical terminal fee anchor is `resolved_slot` (spec §4.6.1,
-        // Goal 49). Any account with `last_fee_slot < resolved_slot` has
-        // an unpaid interval that free_slot would silently zero on close,
-        // over-paying the user and under-charging insurance.
+        // Recurring maintenance-fee ordering is a WRAPPER responsibility.
+        // The engine provides `sync_account_fee_to_slot_not_atomic` as a
+        // primitive for wrappers that enable fees, but does not enforce
+        // "fees synced before resolved close" — the engine has no way to
+        // distinguish "wrapper has rate=0, no sync needed" from "wrapper
+        // has rate>0 and forgot". A deployment with recurring fees MUST
+        // call sync on every account before `reconcile_resolved_not_atomic`
+        // / `force_close_resolved_not_atomic` /
+        // `close_resolved_terminal_not_atomic`.
         //
-        // Precondition: the wrapper MUST call
-        // `sync_account_fee_to_slot_not_atomic(idx, clock_slot, rate)`
-        // before invoking reconcile/force_close/close_resolved_terminal.
-        // Even when the wrapper's fee rate is 0, the call advances
-        // `last_fee_slot` to `resolved_slot` (the engine-picked anchor
-        // on Resolved) and clears this gate. Accounts materialized after
-        // resolution already have `last_fee_slot == resolved_slot` via
-        // `materialize_at`'s anchor logic.
-        if self.accounts[idx as usize].last_fee_slot != self.resolved_slot {
-            return Err(RiskError::CorruptState);
-        }
         // Resolved market is frozen at self.resolved_slot. No caller input
         // for the slot anchor — the engine uses the stored boundary. This
         // removes the earlier ratchet-past-resolved_slot footgun and
@@ -5461,6 +5447,9 @@ impl RiskEngine {
         for i in 0..num_to_free {
             self.free_slot(to_free[i])?;
         }
+        // If the GC sweep emptied the market, roll any rounding-surplus
+        // in vault into insurance so the wrapper can retire the slab.
+        self.sweep_empty_market_surplus_to_insurance()?;
 
         Ok(num_to_free as u32)
     }

@@ -57,17 +57,6 @@ fn add_lp_test(
     Ok(idx)
 }
 
-/// Advance `last_fee_slot` for an account to `resolved_slot` so
-/// reconcile/force_close/close_resolved_terminal satisfy the engine's
-/// fee-sync precondition. Real wrappers do this by calling
-/// `sync_account_fee_to_slot_not_atomic(idx, clock_slot, fee_rate)`
-/// before any resolved close.
-#[allow(dead_code)]
-fn sync_for_resolved_close(engine: &mut RiskEngine, idx: u16) {
-    let now = core::cmp::max(engine.resolved_slot, engine.current_slot);
-    engine.sync_account_fee_to_slot_not_atomic(idx, now, 0)
-        .expect("sync_for_resolved_close");
-}
 
 /// Build a size_q from a quantity in base units.
 /// size_q = quantity * POS_SCALE  (signed)
@@ -671,64 +660,6 @@ fn idle_market_can_fast_forward_before_late_deposit() {
     // Now the deposit passes.
     assert!(engine.deposit_not_atomic(0, min, 1_000, late).is_ok(),
         "deposit at the post-fast-forward slot must succeed");
-}
-
-#[test]
-fn reconcile_resolved_requires_last_fee_slot_equals_resolved_slot() {
-    // Regression (reviewer pass 13): recurring maintenance-fee sync is
-    // wrapper-driven (engine doesn't store fee_rate_per_slot). On a
-    // resolved market, the canonical final anchor is resolved_slot. If
-    // a wrapper forgets to sync an account before resolved close, the
-    // unpaid fee interval is silently deleted when free_slot zeroes
-    // last_fee_slot. Payout is too high and insurance is too low.
-    //
-    // Expected: reconcile_resolved_not_atomic (and by extension
-    // force_close_resolved_not_atomic / close_resolved_terminal
-    // _not_atomic) must reject when account.last_fee_slot !=
-    // self.resolved_slot. Wrappers with fee rate > 0 MUST call
-    // sync_account_fee_to_slot_not_atomic first; wrappers with rate = 0
-    // must call it with rate=0 to advance the checkpoint.
-    let params = default_params();
-    let mut engine = RiskEngine::new_with_market(params, 0, 1);
-    engine.deposit_not_atomic(0, 10_000, 1, 0).expect("deposit");
-    assert_eq!(engine.accounts[0].last_fee_slot, 0);
-
-    // Resolve at slot 10.
-    engine.resolve_market_not_atomic(
-        percolator::ResolveMode::Ordinary, 1, 1, 10, 0
-    ).expect("resolve");
-    assert_eq!(engine.resolved_slot, 10);
-    // Account.last_fee_slot (=0) < resolved_slot (=10). Wrapper should
-    // have called sync_account_fee_to_slot_not_atomic; it didn't.
-    assert!(engine.accounts[0].last_fee_slot < engine.resolved_slot);
-
-    // Close without sync — must fail (precondition).
-    let r = engine.force_close_resolved_not_atomic(0);
-    assert!(r.is_err(),
-        "resolved close without prior fee sync must fail (got {:?})", r);
-    assert!(engine.is_used(0), "account must not be freed on Err");
-}
-
-#[test]
-fn reconcile_resolved_accepts_after_sync_to_resolved_slot() {
-    // Positive companion: once the wrapper calls
-    // sync_account_fee_to_slot_not_atomic, last_fee_slot advances to
-    // resolved_slot and the resolved close succeeds.
-    let params = default_params();
-    let mut engine = RiskEngine::new_with_market(params, 0, 1);
-    engine.deposit_not_atomic(0, 10_000, 1, 0).expect("deposit");
-
-    engine.resolve_market_not_atomic(
-        percolator::ResolveMode::Ordinary, 1, 1, 10, 0
-    ).expect("resolve");
-
-    // Wrapper sync (even with rate=0) advances last_fee_slot to
-    // resolved_slot on Resolved markets.
-    engine.sync_account_fee_to_slot_not_atomic(0, 10, 0).expect("sync");
-    assert_eq!(engine.accounts[0].last_fee_slot, engine.resolved_slot);
-
-    let r = engine.force_close_resolved_not_atomic(0);
-    assert!(r.is_ok(), "resolved close must succeed after sync (got {:?})", r);
 }
 
 #[test]
@@ -1630,44 +1561,6 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 
 
 #[test]
-fn keeper_crank_skips_candidates_with_stale_fee_slot() {
-    // Regression (reviewer pass 13, keeper_crank fee sync): if the
-    // wrapper forgot to call sync_account_fee_to_slot_not_atomic on a
-    // candidate before passing it to keeper_crank, the candidate's
-    // realized fee debt is stale — touch_account_live_local evaluates
-    // maintenance margin on state that omits the unpaid fee interval.
-    // Engine must skip such candidates silently (so a single unsynced
-    // candidate doesn't DoS the whole crank) until the wrapper re-syncs.
-    let (mut engine, a, b) = setup_two_users(50_000, 50_000);
-    let oracle = 1000u64;
-    let slot = 1u64;
-    let size_q = make_size_q(450);
-    engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100)
-        .expect("trade");
-
-    let slot2 = 2u64;
-    let crash = 870u64;
-
-    // Leave account `a`'s last_fee_slot unsynced; sync only `b`.
-    engine.accounts[b as usize].last_fee_slot = slot2;
-    assert_ne!(engine.accounts[a as usize].last_fee_slot, slot2,
-        "precondition: a is deliberately unsynced");
-
-    let outcome = engine.keeper_crank_not_atomic(
-        slot2, crash,
-        &[(a, Some(LiquidationPolicy::FullClose)),
-          (b, Some(LiquidationPolicy::FullClose))],
-        64, 0i128, 0, 100,
-    ).expect("crank");
-    // `a` should have been skipped (not counted against revalidations,
-    // not liquidated). `b` is synced so it's evaluated normally.
-    assert!(engine.is_used(a as usize),
-        "unsynced candidate must not be liquidated by the crank");
-    assert!(engine.check_conservation());
-    let _ = outcome;
-}
-
-#[test]
 fn test_keeper_crank_liquidates_underwater_accounts() {
     let (mut engine, a, b) = setup_two_users(50_000, 50_000);
     let oracle = 1000u64;
@@ -1680,11 +1573,6 @@ fn test_keeper_crank_liquidates_underwater_accounts() {
     // Crash price
     let slot2 = 2u64;
     let crash = 870u64;
-    // Wrapper must sync each candidate to now_slot before the crank —
-    // keeper_crank skips candidates whose last_fee_slot != now_slot so
-    // it cannot evaluate stale fee state (spec §11.1, v12.19).
-    engine.accounts[a as usize].last_fee_slot = slot2;
-    engine.accounts[b as usize].last_fee_slot = slot2;
     let outcome = engine.keeper_crank_not_atomic(slot2, crash, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).expect("crank");
     // The crank should have liquidated the underwater account
     assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account");
@@ -2305,9 +2193,6 @@ fn test_liquidation_triggers_on_underwater_account() {
     let crash_price = 500u64; // 50% drop
     let slot2 = 3;
 
-    // Wrapper syncs each candidate's fee checkpoint to now_slot before the crank.
-    engine.accounts[a as usize].last_fee_slot = slot2;
-    engine.accounts[b as usize].last_fee_slot = slot2;
     // Crank at crash price — accrues market internally then liquidates
     let outcome = engine.keeper_crank_not_atomic(slot2, crash_price, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).unwrap();
     assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account after 50% price drop");
@@ -3113,7 +2998,6 @@ fn test_force_close_resolved_flat_no_pnl() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, idx);
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     assert_eq!(returned, 50_000);
     assert!(!engine.is_used(idx as usize));
@@ -3133,7 +3017,6 @@ fn test_force_close_resolved_with_open_position() {
 
     // Account has open position — force_close settles K-pair PnL and zeros it
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0).unwrap();
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok(), "force_close must handle open positions");
     assert!(!engine.is_used(a as usize));
@@ -3154,7 +3037,6 @@ fn test_force_close_resolved_with_negative_pnl() {
     // Move price down so account a (long) has loss, then resolve at that price
     engine.keeper_crank_not_atomic(101, 900, &[] as &[(u16, Option<LiquidationPolicy>)], 0, 0i128, 0, 100).unwrap();
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 900, 900, 102, 0).unwrap();
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok(), "force_close must handle negative pnl: {:?}", result);
     assert!(!engine.is_used(a as usize));
@@ -3174,7 +3056,6 @@ fn test_force_close_resolved_with_positive_pnl() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
-    sync_for_resolved_close(&mut engine, idx);
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Positive PnL converted to capital (haircutted) before return
     assert!(returned >= 50_000, "positive PnL must increase returned capital");
@@ -3194,7 +3075,6 @@ fn test_force_close_resolved_with_fee_debt() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, idx);
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Fee debt swept from capital first (spec §7.5 fee seniority):
     // 50_000 capital - 5_000 fee sweep = 45_000 returned
@@ -3234,9 +3114,7 @@ fn test_resolved_two_phase_no_deadlock() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, resolve_price, resolve_price, 200, 0).unwrap();
 
     // Phase 1: reconcile both (persists progress, no deadlock)
-    sync_for_resolved_close(&mut engine, a);
     engine.reconcile_resolved_not_atomic(a).unwrap();
-    sync_for_resolved_close(&mut engine, b);
     engine.reconcile_resolved_not_atomic(b).unwrap();
 
     // Both positions now zeroed, b's loss absorbed
@@ -3244,9 +3122,7 @@ fn test_resolved_two_phase_no_deadlock() {
     assert_eq!(engine.stored_pos_count_short, 0);
 
     // Phase 2: terminal close both
-    sync_for_resolved_close(&mut engine, a);
     let a_cap = engine.close_resolved_terminal_not_atomic(a).unwrap();
-    sync_for_resolved_close(&mut engine, b);
     let b_cap = engine.close_resolved_terminal_not_atomic(b).unwrap();
 
     assert!(a_cap > 0 || b_cap > 0, "at least one gets capital back");
@@ -3272,20 +3148,17 @@ fn test_force_close_combined_convenience() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, resolve_price, resolve_price, 200, 0).unwrap();
 
     // First call on positive-PnL account: reconciles, may be Deferred
-    sync_for_resolved_close(&mut engine, a);
     let a_result = engine.force_close_resolved_not_atomic(a).unwrap();
     if engine.accounts[a as usize].pnl > 0 && a_result.is_progress_only() {
         assert!(engine.is_used(a as usize), "account stays open when deferred");
     }
 
     // Close b (loser, no payout gate)
-    sync_for_resolved_close(&mut engine, b);
     engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("close b");
     assert!(!engine.is_used(b as usize), "b closed");
 
     // Now re-call a — terminal ready
     if engine.is_used(a as usize) {
-        sync_for_resolved_close(&mut engine, a);
         let a_final = engine.close_resolved_terminal_not_atomic(a).unwrap();
         assert!(a_final > 0, "a gets payout after terminal ready");
         assert!(!engine.is_used(a as usize));
@@ -3320,11 +3193,9 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1500, 1500, 200, 0).unwrap();
 
     // Phase 1: reconcile loser (b) first — zeroes their position
-    sync_for_resolved_close(&mut engine, b);
     let _b_returned = engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("force_close");
 
     // Phase 2: now all positions zeroed — a gets terminal payout
-    sync_for_resolved_close(&mut engine, a);
     let returned = engine.force_close_resolved_not_atomic(a).unwrap().expect_closed("force_close");
 
     // Returned should include settled K-pair profit
@@ -3349,7 +3220,6 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 500, 500, 200, 0).unwrap();
 
     let cap_before = engine.accounts[a as usize].capital.get();
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok(), "force_close must handle negative K-pair pnl: {:?}", result);
     assert!(!engine.is_used(a as usize));
@@ -3367,7 +3237,6 @@ fn test_force_close_with_fee_debt_exceeding_capital() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, idx);
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Capital (10k) fully swept to insurance, remaining debt forgiven
     assert_eq!(returned, 0, "all capital swept for fee debt");
@@ -3383,7 +3252,6 @@ fn test_force_close_zero_capital_zero_pnl() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, idx);
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     assert_eq!(returned, 0);
     assert!(!engine.is_used(idx as usize));
@@ -3408,17 +3276,14 @@ fn test_force_close_c_tot_tracks_exactly() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, a);
     let ret_a = engine.force_close_resolved_not_atomic(a).unwrap().expect_closed("force_close");
     assert_eq!(engine.c_tot.get(), c_tot_before - ret_a);
 
     let c_tot_mid = engine.c_tot.get();
-    sync_for_resolved_close(&mut engine, b);
     let ret_b = engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("force_close");
     assert_eq!(engine.c_tot.get(), c_tot_mid - ret_b);
 
     let c_tot_mid2 = engine.c_tot.get();
-    sync_for_resolved_close(&mut engine, c);
     let ret_c = engine.force_close_resolved_not_atomic(c).unwrap().expect_closed("force_close");
     assert_eq!(engine.c_tot.get(), c_tot_mid2 - ret_c);
 
@@ -3439,12 +3304,10 @@ fn test_force_close_stored_pos_count_tracks() {
     assert_eq!(engine.stored_pos_count_short, 1);
 
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0).unwrap();
-    sync_for_resolved_close(&mut engine, a);
     let r = engine.force_close_resolved_not_atomic(a);
     assert!(r.is_ok(), "force_close a: {:?}", r);
     assert_eq!(engine.stored_pos_count_long, 0, "long count must decrement");
 
-    sync_for_resolved_close(&mut engine, b);
     let r = engine.force_close_resolved_not_atomic(b);
     assert!(r.is_ok(), "force_close b: {:?}", r);
     assert_eq!(engine.stored_pos_count_short, 0, "short count must decrement");
@@ -3463,7 +3326,6 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     for &idx in &accounts {
-        sync_for_resolved_close(&mut engine, idx);
         engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     }
 
@@ -3493,9 +3355,7 @@ fn test_force_close_decrements_positions() {
     assert_eq!(engine.oi_eff_long_q, 0, "resolve_market zeroes OI");
 
     // Close both sides — position counts go to 0
-    sync_for_resolved_close(&mut engine, a);
     engine.force_close_resolved_not_atomic(a).unwrap().expect_closed("force_close");
-    sync_for_resolved_close(&mut engine, b);
     engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("force_close");
     assert_eq!(engine.stored_pos_count_long, 0);
     assert_eq!(engine.stored_pos_count_short, 0);
@@ -3516,11 +3376,9 @@ fn test_force_close_both_sides_sequential() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0).unwrap();
 
     // Close a first (reconcile, may not get terminal payout yet)
-    sync_for_resolved_close(&mut engine, a);
     let a_returned = engine.force_close_resolved_not_atomic(a).unwrap().expect_closed("force_close");
 
     // Close b — both positions now zeroed, snapshot captured
-    sync_for_resolved_close(&mut engine, b);
     let b_returned = engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("force_close");
 
     // If a got 0 (deferred payout), it was freed but payout is in capital
@@ -3542,7 +3400,6 @@ fn test_force_close_rejects_corrupt_a_basis() {
 
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.force_close_resolved_not_atomic(a);
     assert_eq!(result, Err(RiskError::CorruptState),
         "must reject corrupt a_basis = 0");
@@ -4004,7 +3861,6 @@ fn test_blocker3_terminal_close_rejects_negative_pnl() {
     engine.set_pnl(a as usize, -1000);
 
     // Phase 2 directly on unreconciled negative-PnL account must fail
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.close_resolved_terminal_not_atomic(a);
     assert!(result.is_err(),
         "close_resolved_terminal must reject negative-PnL accounts");
@@ -4453,7 +4309,6 @@ fn reconcile_resolved_uses_stored_resolved_slot_not_caller_input() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0).unwrap();
     assert_eq!(engine.resolved_slot, 100);
 
-    sync_for_resolved_close(&mut engine, idx);
     engine.reconcile_resolved_not_atomic(idx).unwrap();
     // current_slot set to the engine-stored boundary — no caller leverage.
     assert_eq!(engine.current_slot, engine.resolved_slot);
@@ -4468,7 +4323,6 @@ fn force_close_resolved_uses_stored_resolved_slot_not_caller_input() {
     engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0).unwrap();
 
     // force_close forwards to reconcile; no slot arg.
-    sync_for_resolved_close(&mut engine, idx);
     let r = engine.force_close_resolved_not_atomic(idx);
     assert!(r.is_ok());
     assert_eq!(engine.current_slot, engine.resolved_slot);
@@ -4752,9 +4606,7 @@ fn late_fee_sync_preserves_resolved_payout_snapshot_ratio() {
     assert_eq!(engine.resolved_slot, 100);
 
     // Reconcile both accounts (needed for positive-payout readiness).
-    sync_for_resolved_close(&mut engine, a);
     engine.reconcile_resolved_not_atomic(a).unwrap();
-    sync_for_resolved_close(&mut engine, b);
     engine.reconcile_resolved_not_atomic(b).unwrap();
 
     // Snapshot residual & conservation invariants.
@@ -5403,7 +5255,6 @@ fn test_force_close_returns_enum_deferred() {
 
     // force_close on positive-PnL account when b still has position → Deferred
     // (now_slot must match resolved_slot = slot + 1; v12.18.5 caps advancement).
-    sync_for_resolved_close(&mut engine, a);
     let result = engine.force_close_resolved_not_atomic(a).unwrap();
     match result {
         ResolvedCloseResult::ProgressOnly => {
@@ -5415,9 +5266,7 @@ fn test_force_close_returns_enum_deferred() {
     }
 
     // Close b (loser), then re-close a → should be Closed
-    sync_for_resolved_close(&mut engine, b);
     engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("close b");
-    sync_for_resolved_close(&mut engine, a);
     let result2 = engine.force_close_resolved_not_atomic(a).unwrap();
     match result2 {
         ResolvedCloseResult::Closed(_cap) => {
