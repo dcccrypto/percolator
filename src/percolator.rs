@@ -1150,6 +1150,15 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS {
             return Err(RiskError::AccountNotFound);
         }
+        // Spec §1.4: active market indices are [0, cfg_max_accounts). A
+        // wrapper/scanner that enumerates only that range MUST NOT miss a
+        // materialized account. The count bound below is not sufficient
+        // on its own: with headroom in num_used_accounts, picking any
+        // idx in [cfg_max_accounts, MAX_ACCOUNTS) would silently create
+        // a live account outside the configured market range.
+        if (idx as u64) >= self.params.max_accounts {
+            return Err(RiskError::AccountNotFound);
+        }
 
         let used_count = self.num_used_accounts as u64;
         if used_count >= self.params.max_accounts {

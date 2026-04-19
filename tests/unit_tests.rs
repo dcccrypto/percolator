@@ -662,6 +662,35 @@ fn idle_market_can_fast_forward_before_late_deposit() {
 }
 
 #[test]
+fn materialize_rejects_idx_outside_market_capacity() {
+    // Regression (reviewer pass 11): materialize_at must reject
+    // idx >= params.max_accounts. Previously it only checked
+    // idx < MAX_ACCOUNTS (the compile-time ceiling) and
+    // num_used_accounts < max_accounts (count bound). An idx outside
+    // [0, max_accounts) could slip through — wrappers and off-chain
+    // scanners that scan only [0, max_accounts) would then miss a
+    // live account.
+    let mut params = default_params();
+    params.max_accounts = 2;
+    params.max_active_positions_per_side = 2;
+    let mut engine = RiskEngine::new_with_market(params, 0, 1);
+    let min = engine.params.min_initial_deposit.get();
+
+    // Only one slot in use — count bound (num_used < max_accounts)
+    // would still allow another materialization. The TRUE gap is
+    // picking an idx outside [0, max_accounts).
+    engine.deposit_not_atomic(0, min, 1, 0).expect("idx 0 inside range");
+
+    // Index 3 is outside the configured market range even though it
+    // is under MAX_ACCOUNTS and there is still count headroom. Must
+    // reject.
+    let r = engine.deposit_not_atomic(3, min, 1, 0);
+    assert!(r.is_err(),
+        "deposit at idx >= max_accounts must fail (got {:?})", r);
+    assert!(!engine.is_used(3), "slot 3 must not be marked used on Err");
+}
+
+#[test]
 fn execute_trade_clears_dust_before_opening_fresh_oi() {
     // Regression (reviewer pass 10): execute_trade runs touch_account_live
     // _local on both legs before computing bilateral OI. When a touch hits
