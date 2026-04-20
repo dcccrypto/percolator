@@ -73,7 +73,15 @@ pub const MAX_ACCOUNTS: usize = 4;
 #[cfg(all(feature = "test", not(kani)))]
 pub const MAX_ACCOUNTS: usize = 64;
 
-#[cfg(all(not(kani), not(feature = "test")))]
+// Deployment-scale capacity tiers. Priority cascade: kani > test > small >
+// medium > default. Each tier must remain a power of two (static assert below).
+#[cfg(all(feature = "small", not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 256;
+
+#[cfg(all(feature = "medium", not(feature = "small"), not(feature = "test"), not(kani)))]
+pub const MAX_ACCOUNTS: usize = 1024;
+
+#[cfg(all(not(kani), not(feature = "test"), not(feature = "small"), not(feature = "medium")))]
 pub const MAX_ACCOUNTS: usize = 4096;
 
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
