@@ -32,14 +32,8 @@ fn t1_7_adl_quantity_only_lazy_conservative() {
     let lazy_q = lazy_eff_q(basis_q, a_new, a_old);
     let lazy_q_base = lazy_q / S_POS_SCALE;
 
-    assert!(
-        lazy_q_base <= eager_q,
-        "ADL lazy must not exceed eager quantity"
-    );
-    assert!(
-        eager_q - lazy_q_base <= 1,
-        "ADL lazy error must be bounded by 1 base unit"
-    );
+    assert!(lazy_q_base <= eager_q, "ADL lazy must not exceed eager quantity");
+    assert!(eager_q - lazy_q_base <= 1, "ADL lazy error must be bounded by 1 base unit");
 }
 
 #[kani::proof]
@@ -59,7 +53,7 @@ fn t1_8_adl_deficit_only_lazy_equals_eager() {
 
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    let delta_k_abs = ((d as u32) * (a_side as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_side as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let k_after = k_init + delta_k;
     let k_diff = k_after - k_init;
@@ -67,14 +61,9 @@ fn t1_8_adl_deficit_only_lazy_equals_eager() {
     let lazy_loss_raw = lazy_pnl(basis_q, k_diff, a_side);
 
     let lazy_loss = -lazy_loss_raw;
-    assert!(
-        lazy_loss >= eager_loss,
-        "ADL deficit lazy must be at least as large as eager"
-    );
-    assert!(
-        lazy_loss <= eager_loss + (q_base as i32),
-        "ADL deficit lazy overshoot must be bounded by q_base"
-    );
+    assert!(lazy_loss >= eager_loss, "ADL deficit lazy must be at least as large as eager");
+    assert!(lazy_loss <= eager_loss + (q_base as i32),
+        "ADL deficit lazy overshoot must be bounded by q_base");
 }
 
 #[kani::proof]
@@ -102,19 +91,14 @@ fn t1_9_adl_quantity_plus_deficit_lazy_conservative() {
     assert!(lazy_q <= eager_q, "lazy must not exceed eager quantity");
     assert!(eager_q - lazy_q <= 1, "lazy error bounded by 1 base unit");
 
-    let delta_k_abs = ((d as u32) * (a_old as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_old as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss = -lazy_pnl(basis_q, delta_k, a_old);
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    assert!(
-        lazy_loss >= eager_loss,
-        "ADL PnL: lazy loss must be >= eager loss (conservative)"
-    );
-    assert!(
-        lazy_loss <= eager_loss + (q_base as i32),
-        "ADL PnL: lazy overshoot must be bounded by q_base"
-    );
+    assert!(lazy_loss >= eager_loss, "ADL PnL: lazy loss must be >= eager loss (conservative)");
+    assert!(lazy_loss <= eager_loss + (q_base as i32),
+        "ADL PnL: lazy overshoot must be bounded by q_base");
 }
 
 // ============================================================================
@@ -140,15 +124,13 @@ fn t1_8b_adl_deficit_lazy_conservative_symbolic_a_basis() {
 
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
 
-    let delta_k_abs = ((d as u32) * (a_basis as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_basis as u16) + (oi as u16) - 1) / (oi as u16);
     let delta_k = -(delta_k_abs as i32);
     let lazy_loss_raw = lazy_pnl(basis_q, delta_k, a_basis);
 
     let lazy_loss = -lazy_loss_raw;
-    assert!(
-        lazy_loss >= eager_loss,
-        "ADL deficit lazy must be at least as large as eager for symbolic a_basis"
-    );
+    assert!(lazy_loss >= eager_loss,
+        "ADL deficit lazy must be at least as large as eager for symbolic a_basis");
 }
 
 // ############################################################################
@@ -169,21 +151,11 @@ fn t2_12_floor_shift_lemma() {
     let m32 = m as i32;
     let shifted = n32 + m32 * d32;
 
-    let floor_n = if n32 >= 0 {
-        n32 / d32
-    } else {
-        -((-n32 + d32 - 1) / d32)
-    };
-    let floor_shifted = if shifted >= 0 {
-        shifted / d32
-    } else {
-        -((-shifted + d32 - 1) / d32)
-    };
+    let floor_n = if n32 >= 0 { n32 / d32 } else { -((-n32 + d32 - 1) / d32) };
+    let floor_shifted = if shifted >= 0 { shifted / d32 } else { -((-shifted + d32 - 1) / d32) };
 
-    assert!(
-        floor_shifted == floor_n + m32,
-        "floor(n + m*d, d) must equal floor(n, d) + m"
-    );
+    assert!(floor_shifted == floor_n + m32,
+        "floor(n + m*d, d) must equal floor(n, d) + m");
 }
 
 #[kani::proof]
@@ -208,10 +180,7 @@ fn t2_12_fold_step_case() {
     let lazy_prefix = lazy_pnl(basis_q, k_prefix as i32, a);
     let lazy_step = lazy_total - lazy_prefix;
 
-    assert!(
-        lazy_step == eager_step,
-        "fold step: lazy increment must equal eager step"
-    );
+    assert!(lazy_step == eager_step, "fold step: lazy increment must equal eager step");
 }
 
 // ############################################################################
@@ -281,10 +250,8 @@ fn t2_14_compose_mark_adl_mark() {
     let k_diff = k2 - k0;
     let lazy_total = lazy_pnl(basis_q, k_diff, a0);
 
-    assert!(
-        eager_total == lazy_total,
-        "composition across A-changing ADL event: eager != lazy"
-    );
+    assert!(eager_total == lazy_total,
+        "composition across A-changing ADL event: eager != lazy");
 }
 
 // ############################################################################
@@ -297,7 +264,7 @@ fn t2_14_compose_mark_adl_mark() {
 fn t3_14_epoch_mismatch_forces_terminal_close() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000_000, 100, 0).unwrap();
 
     let pos_mul: u8 = kani::any();
     kani::assume(pos_mul > 0);
@@ -321,7 +288,7 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 
-    let result = engine.settle_side_effects(idx as usize);
+    let result = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(result.is_ok());
 
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
@@ -332,12 +299,9 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
     // PnL assertion: the settlement must credit the correct amount
     let abs_basis = pos as u128;
     let den = ADL_ONE * POS_SCALE;
-    let expected_pnl_delta =
-        wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
-    assert!(
-        engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
-        "epoch mismatch PnL must match wide_signed_mul_div_floor_from_k_pair"
-    );
+    let expected_pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
+    assert!(engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
+        "epoch mismatch PnL must match wide_signed_mul_div_floor_from_k_pair");
 }
 
 #[kani::proof]
@@ -346,7 +310,7 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
 fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10_000_000, 100, 0).unwrap();
 
     let pos = POS_SCALE as i128;
     engine.accounts[idx as usize].position_basis_q = pos;
@@ -372,7 +336,7 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 
-    let result = engine.settle_side_effects(idx as usize);
+    let result = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(result.is_ok());
 
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
@@ -383,12 +347,9 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     // PnL assertion: the settlement must credit the correct amount
     let abs_basis = pos as u128;
     let den = ADL_ONE * POS_SCALE;
-    let expected_pnl_delta =
-        wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
-    assert!(
-        engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
-        "epoch mismatch PnL must match wide_signed_mul_div_floor_from_k_pair"
-    );
+    let expected_pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
+    assert!(engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
+        "epoch mismatch PnL must match wide_signed_mul_div_floor_from_k_pair");
 }
 
 // ############################################################################
@@ -416,11 +377,7 @@ fn t7_28a_noncompounding_floor_inequality_correct_direction() {
     kani::assume(den > 0);
 
     let floor_div = |num: i32, d: i32| -> i32 {
-        if num >= 0 {
-            num / d
-        } else {
-            (num - d + 1) / d
-        }
+        if num >= 0 { num / d } else { (num - d + 1) / d }
     };
 
     let pnl_1 = floor_div((basis as i32) * (k1 as i32), den);
@@ -429,14 +386,10 @@ fn t7_28a_noncompounding_floor_inequality_correct_direction() {
 
     let pnl_single = floor_div((basis as i32) * (k2_val as i32), den);
 
-    assert!(
-        total_two_touch <= pnl_single,
-        "two-touch sum must be <= single-touch (floor splits lose fractional parts)"
-    );
-    assert!(
-        pnl_single <= total_two_touch + 1,
-        "single-touch must be at most 1 unit above two-touch sum"
-    );
+    assert!(total_two_touch <= pnl_single,
+        "two-touch sum must be <= single-touch (floor splits lose fractional parts)");
+    assert!(pnl_single <= total_two_touch + 1,
+        "single-touch must be at most 1 unit above two-touch sum");
 }
 
 #[kani::proof]
@@ -466,11 +419,7 @@ fn t7_28b_noncompounding_exact_additivity_divisible_increments() {
     let k_total = (a_basis as i32) * (dp_total as i32);
 
     let floor_div = |num: i32, d: i32| -> i32 {
-        if num >= 0 {
-            num / d
-        } else {
-            (num - d + 1) / d
-        }
+        if num >= 0 { num / d } else { (num - d + 1) / d }
     };
 
     let pnl_1 = floor_div((basis as i32) * k1, den);
@@ -479,10 +428,8 @@ fn t7_28b_noncompounding_exact_additivity_divisible_increments() {
 
     let pnl_single = floor_div((basis as i32) * k_total, den);
 
-    assert!(
-        total_two_touch == pnl_single,
-        "exact additivity when K increments are multiples of a_basis"
-    );
+    assert!(total_two_touch == pnl_single,
+        "exact additivity when K increments are multiples of a_basis");
 }
 
 // ############################################################################
@@ -516,7 +463,7 @@ fn t6_24_worked_example_regression() {
     let oi_post = oi - q_close;
     assert!(oi_post > 0);
 
-    let delta_k_abs = ((d as u32) * (a_long as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_long as u16) + (oi as u16) - 1) / (oi as u16);
     assert!(delta_k_abs == 64);
     let delta_k = -(delta_k_abs as i32);
     k_long = k_long + delta_k;
@@ -548,7 +495,7 @@ fn t6_25_pure_pnl_bankruptcy_regression() {
     let a_opp = S_ADL_ONE;
     let basis_q = (q_base as u16) * S_POS_SCALE;
 
-    let delta_k_abs = ((d as u32) * (a_opp as u32) + (oi as u32) - 1) / (oi as u32);
+    let delta_k_abs = ((d as u16) * (a_opp as u16) + (oi as u16) - 1) / (oi as u16);
     assert!(delta_k_abs > 0);
 
     let delta_k = -(delta_k_abs as i32);
@@ -558,10 +505,7 @@ fn t6_25_pure_pnl_bankruptcy_regression() {
     assert!(pnl <= 0);
 
     let eager_loss = ((q_base as i32) * (d as i32)) / (oi as i32);
-    assert!(
-        -pnl >= eager_loss,
-        "lazy loss must be >= eager floor loss (conservative)"
-    );
+    assert!(-pnl >= eager_loss, "lazy loss must be >= eager floor loss (conservative)");
 }
 
 #[kani::proof]
@@ -571,7 +515,7 @@ fn t6_26_full_drain_reset_regression() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000_000, 100, 0).unwrap();
 
     let k_snap_val: i8 = kani::any();
     let k_snap = k_snap_val as i128;
@@ -602,7 +546,7 @@ fn t6_26_full_drain_reset_regression() {
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 
-    let result = engine.settle_side_effects(idx as usize);
+    let result = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(result.is_ok());
 
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
@@ -611,12 +555,9 @@ fn t6_26_full_drain_reset_regression() {
     // PnL assertion: settlement must credit the correct amount
     let abs_basis = (POS_SCALE * (pos_mul as u128)) as u128;
     let den = ADL_ONE * POS_SCALE;
-    let expected_pnl_delta =
-        wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
-    assert!(
-        engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
-        "full drain reset PnL must match wide_signed_mul_div_floor_from_k_pair"
-    );
+    let expected_pnl_delta = wide_signed_mul_div_floor_from_k_pair(abs_basis, k_snap, k_epoch_start, den);
+    assert!(engine.accounts[idx as usize].pnl == pnl_before + expected_pnl_delta,
+        "full drain reset PnL must match wide_signed_mul_div_floor_from_k_pair");
 
     assert!(engine.stored_pos_count_long == 0);
     let finalize = engine.finalize_side_reset(Side::Long);
@@ -639,7 +580,7 @@ fn proof_property_43_k_pair_chronology_correctness() {
     // If arguments were swapped, PnL would flip sign.
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 1_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Set up a long position with k_snap = 100
     let pos = 10 * POS_SCALE as i128;
@@ -657,7 +598,7 @@ fn proof_property_43_k_pair_chronology_correctness() {
     let pnl_before = engine.accounts[idx as usize].pnl;
 
     // settle_side_effects uses the real engine ordering
-    let result = engine.settle_side_effects(idx as usize);
+    let result = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(result.is_ok());
 
     let pnl_after = engine.accounts[idx as usize].pnl;
@@ -669,18 +610,14 @@ fn proof_property_43_k_pair_chronology_correctness() {
     let abs_basis = pos as u128;
     let den = ADL_ONE * POS_SCALE;
     let expected = wide_signed_mul_div_floor_from_k_pair(abs_basis, 100i128, 500i128, den);
-    assert!(
-        pnl_delta == expected,
-        "settle PnL must match chronological k_pair computation"
-    );
+    assert!(pnl_delta == expected,
+        "settle PnL must match chronological k_pair computation");
 
     // The WRONG order would give the negation:
     let wrong = wide_signed_mul_div_floor_from_k_pair(abs_basis, 500i128, 100i128, den);
     // If expected != 0, wrong must have opposite sign
     if expected != 0 {
-        assert!(
-            wrong == -expected || (expected > 0 && wrong < 0) || (expected < 0 && wrong > 0),
-            "swapped arguments must produce opposite-sign PnL"
-        );
+        assert!(wrong == -expected || (expected > 0 && wrong < 0) || (expected < 0 && wrong > 0),
+            "swapped arguments must produce opposite-sign PnL");
     }
 }

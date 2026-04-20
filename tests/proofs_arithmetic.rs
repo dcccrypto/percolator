@@ -108,10 +108,7 @@ fn t0_2_mul_div_ceil_algebraic_identity() {
     } else {
         floor
     };
-    assert!(
-        ceil == expected_ceil,
-        "ceil must equal floor + (r != 0 ? 1 : 0)"
-    );
+    assert!(ceil == expected_ceil, "ceil must equal floor + (r != 0 ? 1 : 0)");
 }
 
 #[kani::proof]
@@ -208,10 +205,8 @@ fn t0_4_fee_debt_i128_min() {
     if fc >= 0 {
         assert!(debt == 0, "non-negative fee_credits must have zero debt");
     } else {
-        assert!(
-            debt == (-(fc as i128)) as u128,
-            "negative fee_credits debt must equal abs(fee_credits)"
-        );
+        assert!(debt == (-(fc as i128)) as u128,
+            "negative fee_credits debt must equal abs(fee_credits)");
     }
 }
 
@@ -241,7 +236,7 @@ fn proof_notional_scales_with_price() {
     // through the floor(abs(eff_pos_q) * price / POS_SCALE) formula.
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 10_000_000, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10_000_000, 100, 0).unwrap();
 
     // Give the account a non-zero position
     let q_mul: u8 = kani::any();
@@ -267,59 +262,24 @@ fn proof_notional_scales_with_price() {
 
 /// advance_profit_warmup releases at most reserved_pnl (§4.9)
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn proof_warmup_release_bounded_by_reserved() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     let pnl_val: u16 = kani::any();
     kani::assume(pnl_val > 0 && pnl_val <= 10_000);
     engine.set_pnl(idx as usize, pnl_val as i128);
     // After set_pnl, reserved_pnl tracks the positive PnL increase
     let r_before = engine.accounts[idx as usize].reserved_pnl;
-    engine.restart_warmup_after_reserve_increase(idx as usize);
-
-    let elapsed: u16 = kani::any();
-    kani::assume(elapsed <= 500);
-    engine.current_slot = DEFAULT_SLOT + elapsed as u64;
 
     engine.advance_profit_warmup(idx as usize);
     let r_after = engine.accounts[idx as usize].reserved_pnl;
 
     // reserved can only decrease or stay the same
-    assert!(
-        r_after <= r_before,
-        "advance_profit_warmup must not increase reserve"
-    );
-}
-
-/// advance_profit_warmup releases at most slope * elapsed (§4.9)
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_warmup_release_bounded_by_slope() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = engine.add_user(0).unwrap();
-    engine.deposit(idx, 100_000, DEFAULT_SLOT).unwrap();
-
-    engine.set_pnl(idx as usize, 50_000i128);
-    engine.restart_warmup_after_reserve_increase(idx as usize);
-
-    let slope = engine.accounts[idx as usize].warmup_slope_per_step;
-    let r_before = engine.accounts[idx as usize].reserved_pnl;
-
-    let elapsed: u16 = kani::any();
-    kani::assume(elapsed <= 500);
-    engine.current_slot = engine.accounts[idx as usize].warmup_started_at_slot + elapsed as u64;
-
-    engine.advance_profit_warmup(idx as usize);
-    let r_after = engine.accounts[idx as usize].reserved_pnl;
-    let released = r_before - r_after;
-
-    let cap = saturating_mul_u128_u64(slope, elapsed as u64);
-    assert!(released <= cap, "release must not exceed slope * elapsed");
+    assert!(r_after <= r_before, "advance_profit_warmup must not increase reserve");
 }
 
 // ============================================================================
@@ -342,16 +302,12 @@ fn t13_59_fused_delta_k_no_double_rounding() {
 
     let new_delta_k = ((d as u32) * (a as u32) + (oi as u32) - 1) / (oi as u32);
 
-    assert!(
-        new_delta_k <= old_delta_k,
-        "fused formula must not exceed old two-step formula"
-    );
+    assert!(new_delta_k <= old_delta_k,
+        "fused formula must not exceed old two-step formula");
 
     let exact_times_oi = (d as u32) * (a as u32);
-    assert!(
-        new_delta_k * (oi as u32) >= exact_times_oi,
-        "fused ceiling must be >= exact value"
-    );
+    assert!(new_delta_k * (oi as u32) >= exact_times_oi,
+        "fused ceiling must be >= exact value");
 }
 
 // ============================================================================
@@ -367,14 +323,14 @@ fn proof_ceil_div_positive_checked() {
     let d: u8 = kani::any();
     kani::assume(d > 0);
 
-    let result = ceil_div_positive_checked(U256::from_u128(n as u128), U256::from_u128(d as u128));
+    let result = ceil_div_positive_checked(
+        U256::from_u128(n as u128),
+        U256::from_u128(d as u128),
+    );
 
     let expected = ((n as u32) + (d as u32) - 1) / (d as u32);
     let result_u128 = result.try_into_u128().unwrap();
-    assert!(
-        result_u128 == expected as u128,
-        "ceil_div_positive_checked mismatch"
-    );
+    assert!(result_u128 == expected as u128, "ceil_div_positive_checked mismatch");
 }
 
 // ============================================================================
@@ -396,7 +352,7 @@ fn proof_haircut_mul_div_conservative() {
     // Set vault > c_tot so residual is positive
     let cap: u16 = kani::any();
     kani::assume(cap >= 100 && cap <= 10_000);
-    engine.set_capital(idx as usize, cap as u128);
+    engine.set_capital(idx as usize, cap as u128).unwrap();
     engine.vault = U128::new((cap as u128) + (pnl_val as u128));
 
     let (h_num, h_den) = engine.haircut_ratio();
@@ -405,10 +361,8 @@ fn proof_haircut_mul_div_conservative() {
 
     // effective_pnl = floor(pnl * h_num / h_den) <= pnl
     let effective = mul_div_floor_u128(pnl_val as u128, h_num, h_den);
-    assert!(
-        effective <= pnl_val as u128,
-        "floor haircut must not overshoot pnl"
-    );
+    assert!(effective <= pnl_val as u128,
+        "floor haircut must not overshoot pnl");
 }
 
 // ============================================================================
@@ -456,10 +410,8 @@ fn proof_wide_signed_mul_div_floor_sign_and_rounding() {
         result.abs_u256().lo() as i128
     };
 
-    assert!(
-        result_i128 == expected as i128,
-        "wide_signed_mul_div_floor must match reference floor division"
-    );
+    assert!(result_i128 == expected as i128,
+        "wide_signed_mul_div_floor must match reference floor division");
 }
 
 // ============================================================================
@@ -504,10 +456,8 @@ fn proof_k_pair_variant_sign_and_rounding() {
         -(((abs_num + d - 1) / d) as i32)
     };
 
-    assert!(
-        result == expected as i128,
-        "K-pair variant must match reference floor division"
-    );
+    assert!(result == expected as i128,
+        "K-pair variant must match reference floor division");
 }
 
 #[kani::proof]
@@ -522,15 +472,9 @@ fn proof_k_pair_variant_zero_diff() {
 
     // k_now == k_then → result must be 0
     let result = wide_signed_mul_div_floor_from_k_pair(
-        basis as u128,
-        k_val as i128,
-        k_val as i128,
-        denom as u128,
+        basis as u128, k_val as i128, k_val as i128, denom as u128,
     );
-    assert!(
-        result == 0,
-        "K-pair with equal k_now and k_then must return 0"
-    );
+    assert!(result == 0, "K-pair with equal k_now and k_then must return 0");
 }
 
 #[kani::proof]

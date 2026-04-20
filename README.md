@@ -1,268 +1,146 @@
 # Percolator
 
-**EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY. NOT AUDITED. Do NOT use with real funds.**
+**EXPERIMENTAL RESEARCH PROJECT — NOT AUDITED. Do NOT use with real funds. This is experimental software provided for learning and research purposes only. Use at your own risk.**
 
-A predictable alternative to ADL — the core risk engine crate for the [Percolator](https://github.com/dcccrypto/percolator-launch) perpetual futures protocol on Solana.
+Risk engine library for permissionless perpetual futures on Solana.
 
-[![Crate](https://img.shields.io/badge/crate-percolator-orange)](https://github.com/dcccrypto/percolator)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Kani Proofs](https://img.shields.io/badge/Kani-157%20proofs-14F195)]()
+A predictable alternative to ADL queues.
 
----
-
-## The Core Idea
-
-If you want the `xy = k` of perpetual futures risk engines — something you can reason about, audit, and run without human intervention — the cleanest move is simple: stop treating profit like money. Treat it like what it really is in a stressed exchange: a junior claim on a shared balance sheet.
+If you want the `xy = k` of perpetual futures risk engines -- something you can reason about, audit, and run without human intervention -- the cleanest move is simple: stop treating profit like money. Treat it like what it really is in a stressed exchange: a junior claim on a shared balance sheet.
 
 > No user can ever withdraw more value than actually exists on the exchange balance sheet.
 
-- **Principal** (capital deposited) is a **senior claim** — always withdrawable.
-- **Profits** are **junior IOUs** — backed by system residual value.
-- A single global ratio `h` determines how much of all profits are actually backed.
-- Profits convert into withdrawable capital through a bounded warmup process.
+## Two Problems, Two Mechanisms
 
-## Why This Is Different From ADL
+A perp exchange has two fairness problems:
 
-Most perp venues use a waterfall: liquidate → insurance absorbs loss → if insufficient, ADL. ADL preserves solvency by forcibly reducing profitable positions. Percolator instead applies a **global pro-rata haircut on profit extraction**.
+1. **Exit fairness:** when the vault is stressed, who gets paid and how much?
+2. **Overhang clearing:** when positions go bankrupt, how does the opposing side absorb the residual without deadlocking the market?
 
-| | ADL | Percolator (Withdrawal-Window) |
-|---|---|---|
-| **Mechanism** | Forcibly closes profitable positions | Haircuts profit extraction |
-| **When triggered** | Insurance depleted | Continuously via `h` |
-| **User experience** | Position deleted without consent | Withdrawable amount reduced |
-| **Recovery** | Manual re-entry | Automatic as `h` recovers |
+Percolator solves them with two independent mechanisms that compose cleanly:
 
-## The Global Coverage Ratio `h`
+- **H** (the haircut ratio) keeps all exits fair.
+- **A/K** (the lazy side indices) keeps all residual overhang clearing fair, and guarantees markets always return to healthy.
+
+---
+
+## H: Fair Exits
+
+Capital is senior. Profit is junior. A single global ratio determines how much profit is real.
 
 ```
 Residual  = max(0, V - C_tot - I)
 
-              min(Residual, PNL_pos_tot)
-    h     =  --------------------------
-                    PNL_pos_tot
+              min(Residual, PNL_matured_pos_tot)
+    h     =  ----------------------------------
+                    PNL_matured_pos_tot
 ```
 
-If the system is fully backed, `h = 1`. If stressed, `h < 1`. Every profitable account is backed by the same fraction `h`. No rankings. No queue. Just proportional equity math.
+If fully backed, `h = 1`. If stressed, `h < 1`. Every profitable account sees the same fraction of its *released* profit:
+
+```
+ReleasedPos_i   = max(PNL_i, 0) - R_i
+effective_pnl_i = floor(ReleasedPos_i * h)
+```
+
+Fresh profit sits in a per-account reserve `R_i` and converts to released (matured) profit through a warmup period. Only matured profit enters the haircut denominator (`PNL_matured_pos_tot`) and the per-account effective PnL. This is the core oracle-manipulation defense — an attacker who spikes a price sees their unrealized gain locked in `R_i`, excluded from both the ratio and their withdrawable amount, until the warmup window passes.
+
+No rankings, no queue priority, no first-come advantage. The floor rounding is conservative — the sum of all effective PnL never exceeds what exists in the vault.
+
+When the system is stressed, `h` falls and less converts. When losses settle or buffers recover, `h` rises. Self-healing.
+
+Flat accounts are always protected — `h` only gates profit extraction, never touches deposited capital.
 
 ---
 
-## Architecture
+## A/K: Fair Overhang Clearing
 
-This crate is a **pure Rust library** with zero dependencies (no `std`, no allocator, no Solana SDK). It implements the `RiskEngine` state machine:
+When a leveraged account goes bankrupt, two things need to happen: remove the position quantity from open interest, and distribute any uncovered deficit across the opposing side.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     percolator (this crate)                 │
-│                                                             │
-│  RiskEngine                                                 │
-│  ├── Account state (capital, PnL, positions, warmup)        │
-│  ├── Trade execution (open, close, flip positions)          │
-│  ├── Margin checks (initial + maintenance margin)           │
-│  ├── Funding rate accrual (anti-retroactive)                │
-│  ├── Warmup/conversion (time-gated profit → capital)        │
-│  ├── Liquidation logic (fee-debt aware)                     │
-│  ├── Insurance fund accounting                              │
-│  └── Global coverage ratio h (haircut computation)          │
-│                                                             │
-│  Properties:                                                │
-│  • Pure accounting — no CPI, no I/O, no signatures          │
-│  • Deterministic — same inputs always produce same outputs  │
-│  • no_std compatible — runs on Solana BPF                   │
-│  • Zero dependencies at runtime                             │
-└─────────────────────────────────────────────────────────────┘
-         │
-         │  Used by:
-         ▼
-┌─────────────────────────┐    ┌──────────────────────┐
-│  percolator-prog        │    │  percolator-stake     │
-│  (Solana on-chain       │    │  (Insurance LP        │
-│   program / wrapper)    │    │   staking program)    │
-└─────────────────────────┘    └──────────────────────┘
-```
+Traditional ADL queues pick specific counterparties and force-close them. Percolator replaces the queue with two global coefficients per side:
 
-### Source Layout
+- **A** scales everyone's effective position equally.
+- **K** accumulates all PnL events (mark, funding, deficit socialization) into one index.
 
 ```
-percolator/
-├── src/
-│   ├── percolator.rs   # RiskEngine implementation (~4000 lines)
-│   └── i128.rs         # Safe i128 arithmetic helpers
-├── tests/
-│   ├── unit_tests.rs   # Unit tests
-│   ├── amm_tests.rs    # AMM integration tests
-│   ├── fuzzing.rs      # Proptest fuzz tests
-│   └── kani.rs         # Kani formal verification proofs
-├── spec.md             # Normative spec (v7) — source of truth
-├── audit.md            # Security audit notes
-├── Cargo.toml
-├── LICENSE             # Apache 2.0
-└── README.md
+effective_pos(i) = floor(basis_i * A / a_basis_i)
+pnl_delta(i)     = floor(|basis_i| * (K - k_snap_i) / (a_basis_i * POS_SCALE))
 ```
 
-### Key Types
+When a liquidation reduces OI, `A` decreases — every account on that side shrinks by the same ratio. When a deficit is socialized, `K` shifts — every account absorbs the same per-unit loss.
 
-```rust
-pub struct RiskEngine {
-    // Global state
-    pub risk_params: RiskParams,
-    pub insurance_balance: U128,
-    pub total_capital: U128,
-    pub total_positive_pnl: U128,
-    pub risk_reduction_threshold: U128,
-    pub last_crank_slot: u64,
-    // ...
-    pub accounts: [Account; MAX_ACCOUNTS],
-}
+No account is singled out. Settlement is O(1) per account and order-independent.
 
-pub struct Account {
-    pub owner: [u8; 32],
-    pub capital: U128,
-    pub pnl: I128,
-    pub position_size: I128,
-    pub entry_price_e6: u64,
-    pub warmup_started_at_slot: u64,
-    pub warmup_slope_per_step: U128,
-    pub funding_index: I128,
-    // ...
-}
-```
+### Markets Always Return to Healthy
+
+A/K guarantees forward progress through a deterministic cycle:
+
+**DrainOnly** — when `A` drops below a precision threshold, no new OI can be added. Positions can only close.
+
+**ResetPending** — when OI reaches zero, the engine snapshots `K`, increments the epoch, and resets `A` back to 1. Remaining accounts settle their residual PnL exactly once when next touched.
+
+**Normal** — once all stale accounts have settled and OI is confirmed zero, the side reopens for trading with full precision.
+
+No admin intervention. No governance vote. The state machine always makes progress.
 
 ---
 
-## Spec
+## How They Compose
 
-The normative specification lives in [`spec.md`](spec.md) (v7). It defines:
+| | H | A/K |
+|---|---|---|
+| **Solves** | Exit fairness | Overhang clearing |
+| **Math** | Pro-rata profit scaling | Pro-rata position/deficit scaling |
+| **Triggered by** | Withdrawal or conversion | Bankrupt liquidation |
+| **Recovery** | Automatic as Residual improves | Deterministic three-phase reset |
 
-1. **Security goals** — principal protection, oracle manipulation safety, conservation, liveness, no zombie poisoning
-2. **Types and scaling** — all amounts in quote token atomic units, prices in `u64 × 1e6`
-3. **Account state machine** — capital, PnL, positions, warmup, funding snapshots
-4. **Trade execution** — initial/maintenance margin, fee computation, position flips
-5. **Funding rate** — anti-retroactive accrual, slot-based intervals
-6. **Warmup/conversion** — time-gated profit → capital with bounded conversion
-7. **Liquidation** — fee-debt-aware, keeper permissionless
-8. **Coverage ratio** — global `h` computation, haircut distribution
-9. **Insurance fund** — top-up, flush, withdrawal policies
+Together:
+- No user can withdraw more than exists.
+- No user is singled out for forced closure.
+- Markets always recover.
+- Flat accounts keep their deposits.
+
+A/K fairness is exact for open-position economics. H fairness is exact only for the currently stored realized claim set, not for the economically "true" claim set you would get after globally cranking everyone.
 
 ---
 
-## Formal Verification
+## Features
 
-**157 Kani proofs** covering conservation, principal protection, isolation, and no-teleport properties:
+- **v12.17 two-bucket warmup** — unrealized profit sits in a scheduled then pending reserve before entering the matured haircut denominator, bounding oracle-manipulation exposure
+- **Per-side funding** — long and short funding indices (F coefficients) are tracked independently, enabling asymmetric funding rates
+- **ADL via A/K coefficients** — position overhang is cleared lazily without singling out counterparties; O(1) per account, order-independent
+- **Three-phase side reset** — `DrainOnly` → `ResetPending` → `Normal` guarantees markets always recover without admin intervention
+- **No external dependencies** — pure `no_std` compatible Rust library; no CPI, no token transfers, no signer checks
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| Inductive | 11 | Multi-step invariant proofs (conservation across sequences) |
-| Strong | 144 | Single-step property proofs (margin, liquidation, warmup, funding) |
-| Unit test | 2 | Boundary condition checks via Kani |
-
-### Running Kani Proofs
-
-> **Kani runs locally only** — it is not run automatically on every PR (removed in [#47](https://github.com/dcccrypto/percolator/pull/47) due to CI runtime). If your PR touches math, proof logic, or invariant code, run Kani locally before merging. You can also trigger a run via the [Kani (Manual)](../../actions/workflows/kani-manual.yml) GitHub Actions workflow.
+## Build and Test
 
 ```bash
-# Install Kani (one-time)
+# Run the full test suite (uses MAX_ACCOUNTS=64 for speed)
+cargo test --features test
+
+# Run property tests and edge-case harnesses
+cargo test --features test -- --include-ignored
+
+# Run Kani formal verification proofs (one-time setup required)
 cargo install --locked kani-verifier
 cargo kani setup
+cargo kani
 
-# Run all proofs
-cargo kani --tests --harness proof_
-
-# Run a specific harness
-cargo kani --tests --harness proof_deposit_preserves_inv_inductive
+# 471 Kani proof harnesses, 1,265 tests, 0 failures
 ```
 
-### Property Tests
+## Security
 
-The crate also includes **proptest** fuzzing for randomized exploration:
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the full trust model, known deferred findings, and deployment checklist.
 
-```bash
-cargo test --features fuzz
-```
+## Specification
 
----
+The normative spec for v12.17 is in [spec.md](spec.md). It covers the H haircut ratio, A/K coefficient mechanics, two-bucket warmup math, funding computation, and all state machine transitions.
 
-## Build & Test
+## Open Source
 
-### Prerequisites
-
-- **Rust** (stable, 2021 edition)
-- For Kani: `cargo-kani` (see [Kani docs](https://model-checking.github.io/kani/))
-
-### Commands
-
-```bash
-# Run all unit and integration tests
-cargo test
-
-# Run with specific MAX_ACCOUNTS size
-cargo test --features test     # MAX_ACCOUNTS=64  (~0.17 SOL)
-cargo test --features small    # MAX_ACCOUNTS=256 (~0.68 SOL)
-cargo test --features medium   # MAX_ACCOUNTS=1024 (~2.7 SOL)
-cargo test                     # MAX_ACCOUNTS=4096 (~6.9 SOL, default)
-
-# Run proptest fuzz tests
-cargo test --features fuzz
-
-# Run Kani formal verification
-cargo kani --tests
-
-# Build for Solana BPF (no-entrypoint, library only)
-cargo build --target bpfel-unknown-unknown --release
-```
-
-### Feature Flags
-
-| Feature | Effect |
-|---------|--------|
-| `test` | `MAX_ACCOUNTS=64` — small slab for fast tests |
-| `small` | `MAX_ACCOUNTS=256` — medium slab |
-| `medium` | `MAX_ACCOUNTS=1024` — large slab |
-| (default) | `MAX_ACCOUNTS=4096` — production slab |
-| `fuzz` | Enable proptest fuzzing harnesses |
-
----
-
-## Usage as a Dependency
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-percolator = { git = "https://github.com/dcccrypto/percolator.git", branch = "master" }
-```
-
-With a size feature:
-
-```toml
-percolator = { git = "https://github.com/dcccrypto/percolator.git", branch = "master", features = ["small"] }
-```
-
----
-
-## Concrete Example
-
-**Fully solvent:** `Residual = 150`, `PNL_pos_tot = 120` → `h = 1` (fully backed)
-
-**Stressed:** `Residual = 50`, `PNL_pos_tot = 200` → `h = 0.25` (each dollar of profit is backed by 25 cents)
+Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
 
 ## References
 
-- Tarun Chitra, *Autodeleveraging: Impossibilities and Optimization*, arXiv:2512.01112, 2025. [arxiv.org](https://arxiv.org/abs/2512.01112)
-
----
-
-## Related Repositories
-
-| Repository | Description |
-|-----------|-------------|
-| [percolator-prog](https://github.com/dcccrypto/percolator-prog) | Solana on-chain program (wrapper around this crate) |
-| [percolator-matcher](https://github.com/dcccrypto/percolator-matcher) | Reference matcher program for LP pricing |
-| [percolator-stake](https://github.com/dcccrypto/percolator-stake) | Insurance LP staking program |
-| [percolator-sdk](https://github.com/dcccrypto/percolator-sdk) | TypeScript SDK for client integration |
-| [percolator-ops](https://github.com/dcccrypto/percolator-ops) | Operations dashboard |
-| [percolator-mobile](https://github.com/dcccrypto/percolator-mobile) | Solana Seeker mobile trading app |
-| [percolator-launch](https://github.com/dcccrypto/percolator-launch) | Full-stack launch platform (monorepo) |
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE).
+- Tarun Chitra, *Autodeleveraging: Impossibilities and Optimization*, arXiv:2512.01112, 2025. https://arxiv.org/abs/2512.01112

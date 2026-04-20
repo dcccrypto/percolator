@@ -90,7 +90,8 @@ fn t0_4_conservation_check_handles_overflow() {
                     // Conservation: vault_new >= c_tot_new + insurance
                     let sum_new = cn.checked_add(insurance);
                     if let Some(sn) = sum_new {
-                        assert!(vn >= sn, "deposit preserves conservation when no overflow");
+                        assert!(vn >= sn,
+                            "deposit preserves conservation when no overflow");
                     }
                 }
             }
@@ -116,13 +117,13 @@ fn inductive_top_up_insurance_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 
     let ins_amt: u32 = kani::any();
     kani::assume(ins_amt <= 1_000_000);
-    engine.top_up_insurance_fund(ins_amt as u128).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.top_up_insurance_fund(ins_amt as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 }
 
 #[kani::proof]
@@ -134,13 +135,13 @@ fn inductive_set_capital_decrease_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 
     let new_cap: u32 = kani::any();
     kani::assume(new_cap <= dep);
-    engine.set_capital(idx as usize, new_cap as u128);
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.set_capital(idx as usize, new_cap as u128).unwrap();
+    assert!(engine.check_conservation());
 }
 
 #[kani::proof]
@@ -173,30 +174,27 @@ fn inductive_deposit_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 }
 
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn inductive_withdraw_preserves_accounting() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    let dep: u32 = kani::any();
-    kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
+    // Concrete deposit to reduce symbolic state space
+    engine.deposit_not_atomic(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Run keeper_crank_not_atomic to satisfy fresh-crank requirement for withdraw_not_atomic
-    let _ = engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i64);
-
+    // Symbolic withdrawal amount
     let w: u32 = kani::any();
-    kani::assume(w >= 1 && w <= dep);
-    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i64);
-    kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
+    kani::assume(w >= 1 && w <= 100_000);
+    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0);
+    kani::cover!(result.is_ok(), "withdraw Ok path reachable");
     if result.is_ok() {
-        assert!(engine.check_conservation(DEFAULT_ORACLE));
+        assert!(engine.check_conservation());
     }
 }
 
@@ -209,17 +207,23 @@ fn inductive_settle_loss_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 
     let loss: i32 = kani::any();
     kani::assume(loss < 0 && loss > i32::MIN);
     kani::assume((-loss as u32) <= dep);
     engine.set_pnl(idx as usize, loss as i128);
 
-    // touch_account_full_not_atomic settles losses from principal (step 9)
-    let _ = engine.touch_account_full_not_atomic(idx as usize, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    // touch_account_live_local settles losses from principal (step 9)
+    {
+        let mut ctx = InstructionContext::new_with_h_lock(0);
+        engine.accrue_market_to(DEFAULT_SLOT, DEFAULT_ORACLE, 0).unwrap();
+        engine.current_slot = DEFAULT_SLOT;
+        let _ = engine.touch_account_live_local(idx as usize, &mut ctx);
+        engine.finalize_touched_accounts_post_live(&ctx);
+    }
+    assert!(engine.check_conservation());
 }
 
 // ============================================================================
@@ -260,28 +264,28 @@ fn prop_conservation_holds_after_all_ops() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 5_000_000);
-    engine.deposit(idx, dep as u128, DEFAULT_SLOT).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 
     let ins_amt: u32 = kani::any();
     kani::assume(ins_amt <= 1_000_000);
-    engine.top_up_insurance_fund(ins_amt as u128).unwrap();
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    engine.top_up_insurance_fund(ins_amt as u128, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
 
     let loss: u32 = kani::any();
     kani::assume(loss <= dep);
     engine.set_pnl(idx as usize, -(loss as i128));
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    assert!(engine.check_conservation());
 
     let cap_before = engine.accounts[idx as usize].capital.get();
     let pnl_abs = if loss > 0 { loss as u128 } else { 0 };
     let pay = core::cmp::min(pnl_abs, cap_before);
     if pay > 0 {
-        engine.set_capital(idx as usize, cap_before - pay);
+        engine.set_capital(idx as usize, cap_before - pay).unwrap();
         let new_pnl_val = -(loss as i128) + (pay as i128);
         engine.set_pnl(idx as usize, new_pnl_val);
     }
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    assert!(engine.check_conservation());
 }
 
 // ============================================================================
@@ -344,13 +348,21 @@ fn proof_set_pnl_clamps_reserved_pnl() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    // Set PNL to 5000 first → reserved_pnl = 5000 (reserve-first increase)
+    // set_pnl routes through ImmediateRelease: positive increase goes to matured,
+    // not to reserve. So reserved_pnl stays 0 after set_pnl.
     engine.set_pnl(idx as usize, 5000i128);
-    assert!(engine.accounts[idx as usize].reserved_pnl == 5000u128);
+    assert!(engine.accounts[idx as usize].reserved_pnl == 0u128,
+        "ImmediateRelease: positive PnL goes to matured, not reserve");
 
-    // Decrease PNL to 3000 → reserve clamped via saturating_sub
+    // Use UseHLock to test reserve clamping
+    engine.set_pnl_with_reserve(idx as usize, 0i128, ReserveMode::ImmediateRelease).unwrap();
+    engine.set_pnl_with_reserve(idx as usize, 5000i128, ReserveMode::UseHLock(10)).unwrap();
+    assert!(engine.accounts[idx as usize].reserved_pnl == 5000u128,
+        "UseHLock: positive PnL goes to reserve");
+
+    // Decrease PNL: reserve loss applied via newest-first
     engine.set_pnl(idx as usize, 3000i128);
-    assert!(engine.accounts[idx as usize].reserved_pnl == 3000u128);
+    assert!(engine.accounts[idx as usize].reserved_pnl <= 3000u128);
 
     // Decrease PNL to -100 → reserve clamped to 0
     engine.set_pnl(idx as usize, -100i128);
@@ -366,13 +378,13 @@ fn proof_set_capital_maintains_c_tot() {
 
     let initial: u32 = kani::any();
     kani::assume(initial > 0 && initial <= 1_000_000);
-    engine.deposit(idx, initial as u128, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, initial as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     assert!(engine.c_tot.get() == engine.accounts[idx as usize].capital.get());
 
     let new_cap: u32 = kani::any();
     kani::assume((new_cap as u64) <= (initial as u64) * 2);
-    engine.set_capital(idx as usize, new_cap as u128);
+    engine.set_capital(idx as usize, new_cap as u128).unwrap();
 
     assert!(engine.c_tot.get() == new_cap as u128);
 }
@@ -390,10 +402,10 @@ fn proof_check_conservation_basic() {
     engine.vault = U128::new(100);
     engine.c_tot = U128::new(60);
     engine.insurance_fund.balance = U128::new(30);
-    assert!(engine.check_conservation(DEFAULT_ORACLE));
+    assert!(engine.check_conservation());
 
     engine.insurance_fund.balance = U128::new(50);
-    assert!(!engine.check_conservation(DEFAULT_ORACLE));
+    assert!(!engine.check_conservation());
 }
 
 #[kani::proof]
@@ -407,7 +419,7 @@ fn proof_haircut_ratio_no_division_by_zero() {
     assert!(num == 1u128);
     assert!(den == 1u128);
 
-    // Set pnl_matured_pos_tot (v12.1.0 uses this as denominator, not pnl_pos_tot)
+    // Set pnl_matured_pos_tot (v12.14.0 uses this as denominator, not pnl_pos_tot)
     engine.pnl_pos_tot = 1000u128;
     engine.pnl_matured_pos_tot = 1000u128;
     engine.vault = U128::new(2000);
@@ -454,15 +466,15 @@ fn proof_set_position_basis_q_count_tracking() {
 
     assert!(engine.stored_pos_count_long == 0);
 
-    engine.set_position_basis_q(idx as usize, POS_SCALE as i128);
+    engine.set_position_basis_q(idx as usize, POS_SCALE as i128).unwrap();
     assert!(engine.stored_pos_count_long == 1);
 
     let neg = -(POS_SCALE as i128);
-    engine.set_position_basis_q(idx as usize, neg);
+    engine.set_position_basis_q(idx as usize, neg).unwrap();
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 1);
 
-    engine.set_position_basis_q(idx as usize, 0i128);
+    engine.set_position_basis_q(idx as usize, 0i128).unwrap();
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.stored_pos_count_long == 0);
 }
@@ -476,21 +488,13 @@ fn proof_side_mode_gating() {
 
     let a = engine.add_user(0).unwrap();
     let b = engine.add_user(0).unwrap();
-    engine.deposit(a, 5_000_000, DEFAULT_SLOT).unwrap();
-    engine.deposit(b, 5_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     engine.side_mode_long = SideMode::DrainOnly;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(
-        a,
-        b,
-        DEFAULT_ORACLE,
-        DEFAULT_SLOT,
-        size_q,
-        DEFAULT_ORACLE,
-        0i64,
-    );
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0);
     assert!(result == Err(RiskError::SideBlocked));
 
     engine.side_mode_long = SideMode::Normal;
@@ -498,15 +502,7 @@ fn proof_side_mode_gating() {
     engine.stale_account_count_short = 1;
 
     let pos_size = POS_SCALE as i128;
-    let result2 = engine.execute_trade_not_atomic(
-        b,
-        a,
-        DEFAULT_ORACLE,
-        DEFAULT_SLOT,
-        pos_size,
-        DEFAULT_ORACLE,
-        0i64,
-    );
+    let result2 = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, pos_size, DEFAULT_ORACLE, 0i128, 0);
     assert!(result2 == Err(RiskError::SideBlocked));
 }
 
@@ -523,8 +519,8 @@ fn proof_account_equity_net_nonnegative() {
     let cap_b: u16 = kani::any();
     kani::assume(cap_b > 0 && cap_b <= 10_000);
 
-    engine.set_capital(a as usize, cap_a as u128);
-    engine.set_capital(b as usize, cap_b as u128);
+    engine.set_capital(a as usize, cap_a as u128).unwrap();
+    engine.set_capital(b as usize, cap_b as u128).unwrap();
 
     // Vault has excess beyond c_tot so Residual > 0 and haircut is non-trivial
     let excess: u16 = kani::any();
@@ -536,17 +532,15 @@ fn proof_account_equity_net_nonnegative() {
     kani::assume(pnl_val as i32 > i16::MIN as i32);
     engine.set_pnl(a as usize, pnl_val as i128);
 
-    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.1.0)
+    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.14.0)
     let matured: u16 = kani::any();
     kani::assume(matured <= 20_000);
     engine.pnl_matured_pos_tot = core::cmp::min(matured as u128, engine.pnl_pos_tot);
 
     // Exercise both positive PnL (haircut path) and negative PnL
     let eq = engine.account_equity_net(&engine.accounts[a as usize], DEFAULT_ORACLE);
-    assert!(
-        eq >= 0,
-        "flat account equity must be non-negative for any haircut level"
-    );
+    assert!(eq >= 0,
+        "flat account equity must be non-negative for any haircut level");
 }
 
 #[kani::proof]

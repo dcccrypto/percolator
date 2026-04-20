@@ -39,4 +39,3 @@ desktop.ini
 .env
 .env.local
 test-ledger/
-rust_out

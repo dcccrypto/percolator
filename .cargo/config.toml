@@ -1,5 +1,2 @@
-# RiskEngine is ~6 MB at MAX_ACCOUNTS=4096 and `new()` constructs on the
-# stack.  The default 8 MB thread stack is too small in debug builds.
-# Bump all test threads to 32 MB so that every `cargo test` just works.
 [env]
-RUST_MIN_STACK = "33554432"  # 32 MB
+RUST_MIN_STACK = "8388608"
