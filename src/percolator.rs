@@ -116,9 +116,11 @@ pub const FUNDING_DEN: u128 = 1_000_000_000;
 /// ADL_ONE=1e15, MAX_ORACLE_PRICE=1e12, and the init-time envelope
 /// `ADL_ONE * MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot *
 /// min_funding_lifetime_slots <= i128::MAX`, a rate ceiling of 1e4 allows
-/// a worst-case cumulative-F lifetime of up to ~1.7e7 slots
-/// (~6.8 years at 400ms slot time at sustained max-rate funding in one
-/// direction; realistic operating rates are orders of magnitude smaller).
+/// a worst-case cumulative-F lifetime of up to ~1.7e7 slots (400ms slots
+/// → ~7.89e7 slots/year, so ~0.22 years ≈ 2.6 months at sustained
+/// max-rate funding in one direction). Realistic operating rates are
+/// orders of magnitude smaller; observed horizons at typical rates are
+/// measured in decades to centuries.
 pub const MAX_ABS_FUNDING_E9_PER_SLOT: i128 = 10_000;
 
 // Normative bounds (spec §1.4)
@@ -471,12 +473,15 @@ pub struct RiskParams {
     /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000, ADL_ONE = 1e15, and
     /// MAX_ORACLE_PRICE = 1e12, the cumulative envelope
     ///   rate * lifetime <= i128::MAX / (ADL_ONE * MAX_ORACLE_PRICE) ≈ 1.7e11
-    /// gives (at 400ms slots, ~7.9e7 slots/year):
-    ///   rate <= 10_000 (global max) ⇒ lifetime ~1.7e7 slots ≈ 6.8 years
-    ///   rate <=  1_000              ⇒ lifetime ~1.7e8 slots ≈ 68 years
-    ///   rate <=    100              ⇒ lifetime ~1.7e9 slots ≈ 680 years
-    /// Tests MAY set this equal to `max_accrual_dt_slots` to preserve the
-    /// prior per-call-only semantics.
+    /// gives (at 400ms slots ≈ 7.89e7 slots/year):
+    ///   rate <= 10_000 (global max) ⇒ lifetime ~1.7e7 slots  ≈ 2.6 months
+    ///   rate <=  1_000              ⇒ lifetime ~1.7e8 slots  ≈ 2.15 years
+    ///   rate <=    100              ⇒ lifetime ~1.7e9 slots  ≈ 21.5 years
+    ///   rate <=     10              ⇒ lifetime ~1.7e10 slots ≈ 215  years
+    /// These are sustained-worst-case lifetimes. At realistic operating
+    /// rates (orders of magnitude below the ceiling), observed horizons
+    /// are much longer. Tests MAY set this equal to `max_accrual_dt_slots`
+    /// to preserve the prior per-call-only semantics.
     ///
     /// Saturation at `max_abs_funding_e9_per_slot` is the worst case;
     /// realistic operating rates are orders of magnitude smaller, so the
