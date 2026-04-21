@@ -267,19 +267,20 @@ fn proof_funding_price_basis_timing() {
     engine.fund_px_last = 500;      // old price for funding basis (v12.16.5)
     engine.last_market_slot = 0;
 
-    // Call with new oracle price 1500, rate = 10% in ppb
-    let result = engine.accrue_market_to(1, 1500, 100_000_000);
+    // Call with new oracle price 1500, rate at the new global cap.
+    let rate: i128 = 10_000;
+    let result = engine.accrue_market_to(1, 1500, rate);
     assert!(result.is_ok());
 
     // v12.16.5: Funding goes to F, mark goes to K.
     // fund_px_0 = 500 (last_oracle_price before this call)
-    // fund_num_total = 500 * 100_000_000 * 1 = 50_000_000_000
-    // F_long -= ADL_ONE * 50_000_000_000
+    // fund_num_total = 500 * 10_000 * 1 = 5_000_000
+    // F_long -= ADL_ONE * 5_000_000
     // K_long only has mark: ΔP = 1500-500 = 1000, K_long += ADL_ONE * 1000
     let expected_k_long = (ADL_ONE as i128) * 1000; // mark only
     assert_eq!(engine.adl_coeff_long, expected_k_long,
         "K_long must reflect mark only, not funding");
-    let expected_f_long = -((ADL_ONE as i128) * 50_000_000_000i128);
+    let expected_f_long = -((ADL_ONE as i128) * 5_000_000i128);
     assert_eq!(engine.f_long_num, expected_f_long,
         "F_long must use fund_px_0=500, not oracle=1500");
 

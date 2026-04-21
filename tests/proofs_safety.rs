@@ -1309,10 +1309,19 @@ fn proof_gc_reclaims_flat_dust_capital() {
     assert!(!engine.is_used(idx as usize),
         "GC must reclaim flat account with dust capital below MIN_INITIAL_DEPOSIT");
 
-    // Dust capital must be swept to insurance (not lost)
+    // Dust capital must be swept to insurance (not lost). v12.19 adds a
+    // sweep of any vault ↔ (c_tot + insurance) residual into insurance
+    // once the market is fully empty (num_used_accounts == 0 after the
+    // free), so insurance may be *more* than just the dust — it absorbs
+    // any stranded surplus. The dust-sweep invariant is ins_after >=
+    // ins_before + cap, and after the empty-market close vault must
+    // equal insurance (no stranded rounding surplus).
     let ins_after = engine.insurance_fund.balance.get();
-    assert!(ins_after == ins_before + cap,
+    assert!(ins_after >= ins_before + cap,
         "dust capital must be swept into insurance fund");
+    assert!(engine.vault.get() == ins_after,
+        "after empty-market close, vault must equal insurance");
+    let _ = vault_before; // Retained for potential future assertions.
 
     // Conservation must hold
     assert!(engine.check_conservation());
