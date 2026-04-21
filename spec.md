@@ -147,7 +147,7 @@ Global hard bounds:
 - `MAX_OI_SIDE_Q = 100_000_000_000_000`
 - `MAX_ACCOUNT_NOTIONAL = 100_000_000_000_000_000_000`
 - `MAX_PROTOCOL_FEE_ABS = 1_000_000_000_000_000_000_000_000_000_000_000_000`
-- `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT = 1_000_000_000`
+- `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT = 10_000`
 - `MAX_TRADING_FEE_BPS = 10_000`
 - `MAX_INITIAL_BPS = 10_000`
 - `MAX_MAINTENANCE_BPS = 10_000`
@@ -200,7 +200,7 @@ Configured values MUST satisfy:
   - `cfg_min_funding_lifetime_slots >= cfg_max_accrual_dt_slots`
   - `ADL_ONE * MAX_ORACLE_PRICE * cfg_max_abs_funding_e9_per_slot * cfg_min_funding_lifetime_slots <= i128::MAX` (cumulative lifetime floor)
   - both validations MUST be performed in an exact wide signed domain of at least 256 bits, or a formally equivalent exact method
-  - `cfg_min_funding_lifetime_slots` is the deployment's guaranteed cumulative-F lifetime at sustained worst-case rate. Production deployments SHOULD pick a value comfortably beyond any planned market horizon (at 400ms slots: ~7.9e7 slots/year, so ~8e9 slots ≈ 100 years; ~1e10 slots ≈ 127 years). Deployments MUST NOT leave `cfg_max_abs_funding_e9_per_slot` at `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT` (1e9) while also expecting a long lifetime — at that ceiling the invariant forces `cfg_min_funding_lifetime_slots <= 170`, i.e. ~68 seconds at 400ms slots. With `ADL_ONE = 1e15` and `MAX_ORACLE_PRICE = 1e12`: `rate <= ~170` gives ~1e9 slots (~12.7 years); `rate <= ~21` gives ~8e9 slots (~100 years). Deployments that want a multi-year lifetime MUST lower `cfg_max_abs_funding_e9_per_slot` accordingly. Realistic operating funding rates are orders of magnitude below the configured ceiling, so observed F-saturation horizons are typically far longer than this floor guarantees.
+  - `cfg_min_funding_lifetime_slots` is the deployment's guaranteed cumulative-F lifetime at sustained worst-case rate. Production deployments SHOULD pick a value comfortably beyond any planned market horizon. With the tightened `GLOBAL_MAX_ABS_FUNDING_E9_PER_SLOT = 10_000`, `ADL_ONE = 1e15`, and `MAX_ORACLE_PRICE = 1e12`, the cumulative envelope `rate * lifetime <= i128::MAX / (ADL_ONE * MAX_ORACLE_PRICE) ≈ 1.7e11` allows `cfg_min_funding_lifetime_slots` up to `~1.7e7` at the global ceiling — about 6.8 years at 400ms slots. Lower rates give proportionally longer lifetimes: `rate <= 1_000` → up to `~1.7e8` slots (~68 years); `rate <= 100` → up to `~1.7e9` slots (~680 years). Realistic operating funding rates are orders of magnitude below the configured ceiling, so observed F-saturation horizons are typically far longer than this floor guarantees.
 
 If the deployment also defines a stale-market resolution delay `permissionless_resolve_stale_slots` and expects permissionless resolution to remain callable after that delay, then initialization MUST additionally require:
 

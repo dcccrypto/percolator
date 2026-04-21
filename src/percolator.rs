@@ -108,8 +108,18 @@ pub const MAX_ORACLE_PRICE: u64 = 1_000_000_000_000;
 /// FUNDING_DEN = 1_000_000_000 (spec v12.15 §5.4)
 pub const FUNDING_DEN: u128 = 1_000_000_000;
 
-/// MAX_ABS_FUNDING_E9_PER_SLOT = 1_000_000_000 (spec §1.4, parts-per-billion)
-pub const MAX_ABS_FUNDING_E9_PER_SLOT: i128 = 1_000_000_000;
+/// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
+///
+/// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
+/// set far below the 1e9 parts-per-billion maximum so cumulative F_side_num
+/// cannot saturate `i128` within a production market horizon. With
+/// ADL_ONE=1e15, MAX_ORACLE_PRICE=1e12, and the init-time envelope
+/// `ADL_ONE * MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot *
+/// min_funding_lifetime_slots <= i128::MAX`, a rate ceiling of 1e4 allows
+/// a worst-case cumulative-F lifetime of up to ~1.7e7 slots
+/// (~6.8 years at 400ms slot time at sustained max-rate funding in one
+/// direction; realistic operating rates are orders of magnitude smaller).
+pub const MAX_ABS_FUNDING_E9_PER_SLOT: i128 = 10_000;
 
 // Normative bounds (spec §1.4)
 pub const MAX_VAULT_TVL: u128 = 10_000_000_000_000_000;
@@ -457,18 +467,16 @@ pub struct RiskParams {
     /// (cumulative bound must be at least as strong as per-call).
     ///
     /// Production deployments SHOULD pick a lifetime comfortably beyond
-    /// any planned market horizon. At 400ms slots: ~7.9e7 slots/year, so
-    /// ~8e9 slots ≈ 100 years; ~1e10 slots ≈ 127 years. Tests MAY set
-    /// this equal to `max_accrual_dt_slots` to preserve the prior
-    /// per-call-only semantics.
-    ///
-    /// IMPORTANT deployment trap: at `max_abs_funding_e9_per_slot = 1e9`
-    /// (the GLOBAL ceiling), the invariant forces
-    /// `min_funding_lifetime_slots <= 170` — about 68 seconds at 400ms.
-    /// Deployments that want a multi-year lifetime MUST lower the rate
-    /// ceiling. With ADL_ONE = 1e15 and MAX_ORACLE_PRICE = 1e12:
-    ///   rate <= ~170 ⇒ lifetime ~1e9 slots ≈ 12.7 years
-    ///   rate <= ~21  ⇒ lifetime ~8e9 slots ≈ 100 years
+    /// any planned market horizon. With the tightened global rate ceiling
+    /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000, ADL_ONE = 1e15, and
+    /// MAX_ORACLE_PRICE = 1e12, the cumulative envelope
+    ///   rate * lifetime <= i128::MAX / (ADL_ONE * MAX_ORACLE_PRICE) ≈ 1.7e11
+    /// gives (at 400ms slots, ~7.9e7 slots/year):
+    ///   rate <= 10_000 (global max) ⇒ lifetime ~1.7e7 slots ≈ 6.8 years
+    ///   rate <=  1_000              ⇒ lifetime ~1.7e8 slots ≈ 68 years
+    ///   rate <=    100              ⇒ lifetime ~1.7e9 slots ≈ 680 years
+    /// Tests MAY set this equal to `max_accrual_dt_slots` to preserve the
+    /// prior per-call-only semantics.
     ///
     /// Saturation at `max_abs_funding_e9_per_slot` is the worst case;
     /// realistic operating rates are orders of magnitude smaller, so the

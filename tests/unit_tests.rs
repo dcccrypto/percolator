@@ -24,9 +24,9 @@ fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 1_000,
-        max_abs_funding_e9_per_slot: 100_000_000,
-        min_funding_lifetime_slots: 1_000,
+        max_accrual_dt_slots: 10_000_000,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
     }
 }
@@ -996,13 +996,15 @@ fn trade_at_position_cap_still_rejects_real_overflow() {
 fn validate_params_rejects_short_funding_lifetime() {
     // Regression: validate_params must refuse any (max_rate, min_lifetime)
     // pair that allows cumulative F saturation within min_lifetime_slots.
-    // Pick rate * lifetime > 1.7e11 / (ADL_ONE * MAX_ORACLE_PRICE). The
-    // per-call envelope is satisfied, but the cumulative bound is not.
+    // Pick max_rate <= MAX_ABS_FUNDING_E9_PER_SLOT (10_000) and a lifetime
+    // that trips the cumulative bound (rate * lifetime > i128::MAX / (ADL_ONE
+    // * MAX_ORACLE_PRICE) ≈ 1.7e11). Per-call envelope is satisfied
+    // because max_accrual_dt_slots is tiny.
     let mut params = default_params();
     params.max_accrual_dt_slots = 1;
-    params.max_abs_funding_e9_per_slot = 1_000_000;
-    // rate * lifetime = 1e6 * 1e6 = 1e12 > 1.7e11 → cumulative assert panics.
-    params.min_funding_lifetime_slots = 1_000_000;
+    params.max_abs_funding_e9_per_slot = 10_000;
+    // rate * lifetime = 1e4 * 2e7 = 2e11 > 1.7e11 → cumulative assert panics.
+    params.min_funding_lifetime_slots = 20_000_000;
     let _e = RiskEngine::new(params);
 }
 
@@ -2098,7 +2100,7 @@ fn test_accrue_market_applies_funding_transfer() {
     let k_long_before = engine.adl_coeff_long;
 
     // Positive rate: longs pay shorts (10% in ppb)
-    engine.accrue_market_to(10, 1000, 100_000_000).unwrap();
+    engine.accrue_market_to(10, 1000, 10_000).unwrap();
 
     // fund_num_total = 1000 * 100_000_000 * 10 = 1_000_000_000_000
     // F_long -= A_long * fund_num_total = ADL_ONE * 1e12 = 1e18
@@ -4908,11 +4910,11 @@ fn funding_basic_sign_convention() {
 
     let size = make_size_q(100);
     // Trade at oracle price — no slippage, no mark delta
-    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 50_000_000i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 5_000i128, 0, 100).unwrap();
 
     // Manually accrue to verify funding changes F (v12.16.5: funding goes to F, not K)
     let f_long_before = engine.f_long_num;
-    engine.accrue_market_to(slot + 10, oracle, 50_000_000).unwrap();
+    engine.accrue_market_to(slot + 10, oracle, 5_000).unwrap();
     assert!(engine.f_long_num != f_long_before,
         "F_long must change from funding: before={} after={}",
         f_long_before, engine.f_long_num);
@@ -4925,7 +4927,7 @@ fn funding_basic_sign_convention() {
     engine.touch_account_live_local(b as usize, &mut ctx).unwrap();
     engine.finalize_touched_accounts_post_live(&ctx);
 
-    engine.settle_account_not_atomic(b, oracle, slot + 10, 50_000_000i128, 0, 100).unwrap();
+    engine.settle_account_not_atomic(b, oracle, slot + 10, 5_000i128, 0, 100).unwrap();
 
     // Funding applied: long loses capital (PnL settled to principal), short gains.
     // After settle_losses, negative PnL becomes a capital decrease and PnL resets to 0.
@@ -5110,12 +5112,9 @@ fn test_funding_partition_invariance() {
     let a2 = add_user_test(&mut ea, 1000).unwrap();
     ea.deposit_not_atomic(a1, 500_000, oracle, slot).unwrap();
     ea.deposit_not_atomic(a2, 500_000, oracle, slot).unwrap();
-    // Use a rate that produces a non-integer fund_term per slot:
-    // fund_num_per_slot = oracle * rate * 1 = 1000 * 500_000_001 = 500_000_001_000
-    // fund_term_per_slot = 500_000_001_000 / 1e9 = 500 (remainder = 1_000)
-    // Over 2 slots: fund_num = 1000 * 500_000_001 * 2 = 1_000_000_002_000
-    // fund_term = 1_000_000_002_000 / 1e9 = 1000 (remainder = 2_000)
-    let rate = 50_000_001i128; // produces fractional remainder (within envelope)
+    // Non-round rate exercises the fractional-remainder path in K/F math.
+    // Must be <= MAX_ABS_FUNDING_E9_PER_SLOT = 10_000.
+    let rate = 9_999i128;
     let size = make_size_q(100);
     ea.execute_trade_not_atomic(a1, a2, oracle, slot, size, oracle, rate, 0, 100).unwrap();
     // One accrue of 2 slots

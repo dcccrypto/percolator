@@ -24,9 +24,9 @@ fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 1_000,
-        max_abs_funding_e9_per_slot: 100_000_000,
-        min_funding_lifetime_slots: 1_000,
+        max_accrual_dt_slots: 10_000_000,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
     }
 }
@@ -231,7 +231,7 @@ fn test_e2e_funding_complete_cycle() {
     // v12.16.4: rate passed directly to accrue_market_to via keeper_crank
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
-    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 50_000_000i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 5_000i128, 0, 100).unwrap();
 
     // Advance time so next accrue_market_to applies funding.
     engine.advance_slot(20);
@@ -241,7 +241,7 @@ fn test_e2e_funding_complete_cycle() {
     // then touches both accounts (settle_side_effects realizes the K delta into PnL,
     // then settle_losses transfers negative PnL from capital).
     engine.keeper_crank_not_atomic(slot2, oracle_price,
-        &[(alice, None), (bob, None)], 64, 50_000_000i128, 0, 100).unwrap();
+        &[(alice, None), (bob, None)], 64, 5_000i128, 0, 100).unwrap();
 
     let alice_cap_after = engine.accounts[alice as usize].capital.get();
     let bob_cap_after = engine.accounts[bob as usize].capital.get();
@@ -311,13 +311,13 @@ fn test_e2e_negative_funding_rate() {
     // Store negative rate: shorts pay longs (-500 bps/slot)
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
-    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -50_000_000i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -5_000i128, 0, 100).unwrap();
 
     // Advance and settle
     engine.advance_slot(20);
     let slot2 = engine.current_slot;
     engine.keeper_crank_not_atomic(slot2, oracle_price,
-        &[(alice, None), (bob, None)], 64, -50_000_000i128, 0, 100).unwrap();
+        &[(alice, None), (bob, None)], 64, -5_000i128, 0, 100).unwrap();
 
     let alice_cap_after = engine.accounts[alice as usize].capital.get();
     let bob_cap_after = engine.accounts[bob as usize].capital.get();
