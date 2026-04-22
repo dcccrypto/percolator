@@ -1280,46 +1280,40 @@ fn proof_v1126_min_nonzero_margin_floor() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_gc_reclaims_flat_dust_capital() {
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+fn proof_gc_reclaims_drained_accounts() {
+    // After min_initial_deposit removal, GC reclaims only accounts with
+    // capital == 0. Any residual is swept to insurance by the wrapper
+    // (via charge_account_fee) before GC runs. The empty-market
+    // rounding-surplus sweep still fires at the end of GC.
+    let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Simulate dust: set capital to 1 (below MIN_INITIAL_DEPOSIT of 10_000)
-    // This models an account whose capital was drained by fees/losses to dust level.
-    engine.set_capital(idx as usize, 1);
+    // Wrapper drained the capital (modeled here via set_capital(0) to
+    // avoid the charge_account_fee state dependencies). Any residual
+    // that would normally route to insurance is already in insurance.
+    engine.set_capital(idx as usize, 0).unwrap();
 
-    let cap = engine.accounts[idx as usize].capital.get();
-    assert!(cap > 0 && cap < 10_000, "account must have dust capital");
     assert!(engine.accounts[idx as usize].pnl == 0);
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
     assert!(engine.is_used(idx as usize));
 
     let ins_before = engine.insurance_fund.balance.get();
-    let vault_before = engine.vault.get();
 
-    // GC must reclaim this account
+    // GC must reclaim this drained account.
     engine.garbage_collect_dust();
 
-    // Account must be freed
     assert!(!engine.is_used(idx as usize),
-        "GC must reclaim flat account with dust capital below MIN_INITIAL_DEPOSIT");
+        "GC must reclaim flat account with capital == 0");
 
-    // Dust capital must be swept to insurance (not lost). v12.19 adds a
-    // sweep of any vault ↔ (c_tot + insurance) residual into insurance
-    // once the market is fully empty (num_used_accounts == 0 after the
-    // free), so insurance may be *more* than just the dust — it absorbs
-    // any stranded surplus. The dust-sweep invariant is ins_after >=
-    // ins_before + cap, and after the empty-market close vault must
-    // equal insurance (no stranded rounding surplus).
+    // The empty-market sweep absorbs any vault ↔ (c_tot + insurance)
+    // residual into insurance once num_used_accounts == 0 after the free.
     let ins_after = engine.insurance_fund.balance.get();
-    assert!(ins_after >= ins_before + cap,
-        "dust capital must be swept into insurance fund");
+    assert!(ins_after >= ins_before,
+        "insurance must be non-decreasing across reclaim");
     assert!(engine.vault.get() == ins_after,
         "after empty-market close, vault must equal insurance");
-    let _ = vault_before; // Retained for potential future assertions.
 
     // Conservation must hold
     assert!(engine.check_conservation());
@@ -2205,17 +2199,20 @@ fn proof_audit5_reclaim_empty_account_basic() {
     assert!(engine.num_used_accounts == used_before - 1);
 }
 
-/// Proof: reclaim_empty_account_not_atomic sweeps dust capital to insurance.
+/// Proof: reclaim_empty_account_not_atomic requires fully-drained accounts.
+///
+/// After the `cfg_min_initial_deposit` removal, the engine no longer
+/// sweeps dust capital to insurance in the reclaim path. Reclaim now
+/// strictly requires `capital == 0`; wrappers drain any residual via
+/// `charge_account_fee_not_atomic` first.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_audit5_reclaim_dust_sweep() {
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+fn proof_audit5_reclaim_requires_zero_capital() {
+    let mut engine = RiskEngine::new(zero_fee_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
 
-    // Give the account dust capital (< MIN_INITIAL_DEPOSIT)
-    // Must set vault to cover it
+    // Residual capital — engine must reject reclaim.
     engine.vault = U128::new(500);
     engine.accounts[idx as usize].capital = U128::new(500);
     engine.c_tot = U128::new(500);
@@ -2223,12 +2220,15 @@ fn proof_audit5_reclaim_dust_sweep() {
     let ins_before = engine.insurance_fund.balance.get();
 
     let result = engine.reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT);
-    assert!(result.is_ok());
+    assert!(result.is_err(), "reclaim with nonzero capital must fail");
+    assert!(engine.is_used(idx as usize));
+    assert!(engine.insurance_fund.balance.get() == ins_before);
 
-    // Dust must have been swept to insurance
-    assert!(engine.insurance_fund.balance.get() == ins_before + 500,
-        "dust capital must be swept to insurance");
-    // Conservation holds: vault unchanged, C_tot decreased, I increased
+    // Wrapper drains the residual, then reclaim succeeds.
+    engine.accounts[idx as usize].capital = U128::new(0);
+    engine.c_tot = U128::new(0);
+    let r2 = engine.reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT);
+    assert!(r2.is_ok(), "reclaim must succeed with capital == 0");
     assert!(engine.check_conservation());
 }
 
@@ -2394,35 +2394,35 @@ fn proof_sign_flip_trade_conserves() {
 fn proof_close_account_fee_forgiveness_bounded() {
     // Per spec §9.5 step 11, voluntary close_account_not_atomic REJECTS fee debt.
     // Fee forgiveness only happens via reclaim_empty_account_not_atomic (keeper
-    // path, spec §2.6). This proof exercises the reclaim path with bounded
-    // forgiveness (fee_credits zeroed without drawing from insurance).
+    // path, spec §2.8). The engine now requires capital == 0 to reclaim, so
+    // the test directly sets capital to 0 (equivalent to a wrapper-drained
+    // account) and verifies that uncollectible fee_credits are forgiven
+    // without drawing from insurance.
     let mut engine = RiskEngine::new(zero_fee_params());
     let _ = engine.top_up_insurance_fund(100_000, 0);
 
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Simulate fee debt: negative fee_credits
+    // Simulate a wrapper-drained account carrying negative fee_credits.
+    // Wrapper would use charge_account_fee to route the residual capital
+    // into insurance before reclaim; here we model the post-drain state.
+    engine.set_capital(idx as usize, 0).unwrap();
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
     let v_before = engine.vault.get();
     let i_before = engine.insurance_fund.balance.get();
 
-    // reclaim_empty_account_not_atomic handles fee forgiveness for dust accounts.
-    // Preconditions: position=0, pnl=0, reserved=0, capital < min_initial_deposit=2.
     let result = engine.reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT);
-    assert!(result.is_ok(), "reclaim_empty_account_not_atomic must succeed for dust account with fee debt");
+    assert!(result.is_ok(), "reclaim must succeed once capital is zero");
 
-    // Fee debt forgiven — account freed
+    // Account freed, fee debt forgiven.
     assert!(!engine.is_used(idx as usize));
 
-    // Vault decrease is bounded — dust capital goes to insurance, not to depositor.
-    let v_after = engine.vault.get();
-    assert!(v_after <= v_before, "vault must not increase during reclaim");
-
-    // Insurance fund must not decrease from fee forgiveness
-    // (fee forgiveness just zeros fee_credits, doesn't touch insurance).
-    assert!(engine.insurance_fund.balance.get() >= i_before,
+    // Vault unchanged (no capital to move), insurance unchanged (fee
+    // forgiveness is a pure zero-out, not an insurance draw).
+    assert!(engine.vault.get() == v_before);
+    assert!(engine.insurance_fund.balance.get() == i_before,
         "fee forgiveness must not draw from insurance");
 
     assert!(engine.check_conservation());

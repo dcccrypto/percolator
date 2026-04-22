@@ -1239,24 +1239,29 @@ fn proof_solvent_flat_close_succeeds() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_property_23_deposit_materialization_threshold() {
-    // With nonzero MIN_INITIAL_DEPOSIT, a deposit below the threshold
-    // must be rejected for a missing account.
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+    // The engine rejects only amount == 0 at materialization; any
+    // higher floor is wrapper policy. Verifies:
+    //  - amount=0 on missing → reject
+    //  - amount=1 on missing → materialize (no engine floor)
+    //  - amount=0 on existing → no-op, no mutation
+    let mut engine = RiskEngine::new(zero_fee_params());
 
     let existing = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(existing, 5000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    // Try to deposit below threshold into unmaterialized account
     let missing: u16 = 3;
     assert!(!engine.is_used(missing as usize));
+    let rej = engine.deposit_not_atomic(missing, 0, DEFAULT_ORACLE, DEFAULT_SLOT);
+    assert!(rej.is_err(), "amount=0 materialize must be rejected");
+    assert!(!engine.is_used(missing as usize));
 
-    let result = engine.deposit_not_atomic(missing, 999, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(result.is_err(), "deposit below MIN_INITIAL_DEPOSIT must be rejected for missing account");
+    let ok = engine.deposit_not_atomic(missing, 1, DEFAULT_ORACLE, DEFAULT_SLOT);
+    assert!(ok.is_ok(), "amount>0 materialize must succeed (wrapper enforces any higher floor)");
+    assert!(engine.is_used(missing as usize));
 
-    // But an existing materialized account can receive a small top-up
-    engine.deposit_not_atomic(existing, 5000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    // Existing accounts accept any top-up (including small ones)
     let topup = engine.deposit_not_atomic(existing, 1, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(topup.is_ok(), "existing account must accept small top-up below MIN_INITIAL_DEPOSIT");
+    assert!(topup.is_ok());
 
     assert!(engine.check_conservation());
 }
@@ -1268,25 +1273,24 @@ fn proof_property_23_deposit_materialization_threshold() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_property_51_withdrawal_dust_guard() {
-    // With nonzero MIN_INITIAL_DEPOSIT, a withdrawal that would leave
-    // 0 < C_i < MIN_INITIAL_DEPOSIT must be rejected.
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+fn proof_property_51_withdraw_any_partial_ok() {
+    // The engine no longer enforces a post-withdraw dust floor. Any
+    // withdraw that leaves non-negative capital is allowed; wrappers
+    // enforce any dust-avoidance policy at their own gate.
+    let mut engine = RiskEngine::new(zero_fee_params());
 
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 5000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100).unwrap();
 
-    // Withdraw leaving exactly 500 (< MIN_INITIAL_DEPOSIT=1000) → must fail
+    // Withdraw leaving 500 — no floor, must succeed.
     let result = engine.withdraw_not_atomic(a, 4500, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
-    assert!(result.is_err(),
-        "withdrawal leaving dust capital (500 < 1000) must be rejected");
+    assert!(result.is_ok(), "partial withdraw must succeed regardless of remainder");
+    assert!(engine.accounts[a as usize].capital.get() == 500);
 
-    // Withdraw leaving exactly 0 → must succeed
-    let result_zero = engine.withdraw_not_atomic(a, 5000, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
-    assert!(result_zero.is_ok(),
-        "withdrawal leaving zero capital must succeed");
+    // Withdraw to exactly 0 must succeed.
+    let result_zero = engine.withdraw_not_atomic(a, 500, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+    assert!(result_zero.is_ok(), "full withdraw to zero must succeed");
 
     assert!(engine.check_conservation());
 }
@@ -1610,25 +1614,15 @@ fn proof_audit2_deposit_materializes_missing_account() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_audit2_deposit_rejects_below_min_initial_for_missing() {
-    // Per spec §10.3 step 2: deposit below MIN_INITIAL_DEPOSIT on a
-    // missing account must fail.
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+fn proof_audit2_deposit_rejects_zero_amount_for_missing() {
+    // The engine only rejects amount == 0 at materialization. Any higher
+    // minimum-deposit floor is wrapper policy.
+    let mut engine = RiskEngine::new(zero_fee_params());
     assert!(!engine.is_used(0));
 
-    let min_dep = 1_000u128;
-    assert!(min_dep == 1000); // sanity: threshold is non-trivial
-
-    // Symbolic amount strictly below threshold
-    let amount: u16 = kani::any();
-    kani::assume((amount as u128) < min_dep);
-
-    let result = engine.deposit_not_atomic(0, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT);
-    assert!(result.is_err(), "deposit below MIN_INITIAL_DEPOSIT must fail for missing account");
-    // Account must NOT be materialized
+    let result = engine.deposit_not_atomic(0, 0, DEFAULT_ORACLE, DEFAULT_SLOT);
+    assert!(result.is_err(), "amount=0 materialize must fail");
     assert!(!engine.is_used(0), "account must not be materialized on failed deposit");
-    // Vault must be unchanged
     assert!(engine.vault.get() == 0, "vault must not change on rejected deposit");
 }
 

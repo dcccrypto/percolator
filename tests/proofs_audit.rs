@@ -556,23 +556,27 @@ fn proof_gc_cursor_advances_by_scanned() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_gc_cursor_with_dust_accounts() {
+fn proof_gc_cursor_with_drained_accounts() {
+    // After min_initial_deposit removal, GC reclaims only fully-drained
+    // accounts (capital == 0). Wrappers drain residuals via
+    // charge_account_fee_not_atomic before expecting GC to recycle.
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    // Create 2 dust accounts (< MAX_ACCOUNTS=4 under Kani)
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(b, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
+    // Simulate the wrapper having drained all capital (via
+    // charge_account_fee, which routes residual into insurance).
+    engine.set_capital(a as usize, 0).unwrap();
+    engine.set_capital(b as usize, 0).unwrap();
+
     engine.gc_cursor = 0;
     let num_freed = engine.garbage_collect_dust().unwrap();
 
-    // Both accounts are dust (capital=1 < min_initial_deposit=2, flat, pnl=0)
-    assert_eq!(num_freed, 2, "both dust accounts should be freed");
+    assert_eq!(num_freed, 2, "both drained accounts should be freed");
 
-    // Cursor advances by min(ACCOUNTS_PER_CRANK, MAX_ACCOUNTS) = full scan
-    // (no early break since GC_CLOSE_BUDGET=32 > 2 freed)
     let max_scan = core::cmp::min(ACCOUNTS_PER_CRANK as usize, MAX_ACCOUNTS);
     let mask = MAX_ACCOUNTS - 1;
     assert_eq!(engine.gc_cursor, ((0 + max_scan) & mask) as u16);
