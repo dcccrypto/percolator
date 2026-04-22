@@ -86,6 +86,7 @@ pub const MAX_ACCOUNTS: usize = 4096;
 
 pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 pub const MAX_ROUNDING_SLACK: u128 = MAX_ACCOUNTS as u128;
+#[allow(dead_code)] // used inside test_visible! garbage_collect_dust
 const ACCOUNT_IDX_MASK: usize = MAX_ACCOUNTS - 1;
 const _: () = assert!(MAX_ACCOUNTS.is_power_of_two());
 
@@ -387,6 +388,7 @@ impl Account {
     }
 }
 
+#[cfg(any(feature = "test", kani))]
 fn empty_account() -> Account {
     Account {
         capital: U128::ZERO,
@@ -649,16 +651,6 @@ pub struct CrankOutcome {
 // ============================================================================
 // Small Helpers
 // ============================================================================
-
-#[inline]
-fn add_u128(a: u128, b: u128) -> u128 {
-    a.checked_add(b).expect("add_u128 overflow")
-}
-
-#[inline]
-fn sub_u128(a: u128, b: u128) -> u128 {
-    a.checked_sub(b).expect("sub_u128 underflow")
-}
 
 /// Determine which side a signed position is on. Positive = long, negative = short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4082,20 +4074,18 @@ impl RiskEngine {
             0
         };
 
-        // Charge fee from both accounts (spec §10.5 step 28)
-        // (cash_to_insurance, total_equity_impact) for each side
-        let mut fee_cash_a = 0u128;
-        let mut fee_cash_b = 0u128;
+        // Charge fee from both accounts (spec §10.5 step 28). Only the
+        // equity-impact value (capital_paid + collectible_debt) feeds the
+        // post-trade margin enforcement below; cash-to-insurance and
+        // dropped portions are side effects of charge_fee_to_insurance.
         let mut fee_impact_a = 0u128;
         let mut fee_impact_b = 0u128;
         if fee > 0 {
             if fee > MAX_PROTOCOL_FEE_ABS {
                 return Err(RiskError::Overflow);
             }
-            let (cash_a, impact_a, _dropped_a) = self.charge_fee_to_insurance(a as usize, fee)?;
-            let (cash_b, impact_b, _dropped_b) = self.charge_fee_to_insurance(b as usize, fee)?;
-            fee_cash_a = cash_a;
-            fee_cash_b = cash_b;
+            let (_cash_a, impact_a, _dropped_a) = self.charge_fee_to_insurance(a as usize, fee)?;
+            let (_cash_b, impact_b, _dropped_b) = self.charge_fee_to_insurance(b as usize, fee)?;
             fee_impact_a = impact_a;
             fee_impact_b = impact_b;
         }
