@@ -1504,18 +1504,17 @@ Preconditions:
 
 Procedure:
 
-1. if the deployment enables wrapper-owned recurring account fees and `last_fee_slot_i < resolved_slot`, sync recurring fee to `resolved_slot`
+1. call `fee_debt_sweep(i)` (recurring-fee ordering is a wrapper responsibility; see §9.9)
 2. if `PNL_i < 0`, resolve uncovered flat loss via §6.3
-3. call `fee_debt_sweep(i)`
-4. forgive any remaining negative `fee_credits_i`
-5. let `payout = C_i`
-6. if `payout > 0`:
+3. forgive any remaining negative `fee_credits_i`
+4. let `payout = C_i`
+5. if `payout > 0`:
    - `set_capital(i, 0)`
    - `V = V - payout`
-7. require `PNL_i == 0`, `R_i == 0`, both reserve buckets absent, `basis_pos_q_i == 0`, and `last_fee_slot_i <= resolved_slot`
-8. reset local fields and free the slot
-9. require `V >= C_tot + I`
-10. return `payout`
+6. require `PNL_i == 0`, `R_i == 0`, both reserve buckets absent, `basis_pos_q_i == 0`, and `last_fee_slot_i <= resolved_slot`
+7. reset local fields and free the slot
+8. require `V >= C_tot + I`
+9. return `payout`
 
 ### 6.10 `force_close_resolved_terminal_positive(i) -> payout`
 
@@ -1532,21 +1531,20 @@ Preconditions:
 
 Procedure:
 
-1. if the deployment enables wrapper-owned recurring account fees and `last_fee_slot_i < resolved_slot`, sync recurring fee to `resolved_slot`
-2. let `x = max(PNL_i, 0)`
-3. let `y = floor(x * resolved_payout_h_num / resolved_payout_h_den)`
-4. `set_pnl(i, 0, NoPositiveIncreaseAllowed)`
-5. `set_capital(i, C_i + y)`
-6. call `fee_debt_sweep(i)`
-7. forgive any remaining negative `fee_credits_i`
-8. let `payout = C_i`
-9. if `payout > 0`:
+1. let `x = max(PNL_i, 0)`
+2. let `y = floor(x * resolved_payout_h_num / resolved_payout_h_den)`
+3. `set_pnl(i, 0, NoPositiveIncreaseAllowed)`
+4. `set_capital(i, C_i + y)`
+5. call `fee_debt_sweep(i)` (recurring-fee ordering is a wrapper responsibility; see §9.9)
+6. forgive any remaining negative `fee_credits_i`
+7. let `payout = C_i`
+8. if `payout > 0`:
    - `set_capital(i, 0)`
    - `V = V - payout`
-10. require `PNL_i == 0`, `R_i == 0`, both reserve buckets absent, `basis_pos_q_i == 0`, and `last_fee_slot_i <= resolved_slot`
-11. reset local fields and free the slot
-12. require `V >= C_tot + I`
-13. return `payout`
+9. require `PNL_i == 0`, `R_i == 0`, both reserve buckets absent, `basis_pos_q_i == 0`, and `last_fee_slot_i <= resolved_slot`
+10. reset local fields and free the slot
+11. require `V >= C_tot + I`
+12. return `payout`
 
 Impossible states — for example `resolved_payout_snapshot_ready == true` with `PNL_i > 0` but `resolved_payout_h_den == 0` — MUST fail conservatively rather than falling back to `y = x`.
 
@@ -2024,36 +2022,42 @@ Under §0, steps 5 through 20 are one atomic transition. If any check fails — 
 
 The ordinary branch is the normative path. The degenerate branch exists only to preserve privileged resolution liveness when applying additional live accrual would be impossible or undesirable under the deployment’s explicit settlement policy — for example because `dt > cfg_max_accrual_dt_slots` or cumulative live `K_side` or `F_side_num` headroom is tight. It is entered only when the wrapper explicitly passes `resolve_mode = Degenerate`.
 
-### 9.9 `force_close_resolved(i, now_slot[, fee_rate_per_slot])`
+### 9.9 `force_close_resolved(i)`
 
-Multi-stage resolved-market progress path.
+Multi-stage resolved-market progress path. Takes only the account
+index; the engine uses its stored `resolved_slot` as the time anchor
+and does not accept a caller-supplied slot. Recurring-fee ordering is
+a wrapper responsibility: deployments with recurring fees enabled
+MUST call `sync_account_fee_to_slot(i, clock_slot, fee_rate_per_slot)`
+before invoking this path, so that `last_fee_slot_i == resolved_slot`.
+The engine does NOT take a `fee_rate_per_slot` parameter and does
+NOT gate on `last_fee_slot_i` — the gate is wrapper-owned because
+the engine does not store the deployment's fee rate.
 
 An implementation MUST expose an explicit outcome distinguishing:
 
 - `ProgressOnly` — local reconciliation progressed but no terminal close occurred yet
 - `Closed { payout }` — the account was terminally closed and paid out `payout`
 
-A zero payout MUST NOT be the sole encoding of “not yet closeable.”
+A zero payout MUST NOT be the sole encoding of "not yet closeable."
 
 1. require `market_mode == Resolved`
 2. require account `i` is materialized
-3. require `now_slot >= current_slot`
-4. set `current_slot = now_slot`
-5. `prepare_account_for_resolved_touch(i)`
-6. if recurring fees are enabled and `last_fee_slot_i < resolved_slot`, `sync_account_fee_to_slot(i, resolved_slot, fee_rate_per_slot)`
-7. `settle_side_effects_resolved(i)`
-8. settle losses from principal if needed
-9. resolve uncovered flat loss if needed
-10. if `mode_long == ResetPending` and `OI_eff_long == 0` and `stale_account_count_long == 0` and `stored_pos_count_long == 0`, finalize the long side
-11. if `mode_short == ResetPending` and `OI_eff_short == 0` and `stale_account_count_short == 0` and `stored_pos_count_short == 0`, finalize the short side
-12. require `OI_eff_long == OI_eff_short`
-13. if `PNL_i <= 0`, return `Closed { payout }` from `force_close_resolved_terminal_nonpositive(i)`
-14. if `PNL_i > 0`:
-   - if the market is not positive-payout ready:
-     - require `V >= C_tot + I`
-     - return `ProgressOnly` after persisting the local reconciliation
-   - if the shared resolved payout snapshot is not ready, capture it
-   - return `Closed { payout }` from `force_close_resolved_terminal_positive(i)`
+3. set `current_slot = resolved_slot` (frozen market anchor)
+4. `prepare_account_for_resolved_touch(i)`
+5. `settle_side_effects_resolved(i)`
+6. settle losses from principal if needed
+7. resolve uncovered flat loss if needed
+8. if `mode_long == ResetPending` and `OI_eff_long == 0` and `stale_account_count_long == 0` and `stored_pos_count_long == 0`, finalize the long side
+9. if `mode_short == ResetPending` and `OI_eff_short == 0` and `stale_account_count_short == 0` and `stored_pos_count_short == 0`, finalize the short side
+10. require `OI_eff_long == OI_eff_short`
+11. if `PNL_i <= 0`, return `Closed { payout }` from `force_close_resolved_terminal_nonpositive(i)`
+12. if `PNL_i > 0`:
+    - if the market is not positive-payout ready:
+      - require `V >= C_tot + I`
+      - return `ProgressOnly` after persisting the local reconciliation
+    - if the shared resolved payout snapshot is not ready, capture it
+    - return `Closed { payout }` from `force_close_resolved_terminal_positive(i)`
 
 ### 9.10 `reclaim_empty_account(i, now_slot[, fee_rate_per_slot])`
 
