@@ -17,7 +17,6 @@ fn default_params() -> RiskParams {
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
         min_liquidation_abs: U128::new(0),
-        min_initial_deposit: U128::new(2),
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
         h_min: 0,

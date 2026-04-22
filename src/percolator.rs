@@ -437,7 +437,11 @@ pub struct RiskParams {
     pub liquidation_fee_bps: u64,
     pub liquidation_fee_cap: U128,
     pub min_liquidation_abs: U128,
-    pub min_initial_deposit: U128,
+    // NOTE: `min_initial_deposit` was removed from the engine. The wrapper
+    // is expected to enforce both a minimum deposit (anti-spam) and
+    // recurring account fees (capital erosion over time) to keep the
+    // materialized-account set bounded. The engine only enforces
+    // `amount > 0` on materialization; any higher floor is wrapper policy.
     /// Absolute nonzero-position margin floors (spec §9.1)
     pub min_nonzero_mm_req: u128,
     pub min_nonzero_im_req: u128,
@@ -730,7 +734,9 @@ impl RiskEngine {
             "liquidation_fee_bps must be <= 10_000"
         );
 
-        // Nonzero margin floor ordering: 0 < mm < im <= min_initial_deposit (spec §1.4)
+        // Nonzero margin floor ordering: 0 < mm < im (spec §1.4).
+        // Upper bound on min_nonzero_im_req is a wrapper policy now that
+        // min_initial_deposit has been removed from engine state.
         assert!(
             params.min_nonzero_mm_req > 0,
             "min_nonzero_mm_req must be > 0"
@@ -738,20 +744,6 @@ impl RiskEngine {
         assert!(
             params.min_nonzero_mm_req < params.min_nonzero_im_req,
             "min_nonzero_mm_req must be strictly less than min_nonzero_im_req"
-        );
-        assert!(
-            params.min_nonzero_im_req <= params.min_initial_deposit.get(),
-            "min_nonzero_im_req must be <= min_initial_deposit (spec §1.4)"
-        );
-
-        // MIN_INITIAL_DEPOSIT bounds: 0 < min_initial_deposit <= MAX_VAULT_TVL (spec §1.4)
-        assert!(
-            params.min_initial_deposit.get() > 0,
-            "min_initial_deposit must be > 0 (spec §1.4)"
-        );
-        assert!(
-            params.min_initial_deposit.get() <= MAX_VAULT_TVL,
-            "min_initial_deposit must be <= MAX_VAULT_TVL"
         );
 
         // Liquidation fee ordering: 0 <= min_liquidation_abs <= liquidation_fee_cap (spec §1.4)
@@ -3671,11 +3663,15 @@ impl RiskEngine {
         }
 
         // Step 2: spec §10.2 — deposit is the canonical materialization path.
-        // Missing account materializes when amount >= cfg_min_initial_deposit.
-        // No engine-native opening fee (v12.18.1).
+        // The engine only requires amount > 0 for a fresh materialization
+        // (no zero-capital ghost accounts). Any higher minimum-deposit
+        // threshold is wrapper policy: the wrapper is expected to enforce
+        // a deployment-chosen floor for anti-spam, paired with recurring
+        // maintenance fees (§7.3) to keep the materialized-account set
+        // bounded.
         let capital_amount = amount;
         if !self.is_used(idx as usize) {
-            if amount < self.params.min_initial_deposit.get() {
+            if amount == 0 {
                 return Err(RiskError::InsufficientBalance);
             }
             self.materialize_at(idx, now_slot)?;
@@ -3766,11 +3762,11 @@ impl RiskEngine {
             return Err(RiskError::InsufficientBalance);
         }
 
-        // Step 5: universal dust guard — post-withdraw_not_atomic capital must be 0 or >= MIN_INITIAL_DEPOSIT
-        let post_cap = self.accounts[idx as usize].capital.get() - amount;
-        if post_cap != 0 && post_cap < self.params.min_initial_deposit.get() {
-            return Err(RiskError::InsufficientBalance);
-        }
+        // Step 5: the engine allows any partial withdraw that leaves
+        // `capital - amount >= 0`. A post-withdraw "dust floor" (capital
+        // must be 0 or >= some threshold) is wrapper policy — enforce it
+        // at the wrapper layer if your deployment doesn't want tiny
+        // residuals lingering in account slots.
 
         // Step 6: if position exists, require post-withdrawal margin using
         // withdrawal equity (capital minus losses minus fees — does NOT include
@@ -5334,30 +5330,19 @@ impl RiskEngine {
 
         // No engine-native maintenance fee in v12.14.0 (spec §8).
 
-        // Step 5: final reclaim-eligibility check (spec §2.6)
-        // C_i must be 0 or dust (< MIN_INITIAL_DEPOSIT)
-        if self.accounts[idx as usize].capital.get() >= self.params.min_initial_deposit.get()
-            && !self.accounts[idx as usize].capital.is_zero()
-        {
+        // Step 5: final reclaim-eligibility check.
+        // The engine only reclaims accounts whose capital has been fully
+        // drained. Wrappers that want to recycle slots with tiny residual
+        // capital MUST drain that residual first (e.g., via
+        // `charge_account_fee_not_atomic` to push the remainder into the
+        // insurance fund). This keeps the engine's reclaim predicate a
+        // single bit (`capital == 0`) and pushes any "dust threshold"
+        // policy into the wrapper.
+        if !self.accounts[idx as usize].capital.is_zero() {
             return Err(RiskError::Undercollateralized);
         }
 
-        // Step 7: reclamation effects (spec §2.6)
-        // Validate-then-mutate: compute the new insurance balance with
-        // checked_add BEFORE zeroing capital, so an overflow cannot leave
-        // the account zeroed while the insurance add silently saturates.
-        // U128's default + is saturating, which would break conservation
-        // (C_tot + I invariant) if unchecked.
-        let dust_cap = self.accounts[idx as usize].capital.get();
-        if dust_cap > 0 {
-            let new_insurance = self.insurance_fund.balance
-                .checked_add(dust_cap)
-                .ok_or(RiskError::Overflow)?;
-            self.set_capital(idx as usize, 0)?;
-            self.insurance_fund.balance = new_insurance;
-        }
-
-        // Forgive uncollectible fee debt (spec §2.6)
+        // Forgive uncollectible fee debt (spec §2.6).
         if self.accounts[idx as usize].fee_credits.get() < 0 {
             self.accounts[idx as usize].fee_credits = I128::new(0);
         }
@@ -5415,19 +5400,13 @@ impl RiskEngine {
                 continue;
             }
 
-            // Check capital for dust eligibility
-            if self.accounts[idx].capital.get() >= self.params.min_initial_deposit.get()
-                && !self.accounts[idx].capital.is_zero() {
+            // Engine reclaims only fully-drained accounts (capital == 0).
+            // Wrappers that want to recycle accounts with tiny residual
+            // capital MUST drain that residual first (e.g., via
+            // `charge_account_fee_not_atomic`) before expecting GC to pick
+            // the slot up.
+            if !self.accounts[idx].capital.is_zero() {
                 continue;
-            }
-
-            // Sweep dust capital into insurance (spec §2.6)
-            let dust_cap = self.accounts[idx].capital.get();
-            if dust_cap > 0 {
-                self.set_capital(idx, 0)?;
-                self.insurance_fund.balance = U128::new(
-                    self.insurance_fund.balance.get().checked_add(dust_cap)
-                        .ok_or(RiskError::Overflow)?);
             }
 
             // Forgive uncollectible fee debt (spec §2.6)

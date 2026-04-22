@@ -17,7 +17,6 @@ fn default_params() -> RiskParams {
         liquidation_fee_bps: 100,
         liquidation_fee_cap: U128::new(1_000_000),
         min_liquidation_abs: U128::new(0),
-        min_initial_deposit: U128::new(1000),
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
         h_min: 0,
@@ -146,10 +145,12 @@ fn test_deposit_materialize_user() {
 }
 
 #[test]
-fn test_deposit_materialize_below_min_rejected() {
+fn test_deposit_materialize_zero_amount_rejected() {
+    // The engine requires amount > 0 to materialize (no zero-capital
+    // ghost accounts). A deployment-chosen floor is wrapper policy.
     let mut engine = RiskEngine::new(default_params());
     let idx = engine.free_head;
-    let result = engine.deposit_not_atomic(idx, 500, 1000, 100);
+    let result = engine.deposit_not_atomic(idx, 0, 1000, 100);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
     assert!(!engine.is_used(idx as usize), "failed deposit must not materialize");
 }
@@ -644,7 +645,7 @@ fn idle_market_can_fast_forward_before_late_deposit() {
     let mut engine = RiskEngine::new(default_params());
     let max_dt = engine.params.max_accrual_dt_slots;
     let late = max_dt + 100;
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
 
     // Direct deposit refuses the long jump.
     assert_eq!(
@@ -676,7 +677,6 @@ fn rounding_surplus_must_not_strand_vault_after_close() {
     // insurance fund so the wrapper can withdraw it via the normal
     // insurance path.
     let mut params = default_params();
-    params.min_initial_deposit = U128::new(2);     // allow small deposits
     params.min_nonzero_mm_req = 1;
     params.min_nonzero_im_req = 2;
     params.maintenance_margin_bps = 0;
@@ -735,7 +735,7 @@ fn materialize_rejects_idx_outside_market_capacity() {
     params.max_accounts = 2;
     params.max_active_positions_per_side = 2;
     let mut engine = RiskEngine::new_with_market(params, 0, 1);
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
 
     // Only one slot in use — count bound (num_used < max_accounts)
     // would still allow another materialization. The TRUE gap is
@@ -1032,7 +1032,7 @@ fn idle_market_deposit_still_works_after_long_gap() {
 
     // Now a deposit at the same slot must succeed — envelope is
     // hostile_slot + max_dt, which covers now_slot = hostile_slot.
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
     let r = engine.deposit_not_atomic(0, min, 1_000, hostile_slot);
     assert!(r.is_ok(),
         "deposit at the post-fast-forward slot must succeed (got {:?})", r);
@@ -1045,7 +1045,7 @@ fn deposit_existing_zero_amount_cannot_brick_accrual() {
     // account an amount=0 deposit is a free time-jump, so the envelope
     // check must run before the current_slot commit.
     let mut engine = RiskEngine::new(default_params());
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
     // Materialize at slot 0.
     engine.deposit_not_atomic(0, min, 1_000, 0).expect("first deposit");
     assert_eq!(engine.last_market_slot, 0);
@@ -1070,7 +1070,7 @@ fn deposit_new_account_cannot_brick_accrual() {
     // was unused). materialize_at runs first, then current_slot =
     // now_slot. The envelope check must fire before any mutation.
     let mut engine = RiskEngine::new(default_params());
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
     let max_dt = engine.params.max_accrual_dt_slots;
     let hostile_slot = max_dt + 1;
     assert_eq!(engine.last_market_slot, 0);
@@ -2799,14 +2799,14 @@ fn test_property_50_flat_only_auto_conversion() {
 // ============================================================================
 
 #[test]
-fn test_property_51_universal_withdrawal_dust_guard() {
+fn test_withdraw_partial_and_full_ok() {
+    // The engine no longer enforces a "post-withdraw capital must be 0
+    // or >= min_initial_deposit" dust guard — that's wrapper policy now.
+    // Verify the engine accepts any partial withdraw that leaves
+    // non-negative capital, plus a full withdraw to zero.
     let oracle = 1_000u64;
     let slot = 1u64;
-    let min_deposit = 1_000u128;
-
-    let mut params = default_params();
-    params.min_initial_deposit = U128::new(min_deposit);
-    let mut engine = RiskEngine::new(params);
+    let mut engine = RiskEngine::new(default_params());
 
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 5_000, oracle, slot).unwrap();
@@ -2815,21 +2815,14 @@ fn test_property_51_universal_withdrawal_dust_guard() {
     let cap = engine.accounts[a as usize].capital.get();
     assert_eq!(cap, 5_000);
 
-    // Try withdrawing to leave dust (< MIN_INITIAL_DEPOSIT but > 0)
-    let withdraw_dust = cap - 500; // leaves 500, which is < 1000 MIN_INITIAL_DEPOSIT
-    let result = engine.withdraw_not_atomic(a, withdraw_dust, oracle, slot, 0i128, 0, 100);
-    assert!(result.is_err(), "withdrawal leaving dust below MIN_INITIAL_DEPOSIT must be rejected");
+    // Partial withdraw leaving 500 must succeed (no engine-side floor).
+    let result = engine.withdraw_not_atomic(a, cap - 500, oracle, slot, 0i128, 0, 100);
+    assert!(result.is_ok(), "partial withdraw leaving any non-negative capital must succeed");
+    assert_eq!(engine.accounts[a as usize].capital.get(), 500);
 
-    // Withdrawing to leave exactly 0 must succeed
-    let result2 = engine.withdraw_not_atomic(a, cap, oracle, slot, 0i128, 0, 100);
-    assert!(result2.is_ok(), "full withdrawal to 0 must succeed");
-
-    // Re-deposit and test partial withdrawal leaving >= MIN_INITIAL_DEPOSIT
-    engine.deposit_not_atomic(a, 5_000, oracle, slot).unwrap();
-    let cap2 = engine.accounts[a as usize].capital.get();
-    let withdraw_ok = cap2 - min_deposit; // leaves exactly MIN_INITIAL_DEPOSIT
-    let result3 = engine.withdraw_not_atomic(a, withdraw_ok, oracle, slot, 0i128, 0, 100);
-    assert!(result3.is_ok(), "withdrawal leaving >= MIN_INITIAL_DEPOSIT must succeed");
+    // Withdraw to exactly 0 must succeed.
+    let result2 = engine.withdraw_not_atomic(a, 500, oracle, slot, 0i128, 0, 100);
+    assert!(result2.is_ok(), "full withdraw to 0 must succeed");
 }
 
 // ============================================================================
@@ -4782,41 +4775,29 @@ fn fix3_flat_conversion_rejects_if_post_eq_negative() {
 }
 
 #[test]
-fn fix5_deposit_materialize_requires_min_deposit() {
-    // v12.18.1: deposit is the sole materialization path. Spec §10.2 requires
-    // amount >= cfg_min_initial_deposit. No engine-native new_account_fee.
+fn deposit_materialize_rejects_zero_amount() {
+    // The engine requires amount > 0 to materialize a missing account —
+    // zero-capital ghost accounts are not allowed. Any higher minimum-
+    // deposit floor is wrapper policy (min_initial_deposit was removed
+    // from engine state); the wrapper is expected to enforce a deployment
+    // -chosen anti-spam threshold.
     let mut engine = RiskEngine::new(default_params());
-    // min_initial_deposit = 1000 in default_params.
     let unused_idx = engine.free_head;
-    let result = engine.deposit_not_atomic(unused_idx, 999, 1000, 100);
-    // Specific error type — not any Err — to avoid passing for wrong reason.
+    let result = engine.deposit_not_atomic(unused_idx, 0, 1000, 100);
     assert_eq!(result, Err(RiskError::InsufficientBalance),
-        "deposit into missing account with amount < min_initial_deposit must reject InsufficientBalance");
+        "amount=0 materialize must reject InsufficientBalance");
     assert!(!engine.is_used(unused_idx as usize), "failed deposit must not materialize");
 
-    // Exactly min_initial_deposit must succeed and materialize.
-    let result2 = engine.deposit_not_atomic(unused_idx, 1000, 1000, 100);
-    assert!(result2.is_ok(), "deposit == min_initial_deposit must materialize");
+    // Any amount > 0 materializes.
+    let result2 = engine.deposit_not_atomic(unused_idx, 1, 1000, 100);
+    assert!(result2.is_ok(), "amount>0 deposit must materialize");
     assert!(engine.is_used(unused_idx as usize));
-    assert_eq!(engine.accounts[unused_idx as usize].capital.get(), 1000);
+    assert_eq!(engine.accounts[unused_idx as usize].capital.get(), 1);
 }
 
 // ============================================================================
 // Final blocker regression tests (TDD)
 // ============================================================================
-
-#[test]
-fn blocker2_deposit_dust_amount_rejected() {
-    // v12.18.1: deposit must reject amounts below min_initial_deposit
-    // when the account is missing (can't materialize with dust).
-    let mut engine = RiskEngine::new(default_params());
-    let unused_idx = engine.free_head;
-    let result = engine.deposit_not_atomic(unused_idx, 500, 1000, 100);
-    assert_eq!(result, Err(RiskError::InsufficientBalance),
-        "dust deposit into missing account must reject InsufficientBalance specifically");
-    assert!(!engine.is_used(unused_idx as usize),
-        "missing account must not be materialized on failed deposit");
-}
 
 #[test]
 fn blocker3_materialize_at_is_stack_safe() {
@@ -5041,10 +5022,12 @@ fn test_h_lock_zero_always_legal() {
 // fix5_deposit_materialize_requires_min_deposit).
 
 #[test]
-fn test_reclaim_rejects_insurance_overflow() {
-    // reclaim_empty_account must propagate Overflow rather than silently
-    // saturating when insurance_fund.balance + dust_cap would overflow u128.
-    // Silent saturation would break conservation (C_tot + I invariant).
+fn test_reclaim_requires_zero_capital() {
+    // After the min_initial_deposit removal, reclaim_empty_account no
+    // longer sweeps dust capital into insurance — it requires the
+    // account to be fully drained (capital == 0). Wrappers that want
+    // to recycle an account with residual capital MUST drain it first
+    // (e.g., via charge_account_fee_not_atomic) before calling reclaim.
     let mut engine = RiskEngine::new(default_params());
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 100, 1000, 100).unwrap();
@@ -5056,16 +5039,20 @@ fn test_reclaim_rejects_insurance_overflow() {
     engine.accounts[idx].sched_present = 0;
     engine.accounts[idx].pending_present = 0;
     engine.accounts[idx].fee_credits = percolator::i128::I128::new(0);
-    // Dust capital so reclaim engages the insurance-transfer branch.
+    // Residual capital must be drained before reclaim can run.
     engine.set_capital(idx, 1);
-    // Force insurance near-u128::MAX so dust_cap=1 would overflow.
-    engine.insurance_fund.balance = percolator::i128::U128::new(u128::MAX);
 
     let result = engine.reclaim_empty_account_not_atomic(a, 200);
-    assert_eq!(result, Err(RiskError::Overflow));
-    // Account must remain intact on Err (validate-then-mutate).
+    assert_eq!(result, Err(RiskError::Undercollateralized),
+        "reclaim must reject when capital > 0");
     assert_eq!(engine.accounts[idx].capital.get(), 1,
-        "capital must not be zeroed when insurance-add fails");
+        "account state must be unchanged on Err");
+
+    // Drain and retry.
+    engine.set_capital(idx, 0);
+    let r2 = engine.reclaim_empty_account_not_atomic(a, 200);
+    assert!(r2.is_ok(), "reclaim must succeed once capital is zero");
+    assert!(!engine.is_used(a as usize));
 }
 
 #[test]

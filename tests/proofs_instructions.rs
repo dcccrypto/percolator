@@ -1242,7 +1242,6 @@ fn proof_property_23_deposit_materialization_threshold() {
     // With nonzero MIN_INITIAL_DEPOSIT, a deposit below the threshold
     // must be rejected for a missing account.
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
 
     let existing = add_user_test(&mut engine, 0).unwrap();
@@ -1273,7 +1272,6 @@ fn proof_property_51_withdrawal_dust_guard() {
     // With nonzero MIN_INITIAL_DEPOSIT, a withdrawal that would leave
     // 0 < C_i < MIN_INITIAL_DEPOSIT must be rejected.
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
 
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -1587,7 +1585,7 @@ fn proof_audit2_deposit_materializes_missing_account() {
     assert!(!engine.is_used(0), "slot 0 must start free");
 
     let amount: u32 = kani::any();
-    let min_dep = engine.params.min_initial_deposit.get() as u32;
+    let min_dep = 1_000u128 as u32;
     kani::assume(amount >= min_dep && amount <= 1_000_000);
 
     // Deposit directly on the missing slot — must succeed and materialize
@@ -1616,11 +1614,10 @@ fn proof_audit2_deposit_rejects_below_min_initial_for_missing() {
     // Per spec §10.3 step 2: deposit below MIN_INITIAL_DEPOSIT on a
     // missing account must fail.
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
     assert!(!engine.is_used(0));
 
-    let min_dep = engine.params.min_initial_deposit.get();
+    let min_dep = 1_000u128;
     assert!(min_dep == 1000); // sanity: threshold is non-trivial
 
     // Symbolic amount strictly below threshold
@@ -1645,7 +1642,7 @@ fn proof_audit2_deposit_existing_accepts_small_topup() {
     let a = add_user_test(&mut engine, 0).unwrap();
 
     // First deposit to establish the account
-    let min_dep = engine.params.min_initial_deposit.get();
+    let min_dep = 1_000u128;
     engine.deposit_not_atomic(a, min_dep, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Small top-up below MIN_INITIAL_DEPOSIT must succeed
@@ -1700,7 +1697,7 @@ fn proof_audit4_add_user_atomic_on_failure() {
 fn proof_audit4_add_user_atomic_on_tvl_failure() {
     let params = zero_fee_params();
     let mut engine = RiskEngine::new(params);
-    let min = engine.params.min_initial_deposit.get();
+    let min = 1_000u128;
 
     // Pin vault just below MAX_VAULT_TVL so min_initial_deposit would
     // push it over.

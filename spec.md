@@ -91,7 +91,7 @@ The engine MUST provide the following properties.
 38. **No valid-price sentinel overloading:** no strictly positive price value may be used as an “uninitialized” sentinel for `P_last`, `fund_px_last`, or any other economically meaningful stored price field.
 39. **Self-synchronizing resolution with a privileged degenerate-recovery escape hatch:** `resolve_market` MUST ordinarily synchronize live accrual to its resolution slot inside the same top-level instruction before applying the final zero-funding settlement shift. The same privileged instruction MAY instead take the explicit degenerate recovery branch described in §9.8 when the deployment needs to avoid additional live-state shift — for example because the accrual envelope has already been exceeded or cumulative `K` or `F` headroom is tight.
 40. **Bounded-cost exact arithmetic:** the specification MUST permit exact implementations of scheduled warmup release and funding accrual without runtime work proportional to elapsed slots and without relying on narrow intermediate products that can overflow before the exact quotient is taken.
-41. **Runtime-aware deployment constraints:** on constrained runtimes, deployments MUST choose batch sizes, `cfg_min_initial_deposit`, funding envelopes, and wrapper composition so exact wide arithmetic, materialized-account capacity, and transaction-size limits do not create avoidable operational deadlocks.
+41. **Runtime-aware deployment constraints:** on constrained runtimes, deployments MUST choose batch sizes, wrapper-side deposit minimums, funding envelopes, and wrapper composition so exact wide arithmetic, materialized-account capacity, and transaction-size limits do not create avoidable operational deadlocks.
 42. **Resolution must not depend on cumulative-K absorption of the final settlement mark:** the final settlement price shift is carried as separate resolved terminal K deltas rather than added into persistent live `K_side`.
 43. **Resolved reconciliation must not deadlock on live-only claim caps:** once the market is resolved, local reconciliation MAY exceed live-market positive-PnL caps so long as all persistent values remain representable and terminal payout remains snapshot-capped.
 44. **No live positive-PnL bypass of admission:** every positive reserve-creating event on a live market MUST pass through the two-point admission rule; there is no unconditional live `ImmediateRelease` path.
@@ -170,7 +170,6 @@ Immutable per-market configuration:
 - `cfg_liquidation_fee_bps`
 - `cfg_liquidation_fee_cap`
 - `cfg_min_liquidation_abs`
-- `cfg_min_initial_deposit`
 - `cfg_min_nonzero_mm_req`
 - `cfg_min_nonzero_im_req`
 - `cfg_resolve_price_deviation_bps`
@@ -181,8 +180,7 @@ Immutable per-market configuration:
 
 Configured values MUST satisfy:
 
-- `0 < cfg_min_initial_deposit <= MAX_VAULT_TVL`
-- `0 < cfg_min_nonzero_mm_req < cfg_min_nonzero_im_req <= cfg_min_initial_deposit`
+- `0 < cfg_min_nonzero_mm_req < cfg_min_nonzero_im_req` (upper bound on `cfg_min_nonzero_im_req` is wrapper policy — the engine no longer tracks a minimum deposit)
 - `0 <= cfg_maintenance_bps <= cfg_initial_bps <= MAX_INITIAL_BPS`
 - `0 <= cfg_h_min <= cfg_h_max <= MAX_WARMUP_SLOTS`
 - live instruction admission pairs MUST satisfy `0 <= admit_h_min <= admit_h_max <= cfg_h_max`
@@ -477,7 +475,6 @@ No external instruction in this revision may change:
 - `cfg_liquidation_fee_bps`
 - `cfg_liquidation_fee_cap`
 - `cfg_min_liquidation_abs`
-- `cfg_min_initial_deposit`
 - `cfg_min_nonzero_mm_req`
 - `cfg_min_nonzero_im_req`
 - `cfg_resolve_price_deviation_bps`
@@ -493,7 +490,7 @@ A missing account is one whose slot is not currently materialized. Missing accou
 
 Only the following path MAY materialize a missing account:
 
-- `deposit(i, amount, now_slot)` with `amount >= cfg_min_initial_deposit`
+- `deposit(i, amount, now_slot)` with `amount > 0`. The engine does not enforce a deposit minimum beyond "non-zero" — any higher floor is wrapper policy (anti-spam is a wrapper concern; see §12, §13).
 
 ### 2.6 Canonical zero-position defaults
 
@@ -529,19 +526,17 @@ It MAY succeed only if all of the following hold:
 
 - account `i` is materialized
 - trusted `now_slot >= current_slot`
-- `0 <= C_i < cfg_min_initial_deposit`
+- `C_i == 0`
 - `PNL_i == 0`
 - `R_i == 0`
 - both reserve buckets are absent
 - `basis_pos_q_i == 0`
 - `fee_credits_i <= 0`
 
+Wrappers that want to recycle accounts with residual dust capital MUST drain that capital first (e.g., via `charge_account_fee(i, residual)` which routes the remainder to insurance) before calling reclaim. Dust-threshold policy is wrapper-owned; the engine only reclaims fully-drained slots.
+
 On success, it MUST:
 
-- if `C_i > 0`:
-  - `dust = C_i`
-  - `set_capital(i, 0)`
-  - `I = checked_add_u128(I, dust)`
 - forgive any negative `fee_credits_i`
 - reset local fields to canonical zero
 - set `last_fee_slot_i = 0`
@@ -1719,7 +1714,7 @@ Procedure:
 2a. require `now_slot <= last_market_slot + cfg_max_accrual_dt_slots`
 3. set `current_slot = now_slot`
 4. if account `i` is missing:
-   - require `amount >= cfg_min_initial_deposit`
+   - require `amount > 0` (the engine has no deposit minimum beyond non-zero; any higher floor is wrapper policy)
    - materialize the account with `materialize_account(i, now_slot)`
 5. require `V + amount <= MAX_VAULT_TVL`
 6. set `V = V + amount`
@@ -1806,14 +1801,13 @@ Procedure:
 6. if recurring fees are enabled, `sync_account_fee_to_slot(i, current_slot, fee_rate_per_slot)`
 7. `touch_account_live_local(i, ctx)`
 8. `finalize_touched_accounts_post_live(ctx)`
-9. require `amount <= C_i`
-10. require post-withdraw capital is either `0` or `>= cfg_min_initial_deposit`
-11. if `effective_pos_q(i) != 0`, require withdrawal health on the hypothetical post-withdraw state where both `V` and `C_tot` decrease by `amount`
-12. apply `set_capital(i, C_i - amount)` and `V = V - amount`
-13. schedule resets
-14. finalize resets
-15. assert `OI_eff_long == OI_eff_short`
-16. require `V >= C_tot + I`
+9. require `amount <= C_i` (no engine-side post-withdraw dust floor; any such floor is wrapper policy)
+10. if `effective_pos_q(i) != 0`, require withdrawal health on the hypothetical post-withdraw state where both `V` and `C_tot` decrease by `amount`
+11. apply `set_capital(i, C_i - amount)` and `V = V - amount`
+12. schedule resets
+13. finalize resets
+14. assert `OI_eff_long == OI_eff_short`
+15. require `V >= C_tot + I`
 
 ### 9.3.1 `convert_released_pnl(i, x_req, oracle_price, now_slot, funding_rate_e9_per_slot, admit_h_min, admit_h_max[, fee_rate_per_slot])`
 
@@ -2127,7 +2121,7 @@ An implementation MUST include tests covering at least the following.
 31. A flat account with negative `PNL_i` resolves through `absorb_protocol_loss` only in the allowed already-authoritative flat-account paths.
 32. Reset finalization reopens a side once `ResetPending` preconditions are fully satisfied.
 33. `deposit` settles realized losses before fee sweep.
-34. A missing account cannot be materialized by a deposit smaller than `cfg_min_initial_deposit`.
+34. A missing account cannot be materialized by a deposit of amount `0`. (Any higher minimum-deposit floor is wrapper policy.)
 35. The strict risk-reducing trade exemption uses exact widened raw maintenance buffers and exact widened raw maintenance shortfall.
 36. The strict risk-reducing trade exemption adds back `fee_equity_impact_i`, not nominal fee.
 37. Any side-count increment — including a sign flip — enforces `cfg_max_active_positions_per_side`.
@@ -2227,8 +2221,8 @@ The following are deployment-wrapper obligations.
 10. **Provide a post-snapshot resolved-close progress path.**  
     Because `force_close_resolved` is intentionally multi-stage, a compliant deployment SHOULD provide either a self-service retry path or a permissionless batch or incentive path that sweeps positive resolved accounts after the shared payout snapshot is ready.
 
-11. **Choose `cfg_min_initial_deposit` high enough to resist slot-griefing.**  
-    The engine already enforces account-opening economics via `cfg_min_initial_deposit` (§9.2: a missing account cannot be materialized by a deposit smaller than this amount). A compliant deployment MUST set this value high enough that exhausting the configured materialized-account capacity is economically prohibitive relative to the deployment’s threat model. Additional wrapper-side opening-fee mechanisms are optional, not required — the engine’s minimum-deposit floor plus the wrapper-owned recurring-fee machinery (§4.6.1, §7.3) is sufficient for anti-spam in most deployments.
+11. **Wrapper is responsible for anti-spam on account materialization.**  
+    The engine only rejects `amount == 0` at materialization; any higher minimum-deposit floor is wrapper policy. A compliant deployment MUST enforce a minimum deposit large enough that exhausting the configured materialized-account capacity is economically prohibitive, paired with a recurring maintenance fee (via the wrapper, routed through `sync_account_fee_to_slot(i, fee_slot_anchor, fee_rate_per_slot)` — §4.6.1, §7.3) that erodes account capital over time. Together, the wrapper-owned minimum deposit plus recurring fees plus `reclaim_empty_account` (§9.10) give the deployment a complete anti-spam mechanism: materialization has a real capital cost, fees erode it, and the engine recycles fully-drained slots.
 
 12. **Size runtime batches to actual compute limits.**  
     On constrained runtimes, a compliant deployment MUST choose `max_revalidations`, batch-close sizes, and any wrapper-side multi-account composition so one instruction fits the runtime’s per-instruction compute budget.
@@ -2270,7 +2264,7 @@ The following are deployment-wrapper obligations.
 
 2. **One market account serializes one market.** Because core instructions update shared market aggregates (`V`, `I`, `C_tot`, `PNL_pos_tot`, `A_side`, `K_side`, `F_side_num`, and so on), one market instance is throughput-serialized by design.
 
-3. **Account-capacity griefing is economic, not mathematical.** The engine’s `cfg_min_initial_deposit` floor (§9.2) combined with the wrapper-owned recurring maintenance-fee mechanism (§4.6.1, §7.3) together give the engine an anti-spam guarantee: materialization has a real capital cost, and recurring fees erode that capital until the account falls to dust and becomes reclaimable (§9.10). If `cfg_min_initial_deposit` is set too low, an attacker can still economically spam materialization; the reclaim path preserves eventual liveness, but the deployment must choose parameters that make the attack unattractive. A separate account-opening fee is not required — it is a wrapper-side optional addition, not an engine invariant.
+3. **Account-capacity griefing is economic, not mathematical.** Anti-spam on account materialization is a wrapper concern: the engine only rejects `amount == 0` at materialization. A compliant wrapper combines (a) a wrapper-enforced minimum deposit, (b) a wrapper-enforced recurring maintenance fee (§4.6.1, §7.3) that erodes account capital over time, and (c) the engine’s `reclaim_empty_account` (§9.10) which recycles fully-drained slots. Together, those three give the deployment a complete anti-spam mechanism. The engine provides the primitives; the wrapper chooses the economic parameters.
 
 4. **Resolution paths should stay thin.** Even though `resolve_market` is self-synchronizing, wrappers should keep the resolution path small in transaction size and compute. Precompute external checks off chain where possible, avoid unnecessary CPI fanout in the same transaction, and remember that the settlement band checks consistency between wrapper-trusted prices rather than supplying an independent oracle guarantee.
 

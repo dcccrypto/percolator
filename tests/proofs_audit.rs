@@ -375,7 +375,6 @@ fn proof_config_rejects_invalid_bps() {
 fn proof_config_rejects_im_gt_deposit() {
     let mut params = zero_fee_params();
     params.min_nonzero_im_req = 100;
-    params.min_initial_deposit = U128::new(50); // im > deposit violates §1.4
     let _engine = RiskEngine::new(params);
 }
 

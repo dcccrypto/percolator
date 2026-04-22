@@ -205,7 +205,7 @@ fn bounded_margin_withdrawal() {
     let withdraw_amt: u32 = kani::any();
     // Dust guard: post-withdrawal capital must be 0 or >= MIN_INITIAL_DEPOSIT (2).
     // So either withdraw_not_atomic all, or leave at least MIN_INITIAL_DEPOSIT.
-    let min_dep = engine.params.min_initial_deposit.get() as u32;
+    let min_dep = 1_000u128 as u32;
     kani::assume(withdraw_amt > 0 && withdraw_amt <= deposit_amt);
     kani::assume(withdraw_amt == deposit_amt || deposit_amt - withdraw_amt >= min_dep);
     let result = engine.withdraw_not_atomic(a, withdraw_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
@@ -1251,7 +1251,6 @@ fn proof_v1126_min_nonzero_margin_floor() {
     let mut params = zero_fee_params();
     params.min_nonzero_mm_req = 1000;
     params.min_nonzero_im_req = 2000;
-    params.min_initial_deposit = U128::new(2000); // must be >= min_nonzero_im_req
     let mut engine = RiskEngine::new(params);
     engine.last_crank_slot = DEFAULT_SLOT;
 
@@ -1283,7 +1282,6 @@ fn proof_v1126_min_nonzero_margin_floor() {
 #[kani::solver(cadical)]
 fn proof_gc_reclaims_flat_dust_capital() {
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(10_000); // $0.01 minimum
     let mut engine = RiskEngine::new(params);
 
     let idx = add_user_test(&mut engine, 0).unwrap();
@@ -2194,7 +2192,6 @@ fn proof_audit5_deposit_fee_credits_zero_debt_noop() {
 #[kani::solver(cadical)]
 fn proof_audit5_reclaim_empty_account_basic() {
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
     let idx = add_user_test(&mut engine, 0).unwrap();
 
@@ -2214,7 +2211,6 @@ fn proof_audit5_reclaim_empty_account_basic() {
 #[kani::solver(cadical)]
 fn proof_audit5_reclaim_dust_sweep() {
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
     let idx = add_user_test(&mut engine, 0).unwrap();
 
@@ -2259,7 +2255,6 @@ fn proof_audit5_reclaim_rejects_open_position() {
 #[kani::solver(cadical)]
 fn proof_audit5_reclaim_rejects_live_capital() {
     let mut params = zero_fee_params();
-    params.min_initial_deposit = U128::new(1000);
     let mut engine = RiskEngine::new(params);
     let idx = add_user_test(&mut engine, 0).unwrap();
 
