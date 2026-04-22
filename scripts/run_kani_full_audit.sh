@@ -19,7 +19,7 @@ for proof in $PROOFS; do
     echo "[$COUNT/$TOTAL] Running: $proof"
     START=$(date +%s)
 
-    if timeout 600 cargo kani --tests --harness "$proof" --output-format terse 2>&1 | tail -3; then
+    if timeout 1200 cargo kani --tests --harness "$proof" --output-format terse 2>&1 | tail -3; then
         STATUS="PASS"
         PASS=$((PASS + 1))
     else

@@ -1917,7 +1917,6 @@ fn proof_audit4_init_in_place_canonical() {
     engine.last_market_slot = 55;
     engine.f_long_num = 42;
     engine.f_short_num = -42;
-    engine.params.insurance_floor = U128::new(12345);
     engine.free_head = u16::MAX; // break the freelist
 
     // Re-initialize — must fully reset all fields
@@ -1964,7 +1963,6 @@ fn proof_audit4_init_in_place_canonical() {
     assert!(engine.materialized_account_count == 0);
     assert!(engine.last_oracle_price == DEFAULT_ORACLE);
     assert!(engine.last_market_slot == 0);
-    assert!(engine.params.insurance_floor.get() == 0);
 
     // ---- Used bitmap: all zeroed ----
     let mut any_used = false;

@@ -173,7 +173,6 @@ Immutable per-market configuration:
 - `cfg_min_initial_deposit`
 - `cfg_min_nonzero_mm_req`
 - `cfg_min_nonzero_im_req`
-- `cfg_insurance_floor`
 - `cfg_resolve_price_deviation_bps`
 - `cfg_max_active_positions_per_side`
 - `cfg_max_accrual_dt_slots`
@@ -190,7 +189,6 @@ Configured values MUST satisfy:
 - if `admit_h_min > 0`, then `admit_h_min >= cfg_h_min`
 - for live instructions that may create fresh reserve, `admit_h_max > 0` and `admit_h_max >= cfg_h_min`
 - `0 <= cfg_resolve_price_deviation_bps <= MAX_RESOLVE_PRICE_DEVIATION_BPS`
-- `0 <= cfg_insurance_floor <= MAX_VAULT_TVL`
 - `0 <= cfg_min_liquidation_abs <= cfg_liquidation_fee_cap <= MAX_PROTOCOL_FEE_ABS`
 - `0 < cfg_max_active_positions_per_side <= MAX_ACTIVE_POSITIONS_PER_SIDE`
 - `0 < cfg_max_accrual_dt_slots <= MAX_WARMUP_SLOTS`
@@ -482,7 +480,6 @@ No external instruction in this revision may change:
 - `cfg_min_initial_deposit`
 - `cfg_min_nonzero_mm_req`
 - `cfg_min_nonzero_im_req`
-- `cfg_insurance_floor`
 - `cfg_resolve_price_deviation_bps`
 - `cfg_max_active_positions_per_side`
 - `cfg_max_accrual_dt_slots`
@@ -1133,7 +1130,7 @@ This helper MUST NOT mutate `PNL_i`, `PNL_pos_tot`, `PNL_matured_pos_tot`, reser
 
 ### 4.17 Insurance-loss helpers
 
-- `use_insurance_buffer(loss_abs)` spends insurance down to `cfg_insurance_floor` and returns the remainder.
+- `use_insurance_buffer(loss_abs)` spends the full insurance balance and returns the remainder.
 - `record_uninsured_protocol_loss(loss_abs)` leaves the uncovered loss represented through `Residual` and junior haircuts.
 - `absorb_protocol_loss(loss_abs)` = `use_insurance_buffer` then `record_uninsured_protocol_loss` if needed.
 
@@ -2120,7 +2117,7 @@ An implementation MUST include tests covering at least the following.
 25. Epoch gaps larger than one are rejected as corruption.
 26. If `A_candidate == 0` with `OI_post > 0`, the engine force-drains both sides instead of reverting.
 27. If ADL `delta_K_abs` is non-representable or `K_opp + delta_K_exact` overflows, quantity socialization still proceeds and the remainder routes through `record_uninsured_protocol_loss`.
-28. `enqueue_adl` spends insurance down to `cfg_insurance_floor` before any remaining bankruptcy loss is socialized or left as junior undercollateralization.
+28. `enqueue_adl` spends the full insurance balance before any remaining bankruptcy loss is socialized or left as junior undercollateralization.
 29. The exact ADL dust-bound increment matches §5.6 step 10 and the unilateral and bilateral dust-clear conditions match §5.7 exactly.
 30. Funding accrual uses exact 256-bit-or-equivalent intermediates for both `fund_num_total` and each `A_side * fund_num_total` product, with symmetry preserved.
 31. A flat account with negative `PNL_i` resolves through `absorb_protocol_loss` only in the allowed already-authoritative flat-account paths.

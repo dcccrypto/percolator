@@ -184,7 +184,6 @@ fn params_regime_a() -> RiskParams {
         min_initial_deposit: U128::new(2),
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
-        insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
@@ -209,7 +208,6 @@ fn params_regime_b() -> RiskParams {
         min_initial_deposit: U128::new(1000),
         min_nonzero_mm_req: 1,
         min_nonzero_im_req: 2,
-        insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
@@ -726,7 +724,6 @@ proptest! {
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.insurance_floor.get();
         let target_insurance = initial_insurance.max(floor + 100);
         let current_insurance = state.engine.insurance_fund.balance.get();
         if target_insurance > current_insurance {
@@ -936,7 +933,6 @@ fn run_deterministic_fuzzer(
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.insurance_floor.get();
         let target_ins = floor + rng.u128(5_000, 100_000);
         let current_ins = state.engine.insurance_fund.balance.get();
         if target_ins > current_ins {

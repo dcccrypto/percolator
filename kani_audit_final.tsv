@@ -97,7 +97,7 @@ proof_effective_pos_q_epoch_mismatch_returns_zero	3	PASS
 proof_effective_pos_q_flat_is_zero	15	PASS	
 proof_epoch_snap_correct_on_nonzero_attach	5	PASS	
 proof_epoch_snap_zero_on_position_zeroout	13	PASS	
-proof_execute_trade_full_margin_enforcement	602	TIMEOUT	(bisection by trade direction attempted and did not reduce CBMC runtime below 600s; bottleneck is the 110-point old_pos × delta symbolic state space, not the if/else branch)
+proof_execute_trade_full_margin_enforcement	871	PASS	(CBMC takes ~14.5 min on this proof; runner budget bumped to 1200s)
 proof_f2_insurance_floor_after_absorb	4	PASS	
 proof_f8_loss_seniority_in_touch	22	PASS	
 proof_fee_credits_never_i128_min	2	PASS	

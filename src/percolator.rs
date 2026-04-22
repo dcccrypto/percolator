@@ -439,8 +439,6 @@ pub struct RiskParams {
     /// Absolute nonzero-position margin floors (spec §9.1)
     pub min_nonzero_mm_req: u128,
     pub min_nonzero_im_req: u128,
-    /// Insurance fund floor (spec §1.4: 0 <= I_floor <= MAX_VAULT_TVL)
-    pub insurance_floor: U128,
     /// Warmup horizon bounds (spec §6.1)
     pub h_min: u64,
     pub h_max: u64,
@@ -572,9 +570,6 @@ pub struct RiskEngine {
     pub f_epoch_start_long_num: i128,
     /// F snapshot at epoch start for short side (v12.15)
     pub f_epoch_start_short_num: i128,
-
-
-    // Insurance floor is read from self.params.insurance_floor (no duplicate field)
 
     // Slab management
     pub used: [u64; BITMAP_WORDS],
@@ -775,12 +770,6 @@ impl RiskEngine {
         assert!(
             params.liquidation_fee_cap.get() <= MAX_PROTOCOL_FEE_ABS,
             "liquidation_fee_cap must be <= MAX_PROTOCOL_FEE_ABS (spec §1.4)"
-        );
-
-        // Insurance floor (spec §1.4: 0 <= I_floor <= MAX_VAULT_TVL)
-        assert!(
-            params.insurance_floor.get() <= MAX_VAULT_TVL,
-            "insurance_floor must be <= MAX_VAULT_TVL (spec §1.4)"
         );
 
         // Warmup horizon bounds (spec §6.1)
@@ -1007,7 +996,6 @@ impl RiskEngine {
         self.f_short_num = 0;
         self.f_epoch_start_long_num = 0;
         self.f_epoch_start_short_num = 0;
-        // insurance_floor is now read directly from self.params.insurance_floor
         self.used = [0; BITMAP_WORDS];
         self.num_used_accounts = 0;
         self.free_head = 0;
@@ -2314,14 +2302,14 @@ impl RiskEngine {
     // ========================================================================
 
     /// use_insurance_buffer (spec §4.11): deduct loss from insurance down to floor,
-    /// return the remaining uninsured loss.
+    /// return the remaining uninsured loss. Losses consume the full
+    /// insurance balance; haircut activates when balance reaches zero.
     fn use_insurance_buffer(&mut self, loss: u128) -> u128 {
         if loss == 0 {
             return 0;
         }
         let ins_bal = self.insurance_fund.balance.get();
-        let available = ins_bal.saturating_sub(self.params.insurance_floor.get());
-        let pay = core::cmp::min(loss, available);
+        let pay = core::cmp::min(loss, ins_bal);
         if pay > 0 {
             self.insurance_fund.balance = U128::new(ins_bal - pay);
         }
@@ -5503,11 +5491,9 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.vault = U128::new(new_vault);
         self.insurance_fund.balance = U128::new(new_ins);
-        Ok(self.insurance_fund.balance.get() > self.params.insurance_floor.get())
+        // Signals whether the insurance fund is non-empty after the top-up.
+        Ok(self.insurance_fund.balance.get() > 0)
     }
-
-    // set_insurance_floor removed — configuration immutability (spec §2.2.1).
-    // Insurance floor is fixed at initialization and cannot be changed at runtime.
 
     // ========================================================================
     // Account fees (wrapper-owned)

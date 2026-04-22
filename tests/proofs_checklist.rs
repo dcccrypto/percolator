@@ -78,34 +78,6 @@ fn proof_a7_fee_credits_bounds_after_trade() {
 // F2: Insurance floor respected after absorb_protocol_loss
 // ############################################################################
 
-/// absorb_protocol_loss never drops I below I_floor.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_f2_insurance_floor_after_absorb() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-
-    let ins_bal: u128 = kani::any();
-    kani::assume(ins_bal >= 1 && ins_bal <= 100_000);
-    let floor: u128 = kani::any();
-    kani::assume(floor > 0 && floor <= ins_bal);
-    engine.insurance_fund.balance = U128::new(ins_bal);
-    engine.params.insurance_floor = U128::new(floor);
-    engine.vault = U128::new(engine.vault.get() + ins_bal);
-
-    let loss: u128 = kani::any();
-    kani::assume(loss > 0 && loss <= 100_000);
-
-    engine.absorb_protocol_loss(loss);
-
-    assert!(engine.insurance_fund.balance.get() >= floor,
-        "F2: I must remain >= I_floor after absorb_protocol_loss");
-
-    kani::cover!(loss > ins_bal.saturating_sub(floor), "loss exceeds available above floor");
-    kani::cover!(loss <= ins_bal.saturating_sub(floor), "loss fits above floor");
-}
 
 // ############################################################################
 // F8: Loss seniority in touch (losses before fees)

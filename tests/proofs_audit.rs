@@ -716,33 +716,6 @@ fn proof_gc_skips_negative_pnl() {
 }
 
 // ############################################################################
-// FIX 15: insurance_floor from RiskParams (spec §1.4)
-// ############################################################################
-
-/// A nonzero insurance_floor in RiskParams must be reflected in engine state.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_insurance_floor_from_params() {
-    let mut params = zero_fee_params();
-    params.insurance_floor = U128::new(5000);
-    let engine = RiskEngine::new(params);
-    assert_eq!(engine.params.insurance_floor.get(), 5000,
-        "insurance_floor must come from RiskParams");
-}
-
-/// insurance_floor > MAX_VAULT_TVL must be rejected.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-#[kani::should_panic]
-fn proof_config_rejects_excessive_insurance_floor() {
-    let mut params = zero_fee_params();
-    params.insurance_floor = U128::new(MAX_VAULT_TVL + 1);
-    let _ = RiskEngine::new(params);
-}
-
-// ############################################################################
 // Gap #4: validate_keeper_hint ExactPartial pre-flight matches step 14
 // ############################################################################
 

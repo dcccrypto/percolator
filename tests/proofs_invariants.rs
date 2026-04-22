@@ -447,22 +447,22 @@ fn proof_haircut_ratio_no_division_by_zero() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_absorb_protocol_loss_respects_floor() {
+fn proof_absorb_protocol_loss_drains_to_zero() {
+    // After the insurance_floor removal, absorb_protocol_loss consumes
+    // the full insurance balance. Remaining loss becomes uninsured
+    // (handled by the junior haircut mechanism).
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    let floor: u32 = kani::any();
-    kani::assume(floor <= 10_000);
-    engine.params.insurance_floor = U128::new(floor as u128);
-
     let balance: u32 = kani::any();
-    kani::assume(balance >= floor && balance <= 100_000);
+    kani::assume(balance <= 100_000);
     engine.insurance_fund.balance = U128::new(balance as u128);
 
     let loss: u32 = kani::any();
     kani::assume(loss > 0 && loss <= 100_000);
     engine.absorb_protocol_loss(loss as u128);
 
-    assert!(engine.insurance_fund.balance.get() >= floor as u128);
+    // Balance must never grow from a loss and must not underflow.
+    assert!(engine.insurance_fund.balance.get() <= balance as u128);
 }
 
 // ============================================================================
