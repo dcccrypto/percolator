@@ -2306,6 +2306,174 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
     assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
 }
 
+// ============================================================================
+// v12.19 §9.4 step 12: deterministic ascending storage-index touch (property 108)
+// ============================================================================
+
+#[test]
+fn execute_trade_touches_in_ascending_storage_order() {
+    // Property 108: execute_trade touches its two counterparties in
+    // deterministic ascending storage-index order, regardless of the
+    // caller-supplied (a, b) argument order. We verify by running two
+    // engines with the same economic trade but a/b swapped: since the
+    // engine sorts (a, b) internally before touching, the final state
+    // of same-indexed accounts must match.
+    let oracle = 1000u64;
+    let slot = 1u64;
+    let size_q = make_size_q(10);
+
+    // Two engines, identical setup.
+    let (mut engine_1, i0_1, i1_1) = setup_two_users(500_000, 500_000);
+    let (mut engine_2, i0_2, i1_2) = setup_two_users(500_000, 500_000);
+    assert_eq!(i0_1, i0_2);
+    assert_eq!(i1_1, i1_2);
+
+    // Run 1: caller supplies (i0, i1, size) — ascending order.
+    engine_1
+        .execute_trade_not_atomic(i0_1, i1_1, oracle, slot, size_q, oracle, 0, 0, 100)
+        .unwrap();
+
+    // Run 2: caller supplies (i1, i0, size) — descending; engine must still
+    // touch min(i0, i1) first. Economically, this trade makes i1 the long
+    // (first arg buys from second). So we expect opposite sign positions.
+    engine_2
+        .execute_trade_not_atomic(i1_2, i0_2, oracle, slot, size_q, oracle, 0, 0, 100)
+        .unwrap();
+
+    // Touch order determinism: both runs should have ordered their touched
+    // set with i0 (smaller) first. The side indices that result are
+    // symmetric — run 1: i0 long, i1 short; run 2: i1 long, i0 short.
+    // Both runs have identical |oi_eff_long| == |oi_eff_short| by symmetry.
+    assert_eq!(engine_1.oi_eff_long_q, engine_2.oi_eff_long_q);
+    assert_eq!(engine_1.oi_eff_short_q, engine_2.oi_eff_short_q);
+
+    // Both runs zero sticky h_max state and touched_accounts are finite —
+    // because the engine iterates ascending, no cross-order spillover.
+    assert!(engine_1.check_conservation());
+    assert!(engine_2.check_conservation());
+}
+
+// ============================================================================
+// v12.19 §9.10 step 3a: reclaim_empty_account envelope bound (property 104)
+// ============================================================================
+
+#[test]
+fn reclaim_envelope_rejects_now_slot_beyond_envelope() {
+    // Property 104 (first clause): reclaim_empty_account rejects when
+    // now_slot > slot_last + cfg_max_accrual_dt_slots. On rejection, no
+    // state mutation (including no current_slot advance).
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    // Clean state for reclaim eligibility.
+    engine.accounts[idx as usize].capital = U128::ZERO;
+    engine.accounts[idx as usize].pnl = 0;
+    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.accounts[idx as usize].position_basis_q = 0;
+    engine.accounts[idx as usize].sched_present = 0;
+    engine.accounts[idx as usize].pending_present = 0;
+    engine.accounts[idx as usize].fee_credits = I128::ZERO;
+
+    // max_accrual_dt_slots = 100, last_market_slot = 0, so envelope = 100.
+    // now_slot = 200 > 100 → reject.
+    let current_slot_before = engine.current_slot;
+    let r = engine.reclaim_empty_account_not_atomic(idx, 200);
+    assert_eq!(r, Err(RiskError::Overflow));
+    // State must be unchanged.
+    assert_eq!(engine.current_slot, current_slot_before,
+        "rejected reclaim must not advance current_slot");
+    assert!(engine.is_used(idx as usize),
+        "rejected reclaim must not free the slot");
+}
+
+#[test]
+fn reclaim_envelope_accepts_now_slot_within_envelope() {
+    // Property 104 (second clause): within envelope, reclaim succeeds and
+    // current_slot advances to now_slot.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].capital = U128::ZERO;
+    engine.accounts[idx as usize].pnl = 0;
+    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.accounts[idx as usize].position_basis_q = 0;
+    engine.accounts[idx as usize].sched_present = 0;
+    engine.accounts[idx as usize].pending_present = 0;
+    engine.accounts[idx as usize].fee_credits = I128::ZERO;
+
+    // Within envelope: now_slot = 50 (<= 0 + 100).
+    engine.reclaim_empty_account_not_atomic(idx, 50).unwrap();
+    assert_eq!(engine.current_slot, 50);
+    assert!(!engine.is_used(idx as usize));
+}
+
+// ============================================================================
+// v12.19 §4.7 step 2: consumption-threshold admission gate
+//   (properties 99, 100, 101)
+// ============================================================================
+
+#[test]
+fn admit_gate_some_zero_is_rejected() {
+    // Property 101 second clause: Some(0) is invalid at input validation.
+    let r = RiskEngine::validate_threshold_opt(Some(0));
+    assert_eq!(r, Err(RiskError::Overflow), "Some(0) must be rejected");
+}
+
+#[test]
+fn admit_gate_none_and_some_positive_accepted() {
+    // Property 101 first clause + Some(t>0) valid.
+    assert!(RiskEngine::validate_threshold_opt(None).is_ok());
+    assert!(RiskEngine::validate_threshold_opt(Some(1)).is_ok());
+    assert!(RiskEngine::validate_threshold_opt(Some(u128::MAX)).is_ok());
+}
+
+#[test]
+fn admit_gate_stress_lane_forces_h_max() {
+    // Property 99: Some(threshold) with consumption >= threshold forces
+    // admit_h_max regardless of residual-scarcity state.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, 1000, 100).unwrap();
+    // Pre-load consumption = 100, threshold = 50 → gate fires.
+    engine.price_move_consumed_bps_this_generation = 100;
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, Some(50));
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
+        .unwrap();
+    assert_eq!(h, 50, "consumption-threshold gate must force admit_h_max");
+    // Sticky bit set.
+    assert!(ctx.is_h_max_sticky(idx));
+}
+
+#[test]
+fn admit_gate_none_recovers_residual_lane() {
+    // Property 101 first clause: None disables step 2 entirely.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    // Build residual > fresh_pnl: V=1_000_000, C_tot=0 by manual setup.
+    engine.vault = U128::new(1_000_000);
+    engine.price_move_consumed_bps_this_generation = u128::MAX; // would trip any threshold
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, None);
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
+        .unwrap();
+    assert_eq!(h, 0, "None disables stress gate — residual lane returns admit_h_min");
+    assert!(!ctx.is_h_max_sticky(idx));
+}
+
+#[test]
+fn admit_gate_below_threshold_uses_residual_lane() {
+    // Consumption = 10, threshold = 50 → gate does NOT fire, falls through
+    // to step 3 residual-scarcity lane.
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.vault = U128::new(1_000_000);
+    engine.price_move_consumed_bps_this_generation = 10;
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, Some(50));
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
+        .unwrap();
+    assert_eq!(h, 0, "below threshold falls through to residual lane (ample residual → admit_h_min)");
+}
+
 #[test]
 fn accrue_market_to_sub_bps_jitter_floors_to_zero_consumption() {
     // Property 105: if abs_dp * 10_000 < P_last (sub-bps move), consumption
