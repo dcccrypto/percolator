@@ -40,10 +40,6 @@ extern crate kani;
 // Conditional visibility macro
 // ============================================================================
 
-// ============================================================================
-// Conditional visibility macro
-// ============================================================================
-
 /// Internal methods that proof harnesses and integration tests need direct
 /// access to. Private in production builds, `pub` under test/kani.
 /// Each invocation emits two mutually-exclusive cfg-gated copies of the same
@@ -92,7 +88,8 @@ const _: () = assert!(MAX_ACCOUNTS.is_power_of_two());
 
 pub const GC_CLOSE_BUDGET: u32 = 32;
 pub const ACCOUNTS_PER_CRANK: u16 = 128;
-pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
+// LIQ_BUDGET_PER_CRANK removed in v12.19: max_revalidations is now the
+// per-instruction Phase 1 budget, passed directly to keeper_crank_*.
 
 /// POS_SCALE = 1_000_000 (spec §1.2)
 pub const POS_SCALE: u128 = 1_000_000;
@@ -155,7 +152,6 @@ use wide_math::{
     U256, I256,
     mul_div_floor_u128, mul_div_ceil_u128,
     wide_mul_div_floor_u128,
-    wide_signed_mul_div_floor_from_k_pair,
     wide_mul_div_ceil_u128_or_over_i128max, OverI128Magnitude,
     fee_debt_u128_checked,
     mul_div_floor_u256_with_rem,
@@ -1770,20 +1766,31 @@ impl RiskEngine {
     }
     }
 
-    /// set_position_basis_q (spec §4.4): update stored pos counts based on sign changes.
+    /// set_position_basis_q (spec §4.4 + property 37): update stored pos
+    /// counts based on sign changes. Enforces `cfg_max_active_positions_per_side`
+    /// on any INCREMENTING transition (0 → nonzero, sign flip) by default.
     ///
-    /// Does NOT enforce `cfg_max_active_positions_per_side`. The cap is a
-    /// caller invariant, pre-validated in code paths that INCREMENT a
-    /// side (only `execute_trade_not_atomic` as of this revision). A
-    /// per-account check here would false-reject valid two-party trades
-    /// that swap cap-holding participants: attaching the new holder
-    /// first transiently pushes `stored_pos_count_side` to cap+1 before
-    /// the old holder is detached by the second attach. All other
-    /// `attach_effective_position` call sites (liquidation partial
-    /// reduction, liquidation full-close, resolve reconcile) never
-    /// increment a side, so no pre-check is needed there.
+    /// `allow_transient_spike = true` skips the per-attach increment check
+    /// and is used only by `execute_trade_not_atomic`'s 2-attach bilateral
+    /// swap where attach order can transiently push count to cap+1 before
+    /// the second attach brings it back. Trade-level pre-flight proves
+    /// the FINAL count does not breach cap; the end-of-instruction
+    /// `assert_public_postconditions` re-verifies.
     test_visible! {
     fn set_position_basis_q(&mut self, idx: usize, new_basis: i128) -> Result<()> {
+        self.set_position_basis_q_inner(idx, new_basis, /*allow_transient_spike=*/false)
+    }
+    }
+
+    test_visible! {
+    fn set_position_basis_q_allow_spike(&mut self, idx: usize, new_basis: i128) -> Result<()> {
+        self.set_position_basis_q_inner(idx, new_basis, /*allow_transient_spike=*/true)
+    }
+    }
+
+    fn set_position_basis_q_inner(
+        &mut self, idx: usize, new_basis: i128, allow_transient_spike: bool,
+    ) -> Result<()> {
         let old = self.accounts[idx].position_basis_q;
         let old_side = side_of_i128(old);
         let new_side = side_of_i128(new_basis);
@@ -1802,16 +1809,23 @@ impl RiskEngine {
             }
         }
 
-        // Increment new side count
+        // Increment new side count + enforce cap (spec property 37).
         if let Some(s) = new_side {
+            let cap = self.params.max_active_positions_per_side;
             match s {
                 Side::Long => {
                     self.stored_pos_count_long = self.stored_pos_count_long
                         .checked_add(1).ok_or(RiskError::CorruptState)?;
+                    if !allow_transient_spike && self.stored_pos_count_long > cap {
+                        return Err(RiskError::Overflow);
+                    }
                 }
                 Side::Short => {
                     self.stored_pos_count_short = self.stored_pos_count_short
                         .checked_add(1).ok_or(RiskError::CorruptState)?;
+                    if !allow_transient_spike && self.stored_pos_count_short > cap {
+                        return Err(RiskError::Overflow);
+                    }
                 }
             }
         }
@@ -1819,11 +1833,27 @@ impl RiskEngine {
         self.accounts[idx].position_basis_q = new_basis;
         Ok(())
     }
-    }
 
     /// attach_effective_position (spec §4.5)
     test_visible! {
     fn attach_effective_position(&mut self, idx: usize, new_eff_pos_q: i128) -> Result<()> {
+        self.attach_effective_position_inner(idx, new_eff_pos_q, /*allow_spike=*/false)
+    }
+    }
+
+    /// Variant used by `execute_trade_not_atomic`'s 2-attach bilateral swap.
+    /// The trade's pre-flight cap check (execute_trade_not_atomic line ~4327)
+    /// proves the FINAL per-side count does not breach cap; within the
+    /// two-call attach sequence, either arg order can transiently push count
+    /// to cap+1. This variant skips the per-attach cap check while still
+    /// decrementing counts correctly and enforcing all other invariants.
+    fn attach_effective_position_allow_spike(&mut self, idx: usize, new_eff_pos_q: i128) -> Result<()> {
+        self.attach_effective_position_inner(idx, new_eff_pos_q, /*allow_spike=*/true)
+    }
+
+    fn attach_effective_position_inner(
+        &mut self, idx: usize, new_eff_pos_q: i128, allow_spike: bool,
+    ) -> Result<()> {
         // Before replacing a nonzero same-epoch basis, account for the fractional
         // remainder that will be orphaned (dynamic dust accounting).
         let old_basis = self.accounts[idx].position_basis_q;
@@ -1853,6 +1883,7 @@ impl RiskEngine {
         }
 
         if new_eff_pos_q == 0 {
+            // Decrement-only path — no cap check needed.
             self.set_position_basis_q(idx, 0i128)?;
             // Reset to canonical zero-position defaults (spec §2.4)
             self.accounts[idx].adl_a_basis = ADL_ONE;
@@ -1865,7 +1896,11 @@ impl RiskEngine {
                 return Err(RiskError::Overflow);
             }
             let side = side_of_i128(new_eff_pos_q).ok_or(RiskError::CorruptState)?;
-            self.set_position_basis_q(idx, new_eff_pos_q)?;
+            if allow_spike {
+                self.set_position_basis_q_allow_spike(idx, new_eff_pos_q)?;
+            } else {
+                self.set_position_basis_q(idx, new_eff_pos_q)?;
+            }
 
             match side {
                 Side::Long => {
@@ -1883,7 +1918,6 @@ impl RiskEngine {
             }
         }
         Ok(())
-    }
     }
 
     // ========================================================================
@@ -3896,9 +3930,14 @@ impl RiskEngine {
     }
 
     // ========================================================================
-    // deposit (spec §10.2)
+    // deposit (spec §9.2)
     // ========================================================================
 
+    /// Spec §9.2 v12.19 `deposit(i, amount, now_slot)`. The `_oracle_price`
+    /// parameter is vestigial — deposit is a pure capital-transfer path
+    /// that MUST NOT call `accrue_market_to` and therefore has no use for
+    /// an oracle. Retained in the signature for backward compatibility;
+    /// callers MAY pass `0` or any placeholder value.
     pub fn deposit_not_atomic(&mut self, idx: u16, amount: u128, _oracle_price: u64, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -4425,8 +4464,12 @@ impl RiskEngine {
         self.set_pnl_with_reserve(b as usize, pnl_b, ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared), Some(&mut ctx))?;
 
         // Step 8: attach effective positions
-        self.attach_effective_position(a as usize, new_eff_a)?;
-        self.attach_effective_position(b as usize, new_eff_b)?;
+        // Use allow_spike variant: bilateral trade may transiently push one
+        // side's count to cap+1 between the two attaches. execute_trade's
+        // pre-flight proves the final per-side count fits cap, and
+        // assert_public_postconditions re-verifies at instruction end.
+        self.attach_effective_position_allow_spike(a as usize, new_eff_a)?;
+        self.attach_effective_position_allow_spike(b as usize, new_eff_b)?;
 
         // Step 9: write pre-computed OI (same values from step 5, spec §5.2.2)
         self.oi_eff_long_q = oi_long_after;
