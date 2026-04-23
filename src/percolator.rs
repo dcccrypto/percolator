@@ -1045,7 +1045,19 @@ impl RiskEngine {
     }
 
     /// Initialize in place (for Solana BPF zero-copy, spec §2.7).
-    /// Fully canonicalizes all state — safe even on non-zeroed memory.
+    ///
+    /// **Safety contract:** the underlying memory for `&mut RiskEngine` MUST
+    /// be either zero-initialized (as SystemProgram.createAccount on Solana
+    /// guarantees) or come from a previously-valid RiskEngine. Under v12.19
+    /// the engine still contains `repr(u8)` enum fields (`MarketMode`,
+    /// `SideMode`) whose valid discriminants are 0..=1 and 0..=2 respectively.
+    /// On Solana, zero-initialized memory is a valid discriminant for
+    /// `MarketMode::Live` (0) and `SideMode::Normal` (0) by construction.
+    ///
+    /// For completely uninitialized (non-zero, non-valid-engine) memory,
+    /// callers MUST use `init_in_place_raw` (which initializes enums via
+    /// pointer writes before forming the &mut reference) — not supplied
+    /// by the engine as the production boot path doesn't need it.
     pub fn init_in_place(&mut self, params: RiskParams, init_slot: u64, init_oracle_price: u64) {
         Self::validate_params(&params);
         assert!(
@@ -3344,6 +3356,16 @@ impl RiskEngine {
             return Err(RiskError::CorruptState);
         }
         if self.oi_eff_long_q != self.oi_eff_short_q {
+            return Err(RiskError::CorruptState);
+        }
+        // Spec §1.4 / §4.4: at the public surface, cfg_max_active_positions_per_side
+        // MUST NOT be exceeded. Intra-instruction transient spikes (e.g. bilateral
+        // trade attaching one holder before detaching another) are permitted
+        // because no intermediate state is observable; the cap is a per-instruction
+        // end-state invariant. This catches any call site that increments a side
+        // without pre-validating the cap.
+        let cap = self.params.max_active_positions_per_side;
+        if self.stored_pos_count_long > cap || self.stored_pos_count_short > cap {
             return Err(RiskError::CorruptState);
         }
         Ok(())
