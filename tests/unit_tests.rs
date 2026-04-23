@@ -2307,6 +2307,80 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
 }
 
 // ============================================================================
+// v12.19 §9.7 Phase 2: round-robin sweep (properties 92, 93, 94, 95, 98)
+// ============================================================================
+
+#[test]
+fn keeper_crank_phase2_advances_cursor_by_window_size() {
+    // Property 93: Phase 2 advances rr_cursor_position by exactly
+    // min(rr_window_size, MAX_MATERIALIZED_ACCOUNTS - rr_cursor_position).
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.rr_cursor_position, 0);
+    let _ = engine
+        .keeper_crank_not_atomic_v2(
+            1, 1000, &[], 0, 0, 0, 100, None, 5,
+        )
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 5,
+        "rr_cursor_position must advance by rr_window_size");
+}
+
+#[test]
+fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
+    // Property 98: rr_window_size = 0 does NOT advance cursor or generation.
+    let mut engine = RiskEngine::new(default_params());
+    engine.rr_cursor_position = 42;
+    engine.sweep_generation = 3;
+    engine.price_move_consumed_bps_this_generation = 17;
+    engine
+        .keeper_crank_not_atomic_v2(
+            1, 1000, &[], 0, 0, 0, 100, None, 0,
+        )
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 42);
+    assert_eq!(engine.sweep_generation, 3);
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 17);
+}
+
+#[test]
+fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
+    // Property 94: at cursor wraparound, sweep_generation += 1 and
+    // price_move_consumed_bps_this_generation resets to 0 atomically.
+    let mut engine = RiskEngine::new(default_params());
+    // Place cursor near the top — one wrap_window_size hit will wrap.
+    engine.rr_cursor_position = MAX_MATERIALIZED_ACCOUNTS - 1;
+    engine.sweep_generation = 7;
+    engine.price_move_consumed_bps_this_generation = 123;
+    // Window that wraps past MAX_MATERIALIZED_ACCOUNTS (window=1 is enough
+    // since cursor = MAX_MATERIALIZED_ACCOUNTS - 1).
+    engine
+        .keeper_crank_not_atomic_v2(
+            1, 1000, &[], 0, 0, 0, 100, None, 1,
+        )
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0");
+    assert_eq!(engine.sweep_generation, 8, "generation +1 on wrap");
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 0,
+        "consumption resets to 0 on wrap");
+}
+
+#[test]
+fn keeper_crank_phase2_rejects_some_zero_threshold() {
+    // Spec §9.0 step 1 + §4.7: Some(0) is invalid and must reject pre-mutation.
+    let mut engine = RiskEngine::new(default_params());
+    let cursor_before = engine.rr_cursor_position;
+    let gen_before = engine.sweep_generation;
+    let r = engine.keeper_crank_not_atomic_v2(
+        1, 1000, &[], 0, 0, 0, 100, Some(0), 5,
+    );
+    assert_eq!(r, Err(RiskError::Overflow),
+        "Some(0) threshold must be rejected conservatively");
+    // No mutation on reject.
+    assert_eq!(engine.rr_cursor_position, cursor_before);
+    assert_eq!(engine.sweep_generation, gen_before);
+}
+
+// ============================================================================
 // v12.19 §9.4 step 12: deterministic ascending storage-index touch (property 108)
 // ============================================================================
 

@@ -4741,6 +4741,9 @@ impl RiskEngine {
     /// keeper_crank_not_atomic (spec §10.8): Minimal on-chain permissionless shortlist processor.
     /// Candidate discovery is performed off-chain. ordered_candidates[] is untrusted.
     /// Each candidate is (account_idx, optional liquidation policy hint).
+    /// Public keeper_crank shim (pre-v12.19 signature) that forwards to
+    /// the v12.19 two-phase implementation with rr_window_size=0 and
+    /// threshold_opt=None. Preserves backward-compat for existing tests.
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -4751,7 +4754,34 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<CrankOutcome> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.keeper_crank_not_atomic_v2(
+            now_slot, oracle_price, ordered_candidates, max_revalidations,
+            funding_rate_e9, admit_h_min, admit_h_max, None, 0,
+        )
+    }
+
+    /// v12.19 keeper_crank with Phase 2 round-robin sweep and consumption
+    /// threshold (spec §9.7). Phase 1 runs keeper-priority liquidation,
+    /// then Phase 2 always runs a mandatory structural sweep over the next
+    /// `rr_window_size` materialized-account indices starting from
+    /// `rr_cursor_position`. On full cursor wraparound past
+    /// MAX_MATERIALIZED_ACCOUNTS, `sweep_generation` increments by 1 and
+    /// `price_move_consumed_bps_this_generation` resets to 0.
+    pub fn keeper_crank_not_atomic_v2(
+        &mut self,
+        now_slot: u64,
+        oracle_price: u64,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+        rr_window_size: u64,
+    ) -> Result<CrankOutcome> {
+        // Step 1 (spec §9.0): validate inputs pre-mutation.
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4761,19 +4791,20 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        // Reject requests exceeding MAX_TOUCHED_PER_INSTRUCTION instead of
-        // silently truncating. finalize_touched_accounts_post_live cannot
-        // process more than MAX_TOUCHED_PER_INSTRUCTION touched accounts, so
-        // any caller requesting more is asking for work we cannot do — fail
-        // explicitly rather than accept a reduced budget.
-        if max_revalidations > MAX_TOUCHED_PER_INSTRUCTION as u16 {
+        // Combined Phase 1 + Phase 2 touched-account budget must fit the
+        // runtime ctx capacity.
+        let combined_touch_budget = (max_revalidations as u64)
+            .saturating_add(rr_window_size);
+        if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
             return Err(RiskError::Overflow);
         }
 
-        // Step 1: initialize instruction context
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        // Step 2: initialize instruction context with threshold gate wired in.
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
-        // Steps 2-4: validate inputs
+        // Steps 3-4: validate time monotonicity.
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -4781,10 +4812,10 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 5: accrue_market_to exactly once
+        // Step 5: accrue_market_to exactly once.
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
 
-        // Step 6: current_slot = now_slot
+        // Step 6: current_slot = now_slot.
         self.current_slot = now_slot;
 
         let advanced = now_slot > self.last_crank_slot;
@@ -4792,50 +4823,30 @@ impl RiskEngine {
             self.last_crank_slot = now_slot;
         }
 
-        // Step 7-8: process candidates in keeper-supplied order
+        // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
         let mut attempts: u16 = 0;
         let mut num_liquidations: u32 = 0;
 
         for &(candidate_idx, ref hint) in ordered_candidates {
-            // Budget check
             if attempts >= max_revalidations {
                 break;
             }
-            // Stop on pending reset
             if ctx.pending_reset_long || ctx.pending_reset_short {
                 break;
             }
-            // Skip missing accounts (doesn't count against budget)
             if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
                 continue;
             }
 
-            // Recurring maintenance-fee ordering is a WRAPPER responsibility.
-            // If a deployment enables recurring fees, the wrapper MUST call
-            // `sync_account_fee_to_slot_not_atomic(candidate, now_slot, rate)`
-            // on every candidate before the crank, so that
-            // `touch_account_live_local` evaluates margin on state that
-            // includes the realized fee debt. The engine does not enforce
-            // this here because it has no way to tell whether recurring
-            // fees are even enabled (rate is not stored in engine state).
-
-            // Count as an attempt
             attempts += 1;
             let cidx = candidate_idx as usize;
 
-            // Touch candidate (adds to ctx.touched_accounts, up to 64 slots).
             self.touch_account_live_local(cidx, &mut ctx)?;
-            // Fee sweep deferred to finalize_touched_accounts_post_live (spec §10 rule 7).
 
-            // Check if liquidatable after exact current-state touch.
-            // Apply hint if present and current-state-valid (spec §11.1 rule 3).
             if !ctx.pending_reset_long && !ctx.pending_reset_short {
                 let eff = self.effective_pos_q(cidx);
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                        // Validate hint via stateless pre-flight (spec §11.1 rule 3).
-                        // None hint → no action per spec §11.2.
-                        // Invalid ExactPartial → None (no action) per spec §11.1 rule 3.
                         if let Some(policy) = self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price) {
                             match self.liquidate_at_oracle_internal(candidate_idx, now_slot, oracle_price, policy, &mut ctx) {
                                 Ok(true) => { num_liquidations += 1; }
@@ -4848,16 +4859,55 @@ impl RiskEngine {
             }
         }
 
+        // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
+        // Runs unconditionally — including when Phase 1 exited early on a
+        // pending reset. Phase 2 does NOT execute liquidations, does NOT
+        // count against max_revalidations, and does NOT break on pending
+        // reset. Its job is to deterministically walk the next
+        // rr_window_size indices, touching materialized accounts so
+        // warmup/reserve state advances uniformly across the deployment.
+        //
+        // Cursor wrap: when rr_cursor_position reaches
+        // MAX_MATERIALIZED_ACCOUNTS, sweep_generation increments by 1 and
+        // price_move_consumed_bps_this_generation resets to 0 atomically
+        // with the wrap (spec §9.7 step 7).
+        let cursor_start = self.rr_cursor_position;
+        let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
+        let sweep_end = core::cmp::min(sweep_end_u64, MAX_MATERIALIZED_ACCOUNTS);
+
+        // Clamp to both MAX_MATERIALIZED_ACCOUNTS and physical MAX_ACCOUNTS.
+        // The theoretical spec bound MAX_MATERIALIZED_ACCOUNTS is 1e6; the
+        // runtime implementation uses a smaller MAX_ACCOUNTS slab (e.g. 64).
+        // Real touching is only meaningful for indices below MAX_ACCOUNTS.
+        let touch_end = core::cmp::min(sweep_end, MAX_ACCOUNTS as u64);
+
+        let mut i = cursor_start;
+        while i < touch_end {
+            let iu = i as usize;
+            if self.is_used(iu) {
+                self.touch_account_live_local(iu, &mut ctx)?;
+            }
+            i += 1;
+        }
+
+        // Advance cursor; on wraparound reset and bump generation.
+        if sweep_end >= MAX_MATERIALIZED_ACCOUNTS {
+            self.rr_cursor_position = 0;
+            self.sweep_generation = self.sweep_generation
+                .checked_add(1)
+                .ok_or(RiskError::Overflow)?;
+            self.price_move_consumed_bps_this_generation = 0;
+        } else {
+            self.rr_cursor_position = sweep_end;
+        }
+
         // Finalize: compute fresh snapshot from post-mutation state, apply
         // whole-only conversion + fee sweep to all tracked accounts.
-        // MAX_TOUCHED_PER_INSTRUCTION = 64 matches LIQ_BUDGET_PER_CRANK.
         self.finalize_touched_accounts_post_live(&ctx)?;
 
-        // Note: dust GC is NOT part of keeper_crank per spec §9.7.
-        // Deployments should run reclaim_empty_account_not_atomic explicitly.
         let gc_closed = 0u32;
 
-        // Steps 9-10: end-of-instruction resets
+        // End-of-instruction resets (spec §9.7 steps 9-10).
         self.schedule_end_of_instruction_resets(&mut ctx)?;
         self.finalize_end_of_instruction_resets(&ctx)?;
 
