@@ -870,8 +870,11 @@ impl I256 {
         let r_lo = rhs.lo_u128();
         let r_hi = rhs.hi_u128();
         let (lo, carry) = s_lo.overflowing_add(r_lo);
-        let (hi, overflow1) = s_hi.overflowing_add(r_hi);
-        let (hi, overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
+        // overflow bits unused — this is a wrapping-add for signed I256; the
+        // sign-based overflow detection below uses the result, not the
+        // unsigned-overflow flags.
+        let (hi, _overflow1) = s_hi.overflowing_add(r_hi);
+        let (hi, _overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
         let result = I256::from_lo_hi(lo, hi);
 
         let self_neg = self.is_negative();

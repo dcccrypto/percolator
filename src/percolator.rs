@@ -1749,7 +1749,9 @@ impl RiskEngine {
         if x > old_rel { return Err(RiskError::CorruptState); }
 
         let new_pos = old_pos.checked_sub(x).ok_or(RiskError::CorruptState)?;
-        let new_rel = old_rel.checked_sub(x).ok_or(RiskError::CorruptState)?;
+        // Validation-only subtraction; result unused (new_rel would equal
+        // old_rel - x >= 0 given the `x > old_rel` guard above).
+        let _ = old_rel.checked_sub(x).ok_or(RiskError::CorruptState)?;
         if new_pos < old_r { return Err(RiskError::CorruptState); }
 
         // Update pnl_pos_tot
@@ -2849,7 +2851,7 @@ impl RiskEngine {
         let a_old_u256 = U256::from_u128(a_old);
         let oi_post_u256 = U256::from_u128(oi_post);
         let oi_u256 = U256::from_u128(oi);
-        let (a_candidate_u256, a_trunc_rem) = mul_div_floor_u256_with_rem(
+        let (a_candidate_u256, _a_trunc_rem) = mul_div_floor_u256_with_rem(
             a_old_u256,
             oi_post_u256,
             oi_u256,
@@ -3277,7 +3279,7 @@ impl RiskEngine {
     /// `candidate_trade_pnl` is the signed execution-slippage PnL for this account
     /// from the candidate trade under evaluation.
     pub fn account_equity_trade_open_raw(
-        &self, account: &Account, idx: usize, candidate_trade_pnl: i128
+        &self, account: &Account, _idx: usize, candidate_trade_pnl: i128
     ) -> i128 {
         let trade_gain = if candidate_trade_pnl > 0 { candidate_trade_pnl as u128 } else { 0u128 };
 
