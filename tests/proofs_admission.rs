@@ -461,34 +461,34 @@ fn in1_no_live_immediate_release() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn ah7_sticky_capacity_exhausted_fails() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
-    // Zero residual: admission MUST choose h_max.
-    engine.vault = U128::new(0);
-    engine.c_tot = U128::new(0);
-    engine.pnl_matured_pos_tot = 0;
-
+fn ah7_sticky_bitmap_is_idempotent_and_never_capacity_bound() {
+    // v12.19 rev6: sticky set is now a bitmap indexed by storage slot,
+    // so capacity equals MAX_ACCOUNTS and cannot be exhausted by
+    // marking distinct slots. Property: mark_h_max_sticky is idempotent
+    // and returns true for any in-bounds idx regardless of pre-state.
     let mut ctx = InstructionContext::new_with_admission(0, 100);
-    // Fill the sticky list to capacity with foreign account indices
-    // (not idx), so the new call hits the capacity-exhausted branch.
-    ctx.h_max_sticky_count = MAX_TOUCHED_PER_INSTRUCTION as u8;
-    for i in 0..MAX_TOUCHED_PER_INSTRUCTION {
-        // Use indices different from idx (= 0) to avoid already-sticky short
-        // circuit. Index 0 is the only materialized account; fill with 1..N.
-        ctx.h_max_sticky_accounts[i] = (i + 1) as u16;
-    }
 
-    let fresh: u8 = kani::any();
-    kani::assume(fresh > 0);
+    let idx: u16 = kani::any();
+    kani::assume((idx as usize) < MAX_ACCOUNTS);
 
-    let r = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx, 0u64, 100u64);
-    // Admission needs h_max (residual=0 < fresh); sticky list full; MUST err.
-    assert!(r.is_err(),
-        "sticky-capacity exhaustion while h_max is required must return Err");
+    // First mark sets the bit.
+    assert!(ctx.mark_h_max_sticky(idx));
+    assert!(ctx.is_h_max_sticky(idx));
+
+    // Second mark is idempotent — still true.
+    assert!(ctx.mark_h_max_sticky(idx));
+    assert!(ctx.is_h_max_sticky(idx));
+
+    // A different idx does not conflict.
+    let other: u16 = kani::any();
+    kani::assume((other as usize) < MAX_ACCOUNTS);
+    kani::assume(other != idx);
+    assert!(ctx.mark_h_max_sticky(other));
+    assert!(ctx.is_h_max_sticky(other));
+    // Original stays set.
+    assert!(ctx.is_h_max_sticky(idx));
 }
 
 // ============================================================================

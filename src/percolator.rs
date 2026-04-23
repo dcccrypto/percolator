@@ -215,8 +215,17 @@ pub enum SideMode {
     ResetPending = 2,
 }
 
-/// Max accounts that can be touched in a single instruction
-pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 64;
+/// Max accounts that can be touched in a single instruction. Bumped from 64
+/// to 256 in v12.19 rev6 follow-up so keeper_crank Phase 2's rr_window_size
+/// is not artificially capped far below §14's 60-220 per-call recommendation.
+/// Counter fields are widened to u16.
+pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 256;
+
+/// h_max sticky set is stored as a bitmap indexed by storage slot.
+/// Size = BITMAP_WORDS (same sizing as the allocator's `used` bitmap).
+/// Storage cost: (MAX_ACCOUNTS / 8) bytes. At MAX_ACCOUNTS=4096, 512 bytes.
+/// Lookup/insert are O(1), eliminating the O(n) linear scan of the prior
+/// array-based representation.
 
 /// Instruction context for deferred reset scheduling (spec §5.7-5.8)
 /// and shared touched-account tracking (spec §7.8, v12.14.0).
@@ -233,12 +242,14 @@ pub struct InstructionContext {
     /// `Some(0)` is invalid at input validation time — callers must
     /// pass `None` to disable, never `Some(0)`.
     pub admit_h_max_consumption_threshold_bps_opt_shared: Option<u128>,
-    /// Deduplicated touched accounts (ascending order)
+    /// Deduplicated touched accounts, maintained in ascending-index order
+    /// by sorted-insert in `add_touched`. No separate sort pass required
+    /// in finalize_touched_accounts_post_live.
     pub touched_accounts: [u16; MAX_TOUCHED_PER_INSTRUCTION],
-    pub touched_count: u8,
-    /// Per-instruction sticky set: accounts that required admit_h_max
-    pub h_max_sticky_accounts: [u16; MAX_TOUCHED_PER_INSTRUCTION],
-    pub h_max_sticky_count: u8,
+    pub touched_count: u16,
+    /// Per-instruction sticky set: accounts that required admit_h_max.
+    /// Bitmap indexed by storage slot for O(1) membership test/insert.
+    pub h_max_sticky_bitmap: [u64; BITMAP_WORDS],
 }
 
 impl InstructionContext {
@@ -251,8 +262,7 @@ impl InstructionContext {
             admit_h_max_consumption_threshold_bps_opt_shared: None,
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
-            h_max_sticky_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
-            h_max_sticky_count: 0,
+            h_max_sticky_bitmap: [0; BITMAP_WORDS],
         }
     }
 
@@ -265,8 +275,7 @@ impl InstructionContext {
             admit_h_max_consumption_threshold_bps_opt_shared: None,
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
-            h_max_sticky_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
-            h_max_sticky_count: 0,
+            h_max_sticky_bitmap: [0; BITMAP_WORDS],
         }
     }
 
@@ -284,46 +293,61 @@ impl InstructionContext {
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt,
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
-            h_max_sticky_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
-            h_max_sticky_count: 0,
+            h_max_sticky_bitmap: [0; BITMAP_WORDS],
         }
     }
 
-    /// Check if account is in sticky set
+    /// Check if account is in sticky set. O(1) bitmap test.
     pub fn is_h_max_sticky(&self, idx: u16) -> bool {
-        let count = self.h_max_sticky_count as usize;
-        for i in 0..count {
-            if self.h_max_sticky_accounts[i] == idx { return true; }
-        }
-        false
+        let i = idx as usize;
+        if i >= MAX_ACCOUNTS { return false; }
+        let word = i / 64;
+        let bit = i % 64;
+        (self.h_max_sticky_bitmap[word] >> bit) & 1 == 1
     }
 
-    /// Insert account into sticky set
+    /// Insert account into sticky set. O(1) bitmap set.
+    /// Return value is retained for API compatibility — always true now
+    /// that capacity is MAX_ACCOUNTS. In-bounds idx is required (callers
+    /// already validate idx < MAX_ACCOUNTS before this point).
     pub fn mark_h_max_sticky(&mut self, idx: u16) -> bool {
-        if self.is_h_max_sticky(idx) { return true; }
-        let count = self.h_max_sticky_count as usize;
-        if count < MAX_TOUCHED_PER_INSTRUCTION {
-            self.h_max_sticky_accounts[count] = idx;
-            self.h_max_sticky_count += 1;
-            true
-        } else {
-            false
-        }
+        let i = idx as usize;
+        if i >= MAX_ACCOUNTS { return false; }
+        let word = i / 64;
+        let bit = i % 64;
+        self.h_max_sticky_bitmap[word] |= 1u64 << bit;
+        true
     }
 
-    /// Add account to touched set if not already present
+    /// Add account to touched set, maintaining ascending-index order.
+    /// O(log n) search + O(n) shift-on-insert, vs prior O(n) dedup scan.
+    /// Returns true on success (including dedup hit), false on capacity
+    /// exceeded. Callers MUST propagate false as a conservative failure.
     pub fn add_touched(&mut self, idx: u16) -> bool {
         let count = self.touched_count as usize;
-        for i in 0..count {
-            if self.touched_accounts[i] == idx { return true; } // dedup
+        // Binary search: find insertion point. If idx already present,
+        // dedup with no mutation.
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let v = self.touched_accounts[mid];
+            if v == idx { return true; } // already present
+            if v < idx { lo = mid + 1; } else { hi = mid; }
         }
-        if count < MAX_TOUCHED_PER_INSTRUCTION {
-            self.touched_accounts[count] = idx;
-            self.touched_count += 1;
-            true
-        } else {
-            false // capacity exceeded — caller MUST fail
+        // lo is the insertion point.
+        if count >= MAX_TOUCHED_PER_INSTRUCTION {
+            return false;
         }
+        // Shift [lo, count) right by one, then insert at lo.
+        let mut j = count;
+        while j > lo {
+            self.touched_accounts[j] = self.touched_accounts[j - 1];
+            j -= 1;
+        }
+        self.touched_accounts[lo] = idx;
+        self.touched_count += 1;
+        true
     }
 }
 
@@ -3866,22 +3890,12 @@ impl RiskEngine {
         };
         let is_whole = h_snapshot_den > 0 && h_snapshot_num == h_snapshot_den;
 
-        // Step 2: iterate touched accounts in ascending order
-        // Sort touched_accounts (insertion sort, n <= MAX_TOUCHED_PER_INSTRUCTION = 64).
-        // Cheap enough at that bound; future revs may maintain sorted-on-insert
-        // in add_touched to drop this and the O(n) membership scans elsewhere.
+        // Step 2: iterate touched accounts in ascending order.
+        // v12.19 rev6: touched_accounts is maintained in ascending order
+        // by sorted-insert in `add_touched`, so no sort pass is required.
         let count = ctx.touched_count as usize;
-        let mut sorted = ctx.touched_accounts;
-        for i in 1..count {
-            let mut j = i;
-            while j > 0 && sorted[j - 1] > sorted[j] {
-                sorted.swap(j - 1, j);
-                j -= 1;
-            }
-        }
-
         for ti in 0..count {
-            let idx = sorted[ti] as usize;
+            let idx = ctx.touched_accounts[ti] as usize;
 
             // Whole-only flat auto-conversion
             if is_whole
