@@ -1048,16 +1048,18 @@ impl RiskEngine {
     ///
     /// **Safety contract:** the underlying memory for `&mut RiskEngine` MUST
     /// be either zero-initialized (as SystemProgram.createAccount on Solana
-    /// guarantees) or come from a previously-valid RiskEngine. Under v12.19
-    /// the engine still contains `repr(u8)` enum fields (`MarketMode`,
-    /// `SideMode`) whose valid discriminants are 0..=1 and 0..=2 respectively.
-    /// On Solana, zero-initialized memory is a valid discriminant for
-    /// `MarketMode::Live` (0) and `SideMode::Normal` (0) by construction.
+    /// guarantees) or come from a previously-valid RiskEngine. The engine
+    /// contains `repr(u8)` enum fields (`MarketMode`, `SideMode`) whose
+    /// valid discriminants are 0..=1 and 0..=2 respectively. Zero-initialized
+    /// memory is a valid discriminant for `MarketMode::Live` (0) and
+    /// `SideMode::Normal` (0) by construction.
     ///
-    /// For completely uninitialized (non-zero, non-valid-engine) memory,
-    /// callers MUST use `init_in_place_raw` (which initializes enums via
-    /// pointer writes before forming the &mut reference) — not supplied
-    /// by the engine as the production boot path doesn't need it.
+    /// Callers that need to initialize arbitrary non-zero bytes must perform
+    /// pointer-level enum initialization via `MaybeUninit` or `ptr::write`
+    /// BEFORE forming the `&mut RiskEngine` reference — constructing the
+    /// reference over invalid enum discriminants is UB. This engine does
+    /// not ship a raw-pointer init shim; production boot paths use
+    /// zero-initialized SystemProgram accounts.
     pub fn init_in_place(&mut self, params: RiskParams, init_slot: u64, init_oracle_price: u64) {
         Self::validate_params(&params);
         assert!(
@@ -1576,12 +1578,13 @@ impl RiskEngine {
         if self.accounts[idx].reserved_pnl > old_pos {
             return Err(RiskError::CorruptState);
         }
-        let old_rel = if self.market_mode == MarketMode::Live {
-            old_pos.checked_sub(self.accounts[idx].reserved_pnl).ok_or(RiskError::CorruptState)?
-        } else {
-            if self.accounts[idx].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
-            old_pos
-        };
+        // Validate reserve shape without retaining the computed "released"
+        // amount (prior revs bound this to `old_rel` which was never read).
+        if self.market_mode == MarketMode::Live {
+            old_pos.checked_sub(self.accounts[idx].reserved_pnl).ok_or(RiskError::CorruptState)?;
+        } else if self.accounts[idx].reserved_pnl != 0 {
+            return Err(RiskError::CorruptState);
+        }
         let new_pos = i128_clamp_pos(new_pnl);
 
         // Pre-validate reserve mode BEFORE any mutation
@@ -3830,7 +3833,9 @@ impl RiskEngine {
         let is_whole = h_snapshot_den > 0 && h_snapshot_num == h_snapshot_den;
 
         // Step 2: iterate touched accounts in ascending order
-        // Sort touched_accounts (simple insertion sort, max 4 elements)
+        // Sort touched_accounts (insertion sort, n <= MAX_TOUCHED_PER_INSTRUCTION = 64).
+        // Cheap enough at that bound; future revs may maintain sorted-on-insert
+        // in add_touched to drop this and the O(n) membership scans elsewhere.
         let count = ctx.touched_count as usize;
         let mut sorted = ctx.touched_accounts;
         for i in 1..count {
@@ -4010,6 +4015,12 @@ impl RiskEngine {
     ) -> Result<()> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4132,6 +4143,12 @@ impl RiskEngine {
     ) -> Result<()> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4211,6 +4228,12 @@ impl RiskEngine {
     ) -> Result<()> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4726,6 +4749,12 @@ impl RiskEngine {
     ) -> Result<bool> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         // Spec §9.6 step 2: require account materialized (public entry point).
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -4958,6 +4987,12 @@ impl RiskEngine {
         // Step 1 (spec §9.0): validate inputs pre-mutation.
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -5221,6 +5256,12 @@ impl RiskEngine {
     ) -> Result<()> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -5337,6 +5378,12 @@ impl RiskEngine {
     ) -> Result<u128> {
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        // Spec §12.21: public wrappers MUST NOT combine
+        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
+        // The engine accepts the combination because it cannot distinguish
+        // trusted/private wrappers (for which it is permitted) from public
+        // wrappers. Compliance is a wrapper-layer obligation; engine-level
+        // invariants still hold per property 107.
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
