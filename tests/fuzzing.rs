@@ -186,10 +186,11 @@ fn params_regime_a() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 10_000_000,
+        max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_price_move_bps_per_slot: 4,
     }
 }
 
@@ -209,10 +210,11 @@ fn params_regime_b() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 10_000_000,
+        max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_price_move_bps_per_slot: 4,
     }
 }
 

@@ -103,6 +103,11 @@ pub fn a_after_adl(a_old: u16, oi_post: u16, oi: u16) -> u16 {
 // ============================================================================
 
 pub fn zero_fee_params() -> RiskParams {
+    // v12.19 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
+    // With maint=500, liq=0, max_rate=10_000, max_dt=100:
+    //   funding_budget = 10_000 * 100 * 10_000 / 1e9 = 10 bps
+    //   available for price = 490 bps
+    //   max_price_move_bps_per_slot = 4 gives price_budget = 400 <= 490 ✓
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
@@ -117,10 +122,11 @@ pub fn zero_fee_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 10_000_000,
+        max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_price_move_bps_per_slot: 4,
     }
 }
 
@@ -183,6 +189,10 @@ pub fn set_pnl_test(engine: &mut RiskEngine, idx: usize, new_pnl: i128) -> Resul
 }
 
 pub fn default_params() -> RiskParams {
+    // v12.19 envelope: with maint=500, liq=100, max_rate=10_000, max_dt=100:
+    //   funding_budget = 10_000 * 100 * 10_000 / 1e9 = 10 bps
+    //   available for price = 500 - 100 - 10 = 390 bps
+    //   max_price_move_bps_per_slot = 3 → price_budget = 300 <= 390 ✓
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
@@ -197,9 +207,10 @@ pub fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 10_000_000,
+        max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_price_move_bps_per_slot: 3,
     }
 }

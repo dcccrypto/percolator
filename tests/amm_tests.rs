@@ -8,10 +8,18 @@ use percolator::i128::U128;
 
 #[cfg(feature = "test")]
 fn default_params() -> RiskParams {
+    // v12.19 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
+    // E2E demos: allow dt up to 200 slots (for test_e2e_complete_user_journey's
+    // slot advancement pattern) and per-slot cap of 14 bps:
+    //   price_budget   = 14 * 200 = 2800
+    //   funding_budget = 10_000 * 200 * 10_000 / 1e9 = 20
+    //   total          = 2800 + 20 + 50 = 2870 <= maint 3000 ✓
+    // Cap at dt=10, P=100: 14 * 10 * 100 = 14_000 units of abs_dp*10_000
+    // → abs_dp <= 1 (= 1% move). Tests adapt their price-move magnitudes.
     RiskParams {
-        maintenance_margin_bps: 500, // 5%
-        initial_margin_bps: 1000,    // 10%
-        trading_fee_bps: 10,         // 0.1%
+        maintenance_margin_bps: 3000,
+        initial_margin_bps: 3500,
+        trading_fee_bps: 10,
         max_accounts: 64,
         max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
@@ -22,10 +30,11 @@ fn default_params() -> RiskParams {
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
-        max_accrual_dt_slots: 10_000_000,
+        max_accrual_dt_slots: 200,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
         max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_price_move_bps_per_slot: 14,
     }
 }
 
@@ -121,7 +130,8 @@ fn test_e2e_complete_user_journey() {
 
     // === Phase 2: Price Movement ===
 
-    let new_price: u64 = 120; // +20%
+    // v12.19: price cap = 14 bps/slot × 10 slots × P=100 → abs_dp <= 1 (1%).
+    let new_price: u64 = 101;
 
     // Accrue market to new price
     engine.advance_slot(10);

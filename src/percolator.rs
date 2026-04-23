@@ -495,6 +495,23 @@ pub struct RiskParams {
     /// Per-market active-positions cap per side (spec §1.4).
     /// Invariant: max_active_positions_per_side <= max_accounts <= MAX_ACCOUNTS.
     pub max_active_positions_per_side: u64,
+    /// Per-slot price-move cap in bps (spec §1.4, v12.19).
+    ///
+    /// Bounds the magnitude of `|oracle_price - P_last| / P_last` per
+    /// accrual envelope: `accrue_market_to` rejects any call on a
+    /// price-moving live-exposed market where
+    /// `abs_delta_price * 10_000 > max_price_move_bps_per_slot * dt * P_last`.
+    ///
+    /// Init-time solvency-envelope invariant (spec §1.4):
+    ///   `max_price_move_bps_per_slot * max_accrual_dt_slots
+    ///    + floor(max_abs_funding_e9_per_slot * max_accrual_dt_slots
+    ///            * 10_000 / FUNDING_DEN)
+    ///    + liquidation_fee_bps
+    ///    <= maintenance_margin_bps`
+    ///
+    /// This is the construction-level invariant backing §0 goal 52
+    /// (self-neutral insurance-siphon resistance).
+    pub max_price_move_bps_per_slot: u64,
 }
 
 /// Main risk engine state (spec §2.2)
@@ -561,6 +578,23 @@ pub struct RiskEngine {
 
     /// Count of accounts with PNL < 0 (spec §4.7, v12.16.4)
     pub neg_pnl_account_count: u64,
+
+    /// Round-robin sweep cursor (spec §2.2, v12.19).
+    /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
+    /// `0 <= rr_cursor_position < MAX_MATERIALIZED_ACCOUNTS`.
+    pub rr_cursor_position: u64,
+    /// Sweep generation counter (spec §2.2, v12.19).
+    /// Incremented exactly once per full wraparound of `rr_cursor_position`.
+    /// Read-only from the wrapper perspective; can only advance by running
+    /// `keeper_crank` through a complete cursor wrap.
+    pub sweep_generation: u64,
+    /// Cumulative price-move consumption since the last generation advance
+    /// (spec §2.2, §5.5 step 9a, v12.19). In bps, measured as
+    /// `Σ floor(|ΔP| * 10_000 / P_last)` over successful live `accrue_market_to`
+    /// calls with price movement. Resets to 0 atomically on `sweep_generation`
+    /// advance. Consulted by `admit_fresh_reserve_h_lock` step 2 when the
+    /// wrapper supplies `admit_h_max_consumption_threshold_bps_opt = Some(t)`.
+    pub price_move_consumed_bps_this_generation: u128,
 
     /// Last oracle price used in accrue_market_to (P_last, spec §5.5)
     pub last_oracle_price: u64,
@@ -837,6 +871,58 @@ impl RiskEngine {
         assert!(lifetime_ok,
             "funding lifetime: ADL_ONE * MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot * min_funding_lifetime_slots must fit i128 (spec §1.4)"
         );
+
+        // Per-slot price-move cap (spec §1.4, v12.19).
+        assert!(
+            params.max_price_move_bps_per_slot > 0,
+            "max_price_move_bps_per_slot must be > 0 (spec §1.4)"
+        );
+        // Soft upper bound so the subsequent 256-bit arithmetic on the
+        // solvency envelope never has to deal with pathological inputs.
+        assert!(
+            params.max_price_move_bps_per_slot <= MAX_MARGIN_BPS,
+            "max_price_move_bps_per_slot must be <= MAX_MARGIN_BPS (spec §1.4)"
+        );
+
+        // Exact init-time solvency envelope (spec §1.4, v12.19):
+        //   price_budget_bps + funding_budget_bps + liquidation_fee_bps
+        //     <= maintenance_margin_bps
+        // where
+        //   price_budget_bps   = max_price_move_bps_per_slot * max_accrual_dt_slots
+        //   funding_budget_bps = floor(max_abs_funding_e9_per_slot
+        //                              * max_accrual_dt_slots * 10_000 / FUNDING_DEN)
+        //
+        // Both budgets can exceed u128 at the global bounds. Compute in
+        // U256 and compare.
+        let solvency_ok = {
+            let move_cap = U256::from_u128(params.max_price_move_bps_per_slot as u128);
+            let dt = U256::from_u128(params.max_accrual_dt_slots as u128);
+            let rate = U256::from_u128(params.max_abs_funding_e9_per_slot as u128);
+            let ten_thou = U256::from_u128(10_000u128);
+            let fd = U256::from_u128(FUNDING_DEN);
+            let price_budget = move_cap.checked_mul(dt);
+            let funding_num = rate.checked_mul(dt).and_then(|v| v.checked_mul(ten_thou));
+            let funding_budget = funding_num.and_then(|v| v.checked_div(fd));
+            let liq = U256::from_u128(params.liquidation_fee_bps as u128);
+            let maint = U256::from_u128(params.maintenance_margin_bps as u128);
+            match (price_budget, funding_budget) {
+                (Some(p), Some(f)) => {
+                    match p.checked_add(f).and_then(|v| v.checked_add(liq)) {
+                        Some(total) => total <= maint,
+                        None => false,
+                    }
+                }
+                _ => false,
+            }
+        };
+        assert!(
+            solvency_ok,
+            "solvency envelope: \
+             max_price_move_bps_per_slot * max_accrual_dt_slots \
+             + floor(max_abs_funding_e9_per_slot * max_accrual_dt_slots * 10_000 / FUNDING_DEN) \
+             + liquidation_fee_bps \
+             must be <= maintenance_margin_bps (spec §1.4, v12.19)"
+        );
     }
 
     /// Create a new risk engine for testing. Initializes with
@@ -901,6 +987,9 @@ impl RiskEngine {
             phantom_dust_bound_short_q: 0u128,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
+            rr_cursor_position: 0,
+            sweep_generation: 0,
+            price_move_consumed_bps_this_generation: 0,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
@@ -973,6 +1062,9 @@ impl RiskEngine {
         self.phantom_dust_bound_short_q = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
+        self.rr_cursor_position = 0;
+        self.sweep_generation = 0;
+        self.price_move_consumed_bps_this_generation = 0;
         self.last_oracle_price = init_oracle_price;
         self.fund_px_last = init_oracle_price;
         self.last_market_slot = init_slot;
@@ -2158,27 +2250,76 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Spec §5.5 clause 6 (v12.19): enforce per-call dt envelope only
-        // when funding would actually accumulate.
+        // Spec §5.5 step 6-8 (v12.19): enforce per-call dt envelope whenever
+        // funding OR price movement would actually drain equity.
         //
-        // The envelope exists to protect F_side_num from overflow in a
-        // single call. Funding only accrues when both sides have OI AND
-        // the wrapper-supplied rate is nonzero AND fund_px_last > 0 (see
-        // the funding branch below). In all other cases there is no F
-        // delta, so dt is safe to be unbounded. K (mark-to-market) does
-        // not depend on dt.
+        // - funding_active: funding_rate != 0 AND both sides have OI AND fund_px_last > 0
+        // - price_move_active: P_last > 0 AND oracle_price != P_last AND OI nonzero on some side
         //
-        // Without this gate, idle markets (no OI) would brick after
-        // max_accrual_dt_slots of inactivity — accrue itself would fail,
-        // and every Live non-accruing endpoint also rejects now_slot >
-        // last_market_slot + max_dt, so no public path could advance
-        // last_market_slot.
+        // If either is true, dt <= cfg_max_accrual_dt_slots MUST hold. This
+        // is load-bearing for goal 52: bounded dt + bounded per-slot price
+        // move + init-time solvency envelope together prevent the A1-class
+        // self-neutral insurance siphon.
+        //
+        // Zero-OI idle markets and zero-funding-no-price-move cases remain
+        // fast-forwardable; that's required for idle heartbeat cranks.
         let funding_active = funding_rate_e9 != 0
             && long_live
             && short_live
             && self.fund_px_last > 0;
-        if funding_active && total_dt > self.params.max_accrual_dt_slots {
+        let price_move_active = self.last_oracle_price > 0
+            && oracle_price != self.last_oracle_price
+            && (long_live || short_live);
+        if (funding_active || price_move_active)
+            && total_dt > self.params.max_accrual_dt_slots
+        {
             return Err(RiskError::Overflow);
+        }
+
+        // Spec §5.5 step 9 (v12.19): per-accrual price-move cap.
+        //
+        //   require abs(oracle_price - P_last) * 10_000
+        //           <= cfg_max_price_move_bps_per_slot * dt * P_last
+        //
+        // RHS can exceed u128 at global bounds (10_000 * u64::MAX * u64::MAX).
+        // Compute in U256 exactly. Check fires BEFORE any K/F/P_last/slot_last
+        // mutation — conservation on failure.
+        //
+        // This is the construction-level safety boundary for goal 52. Within
+        // one accrual envelope the oracle can move at most
+        // `cfg_max_price_move_bps_per_slot * cfg_max_accrual_dt_slots` bps,
+        // which the init-time solvency inequality guarantees is less than
+        // cfg_maintenance_bps minus funding and liquidation budgets.
+        //
+        // Must be unconditional on price_move_active: if P_last changes from
+        // zero to nonzero this path is not taken (we'd be in the delta_p==0
+        // shortcut above), so the guard below always has P_last > 0 when
+        // delta_p != 0 AND total_dt > 0 AND a side has live OI.
+        let mut consumed_this_step: u128 = 0;
+        if price_move_active && total_dt > 0 {
+            let abs_dp = (oracle_price as i128 - self.last_oracle_price as i128).unsigned_abs();
+            let lhs = U256::from_u128(abs_dp)
+                .checked_mul(U256::from_u128(10_000))
+                .ok_or(RiskError::Overflow)?;
+            let rhs = U256::from_u128(self.params.max_price_move_bps_per_slot as u128)
+                .checked_mul(U256::from_u128(total_dt as u128))
+                .and_then(|v| v.checked_mul(U256::from_u128(self.last_oracle_price as u128)))
+                .ok_or(RiskError::Overflow)?;
+            if lhs > rhs {
+                return Err(RiskError::Overflow);
+            }
+
+            // Spec §5.5 step 9a (v12.19): consumption tracking uses floor,
+            // not ceil — sub-bps jitter MUST NOT round up into whole-bps
+            // consumption. `floor(abs_dp * 10_000 / P_last)`.
+            //
+            // Upper bound: abs_dp * 10_000 <= max_price_move * total_dt * P_last
+            // so consumed_this_step <= max_price_move * total_dt which fits u128.
+            let num = U256::from_u128(abs_dp).checked_mul(U256::from_u128(10_000))
+                .ok_or(RiskError::Overflow)?;
+            let den = U256::from_u128(self.last_oracle_price as u128);
+            let consumed_wide = num.checked_div(den).ok_or(RiskError::Overflow)?;
+            consumed_this_step = consumed_wide.try_into_u128().ok_or(RiskError::Overflow)?;
         }
 
         // Use scratch K values for the entire mark + funding computation.
@@ -2260,6 +2401,16 @@ impl RiskEngine {
         self.last_market_slot = now_slot;
         self.last_oracle_price = oracle_price;
         self.fund_px_last = oracle_price;
+
+        // Spec §5.5 step 9a (v12.19): commit consumption after all other
+        // state mutations succeed, so the accumulator is rolled back
+        // atomically with the K/F commit on any earlier failure.
+        if consumed_this_step > 0 {
+            self.price_move_consumed_bps_this_generation = self
+                .price_move_consumed_bps_this_generation
+                .checked_add(consumed_this_step)
+                .ok_or(RiskError::Overflow)?;
+        }
 
         Ok(())
     }
