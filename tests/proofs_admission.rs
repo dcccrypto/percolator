@@ -882,3 +882,206 @@ fn k104_oi_geq_sum_of_effective() {
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
     let _ = &mut engine; // avoid unused warning
 }
+
+// ============================================================================
+// v12.19 admission-gate proofs (spec §4.7 step 2)
+// Priority #3 from rev6 plan:
+//   - gate_stress_lane: Some(t) + consumption>=t forces admit_h_max
+//   - gate_none_recovers: None disables step 2 entirely
+//   - gate_some_zero_rejected: Some(0) is invalid input
+//   - gate_sticky_skips: sticky early-return bypasses step 2
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_admit_gate_stress_lane_forces_h_max() {
+    // Property 99: when threshold_opt = Some(threshold) and
+    // price_move_consumed_bps_this_generation >= threshold,
+    // admit_fresh_reserve_h_lock returns admit_h_max regardless of any
+    // choice of Residual_now and matured_plus_fresh.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+
+    // Symbolic state.
+    let fresh: u8 = kani::any();
+    kani::assume(fresh > 0);
+
+    // Symbolic vault/c_tot cover both residual-ample and residual-scarce cases.
+    let vault: u8 = kani::any();
+    let c_tot: u8 = kani::any();
+    kani::assume(c_tot as u128 <= vault as u128);
+    engine.vault = U128::new(vault as u128);
+    engine.c_tot = U128::new(c_tot as u128);
+
+    let threshold: u8 = kani::any();
+    kani::assume(threshold > 0);
+    let consumed: u8 = kani::any();
+    kani::assume(consumed >= threshold);
+    engine.price_move_consumed_bps_this_generation = consumed as u128;
+
+    let admit_h_max: u64 = 50;
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(
+        0, admit_h_max, Some(threshold as u128),
+    );
+
+    let h = engine.admit_fresh_reserve_h_lock(
+        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
+    ).unwrap();
+    assert_eq!(h, admit_h_max,
+        "consumption-threshold gate must force admit_h_max");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_admit_gate_none_disables_step2() {
+    // Property 101 first clause: None disables the gate. Result matches
+    // pre-v12.19 behavior — determined solely by residual-scarcity check.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+
+    let vault: u8 = kani::any();
+    let c_tot: u8 = kani::any();
+    kani::assume(c_tot as u128 <= vault as u128);
+    engine.vault = U128::new(vault as u128);
+    engine.c_tot = U128::new(c_tot as u128);
+
+    let fresh: u8 = kani::any();
+    kani::assume(fresh > 0);
+
+    // Any consumption — gate is disabled so it cannot affect the outcome.
+    engine.price_move_consumed_bps_this_generation = kani::any();
+
+    let admit_h_max: u64 = 50;
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(
+        0, admit_h_max, None,
+    );
+
+    let h = engine.admit_fresh_reserve_h_lock(
+        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
+    ).unwrap();
+
+    // Expected result from pure residual lane.
+    let senior = engine.c_tot.get() + engine.insurance_fund.balance.get();
+    let residual = engine.vault.get().saturating_sub(senior);
+    let matured_plus_fresh = engine.pnl_matured_pos_tot.saturating_add(fresh as u128);
+    let expected = if matured_plus_fresh <= residual { 0 } else { admit_h_max };
+
+    assert_eq!(h, expected,
+        "None-threshold path must equal pure residual-scarcity lane");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_admit_gate_some_zero_rejected() {
+    // Property 101 second clause: Some(0) is invalid at validation time.
+    let r = RiskEngine::validate_threshold_opt(Some(0));
+    assert_eq!(r, Err(RiskError::Overflow));
+    // None and any positive threshold accepted.
+    assert!(RiskEngine::validate_threshold_opt(None).is_ok());
+    let t: u128 = kani::any();
+    kani::assume(t > 0);
+    assert!(RiskEngine::validate_threshold_opt(Some(t)).is_ok());
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_admit_gate_sticky_early_return() {
+    // Step 1 of §4.7: once an account is in h_max_sticky_accounts, the
+    // function returns admit_h_max immediately regardless of step 2 or 3.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.vault = U128::new(100);
+
+    let admit_h_max: u64 = 50;
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(
+        0, admit_h_max, None,
+    );
+
+    // Pre-populate sticky.
+    assert!(ctx.mark_h_max_sticky(idx));
+
+    let fresh: u8 = kani::any();
+    kani::assume(fresh > 0);
+    // Symbolic consumption / threshold — irrelevant due to sticky early-return.
+    engine.price_move_consumed_bps_this_generation = kani::any();
+
+    let h = engine.admit_fresh_reserve_h_lock(
+        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
+    ).unwrap();
+    assert_eq!(h, admit_h_max, "sticky must force admit_h_max");
+}
+
+// ============================================================================
+// v12.19 consumption-accumulator proofs (spec §5.5 step 9a)
+// Property 105: abs_dp * 10_000 < P_last → consumed_this_step == 0 (floor).
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_consumption_floor_below_one_bp() {
+    // If |ΔP| * 10_000 < P_last (sub-bps move), consumption contributes 0,
+    // not 1. This rules out an accidental ceil-rounding regression.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = 1_000_000; // both sides live
+    engine.oi_eff_short_q = 1_000_000;
+
+    // Use large P_last so sub-bps moves are expressible and within cap.
+    let p_last: u32 = kani::any();
+    kani::assume(p_last >= 100_000);
+    kani::assume(p_last <= 1_000_000);
+    engine.last_oracle_price = p_last as u64;
+    engine.fund_px_last = p_last as u64;
+    engine.last_market_slot = 0;
+
+    // abs_dp * 10_000 < P_last means abs_dp < P_last / 10_000.
+    let abs_dp: u32 = kani::any();
+    kani::assume(abs_dp > 0);
+    kani::assume((abs_dp as u64) * 10_000 < p_last as u64);
+
+    let new_price = p_last + abs_dp;
+    // At dt=1 with max_price_move_bps_per_slot=4 (zero_fee_params), cap =
+    // 4 * 1 * P_last. Required: abs_dp * 10_000 <= 4 * P_last. At sub-bps
+    // move this is trivially satisfied.
+    let r = engine.accrue_market_to(1, new_price as u64, 0);
+    assert!(r.is_ok());
+    // Floor consumption must be 0.
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 0,
+        "sub-bps jitter must floor to 0 consumption");
+}
+
+// ============================================================================
+// v12.19 cursor / generation state-machine proofs (spec §9.7 Phase 2)
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_rr_window_zero_no_cursor_advance() {
+    // Property 98: rr_window_size = 0 does not mutate cursor, generation,
+    // or consumption accumulator.
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let cursor: u8 = kani::any();
+    kani::assume((cursor as u64) < MAX_MATERIALIZED_ACCOUNTS);
+    engine.rr_cursor_position = cursor as u64;
+    engine.sweep_generation = kani::any();
+    engine.price_move_consumed_bps_this_generation = kani::any();
+
+    let cursor_before = engine.rr_cursor_position;
+    let gen_before = engine.sweep_generation;
+    let consumed_before = engine.price_move_consumed_bps_this_generation;
+
+    engine.keeper_crank_not_atomic_v2(
+        1, 1000, &[], 0, 0, 0, 100, None, 0,
+    ).unwrap();
+
+    assert_eq!(engine.rr_cursor_position, cursor_before);
+    assert_eq!(engine.sweep_generation, gen_before);
+    // Accrue at same price with zero OI doesn't touch consumption either.
+    assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before);
+}
