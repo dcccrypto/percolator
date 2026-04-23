@@ -367,16 +367,12 @@ fn proof_config_rejects_invalid_bps() {
     let _engine = RiskEngine::new(params);
 }
 
-/// new() with min_nonzero_im_req > min_initial_deposit must panic (spec §1.4).
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-#[kani::should_panic]
-fn proof_config_rejects_im_gt_deposit() {
-    let mut params = zero_fee_params();
-    params.min_nonzero_im_req = 100;
-    let _engine = RiskEngine::new(params);
-}
+// Removed: proof_config_rejects_im_gt_deposit — the invariant
+// `min_nonzero_im_req <= min_initial_deposit` no longer exists in
+// the engine; `min_initial_deposit` was removed (see
+// src/percolator.rs:738-739). The upper bound on `min_nonzero_im_req`
+// is now wrapper policy. Engine-level `validate_params` still checks
+// `min_nonzero_mm_req < min_nonzero_im_req` (covered by live proofs).
 
 // ############################################################################
 // FIX 8: close_account_not_atomic checks PnL before forgiving fee debt

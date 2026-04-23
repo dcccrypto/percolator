@@ -2402,12 +2402,16 @@ fn proof_close_account_fee_forgiveness_bounded() {
     let _ = engine.top_up_insurance_fund(100_000, 0);
 
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Simulate a wrapper-drained account carrying negative fee_credits.
-    // Wrapper would use charge_account_fee to route the residual capital
-    // into insurance before reclaim; here we model the post-drain state.
-    engine.set_capital(idx as usize, 0).unwrap();
+    // `add_user_test` materializes at capital=0 without touching vault; the
+    // wrapper's charge_account_fee would have already routed any residual
+    // capital into insurance, so vault == insurance and no dust is stranded.
+    // (Earlier revisions of this test deposited 1 token then manually zeroed
+    // capital, leaving 1 token orphaned in the vault. reclaim's final
+    // sweep_empty_market_surplus_to_insurance correctly captured that dust,
+    // but the test then falsely claimed insurance was unchanged. Removing
+    // the deposit models the post-drain state faithfully.)
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
     let v_before = engine.vault.get();

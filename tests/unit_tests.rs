@@ -769,14 +769,21 @@ fn rounding_surplus_must_not_strand_vault_after_close() {
     // Expected: terminal close paths must sweep the residual into the
     // insurance fund so the wrapper can withdraw it via the normal
     // insurance path.
+    // v12.19: corner-case test with oracle=1 and price move to 2 (100% move
+    // in 1 slot). Satisfies envelope only at maint=10_000 (max), liq=0,
+    // max_price_move=10_000, max_dt=1, funding=0.
+    //   envelope: 10_000 * 1 + 0 + 0 = 10_000 <= 10_000 ✓
     let mut params = default_params();
     params.min_nonzero_mm_req = 1;
     params.min_nonzero_im_req = 2;
-    // v12.19: maintenance_margin_bps must be > 0 and satisfy the solvency
-    // envelope. Keep default 500 + zero everything else so envelope is
-    // 3 * 100 + 10 + 0 = 310 <= 500 ✓.
     params.trading_fee_bps = 0;
     params.liquidation_fee_bps = 0;
+    params.maintenance_margin_bps = 10_000;
+    params.initial_margin_bps = 10_000;
+    params.max_abs_funding_e9_per_slot = 0;
+    params.max_accrual_dt_slots = 1;
+    params.min_funding_lifetime_slots = 1;
+    params.max_price_move_bps_per_slot = 10_000;
     let mut e = RiskEngine::new_with_market(params, 0, 1);
     e.deposit_not_atomic(0, 10, 1, 0).unwrap();
     e.deposit_not_atomic(1, 10, 1, 0).unwrap();
@@ -922,11 +929,11 @@ fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
     // and F_side after snapshotting them into the epoch-start fields.
     // Stale accounts still settle correctly because they read the
     // epoch-start snapshots, not the live indices.
+    // v12.19: use default params (maint=500, max_price_move=3) and pick
+    // a base price that leaves headroom for a small envelope-compliant move.
     let mut params = default_params();
     params.max_abs_funding_e9_per_slot = 0;
-    params.max_accrual_dt_slots = 1;
-    params.min_funding_lifetime_slots = 1;
-    let mut engine = RiskEngine::new_with_market(params, 0, 1);
+    let mut engine = RiskEngine::new_with_market(params, 0, 100_000);
 
     // Construct the post-ADL shape the reviewer describes: small A, K
     // near the i128 edge — passed the old a_old headroom check because
@@ -943,10 +950,11 @@ fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
     // still carries the near-boundary pre-reset value, reopening the side
     // and doing any valid mark-to-market will overflow K.
     engine.oi_eff_long_q = POS_SCALE; // simulate a new-epoch long position
-    engine.last_oracle_price = 1;
-    engine.fund_px_last = 1;
-    // A minimal valid oracle move should always succeed.
-    let r = engine.accrue_market_to(1, 2, 0);
+    engine.last_oracle_price = 100_000;
+    engine.fund_px_last = 100_000;
+    // A minimal valid oracle move (1 unit at P=100_000) should succeed.
+    // abs_dp*10_000 = 10_000; cap at dt=1 P=100_000 = 3*1*100_000 = 300_000 ✓.
+    let r = engine.accrue_market_to(1, 100_001, 0);
     assert!(r.is_ok(),
         "after begin_full_drain_reset + finalize + reopen, any valid \
          accrue_market_to must succeed; K_side must not carry old-epoch \
@@ -969,21 +977,15 @@ fn adl_k_write_preserves_future_mark_headroom() {
     // If the ADL K write would violate this, the deficit MUST route
     // through record_uninsured_protocol_loss instead, matching the
     // existing "overflow → implicit haircut" policy.
+    // v12.19: start at a high P_last so a small envelope-compliant move
+    // can be applied post-ADL to test mark-to-market headroom.
     let mut params = default_params();
     params.trading_fee_bps = 0;
-    // v12.19: maintenance must stay > 0 to satisfy the solvency envelope.
-    // Keep default 500 and make liq_fee = 0 so other envelope terms are small.
     params.liquidation_fee_bps = 0;
-    // Funding out of scope; pure K/mark headroom test.
     params.max_abs_funding_e9_per_slot = 0;
-    params.max_accrual_dt_slots = 1;
-    params.min_funding_lifetime_slots = 1;
-    let mut engine = RiskEngine::new_with_market(params, 0, 1);
+    let init_px = 100_000u64;
+    let mut engine = RiskEngine::new_with_market(params, 0, init_px);
 
-    // Balanced live OI; construct state directly to isolate the K-headroom
-    // invariant (the shape is reachable through normal trade→liquidate→ADL
-    // flows — the reviewer's test exposes the missing invariant, not a
-    // direct-state-only bug).
     engine.oi_eff_long_q = 2;
     engine.oi_eff_short_q = 2;
     engine.stored_pos_count_short = 1;
@@ -998,12 +1000,15 @@ fn adl_k_write_preserves_future_mark_headroom() {
     // Post-ADL: either the deficit was routed through
     // record_uninsured_protocol_loss (adl_coeff_short unchanged near 0),
     // OR it was written to K but with enough headroom that mark-to-market
-    // at MAX_ORACLE_PRICE still works.
-    let r = engine.accrue_market_to(1, MAX_ORACLE_PRICE, 0);
+    // at next-slot envelope-compliant move still works.
+    // v12.19: move by (cap = 3 bps/slot * 1 slot * init_px = 30 units).
+    // Use delta of 30 (30/100000 = 3 bps) exactly at cap.
+    let next_px = init_px + 30;
+    let r = engine.accrue_market_to(1, next_px, 0);
     assert!(r.is_ok(),
-        "after enqueue_adl, accrue_market_to at MAX_ORACLE_PRICE must not \
-         overflow K — either ADL must leave enough headroom or route the \
-         deficit through uninsured loss (got {:?})", r);
+        "after enqueue_adl, a subsequent envelope-compliant accrue_market_to \
+         must not overflow K — either ADL must leave enough headroom or route \
+         the deficit through uninsured loss (got {:?})", r);
 }
 
 #[test]
@@ -1459,22 +1464,27 @@ fn test_reset_pending_blocks_new_trades() {
 
 #[test]
 fn test_adl_triggered_by_liquidation() {
+    // v12.19: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
+    // Use size=100 for notional 100k, IM=35k. To trigger liquidation via
+    // big adverse move, crash 1000 → 700 (30%) over 100 slots (cap at
+    // dt=100 P=1000 = 25*100*1000 = 2_500_000; abs_dp*10_000 = 3_000_000 →
+    // exceeds cap). Use 800 (20%) = 2_000_000 within cap.
     let (mut engine, a, b) = setup_two_users_with_params(50_000, 50_000, wide_price_move_params());
     let oracle = 1000u64;
     let slot = 1u64;
 
-    // Open large positions near margin
-    // 50k capital, 10% IM => max notional = 500k
-    // 450 units * 1000 = 450k notional, IM = 45k
-    let size_q = make_size_q(450);
+    let size_q = make_size_q(100);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).expect("trade");
 
-    // Move price down sharply to make long (a) deeply underwater
-    // Call liquidate_at_oracle_not_atomic directly (the crank would liquidate first)
+    // Drop price in two envelope-sized steps to reach a deeply-underwater
+    // state (1000 → 800 → 640 = 36% total).
     let slot2 = 101u64;
-    let crash_oracle = 870u64;
+    let _ = engine.accrue_market_to(slot2, 800, 0);
+    let slot3 = 201u64;
+    let crash_oracle = 640u64;
+    let _ = engine.accrue_market_to(slot3, crash_oracle, 0);
 
-    let result = engine.liquidate_at_oracle_not_atomic(a, slot2, crash_oracle, LiquidationPolicy::FullClose, 0i128, 0, 100).expect("liquidate");
+    let result = engine.liquidate_at_oracle_not_atomic(a, slot3, crash_oracle, LiquidationPolicy::FullClose, 0i128, 0, 100).expect("liquidate");
     assert!(result, "account a should be liquidated");
     assert!(engine.check_conservation());
 
@@ -1683,6 +1693,9 @@ fn test_close_account_after_trade_and_unwind() {
 
 #[test]
 fn test_insurance_absorbs_loss_on_liquidation() {
+    // v12.19: wide_price_move_params (IM=35%). 20k capital → max notional ~57k.
+    // Use size=50 (notional=50k, IM=17.5k). Crash by 30% via two envelope
+    // steps (1000 → 800 → 600) to make `a` deeply underwater.
     let mut engine = RiskEngine::new(wide_price_move_params());
     let oracle = 1000u64;
     let slot = 1u64;
@@ -1700,16 +1713,18 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 
     engine.keeper_crank_not_atomic(slot, oracle, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).expect("initial crank");
 
-    // Open near-max position
-    let size_q = make_size_q(180);
+    // Open a position that fits at IM=35% with 20k capital (notional ~50k).
+    let size_q = make_size_q(50);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).expect("trade");
 
-    // Crash price to make a deeply underwater
+    // Crash price in two envelope-sized steps to make a underwater.
     let slot2 = 101u64;
-    let crash = 850u64;
-    engine.keeper_crank_not_atomic(slot2, crash, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).expect("crank");
+    let _ = engine.accrue_market_to(slot2, 800, 0);
+    let slot3 = 201u64;
+    let crash = 600u64;
+    engine.keeper_crank_not_atomic(slot3, crash, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).expect("crank");
 
-    engine.liquidate_at_oracle_not_atomic(a, slot2, crash, LiquidationPolicy::FullClose, 0i128, 0, 100).expect("liquidate");
+    engine.liquidate_at_oracle_not_atomic(a, slot3, crash, LiquidationPolicy::FullClose, 0i128, 0, 100).expect("liquidate");
     assert!(engine.check_conservation());
 }
 
@@ -1717,18 +1732,22 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 
 #[test]
 fn test_keeper_crank_liquidates_underwater_accounts() {
+    // v12.19: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
+    // Size 100 → notional 100k. Two-step crash 1000 → 800 → 600 to push
+    // `a` underwater (total 40% drop via envelope-compliant steps).
     let (mut engine, a, b) = setup_two_users_with_params(50_000, 50_000, wide_price_move_params());
     let oracle = 1000u64;
     let slot = 1u64;
 
-    // Open near-margin positions
-    let size_q = make_size_q(450);
+    let size_q = make_size_q(100);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).expect("trade");
 
-    // Crash price
+    // Crash in two envelope-sized steps.
     let slot2 = 101u64;
-    let crash = 870u64;
-    let outcome = engine.keeper_crank_not_atomic(slot2, crash, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).expect("crank");
+    let _ = engine.accrue_market_to(slot2, 800, 0);
+    let slot3 = 201u64;
+    let crash = 600u64;
+    let outcome = engine.keeper_crank_not_atomic(slot3, crash, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).expect("crank");
     // The crank should have liquidated the underwater account
     assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account");
     assert!(engine.check_conservation());
@@ -1935,9 +1954,11 @@ fn test_fee_seniority_after_restart_on_new_profit_in_trade() {
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).expect("trade1");
     assert!(engine.check_conservation());
 
-    // Price rises: a now has positive PnL (profit)
-    let slot2 = 50u64;
-    let oracle2 = 1100u64;
+    // Price rises: a now has positive PnL (profit).
+    // v12.19: at default_params (max_price_move=3, max_dt=100), max move
+    // over 100 slots is 3*100=300 bps = 3%. Use 1030 (3% up) with dt=100.
+    let slot2 = 101u64;
+    let oracle2 = 1030u64;
     engine.keeper_crank_not_atomic(slot2, oracle2, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).expect("crank2");
     assert!(engine.check_conservation());
 
@@ -2427,27 +2448,36 @@ fn test_keeper_crank_multi_slot_advance_no_fee() {
 
 #[test]
 fn test_liquidation_triggers_on_underwater_account() {
-    // Small deposits + large position = high leverage → easily liquidated
+    // v12.19: wide_price_move_params (IM=35%, MM=30%). 100k capital → max
+    // notional ~285k. Use size=200 (notional=200k, IM=70k, MM=60k).
+    // Crash 1000 → 800 → 600 → 500 (50% total) via three envelope-compliant
+    // steps (cap at dt=100 P=X is 25*100*X units of abs_dp*10_000).
     let (mut engine, a, b) = setup_two_users_with_params(100_000, 100_000, wide_price_move_params());
     let oracle = 1000u64;
     let slot = 2u64;
 
-    // Trade at maximum leverage the margin allows
-    // With 100k capital, 10% IM, max notional ≈ 1M → ~1000 units at price 1000
-    let size_q = make_size_q(900);
+    let size_q = make_size_q(200);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).unwrap();
 
-    // Price crashes — longs deeply underwater
-    let crash_price = 500u64; // 50% drop
-    let slot2 = 3;
+    // Three-step price crash: 1000 → 800 (20%) → 600 (25%) → 500 (16.7%).
+    // Cap at each step: 25*100*P >= abs_dp*10_000.
+    //   step1: 25*100*1000 = 2_500_000, abs_dp*10_000 = 2_000_000 ✓
+    //   step2: 25*100*800 = 2_000_000, abs_dp*10_000 = 2_000_000 ✓
+    //   step3: 25*100*600 = 1_500_000, abs_dp*10_000 = 1_000_000 ✓
+    let _ = engine.accrue_market_to(102, 800, 0);
+    let _ = engine.accrue_market_to(202, 600, 0);
+    let slot2 = 302;
+    let crash_price = 500u64;
 
-    // Crank at crash price — accrues market internally then liquidates
     let outcome = engine.keeper_crank_not_atomic(slot2, crash_price, &[(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose))], 64, 0i128, 0, 100).unwrap();
-    assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account after 50% price drop");
+    assert!(outcome.num_liquidations > 0, "crank must liquidate underwater account after price crash");
 }
 
 #[test]
 fn test_direct_liquidation_returns_to_insurance() {
+    // v12.19: 90% price drop must be reached across multiple envelope
+    // windows. Use 1000 → 800 → 600 → 400 → 200 → 100 (5 steps, each
+    // within cap at dt=100 and appropriate P_last).
     let (mut engine, a, b) = setup_two_users_with_params(10_000_000, 10_000_000, wide_price_move_params());
     let oracle = 1000u64;
     let slot = 2u64;
@@ -2457,9 +2487,15 @@ fn test_direct_liquidation_returns_to_insurance() {
 
     let ins_before = engine.insurance_fund.balance.get();
 
-    // Price crashes — a (long) underwater
-    let crash_price = 100u64;
-    let slot2 = 3;
+    // Envelope-compliant price drops to deeply underwater. Each step
+    // respects cap = 25*100*P_last_of_step for abs_dp*10_000.
+    engine.accrue_market_to(102, 800, 0).unwrap();   // 1000→800: cap 2.5M, abs_dp*10k=2.0M ✓
+    engine.accrue_market_to(202, 640, 0).unwrap();   // 800→640: cap 2.0M, abs_dp*10k=1.6M ✓
+    engine.accrue_market_to(302, 512, 0).unwrap();   // 640→512: cap 1.6M, abs_dp*10k=1.28M ✓
+    engine.accrue_market_to(402, 410, 0).unwrap();   // 512→410: cap 1.28M, abs_dp*10k=1.02M ✓
+    engine.accrue_market_to(502, 328, 0).unwrap();   // 410→328: cap 1.025M, abs_dp*10k=0.82M ✓
+    let crash_price = 328u64;
+    let slot2 = 502;
     engine.liquidate_at_oracle_not_atomic(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i128, 0, 100).unwrap();
 
     let ins_after = engine.insurance_fund.balance.get();
@@ -2473,6 +2509,10 @@ fn test_direct_liquidation_returns_to_insurance() {
 
 #[test]
 fn test_conservation_full_lifecycle() {
+    // v12.19: wide_price_move_params allows 25 bps/slot moves.
+    // 1000 → 1200 = 2000 bps; needs dt>=80. Use slot2=102 (dt=100 from
+    // setup's last_market_slot=1). Similarly for 1200 → 800 (1667 bps,
+    // cap at dt=100 P=1200 = 25*100*1200 = 3_000_000 >= 1_666_667 ✓).
     let (mut engine, a, b) = setup_two_users_with_params(10_000_000, 10_000_000, wide_price_move_params());
     assert!(engine.check_conservation(), "conservation must hold after setup");
 
@@ -2484,8 +2524,8 @@ fn test_conservation_full_lifecycle() {
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).unwrap();
     assert!(engine.check_conservation(), "conservation must hold after trade");
 
-    // Price change + crank
-    let slot2 = 3;
+    // Price change + crank (20% move over full envelope).
+    let slot2 = 102;
     engine.keeper_crank_not_atomic(slot2, 1200, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).unwrap();
     assert!(engine.check_conservation(), "conservation must hold after crank with price change");
 
@@ -2493,9 +2533,9 @@ fn test_conservation_full_lifecycle() {
     engine.withdraw_not_atomic(a, 1_000, 1200, slot2, 0i128, 0, 100).unwrap();
     assert!(engine.check_conservation(), "conservation must hold after withdraw_not_atomic");
 
-    // Another crank at different price
-    let slot3 = 4;
-    engine.keeper_crank_not_atomic(slot3, 800, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).unwrap();
+    // Another crank at different price (1200 → 1000, ~17% move over 100 slots).
+    let slot3 = 202;
+    engine.keeper_crank_not_atomic(slot3, 1000, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).unwrap();
     assert!(engine.check_conservation(), "conservation must hold after second crank");
 }
 
@@ -2869,8 +2909,9 @@ fn test_min_liquidation_fee_enforced() {
 
 #[test]
 fn test_min_liquidation_fee_does_not_exceed_cap() {
-    // Verify: min(max(bps_fee, min_abs), cap) → cap wins when min > cap
-    let mut params = default_params();
+    // Verify: min(max(bps_fee, min_abs), cap) → cap wins when min > cap.
+    // v12.19: use wide_price_move_params so a 90% crash fits via multi-step.
+    let mut params = wide_price_move_params();
     params.liquidation_fee_cap = U128::new(200);     // low cap
     params.min_liquidation_abs = U128::new(150);     // below cap (valid per §1.4)
     params.liquidation_fee_bps = 100;
@@ -2890,9 +2931,18 @@ fn test_min_liquidation_fee_does_not_exceed_cap() {
     let size_q = make_size_q(10);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).unwrap();
 
-    // Crash price to trigger liquidation
-    let crash_price = 100u64;
-    let slot2 = 2;
+    // Multi-step crash to trigger liquidation.
+    engine.accrue_market_to(101, 800, 0).unwrap();
+    engine.accrue_market_to(201, 640, 0).unwrap();
+    engine.accrue_market_to(301, 512, 0).unwrap();
+    engine.accrue_market_to(401, 410, 0).unwrap();
+    engine.accrue_market_to(501, 328, 0).unwrap();
+    engine.accrue_market_to(601, 262, 0).unwrap();
+    engine.accrue_market_to(701, 210, 0).unwrap();
+    engine.accrue_market_to(801, 168, 0).unwrap();
+    engine.accrue_market_to(901, 134, 0).unwrap();
+    let crash_price = 134u64;
+    let slot2 = 901;
 
     // Record insurance before. Trading fee from execute_trade_not_atomic already credited.
     let ins_before = engine.insurance_fund.balance.get();
@@ -3138,9 +3188,11 @@ fn test_property_52_convert_released_pnl_explicit() {
 
 #[test]
 fn test_property_53_phantom_dust_adl_ordering() {
+    // v12.19: use wide_price_move_params so a multi-step crash can fully
+    // bankrupt account 'a'. Size sized for IM=35% with 50k capital.
     let oracle = 1_000u64;
     let slot = 1u64;
-    let mut params = default_params();
+    let mut params = wide_price_move_params();
     params.trading_fee_bps = 0;
 
     let mut engine = RiskEngine::new(params);
@@ -3152,9 +3204,8 @@ fn test_property_53_phantom_dust_adl_ordering() {
     engine.deposit_not_atomic(b, 1_000_000, oracle, slot).unwrap();
     engine.keeper_crank_not_atomic(slot, oracle, &[] as &[(u16, Option<LiquidationPolicy>)], 0, 0i128, 0, 100).unwrap();
 
-    // Open near-maximum-leverage position for 'a':
-    // 50k capital, 10% IM => max notional ~500k => ~480 units at price 1000
-    let size_q = make_size_q(480);
+    // Max notional at IM=35% with 50k = 142k → use size=100 (notional=100k).
+    let size_q = make_size_q(100);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).unwrap();
 
     // Verify balanced OI before crash
@@ -3162,11 +3213,13 @@ fn test_property_53_phantom_dust_adl_ordering() {
     assert!(engine.oi_eff_long_q > 0, "OI must be nonzero");
     assert!(engine.stored_pos_count_long > 0, "should have stored long positions");
 
-    // Crash the price to make 'a' (long) deeply underwater, triggering
-    // liquidation + ADL (bankruptcy). This closes a's position and creates
-    // phantom dust on the long side.
-    let crash_price = 870u64;
-    let slot2 = slot + 1;
+    // Multi-step crash to make 'a' deeply underwater. 1000 → 800 → 640 → 512
+    // (each step respects the envelope at its starting price).
+    engine.accrue_market_to(101, 800, 0).unwrap();
+    engine.accrue_market_to(201, 640, 0).unwrap();
+    engine.accrue_market_to(301, 512, 0).unwrap();
+    let crash_price = 512u64;
+    let slot2 = 301;
     let result = engine.liquidate_at_oracle_not_atomic(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i128, 0, 100);
     assert!(result.is_ok(), "liquidation must succeed: {:?}", result);
     assert!(result.unwrap(), "account a must be liquidated");
@@ -3188,9 +3241,10 @@ fn test_property_53_phantom_dust_adl_ordering() {
 
 #[test]
 fn test_property_54_unilateral_exact_drain_reset() {
+    // v12.19: 90% price drop via envelope-compliant multi-step accrual.
     let oracle = 1_000u64;
     let slot = 1u64;
-    let mut params = default_params();
+    let mut params = wide_price_move_params();
     params.trading_fee_bps = 0;
 
     let mut engine = RiskEngine::new(params);
@@ -3205,9 +3259,19 @@ fn test_property_54_unilateral_exact_drain_reset() {
     let size_q = make_size_q(1);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100).unwrap();
 
-    // Crash the price to make account 'a' deeply underwater
-    let crash_price = 100u64;
-    let slot2 = slot + 1;
+    // Multi-step crash toward 100 (90% drop).
+    engine.accrue_market_to(101, 800, 0).unwrap();
+    engine.accrue_market_to(201, 640, 0).unwrap();
+    engine.accrue_market_to(301, 512, 0).unwrap();
+    engine.accrue_market_to(401, 410, 0).unwrap();
+    engine.accrue_market_to(501, 328, 0).unwrap();
+    engine.accrue_market_to(601, 262, 0).unwrap();
+    engine.accrue_market_to(701, 210, 0).unwrap();
+    engine.accrue_market_to(801, 168, 0).unwrap();
+    engine.accrue_market_to(901, 134, 0).unwrap();
+    engine.accrue_market_to(1001, 107, 0).unwrap();
+    let crash_price = 107u64;
+    let slot2 = 1001;
 
     // Liquidate 'a' — the long position is closed, ADL may drain the long side
     let result = engine.liquidate_at_oracle_not_atomic(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i128, 0, 100);
@@ -3275,9 +3339,10 @@ fn test_force_close_resolved_with_negative_pnl() {
     let size = (100 * POS_SCALE) as i128;
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 0, 100).unwrap();
 
-    // Move price down so account a (long) has loss, then resolve at that price
-    engine.keeper_crank_not_atomic(101, 900, &[] as &[(u16, Option<LiquidationPolicy>)], 0, 0i128, 0, 100).unwrap();
-    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 900, 900, 102, 0).unwrap();
+    // Move price down so account a (long) has loss, then resolve at that price.
+    // v12.19: 10% move (1000→900) at dt=100 fits 2500_000 cap vs 1_000_000 needed.
+    engine.keeper_crank_not_atomic(200, 900, &[] as &[(u16, Option<LiquidationPolicy>)], 0, 0i128, 0, 100).unwrap();
+    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 900, 900, 201, 0).unwrap();
     let result = engine.force_close_resolved_not_atomic(a);
     assert!(result.is_ok(), "force_close must handle negative pnl: {:?}", result);
     assert!(!engine.is_used(a as usize));
@@ -3423,15 +3488,16 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
 
     let cap_after_trade = engine.accounts[a as usize].capital.get();
 
-    // Advance K via price movement (mark-to-market) — NOT touching a or b as candidates
-    // so K-pair PnL remains unrealized for them
-    engine.accrue_market_to(200, 1500, 0).unwrap();
-    engine.current_slot = 200;
-    // Align fee slots to 200 to prevent fee on force_close
-
+    // Advance K via price movement (mark-to-market) in envelope-sized steps
+    // — NOT touching a or b as candidates so K-pair PnL remains unrealized.
+    // v12.19: 50% move (1000→1500) via multi-step accruals.
+    engine.accrue_market_to(200, 1200, 0).unwrap();   // +20% over 100 slots
+    engine.accrue_market_to(300, 1440, 0).unwrap();   // +20% more
+    engine.accrue_market_to(400, 1500, 0).unwrap();   // +4% to reach 1500
+    engine.current_slot = 400;
 
     // Resolve market via proper entry point
-    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1500, 1500, 200, 0).unwrap();
+    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1500, 1500, 400, 0).unwrap();
 
     // Phase 1: reconcile loser (b) first — zeroes their position
     let _b_returned = engine.force_close_resolved_not_atomic(b).unwrap().expect_closed("force_close");
@@ -3456,9 +3522,11 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
 
     engine.execute_trade_not_atomic(a, b, 1000, 100, (100 * POS_SCALE) as i128, 1000, 0i128, 0, 100).unwrap();
 
-    // Price drops, then resolve at that price
-    engine.keeper_crank_not_atomic(200, 500, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).unwrap();
-    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 500, 500, 200, 0).unwrap();
+    // Price drops, then resolve at that price. v12.19: 50% drop via steps.
+    engine.accrue_market_to(200, 800, 0).unwrap();    // -20%
+    engine.accrue_market_to(300, 640, 0).unwrap();    // -20% more
+    engine.keeper_crank_not_atomic(400, 500, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0, 100).unwrap();
+    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 500, 500, 400, 0).unwrap();
 
     let cap_before = engine.accounts[a as usize].capital.get();
     let result = engine.force_close_resolved_not_atomic(a);
@@ -3660,14 +3728,16 @@ fn test_property_31_fullclose_liquidation_zeros_position() {
 
 
 
-    // a opens leveraged long
-    let size = (450 * POS_SCALE) as i128;
+    // v12.19: use size 100 so position fits IM=35% at 50k capital.
+    let size = (100 * POS_SCALE) as i128;
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 0, 100).unwrap();
     assert!(engine.effective_pos_q(a as usize) > 0);
 
-    // Crash price → a is underwater
-    let crash = 870u64;
-    let result = engine.liquidate_at_oracle_not_atomic(a, 101, crash, LiquidationPolicy::FullClose, 0i128, 0, 100);
+    // Multi-step crash to push a underwater (1000 → 640, ~36% drop).
+    engine.accrue_market_to(200, 800, 0).unwrap();
+    engine.accrue_market_to(300, 640, 0).unwrap();
+    let crash = 640u64;
+    let result = engine.liquidate_at_oracle_not_atomic(a, 300, crash, LiquidationPolicy::FullClose, 0i128, 0, 100);
     assert!(result.is_ok());
 
     // Property 31: after FullClose, effective_pos_q MUST be 0
@@ -4064,9 +4134,13 @@ fn test_blocker1_trade_open_must_not_use_unreleased_pnl() {
     let size = (40 * POS_SCALE) as i128; // 40 units at price 1000 = 40k notional
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 50, 50).unwrap();
 
-    // Price moves up — a gains unreleased profit
-    engine.accrue_market_to(101, 1100, 0).unwrap();
-    engine.current_slot = 101;
+    // Price moves up — a gains unreleased profit.
+    // v12.19: 10% move over 100 slots fits cap=3*100*1000=300_000 ≥ 1_000_000?
+    // No: default_params max_price_move=3 → cap=300_000. 10% move = 1_000_000
+    // → exceeds. Use a smaller move (1003 = 0.3%) to fit envelope and still
+    // create positive PnL.
+    engine.accrue_market_to(200, 1003, 0).unwrap();
+    engine.current_slot = 200;
     let mut ctx = InstructionContext::new_with_admission(50, 50);
     engine.touch_account_live_local(a as usize, &mut ctx).unwrap();
 
@@ -5482,12 +5556,12 @@ fn test_force_close_returns_enum_deferred() {
     let size = make_size_q(100);
     engine.execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0, 100).unwrap();
 
-    // Price up — a (long) has positive PnL
-    engine.accrue_market_to(slot + 1, 1050, 0).unwrap();
-    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1050, 1050, slot + 1, 0).unwrap();
+    // Price up — a (long) has positive PnL. v12.19: 5% move (1000→1050)
+    // fits 100-slot envelope at max_price_move=25 (cap=2.5M, needed=500k).
+    engine.accrue_market_to(slot + 100, 1050, 0).unwrap();
+    engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1050, 1050, slot + 100, 0).unwrap();
 
     // force_close on positive-PnL account when b still has position → Deferred
-    // (now_slot must match resolved_slot = slot + 1; v12.18.5 caps advancement).
     let result = engine.force_close_resolved_not_atomic(a).unwrap();
     match result {
         ResolvedCloseResult::ProgressOnly => {
