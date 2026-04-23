@@ -1023,6 +1023,56 @@ fn v19_admit_gate_sticky_early_return() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
+fn v19_consumption_monotone_within_generation() {
+    // Property 97: price_move_consumed_bps_this_generation is monotone
+    // nondecreasing within a generation. Two successive envelope-valid
+    // accrue_market_to calls cannot decrement the accumulator; both
+    // contribute floor(|ΔP| * 10_000 / P_last) >= 0.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = 1_000_000;
+    engine.oi_eff_short_q = 1_000_000;
+    engine.last_oracle_price = 100_000;
+    engine.fund_px_last = 100_000;
+    engine.last_market_slot = 0;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    // Symbolic starting consumption.
+    let start: u8 = kani::any();
+    engine.price_move_consumed_bps_this_generation = start as u128;
+    let gen_start = engine.sweep_generation;
+
+    // Symbolic price move within cap (max_price_move=4 bps/slot * dt=1
+    // * P=100_000 = 400_000; LHS at abs_dp=40 is 400_000 = cap).
+    let dp1: u8 = kani::any();
+    kani::assume(dp1 <= 40);
+    if dp1 > 0 {
+        let _ = engine.accrue_market_to(1, 100_000 + dp1 as u64, 0);
+    }
+    let mid = engine.price_move_consumed_bps_this_generation;
+
+    // Second envelope-valid move within same generation.
+    let dp2: u8 = kani::any();
+    kani::assume(dp2 <= 40);
+    // After first move, new P_last = 100_000 + dp1, new cap base = that,
+    // new last_market_slot = 1 (if dp1>0). Use dt=1 again.
+    if dp2 > 0 && engine.last_market_slot == 1 {
+        let new_p = engine.last_oracle_price.checked_add(dp2 as u64).unwrap_or(u64::MAX);
+        let _ = engine.accrue_market_to(2, new_p, 0);
+    }
+    let after = engine.price_move_consumed_bps_this_generation;
+
+    // Monotone: neither call can decrement the accumulator.
+    assert!(mid >= start as u128, "first accrual cannot decrement consumption");
+    assert!(after >= mid, "second accrual cannot decrement consumption");
+    // Generation did not change (no Phase 2 wrap involved).
+    assert_eq!(engine.sweep_generation, gen_start,
+        "generation must be stable within a bounded-consumption interval");
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
 fn v19_consumption_floor_below_one_bp() {
     // If |ΔP| * 10_000 < P_last (sub-bps move), consumption contributes 0,
     // not 1. This rules out an accidental ceil-rounding regression.
