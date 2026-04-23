@@ -29,6 +29,27 @@
 //! Internal helpers (`enqueue_adl`, `liquidate_at_oracle_internal`, etc.)
 //! are not individually atomic — they rely on the calling `_not_atomic`
 //! method to propagate `Err` to the transaction boundary.
+//!
+//! # ABI-affecting changes across v12.19 `_v2` introduction
+//!
+//! - Six live-op shims (`withdraw_not_atomic`, `settle_account_not_atomic`,
+//!   `execute_trade_not_atomic`, `liquidate_at_oracle_not_atomic`,
+//!   `convert_released_pnl_not_atomic`, `close_account_not_atomic`) are
+//!   `#[deprecated]`. Each has a `_v2` counterpart that accepts an
+//!   `admit_h_max_consumption_threshold_bps_opt: Option<u128>` parameter
+//!   per spec §4.7 step 2. Shim forwarding passes `None`; trusted/private
+//!   wrappers may continue using the shims under spec §12.21's explicit
+//!   carve-out.
+//! - `keeper_crank_not_atomic` is similarly deprecated in favor of
+//!   `keeper_crank_not_atomic_v2` which additionally accepts a
+//!   `rr_window_size: u64` for Phase 2 structural sweep width.
+//! - `deposit_fee_credits` return type: `Result<()>` → `Result<u128>`.
+//!   Returns `pay = min(amount, FeeDebt_i)` per spec §9.2.1 step 5. The
+//!   wrapper is responsible for refunding `amount - pay` externally.
+//!   Callers that pattern-matched `Ok(())` must update to accept `Ok(pay)`.
+//! - `top_up_insurance_fund` return type: `Result<bool>` → `Result<()>`.
+//!   The returned `bool` (post-balance > 0) carried no caller-useful
+//!   signal and was dropped in v12.19.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -1248,6 +1269,28 @@ impl RiskEngine {
         if self.accounts[i].fee_credits.get() != 0 {
             return Err(RiskError::CorruptState);
         }
+        // Free-list head validation (reviewer pass finding #1). Before any
+        // mutation, prove that `free_head` is safe to prepend to:
+        //   (a) head is u16::MAX (empty list) OR
+        //   (b) head is in [0, MAX_ACCOUNTS) AND the slot is not used AND
+        //       the slot's prev_free == u16::MAX (it is genuinely the head).
+        // A corrupt head that lands on a used slot would graft it into the
+        // free list; a corrupt head at a non-head free node would overwrite
+        // that node's prev_free pointer. Both are allocator-corruption paths
+        // that must fail conservatively rather than be silently stitched
+        // through.
+        if self.free_head != u16::MAX {
+            let h = self.free_head as usize;
+            if h >= MAX_ACCOUNTS {
+                return Err(RiskError::CorruptState);
+            }
+            if self.is_used(h) {
+                return Err(RiskError::CorruptState);
+            }
+            if self.prev_free[h] != u16::MAX {
+                return Err(RiskError::CorruptState);
+            }
+        }
         let a = &mut self.accounts[i];
         a.capital = U128::ZERO;
         a.kind = Account::KIND_USER;
@@ -1273,14 +1316,6 @@ impl RiskEngine {
         a.pending_remaining_q = 0;
         a.pending_horizon = 0;
         a.pending_created_slot = 0;
-        // Bounds-check free_head before indexing: a corrupt free_head
-        // value in range [MAX_ACCOUNTS, u16::MAX) would panic at the
-        // prev_free[...] write below, violating spec §0 goal 24's
-        // deterministic-conservative-failure rule. Either u16::MAX (empty)
-        // or a valid in-range index is acceptable.
-        if self.free_head != u16::MAX && (self.free_head as usize) >= MAX_ACCOUNTS {
-            return Err(RiskError::CorruptState);
-        }
         self.clear_used(i);
         // Push to head of doubly-linked free list.
         self.next_free[i] = self.free_head;
@@ -2837,13 +2872,17 @@ impl RiskEngine {
             }
         }
 
-        // Step 8 (§5.6 step 8): if OI_post == 0
+        // Step 8 (§5.6 step 8): if OI_post == 0, BOTH flags MUST be set.
+        // The prior impl gated the liq_side flag on `self.get_oi_eff(liq_side)
+        // == 0`, which matched the spec only under valid bilateral symmetry
+        // (where OI_long == OI_short, so liq_side OI is also 0). Under
+        // corrupt-imbalance states the gating diverged from spec and left
+        // the liq_side flag unset — not fail-conservative. Per spec §5.6
+        // step 8 text, the flag is unconditional.
         if oi_post == 0 {
             self.set_oi_eff(opp, 0u128);
             set_pending_reset(ctx, opp);
-            if self.get_oi_eff(liq_side) == 0 {
-                set_pending_reset(ctx, liq_side);
-            }
+            set_pending_reset(ctx, liq_side);
             return Ok(());
         }
 
@@ -3437,6 +3476,31 @@ impl RiskEngine {
         // without pre-validating the cap.
         let cap = self.params.max_active_positions_per_side;
         if self.stored_pos_count_long > cap || self.stored_pos_count_short > cap {
+            return Err(RiskError::CorruptState);
+        }
+        // Cheap O(1) global invariants expanded in v12.19 per reviewer audit:
+        // Spec §2.2 / §3.2: pnl_matured_pos_tot <= pnl_pos_tot.
+        if self.pnl_matured_pos_tot > self.pnl_pos_tot {
+            return Err(RiskError::CorruptState);
+        }
+        // Spec §1.4: materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS.
+        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
+            return Err(RiskError::CorruptState);
+        }
+        // Spec §4.7 v12.16.4: neg_pnl_account_count <= materialized_account_count.
+        if self.neg_pnl_account_count > self.materialized_account_count {
+            return Err(RiskError::CorruptState);
+        }
+        // Spec §2.2 v12.19: rr_cursor_position < MAX_MATERIALIZED_ACCOUNTS.
+        if self.rr_cursor_position >= MAX_MATERIALIZED_ACCOUNTS {
+            return Err(RiskError::CorruptState);
+        }
+        // Spec §6.8: when resolved payout snapshot is ready, h_num <= h_den.
+        // Before ready, both should be zero (checked by the ready = 0 branch
+        // in capture_resolved_payout_snapshot_if_needed callers).
+        if self.resolved_payout_ready != 0
+            && self.resolved_payout_h_num > self.resolved_payout_h_den
+        {
             return Err(RiskError::CorruptState);
         }
         Ok(())
@@ -4073,9 +4137,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4201,9 +4266,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4286,9 +4352,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4811,9 +4878,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         // Spec §9.6 step 2: require account materialized (public entry point).
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
@@ -5049,9 +5117,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -5318,9 +5387,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -5440,9 +5510,10 @@ impl RiskEngine {
         // Spec §12.21: public wrappers MUST NOT combine
         //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
         // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (for which it is permitted) from public
-        // wrappers. Compliance is a wrapper-layer obligation; engine-level
-        // invariants still hold per property 107.
+        // trusted/private wrappers (permitted) from public wrappers
+        // (forbidden) at this layer. Compliance is enforced above the
+        // engine. Engine-level invariants still hold per property 107
+        // (the v19_cascade_safety Kani proof).
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);

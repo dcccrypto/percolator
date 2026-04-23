@@ -2341,9 +2341,11 @@ fn keeper_crank_phase2_advances_cursor_by_window_size() {
     // min(rr_window_size, MAX_MATERIALIZED_ACCOUNTS - rr_cursor_position).
     let mut engine = RiskEngine::new(default_params());
     assert_eq!(engine.rr_cursor_position, 0);
+    // Use admit_h_min=1 to satisfy the §12.21 wrapper-compliance debug_assert
+    // on v2 entrypoints. This test exercises cursor mechanics, not admission.
     let _ = engine
         .keeper_crank_not_atomic_v2(
-            1, 1000, &[], 0, 0, 0, 100, None, 5,
+            1, 1000, &[], 0, 0, 1, 100, None, 5,
         )
         .unwrap();
     assert_eq!(engine.rr_cursor_position, 5,
@@ -2359,7 +2361,7 @@ fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
     engine.price_move_consumed_bps_this_generation = 17;
     engine
         .keeper_crank_not_atomic_v2(
-            1, 1000, &[], 0, 0, 0, 100, None, 0,
+            1, 1000, &[], 0, 0, 1, 100, None, 0,
         )
         .unwrap();
     assert_eq!(engine.rr_cursor_position, 42);
@@ -2380,7 +2382,7 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
 
     engine
         .keeper_crank_not_atomic_v2(
-            1, 1000, &[], 0, 0, 0, 100, None, 1,
+            1, 1000, &[], 0, 0, 1, 100, None, 1,
         )
         .unwrap();
     assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0 at MAX_MATERIALIZED_ACCOUNTS");
@@ -2395,8 +2397,10 @@ fn keeper_crank_phase2_rejects_some_zero_threshold() {
     let mut engine = RiskEngine::new(default_params());
     let cursor_before = engine.rr_cursor_position;
     let gen_before = engine.sweep_generation;
+    // admit_h_min=1 + Some(0) exercises the validate_threshold_opt rejection
+    // without tripping the §12.21 debug_assert on (0, None).
     let r = engine.keeper_crank_not_atomic_v2(
-        1, 1000, &[], 0, 0, 0, 100, Some(0), 5,
+        1, 1000, &[], 0, 0, 1, 100, Some(0), 5,
     );
     assert_eq!(r, Err(RiskError::Overflow),
         "Some(0) threshold must be rejected conservatively");
@@ -4681,6 +4685,181 @@ fn materialize_anchors_last_fee_slot_at_materialize_slot() {
     let anchor = 300u64;
     engine.deposit_not_atomic(unused_idx, 10_000, 1000, anchor).unwrap();
     assert_eq!(engine.accounts[unused_idx as usize].last_fee_slot, anchor);
+}
+
+// ============================================================================
+// v12.19 rev6 follow-up: assert_public_postconditions cheap O(1) checks
+// (reviewer finding #6). The prior assertion only checked conservation,
+// bilateral OI, and active-position caps. Expand to catch cheap invariant
+// violations: pnl_matured <= pnl_pos_tot, materialized_account_count <=
+// MAX_MATERIALIZED_ACCOUNTS, neg_pnl <= materialized, rr_cursor in range,
+// resolved_payout_h_num <= resolved_payout_h_den when ready.
+// ============================================================================
+
+#[test]
+fn public_postcondition_rejects_matured_exceeding_pos_tot() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.pnl_pos_tot = 100;
+    engine.pnl_matured_pos_tot = 101; // corrupt: > pos_tot
+    // Any public method that calls assert_public_postconditions should Err.
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState),
+        "matured > pos_tot must be rejected via assert_public_postconditions");
+}
+
+#[test]
+fn public_postcondition_rejects_rr_cursor_out_of_range() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.rr_cursor_position = MAX_MATERIALIZED_ACCOUNTS; // corrupt: == bound
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_neg_pnl_exceeding_materialized() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.materialized_account_count = 2;
+    engine.neg_pnl_account_count = 3; // corrupt: > materialized
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_ready_snapshot_with_inverted_ratio() {
+    let mut engine = RiskEngine::new(default_params());
+    // Force the ready-snapshot guard: h_num > h_den with ready flag set.
+    engine.resolved_payout_ready = 1;
+    engine.resolved_payout_h_num = 200;
+    engine.resolved_payout_h_den = 100; // corrupt: num > den
+    let r = engine.top_up_insurance_fund(1, 0);
+    // top_up requires Live market; set Resolved to reach the ready path,
+    // but then top_up rejects on Unauthorized first — test via a different
+    // Live-only entrypoint that still runs assert_public_postconditions.
+    // The ready-snapshot invariant is checked unconditionally in the
+    // assertion regardless of market_mode, so corrupt num>den fails even
+    // before the mode check.
+    assert_eq!(r, Err(RiskError::CorruptState),
+        "ready flag with h_num > h_den is an inconsistent payout snapshot");
+}
+
+// ============================================================================
+// v12.19 rev6 follow-up: enqueue_adl OI_post==0 reset fidelity
+// (reviewer finding #5). Spec §5.6 step 8 says both pending-reset flags
+// MUST be set unconditionally when OI_post == 0 on the opp side. The
+// prior impl only set liq_side's flag if its OI was already 0, which
+// diverged under corrupt-imbalance states.
+// ============================================================================
+
+#[test]
+fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_symmetric() {
+    // Valid bilateral symmetry. Setup:
+    //   liq_side = Short, OI_eff_short = POS_SCALE  (gets decremented)
+    //   opp = Long,        OI_eff_long  = POS_SCALE (OI_post = 0 after close)
+    // Both flags must be set per spec §5.6 step 8.
+    let mut engine = RiskEngine::new(default_params());
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.stored_pos_count_long = 1;
+    engine.stored_pos_count_short = 1;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    let mut ctx = InstructionContext::new();
+    engine.enqueue_adl(&mut ctx, Side::Short, POS_SCALE, 0).unwrap();
+
+    assert!(ctx.pending_reset_long, "opp (long) flag must be set");
+    assert!(ctx.pending_reset_short, "liq_side (short) flag must be set");
+}
+
+#[test]
+fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_asymmetric() {
+    // Corrupt asymmetric state: liq_side has nonzero OI AFTER the close,
+    // but opp drives to 0. Spec §5.6 step 8 requires both flags set
+    // regardless — the reset is the conservative recovery path. The prior
+    // impl gated the liq_side flag on `self.get_oi_eff(liq_side) == 0`,
+    // which diverged from spec under corrupt-imbalance states.
+    //
+    // Setup: liq_side = Short with OI = 2*POS_SCALE (so after decrement by
+    // POS_SCALE, OI_eff_short = POS_SCALE, nonzero). opp = Long with OI =
+    // POS_SCALE (OI_post = 0).
+    let mut engine = RiskEngine::new(default_params());
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = 2 * POS_SCALE; // deliberately asymmetric
+    engine.stored_pos_count_long = 1;
+    engine.stored_pos_count_short = 2;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    let mut ctx = InstructionContext::new();
+    engine.enqueue_adl(&mut ctx, Side::Short, POS_SCALE, 0).unwrap();
+
+    assert!(ctx.pending_reset_long, "opp flag must be set on OI_post=0");
+    assert!(ctx.pending_reset_short,
+        "spec §5.6 step 8: liq_side flag MUST also be set when OI_post=0 \
+         regardless of liq_side OI (was gated on == 0 before)");
+}
+
+// ============================================================================
+// v12.19 rev6 follow-up: free_slot head validation (reviewer finding #1)
+// Corrupt free_head in-range but pointing at a used slot or non-head node
+// must return CorruptState instead of grafting the used slot into the free
+// list or overwriting a non-head's prev_free pointer.
+// ============================================================================
+
+#[test]
+fn free_slot_rejects_when_free_head_points_to_used_slot() {
+    let mut engine = RiskEngine::new(default_params());
+    // Materialize two accounts: 0 (will be freed) and 1 (used).
+    let idx0 = add_user_test(&mut engine, 0).unwrap();
+    let idx1 = add_user_test(&mut engine, 0).unwrap();
+    assert!(engine.is_used(idx0 as usize));
+    assert!(engine.is_used(idx1 as usize));
+
+    // Drain account 0 in preparation for free_slot.
+    engine.set_capital(idx0 as usize, 0).unwrap();
+
+    // Corrupt free_head to point at idx1 (a used slot). A valid free_head
+    // must point at a free slot or be u16::MAX.
+    engine.free_head = idx1;
+
+    // free_slot must reject rather than graft idx1 into the free list.
+    let r = engine.free_slot(idx0);
+    assert_eq!(r, Err(RiskError::CorruptState),
+        "free_slot must reject when free_head points at a used slot (got {:?})", r);
+    // idx0 must still be marked used — no partial mutation.
+    assert!(engine.is_used(idx0 as usize),
+        "idx0 must remain used on rejected free_slot");
+}
+
+#[test]
+fn free_slot_rejects_when_free_head_is_not_head_of_list() {
+    let mut engine = RiskEngine::new(default_params());
+    // Materialize and then prepare account 0 for freeing.
+    let idx0 = add_user_test(&mut engine, 0).unwrap();
+    engine.set_capital(idx0 as usize, 0).unwrap();
+
+    // Capture current free_head. Corrupt it: if free_head is u16::MAX,
+    // substitute an index whose prev_free is NOT u16::MAX — i.e., a
+    // non-head node in the existing free list. A "free but not head"
+    // slot has prev_free pointing at another free slot.
+    //
+    // With a freshly-constructed engine and idx0 materialized, the
+    // free list looks like: head → idx1 → idx2 → ... Picking idx2 as
+    // the fake head means prev_free[idx2] = idx1 ≠ u16::MAX.
+    let fake_head: u16 = 2;
+    // Confirm idx 2 is free and has a non-MAX prev pointer (i.e., it's
+    // the middle of the list, not the real head).
+    assert!(!engine.is_used(fake_head as usize),
+        "test setup: fake_head must be a free slot");
+    assert_ne!(engine.prev_free[fake_head as usize], u16::MAX,
+        "test setup: fake_head must NOT be the real list head");
+    engine.free_head = fake_head;
+
+    let r = engine.free_slot(idx0);
+    assert_eq!(r, Err(RiskError::CorruptState),
+        "free_slot must reject when free_head is a non-head free-list node (got {:?})", r);
+    assert!(engine.is_used(idx0 as usize),
+        "idx0 must remain used on rejected free_slot");
 }
 
 #[test]
