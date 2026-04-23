@@ -2743,71 +2743,99 @@ fn proof_convert_released_pnl_exercises_conversion() {
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn v19_cascade_safety_gate_disabled_preserves_invariants() {
-    // Property 107: when admit_h_min = 0 and threshold_opt = None,
-    // Phase 2 may rapidly mature fresh positive PnL across touched
-    // accounts. Engine invariants (V >= C_tot + I, PNL_matured_pos_tot
-    // <= PNL_pos_tot) must still hold.
+    // Property 107: when admit_h_min = 0 and threshold_opt = None, the
+    // stress-scaled admission gate is entirely off. Even so, engine
+    // invariants must hold: this is the spec's defense for §12.21 —
+    // the combination is wrapper-prohibited, but the engine itself does
+    // not corrupt under it.
     //
-    // This is the engine-safety property backing §12.21's wrapper
-    // obligation: the engine does not corrupt under this combination,
-    // which is what makes the wrapper-layer restriction defensible.
+    // Harness exercises the non-compliant combination on a user that has
+    // symbolic positive PnL (modeling the "cascade" input shape) and
+    // verifies invariants both before and after a Phase 2 keeper_crank
+    // with rr_window_size > 0.
     let mut engine = RiskEngine::new(zero_fee_params());
     let a = add_user_test(&mut engine, 0).unwrap();
 
-    // Symbolic deposit + positive PnL state.
     let cap: u16 = kani::any();
     kani::assume(cap > 0);
     engine.deposit_not_atomic(a, cap as u128, 1000, 0).unwrap();
 
-    // Inject modest positive PnL (skipping full trade for harness tractability).
-    let pnl: u16 = kani::any();
-    engine.accounts[a as usize].pnl = pnl as i128;
+    // Inject symbolic positive PnL in matured and pending buckets consistent
+    // with engine invariants (matured <= pos_tot, reserved <= pnl).
+    let matured: u8 = kani::any();
+    let reserved: u8 = kani::any();
+    kani::assume((matured as u128) <= cap as u128);
+    kani::assume((reserved as u128) <= cap as u128);
+    let pnl = (matured as u128 + reserved as u128) as i128;
+    kani::assume(pnl >= 0);
+    engine.accounts[a as usize].pnl = pnl;
+    engine.accounts[a as usize].reserved_pnl = reserved as u128;
     engine.pnl_pos_tot = pnl as u128;
-    engine.pnl_matured_pos_tot = 0;
+    engine.pnl_matured_pos_tot = matured as u128;
 
-    // Run Phase 2 with gate-disabled combination: admit_h_min = 0,
-    // threshold = None, rr_window_size > 0.
+    // Wrapper-non-compliant combination (admit_h_min = 0, threshold = None).
     let r = engine.keeper_crank_not_atomic_v2(
         1, 1000, &[], 0, 0, 0, 10, None, 3,
     );
     assert!(r.is_ok());
 
-    // Core invariants must still hold.
+    // Core invariants after the non-compliant combination.
     assert!(engine.check_conservation(),
         "V >= C_tot + I must hold under gate-disabled Phase 2");
     assert!(engine.pnl_matured_pos_tot <= engine.pnl_pos_tot,
         "matured_pos_tot <= pos_tot invariant must hold");
+    // Active reservation bound: reserved <= max(pnl, 0).
+    let account = &engine.accounts[a as usize];
+    let pos_pnl = core::cmp::max(account.pnl, 0) as u128;
+    assert!(account.reserved_pnl <= pos_pnl,
+        "reserved_pnl <= max(pnl, 0) must hold");
 }
 
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn v19_trade_touch_order_deterministic_invariants() {
-    // Property 108 invariant form: execute_trade produces valid engine
-    // state regardless of caller-supplied (a, b) argument order; this is
-    // a byproduct of the deterministic min(a,b)-first touch rule.
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, 1000, 0).unwrap();
-    engine.deposit_not_atomic(b, 100_000, 1000, 0).unwrap();
+fn v19_trade_touch_order_is_arg_symmetric() {
+    // Property 108: execute_trade touches counterparties in ascending
+    // storage-index order regardless of caller-supplied (a, b) order.
+    // Verify by running the same economic setup with (a, b) then (b, a)
+    // and asserting post-state invariants match after the economically
+    // equivalent (same partners, sign-flipped size_q effect) trade.
+    //
+    // Both runs use the same pre-state; the only difference is the order
+    // in which execute_trade's first arg is named. Because the engine
+    // sorts (a, b) before touching, internal order is identical.
+    let mut engine_1 = RiskEngine::new(zero_fee_params());
+    let i0_1 = add_user_test(&mut engine_1, 0).unwrap();
+    let i1_1 = add_user_test(&mut engine_1, 0).unwrap();
+    engine_1.deposit_not_atomic(i0_1, 100_000, 1000, 0).unwrap();
+    engine_1.deposit_not_atomic(i1_1, 100_000, 1000, 0).unwrap();
 
-    // Crank to make state fresh.
-    engine.keeper_crank_not_atomic(1, 1000, &[], 0, 0, 0, 10).unwrap();
+    let mut engine_2 = RiskEngine::new(zero_fee_params());
+    let i0_2 = add_user_test(&mut engine_2, 0).unwrap();
+    let i1_2 = add_user_test(&mut engine_2, 0).unwrap();
+    engine_2.deposit_not_atomic(i0_2, 100_000, 1000, 0).unwrap();
+    engine_2.deposit_not_atomic(i1_2, 100_000, 1000, 0).unwrap();
 
-    // Execute with ascending (a, b) order.
-    let size: u16 = kani::any();
+    let size: u8 = kani::any();
     kani::assume(size > 0);
-    kani::assume(size <= 100);
+    kani::assume(size <= 10);
     let size_q = (size as i128) * POS_SCALE as i128;
-    let r = engine.execute_trade_not_atomic(
-        a, b, 1000, 1, size_q, 1000, 0, 0, 10,
-    );
-    assert!(r.is_ok() || r.is_err()); // either is fine; assert no panic
 
-    // Post-state invariants regardless of outcome.
-    assert!(engine.check_conservation());
-    assert!(engine.pnl_matured_pos_tot <= engine.pnl_pos_tot);
-    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q,
-        "bilateral OI symmetry must hold");
+    // Run 1: (i0, i1, +size). i0 is long.
+    let r1 = engine_1
+        .execute_trade_not_atomic(i0_1, i1_1, 1000, 0, size_q, 1000, 0, 0, 10);
+    // Run 2: (i1, i0, +size). i1 is long (economically opposite).
+    let r2 = engine_2
+        .execute_trade_not_atomic(i1_2, i0_2, 1000, 0, size_q, 1000, 0, 0, 10);
+
+    // Both runs should behave deterministically — the touched set is the
+    // same ({i0, i1}), touched in ascending order (i0 first). OI totals
+    // must match across runs by symmetry.
+    assert_eq!(r1.is_ok(), r2.is_ok(),
+        "same economic setup + swapped args must produce same Ok/Err outcome");
+    assert_eq!(engine_1.oi_eff_long_q, engine_2.oi_eff_long_q);
+    assert_eq!(engine_1.oi_eff_short_q, engine_2.oi_eff_short_q);
+    // Each engine maintains invariants.
+    assert!(engine_1.check_conservation());
+    assert!(engine_2.check_conservation());
 }

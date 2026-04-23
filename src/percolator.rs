@@ -4965,18 +4965,20 @@ impl RiskEngine {
         // rr_window_size indices, touching materialized accounts so
         // warmup/reserve state advances uniformly across the deployment.
         //
-        // Cursor wrap: when rr_cursor_position reaches
-        // MAX_MATERIALIZED_ACCOUNTS, sweep_generation increments by 1 and
-        // price_move_consumed_bps_this_generation resets to 0 atomically
-        // with the wrap (spec §9.7 step 7).
+        // Cursor wrap bound: spec §9.7 step 7 uses MAX_MATERIALIZED_ACCOUNTS
+        // as the wrap threshold. For compact shards this makes sweep_generation
+        // turnover slow — explicitly documented in spec §13 note 15 as a
+        // deployment-sizing issue, not a safety bug. Wrappers that want faster
+        // auto-relaxation should increase rr_window_size or shard further.
+        let wrap_bound = MAX_MATERIALIZED_ACCOUNTS;
         let cursor_start = self.rr_cursor_position;
         let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
-        let sweep_end = core::cmp::min(sweep_end_u64, MAX_MATERIALIZED_ACCOUNTS);
+        let sweep_end = core::cmp::min(sweep_end_u64, wrap_bound);
 
-        // Clamp to both MAX_MATERIALIZED_ACCOUNTS and physical MAX_ACCOUNTS.
-        // The theoretical spec bound MAX_MATERIALIZED_ACCOUNTS is 1e6; the
-        // runtime implementation uses a smaller MAX_ACCOUNTS slab (e.g. 64).
-        // Real touching is only meaningful for indices below MAX_ACCOUNTS.
+        // Clamp actual touching to the physical slab. Indices beyond
+        // MAX_ACCOUNTS are outside the runtime's materialized-account slab,
+        // so touch is a no-op on them. The cursor still advances to
+        // preserve the cursor-advance invariant per spec §11 property 93.
         let touch_end = core::cmp::min(sweep_end, MAX_ACCOUNTS as u64);
 
         let mut i = cursor_start;
@@ -4989,7 +4991,7 @@ impl RiskEngine {
         }
 
         // Advance cursor; on wraparound reset and bump generation.
-        if sweep_end >= MAX_MATERIALIZED_ACCOUNTS {
+        if sweep_end >= wrap_bound {
             self.rr_cursor_position = 0;
             self.sweep_generation = self.sweep_generation
                 .checked_add(1)

@@ -2368,19 +2368,19 @@ fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
 fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
     // Property 94: at cursor wraparound, sweep_generation += 1 and
     // price_move_consumed_bps_this_generation resets to 0 atomically.
+    // Spec §9.7 step 7 wraps at MAX_MATERIALIZED_ACCOUNTS.
     let mut engine = RiskEngine::new(default_params());
-    // Place cursor near the top — one wrap_window_size hit will wrap.
+    // Place cursor one below the wrap bound so a 1-window hit triggers wrap.
     engine.rr_cursor_position = MAX_MATERIALIZED_ACCOUNTS - 1;
     engine.sweep_generation = 7;
     engine.price_move_consumed_bps_this_generation = 123;
-    // Window that wraps past MAX_MATERIALIZED_ACCOUNTS (window=1 is enough
-    // since cursor = MAX_MATERIALIZED_ACCOUNTS - 1).
+
     engine
         .keeper_crank_not_atomic_v2(
             1, 1000, &[], 0, 0, 0, 100, None, 1,
         )
         .unwrap();
-    assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0");
+    assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0 at MAX_MATERIALIZED_ACCOUNTS");
     assert_eq!(engine.sweep_generation, 8, "generation +1 on wrap");
     assert_eq!(engine.price_move_consumed_bps_this_generation, 0,
         "consumption resets to 0 on wrap");

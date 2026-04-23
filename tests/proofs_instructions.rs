@@ -1819,26 +1819,44 @@ fn v19_reclaim_envelope_accept_within_bound() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn v19_validate_params_rejects_envelope_breach() {
-    // Any (max_price_move, max_dt, max_rate, liq, maint) quintuple where
-    // price_budget + funding_budget + liq > maint must be rejected by
-    // validate_params.
-    let mut params = zero_fee_params();
-    // Force envelope breach via outsized price cap.
-    params.max_price_move_bps_per_slot = 10_000;
-    params.max_accrual_dt_slots = 1_000;
-    // price_budget = 10_000 * 1_000 = 10_000_000; far exceeds any maint.
-    // validate_params is called from RiskEngine::new, which panics on breach.
-    //
-    // Kani can verify panic via catch_unwind (not available in no_std);
-    // simpler: just assert the validation helper reveals the failure by
-    // checking the inequality symbolically.
-    let price_budget_u256 = U256::from_u128(params.max_price_move_bps_per_slot as u128)
-        .checked_mul(U256::from_u128(params.max_accrual_dt_slots as u128))
-        .unwrap();
-    let maint = U256::from_u128(params.maintenance_margin_bps as u128);
-    let liq = U256::from_u128(params.liquidation_fee_bps as u128);
-    let total_lower_bound = price_budget_u256.checked_add(liq).unwrap();
-    assert!(total_lower_bound > maint,
-        "test setup: price_budget alone exceeds maintenance envelope");
+fn v19_accrue_market_envelope_enforces_goal52_bound() {
+    // Spec §1.4 + §5.5: the init-time envelope inequality
+    //   price_budget + funding_budget + liq_fee <= maint
+    // combined with the per-accrual price-move cap
+    //   abs_dp * 10_000 <= cap * dt * P_last
+    // bounds the adverse equity drain per envelope. This proof verifies
+    // that for any symbolic abs_dp that would exceed the per-slot cap at
+    // a given dt, accrue_market_to rejects — the construction-level
+    // guarantee backing goal 52.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = 1_000_000;
+    engine.oi_eff_short_q = 1_000_000;
+    engine.last_oracle_price = 10_000;
+    engine.fund_px_last = 10_000;
+    engine.last_market_slot = 0;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    let cap_per_slot = engine.params.max_price_move_bps_per_slot as u128;
+    let p_last = engine.last_oracle_price as u128;
+
+    // Symbolic dt and abs_dp; assume a move that exceeds the cap.
+    let dt: u8 = kani::any();
+    kani::assume(dt > 0 && (dt as u64) <= engine.params.max_accrual_dt_slots);
+    let abs_dp: u16 = kani::any();
+    kani::assume(abs_dp > 0);
+    // Exceed-cap predicate: abs_dp * 10_000 > cap * dt * P_last.
+    let lhs = (abs_dp as u128) * 10_000;
+    let rhs = cap_per_slot * (dt as u128) * p_last;
+    kani::assume(lhs > rhs);
+    // Keep abs_dp within u64 price range.
+    kani::assume((abs_dp as u128) <= u64::MAX as u128 - p_last);
+
+    let new_price = p_last as u64 + abs_dp as u64;
+    let r = engine.accrue_market_to(dt as u64, new_price, 0);
+    assert!(r.is_err(),
+        "any abs_dp exceeding the per-slot cap MUST reject — goal 52 construction");
+    // State unchanged on rejection.
+    assert_eq!(engine.last_oracle_price, p_last as u64);
+    assert_eq!(engine.last_market_slot, 0);
 }

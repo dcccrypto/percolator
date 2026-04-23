@@ -1099,32 +1099,36 @@ fn v19_accrual_consumption_only_commits_on_success() {
     // (e.g. K/F overflow), price_move_consumed_bps_this_generation is NOT
     // incremented — it is committed only after all other state commits.
     //
-    // Construct a state where step 9 (price-move cap) passes but step 11
-    // (mark-to-market) would overflow K_long.
+    // Setup: dt=1 with a move large enough that consumed_this_step > 0
+    // (so we can witness non-rollback as a bug), and K near i128::MAX so
+    // the mark-to-market step overflows.
     let mut engine = RiskEngine::new(zero_fee_params());
     engine.oi_eff_long_q = 1_000_000;
     engine.oi_eff_short_q = 1_000_000;
-    engine.last_oracle_price = 100_000;
-    engine.fund_px_last = 100_000;
+    // P_last = 10_000. Move to 10_000 + 1 gives abs_dp*10_000 = 10_000,
+    // floor(10_000 / 10_000) = 1 bps consumed. Cap at dt=1, P=10_000 is
+    // 4 * 1 * 10_000 = 40_000 >= 10_000, so step 9 passes.
+    engine.last_oracle_price = 10_000;
+    engine.fund_px_last = 10_000;
     engine.last_market_slot = 0;
-    // Put K_long near i128::MAX so any positive mark delta overflows.
+    // K near i128::MAX so mark delta = ADL_ONE * 1 = 1e15 overflows.
     engine.adl_coeff_long = i128::MAX - 1;
     engine.adl_mult_long = ADL_ONE;
     engine.adl_mult_short = ADL_ONE;
+
+    // Prime consumption to a known non-trivial value so rollback is
+    // observable (no accidental "0 + 0 = 0" trivial truth).
+    engine.price_move_consumed_bps_this_generation = 17;
 
     let consumed_before = engine.price_move_consumed_bps_this_generation;
     let k_long_before = engine.adl_coeff_long;
     let p_last_before = engine.last_oracle_price;
     let slot_before = engine.last_market_slot;
 
-    // Move price up by 1 at P=100_000. abs_dp*10_000 = 10_000. Cap at dt=1,
-    // P=100_000 = 4 * 1 * 100_000 = 400_000 (zero_fee_params has
-    // max_price_move=4). So step 9 passes. But step 11 computes
-    // K_long += ADL_ONE * 1 = 1e15 → K already at i128::MAX-1 → overflow.
-    let r = engine.accrue_market_to(1, 100_001, 0);
+    let r = engine.accrue_market_to(1, 10_001, 0);
     assert!(r.is_err(), "K overflow must reject the accrual");
 
-    // Consumption must NOT have been committed.
+    // All persistent state (including consumption) must have rolled back.
     assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before,
         "price_move_consumed must roll back atomically with K/F commit");
     assert_eq!(engine.adl_coeff_long, k_long_before);
