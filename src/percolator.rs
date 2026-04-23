@@ -127,7 +127,6 @@ pub const MAX_POSITION_ABS_Q: u128 = 100_000_000_000_000;
 pub const MAX_ACCOUNT_NOTIONAL: u128 = 100_000_000_000_000_000_000;
 pub const MAX_TRADE_SIZE_Q: u128 = MAX_POSITION_ABS_Q; // spec §1.4
 pub const MAX_OI_SIDE_Q: u128 = 100_000_000_000_000;
-pub const MAX_MATERIALIZED_ACCOUNTS: u64 = 1_000_000;
 pub const MAX_ACCOUNT_POSITIVE_PNL: u128 = 100_000_000_000_000_000_000_000_000_000_000;
 pub const MAX_PNL_POS_TOT: u128 = 100_000_000_000_000_000_000_000_000_000_000_000_000;
 pub const MAX_TRADING_FEE_BPS: u64 = 10_000;
@@ -629,7 +628,10 @@ pub struct RiskEngine {
 
     /// Round-robin sweep cursor (spec §2.2, v12.19).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
-    /// `0 <= rr_cursor_position < MAX_MATERIALIZED_ACCOUNTS`.
+    /// `0 <= rr_cursor_position < params.max_accounts`. Wraps (and
+    /// advances sweep_generation) at the deployment's physical slab size
+    /// so generation turnover is proportional to the actual shard — the
+    /// spec's theoretical 1e6 hard bound collapsed onto runtime config.
     pub rr_cursor_position: u64,
     /// Sweep generation counter (spec §2.2, v12.19).
     /// Incremented exactly once per full wraparound of `rr_cursor_position`.
@@ -1334,10 +1336,12 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Enforce materialized_account_count bound (spec §10.0)
+        // Enforce materialized_account_count bound (spec §10.0).
+        // Bound is params.max_accounts (the deployment's configured slab
+        // capacity) — same value used for the free-list check above.
         self.materialized_account_count = self.materialized_account_count
             .checked_add(1).ok_or(RiskError::Overflow)?;
-        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
+        if self.materialized_account_count > self.params.max_accounts {
             self.materialized_account_count -= 1;
             return Err(RiskError::Overflow);
         }
@@ -3462,16 +3466,42 @@ impl RiskEngine {
         if self.pnl_matured_pos_tot > self.pnl_pos_tot {
             return Err(RiskError::CorruptState);
         }
-        // Spec §1.4: materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS.
-        if self.materialized_account_count > MAX_MATERIALIZED_ACCOUNTS {
+        // Spec §1.4: materialized_account_count <= params.max_accounts.
+        if self.materialized_account_count > self.params.max_accounts {
+            return Err(RiskError::CorruptState);
+        }
+        // num_used_accounts and materialized_account_count track the same
+        // count under different names — they must agree.
+        if self.materialized_account_count != self.num_used_accounts as u64 {
             return Err(RiskError::CorruptState);
         }
         // Spec §4.7 v12.16.4: neg_pnl_account_count <= materialized_account_count.
         if self.neg_pnl_account_count > self.materialized_account_count {
             return Err(RiskError::CorruptState);
         }
-        // Spec §2.2 v12.19: rr_cursor_position < MAX_MATERIALIZED_ACCOUNTS.
-        if self.rr_cursor_position >= MAX_MATERIALIZED_ACCOUNTS {
+        // Spec §2.2 v12.19: rr_cursor_position < params.max_accounts.
+        if self.rr_cursor_position >= self.params.max_accounts {
+            return Err(RiskError::CorruptState);
+        }
+        // Oracle-price sentinels are always valid (spec §1.5).
+        if self.last_oracle_price == 0 || self.last_oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+        if self.fund_px_last == 0 || self.fund_px_last > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+        // Monotonic slot invariant (spec §1.5): current_slot >= last_market_slot.
+        if self.current_slot < self.last_market_slot {
+            return Err(RiskError::CorruptState);
+        }
+        // resolved_payout_ready is a 0/1 latch.
+        if self.resolved_payout_ready > 1 {
+            return Err(RiskError::CorruptState);
+        }
+        // Before ready, both h_num and h_den MUST be zero (spec §2.2 invariant).
+        if self.resolved_payout_ready == 0
+            && (self.resolved_payout_h_num != 0 || self.resolved_payout_h_den != 0)
+        {
             return Err(RiskError::CorruptState);
         }
         // Spec §6.8: when resolved payout snapshot is ready, h_num <= h_den.
@@ -4134,9 +4164,10 @@ impl RiskEngine {
         // residuals lingering in account slots.
 
         // Step 6: if position exists, require post-withdrawal margin using
-        // withdrawal equity (capital minus losses minus fees — does NOT include
-        // matured released PnL, preventing approval against claims that may not
-        // survive other accounts' conversions).
+        // `Eq_withdraw_raw` (spec §3.5) — capital + min(PNL, 0) + haircutted
+        // matured PnL - fee debt. Haircutting by the current `h` ratio
+        // prevents approval against matured claims that would be diluted
+        // by other accounts' conversions.
         let eff = self.effective_pos_q(idx as usize);
         if eff != 0 {
             // Post-withdrawal equity: current withdraw equity minus withdrawal amount
@@ -4931,28 +4962,23 @@ impl RiskEngine {
     // keeper_crank_not_atomic (spec §10.6)
     // ========================================================================
 
-    /// keeper_crank_not_atomic (spec §10.8): Minimal on-chain permissionless shortlist processor.
-    /// Candidate discovery is performed off-chain. ordered_candidates[] is untrusted.
-    /// Each candidate is (account_idx, optional liquidation policy hint).
+    /// keeper_crank_not_atomic (spec §9.7): minimal on-chain permissionless
+    /// shortlist processor. Candidate discovery is performed off-chain;
+    /// `ordered_candidates[]` is untrusted. Each candidate is
+    /// `(account_idx, optional liquidation policy hint)`.
     ///
-    /// Pre-v12.19 shim: forwards to the v12.19 two-phase implementation with
-    /// `rr_window_size=0` and `threshold_opt=None`. Phase 2 is effectively
-    /// a no-op at rr_window_size=0 (cursor and generation do not advance).
+    /// Two-phase: Phase 1 runs keeper-priority liquidation; Phase 2 always
+    /// runs a mandatory structural sweep over the next `rr_window_size`
+    /// materialized-account indices starting from `rr_cursor_position`. On
+    /// cursor wraparound past `params.max_accounts`, `sweep_generation`
+    /// increments by 1 and `price_move_consumed_bps_this_generation` resets
+    /// to 0.
     ///
-    /// **WARNING for public/permissionless wrappers:** per spec §12.21, the
-    /// combination `admit_h_min == 0` + `admit_h_max_consumption_threshold_bps_opt
-    /// == None` is wrapper-prohibited because it disables the stress-scaled
-    /// admission gate entirely. This shim always passes None for the threshold,
-    /// so callers MUST either pass `admit_h_min > 0` or migrate to
-    /// `keeper_crank_not_atomic` and pass an explicit `Some(threshold)`.
-    /// Preserved here for backward compatibility with trusted/private wrappers.
-    /// v12.19 keeper_crank with Phase 2 round-robin sweep and consumption
-    /// threshold (spec §9.7). Phase 1 runs keeper-priority liquidation,
-    /// then Phase 2 always runs a mandatory structural sweep over the next
-    /// `rr_window_size` materialized-account indices starting from
-    /// `rr_cursor_position`. On full cursor wraparound past
-    /// MAX_MATERIALIZED_ACCOUNTS, `sweep_generation` increments by 1 and
-    /// `price_move_consumed_bps_this_generation` resets to 0.
+    /// Per spec §12.21, public/permissionless wrappers MUST NOT combine
+    /// `admit_h_min == 0` with `admit_h_max_consumption_threshold_bps_opt
+    /// == None`. The engine accepts the combination at runtime because it
+    /// cannot distinguish trusted/private wrappers (permitted) from public
+    /// (forbidden). Compliance is wrapper-layer.
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -5060,24 +5086,18 @@ impl RiskEngine {
         // rr_window_size indices, touching materialized accounts so
         // warmup/reserve state advances uniformly across the deployment.
         //
-        // Cursor wrap bound: spec §9.7 step 7 uses MAX_MATERIALIZED_ACCOUNTS
-        // as the wrap threshold. For compact shards this makes sweep_generation
-        // turnover slow — explicitly documented in spec §13 note 15 as a
-        // deployment-sizing issue, not a safety bug. Wrappers that want faster
-        // auto-relaxation should increase rr_window_size or shard further.
-        let wrap_bound = MAX_MATERIALIZED_ACCOUNTS;
+        // Cursor wrap bound: params.max_accounts (runtime slab capacity).
+        // Generation turnover is proportional to the real deployment size;
+        // the spec's theoretical 1e6 bound was collapsed onto this runtime
+        // value so compact shards do not spend most of a generation
+        // walking non-existent index space.
+        let wrap_bound = self.params.max_accounts;
         let cursor_start = self.rr_cursor_position;
         let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
         let sweep_end = core::cmp::min(sweep_end_u64, wrap_bound);
 
-        // Clamp actual touching to the physical slab. Indices beyond
-        // MAX_ACCOUNTS are outside the runtime's materialized-account slab,
-        // so touch is a no-op on them. The cursor still advances to
-        // preserve the cursor-advance invariant per spec §11 property 93.
-        let touch_end = core::cmp::min(sweep_end, MAX_ACCOUNTS as u64);
-
         let mut i = cursor_start;
-        while i < touch_end {
+        while i < sweep_end {
             let iu = i as usize;
             if self.is_used(iu) {
                 self.touch_account_live_local(iu, &mut ctx)?;

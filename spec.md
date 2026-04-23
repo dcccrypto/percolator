@@ -124,7 +124,7 @@ The engine MUST provide the following properties.
 50. **Resolved payout snapshot stability under late fee sync:** fee sync or fee forgiveness performed after the shared resolved payout snapshot is captured MUST NOT invalidate that snapshot’s correctness. The snapshot is over `Residual = V - (C_tot + I)` and pure `C -> I` reclassification must preserve it.
 51. **No implicit degenerate-mode selection:** the ordinary vs degenerate `resolve_market` branch MUST be chosen only from an explicit trusted wrapper mode input. Equality of economic values such as `live_oracle_price == P_last` or `funding_rate_e9_per_slot == 0` MUST NOT by itself force the degenerate branch.
 52. **No self-neutral insurance siphon via oracle moves:** between any two successive authoritative `accrue_market_to` calls, the adverse equity drain on any live exposed position that was maintenance-healthy at the earlier call MUST be strictly less than that position’s maintenance buffer, net of liquidation cost and worst-case funding drain over the same interval. This is enforced by construction: §1.4 requires `cfg_max_price_move_bps_per_slot * cfg_max_accrual_dt_slots + funding_drain_bps_per_envelope_at_max_rate + cfg_liquidation_fee_bps ≤ cfg_maintenance_bps`, and §5.5 rejects any price-moving live-exposure `accrue_market_to` whose `dt` exceeds the configured envelope or whose proposed `|ΔP| / P_last` exceeds the per-slot cap scaled by `dt`. A compromised oracle or adversarial price sequence therefore cannot drive a maintenance-healthy position through zero equity within a single accrual envelope; the account is either liquidatable on the next crank with nonnegative equity after liquidation cost, or the accrual itself is rejected and the market must progress through explicit recovery or `resolve_market(Degenerate)`.
-53. **Forgery-resistant sweep-generation signal with engine-enforced stress-scaled admission.** The engine tracks a round-robin cursor that walks the materialized-account index space during every `keeper_crank` call. The cursor advances deterministically by a keeper-supplied window size, and `sweep_generation` increments exactly once per wraparound past `MAX_MATERIALIZED_ACCOUNTS`. The engine also tracks cumulative price-move consumption since the last generation advance, and `admit_fresh_reserve_h_lock` forces `admit_h_max` when consumption exceeds an optional wrapper-supplied threshold. This composes with the existing residual-scarcity check, which already forces `admit_h_max` when the post-impact matured haircut would fall below `1`: together they block fast-lane admission both when the market is already underwater and when recent price movement suggests reconciliation is incomplete. The per-envelope price-move cap of goal 52 remains the construction-level safety property; `sweep_generation` and consumption tracking are stress and UX signals. `sweep_generation` is tamper-resistant because the only way to advance it is to run `keeper_crank`, which always executes its mandatory round-robin phase and touches every materialized account found in the traversed window. The engine enforces the stress gate iff a threshold is supplied; the public-wrapper prohibition on `(admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None)` is wrapper-layer (§12.21), not an engine-side validation. With the gate disabled the engine still preserves all invariants and the goal-52 safety boundary, but the immediate-release cascade behavior witnessed by §11 property 107 returns.
+53. **Forgery-resistant sweep-generation signal with engine-enforced stress-scaled admission.** The engine tracks a round-robin cursor that walks the materialized-account index space during every `keeper_crank` call. The cursor advances deterministically by a keeper-supplied window size, and `sweep_generation` increments exactly once per wraparound past `cfg_max_accounts`. The engine also tracks cumulative price-move consumption since the last generation advance, and `admit_fresh_reserve_h_lock` forces `admit_h_max` when consumption exceeds an optional wrapper-supplied threshold. This composes with the existing residual-scarcity check, which already forces `admit_h_max` when the post-impact matured haircut would fall below `1`: together they block fast-lane admission both when the market is already underwater and when recent price movement suggests reconciliation is incomplete. The per-envelope price-move cap of goal 52 remains the construction-level safety property; `sweep_generation` and consumption tracking are stress and UX signals. `sweep_generation` is tamper-resistant because the only way to advance it is to run `keeper_crank`, which always executes its mandatory round-robin phase and touches every materialized account found in the traversed window. The engine enforces the stress gate iff a threshold is supplied; the public-wrapper prohibition on `(admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None)` is wrapper-layer (§12.21), not an engine-side validation. With the gate disabled the engine still preserves all invariants and the goal-52 safety boundary, but the immediate-release cascade behavior witnessed by §11 property 107 returns.
 
 **Atomic execution model:** every top-level external instruction defined in §9 MUST be atomic. If any required precondition, checked-arithmetic guard, or conservative-failure condition fails, the instruction MUST roll back all state mutations performed since that instruction began.
 
@@ -176,8 +176,8 @@ Global hard bounds:
 - `MAX_INITIAL_BPS = 10_000`
 - `MAX_MAINTENANCE_BPS = 10_000`
 - `MAX_LIQUIDATION_FEE_BPS = 10_000`
-- `MAX_MATERIALIZED_ACCOUNTS = 1_000_000`
-- `MAX_ACTIVE_POSITIONS_PER_SIDE` MUST be finite and MUST NOT exceed `MAX_MATERIALIZED_ACCOUNTS`
+- `cfg_max_accounts` is per-market runtime configuration (see §1.4)
+- `MAX_ACTIVE_POSITIONS_PER_SIDE` MUST be finite and MUST NOT exceed `cfg_max_accounts`
 - `MAX_ACCOUNT_POSITIVE_PNL_LIVE = 100_000_000_000_000_000_000_000_000_000_000`
 - `MAX_PNL_POS_TOT_LIVE = 100_000_000_000_000_000_000_000_000_000_000_000_000`
 - `MIN_A_SIDE = 100_000_000_000_000`
@@ -471,8 +471,8 @@ Global invariants:
 
 - `C_tot <= V <= MAX_VAULT_TVL`
 - `I <= V`
-- `0 <= neg_pnl_account_count <= materialized_account_count <= MAX_MATERIALIZED_ACCOUNTS`
-- `0 <= rr_cursor_position < MAX_MATERIALIZED_ACCOUNTS`
+- `0 <= neg_pnl_account_count <= materialized_account_count <= cfg_max_accounts`
+- `0 <= rr_cursor_position < cfg_max_accounts`
 - `F_long_num` and `F_short_num` MUST remain representable as `i128`
 - if `market_mode == Live`:
   - `PNL_matured_pos_tot <= PNL_pos_tot <= MAX_PNL_POS_TOT_LIVE`
@@ -505,7 +505,7 @@ Capacity rules:
 - `ctx.touched_accounts[]` capacity MUST be at least the deployment’s maximum allowed number of distinct touches in any single top-level instruction.
 - For `keeper_crank`, the wrapper / runtime configuration MUST ensure `max_revalidations + rr_window_size` does not exceed that touched-account capacity.
 - `ctx.h_max_sticky_accounts[]` capacity MUST be at least the deployment’s maximum allowed number of distinct accounts any single top-level instruction can both touch and create fresh reserve for.
-- Implementations on constrained runtimes MAY choose capacities far smaller than `MAX_MATERIALIZED_ACCOUNTS`; in that case any instruction whose touched set would exceed capacity MUST fail conservatively before partial mutation.
+- Implementations on constrained runtimes MAY choose capacities far smaller than `cfg_max_accounts`; in that case any instruction whose touched set would exceed capacity MUST fail conservatively before partial mutation.
 - Implementations MAY choose to size both structures equally if that is operationally convenient.
 
 ### 2.4 Configuration immutability
@@ -530,7 +530,7 @@ No external instruction in this revision may change:
 
 ### 2.5 Materialized-account capacity
 
-The engine MUST track the number of currently materialized account slots. That count MUST NOT exceed `MAX_MATERIALIZED_ACCOUNTS`.
+The engine MUST track the number of currently materialized account slots. That count MUST NOT exceed `cfg_max_accounts`.
 
 A missing account is one whose slot is not currently materialized. Missing accounts MUST NOT be auto-materialized by `settle_account`, `withdraw`, `execute_trade`, `close_account`, `liquidate`, `resolve_market`, `force_close_resolved`, or `keeper_crank`.
 
@@ -550,7 +550,7 @@ The canonical zero-position account defaults are:
 
 ### 2.7 Account materialization
 
-`materialize_account(i, materialize_slot)` MAY succeed only if the account is currently missing and materialized-account capacity remains below `MAX_MATERIALIZED_ACCOUNTS`.
+`materialize_account(i, materialize_slot)` MAY succeed only if the account is currently missing and materialized-account capacity remains below `cfg_max_accounts`.
 
 On success, it MUST:
 
@@ -2020,13 +2020,13 @@ Procedure:
 7. **Phase 2: mandatory round-robin structural sweep.**  
    Phase 2 runs unconditionally, including when Phase 1 exited early on a pending reset. Phase 2 does NOT count against `max_revalidations`, does NOT break on pending reset, and does NOT execute liquidations.
 
-   Let `sweep_end = min(MAX_MATERIALIZED_ACCOUNTS, rr_cursor_position + rr_window_size)`, using checked or saturating arithmetic on the addition. For each storage index `i` in `rr_cursor_position .. sweep_end`:
+   Let `sweep_end = min(cfg_max_accounts, rr_cursor_position + rr_window_size)`, using checked or saturating arithmetic on the addition. For each storage index `i` in `rr_cursor_position .. sweep_end`:
    - if account `i` is missing, skip
    - else:
      - if recurring fees are enabled, sync account `i` to `current_slot`
      - `touch_account_live_local(i, ctx)`
 
-   Set `rr_cursor_position = sweep_end`. If `rr_cursor_position >= MAX_MATERIALIZED_ACCOUNTS`:
+   Set `rr_cursor_position = sweep_end`. If `rr_cursor_position >= cfg_max_accounts`:
    - set `rr_cursor_position = 0`
    - `sweep_generation = checked_add_u64(sweep_generation, 1)`
    - `price_move_consumed_bps_this_generation = 0`
@@ -2265,8 +2265,8 @@ An implementation MUST include tests covering at least the following.
 90. Market initialization rejects any parameter set that violates `cfg_max_price_move_bps_per_slot * cfg_max_accrual_dt_slots + floor(cfg_max_abs_funding_e9_per_slot * cfg_max_accrual_dt_slots * 10_000 / FUNDING_DEN) + cfg_liquidation_fee_bps > cfg_maintenance_bps`.
 91. Self-neutral insurance-siphon resistance: given any two materialized accounts with distinct owners and any bilateral-trade setup, and given any sequence of valid `accrue_market_to` calls that together advance `P_last` by cumulative fraction `Δ` over `N` slots, the sum of attacker-controlled `(C_i + PNL_i)` minus the sum of attacker deposits is bounded below by `-Σ liquidation_fees_i` and cannot be net-positive due to insurance loss. The test MUST witness this on the A1 setup with a staircase price path and confirm `attacker_delta <= 0` holds across multiple accrual envelopes with liquidations interleaved.
 92. `keeper_crank` always executes Phase 2 after Phase 1, including when Phase 1 exited early on a pending reset. An empty `ordered_candidates[]` with `rr_window_size > 0` is a valid structural-sweep-only instruction.
-93. Phase 2 advances `rr_cursor_position` by exactly `min(rr_window_size, MAX_MATERIALIZED_ACCOUNTS - rr_cursor_position)` per successful call.
-94. When `rr_cursor_position` reaches `MAX_MATERIALIZED_ACCOUNTS`, it wraps to `0`, `sweep_generation` increments by exactly `1`, and `price_move_consumed_bps_this_generation` resets to `0` atomically with the wrap.
+93. Phase 2 advances `rr_cursor_position` by exactly `min(rr_window_size, cfg_max_accounts - rr_cursor_position)` per successful call.
+94. When `rr_cursor_position` reaches `cfg_max_accounts`, it wraps to `0`, `sweep_generation` increments by exactly `1`, and `price_move_consumed_bps_this_generation` resets to `0` atomically with the wrap.
 95. Phase 2 does NOT consume `max_revalidations` budget.
 96. Phase 2 does NOT execute liquidations; it only calls `touch_account_live_local`. An account discovered as liquidatable during Phase 2 remains liquidatable for Phase 1 processing in the next instruction.
 97. `price_move_consumed_bps_this_generation` is monotone nondecreasing within a generation, zeroed exactly on generation advance, and reflects `Σ consumed_this_step` from all accruals since the last wraparound.
@@ -2374,7 +2374,7 @@ The following are deployment-wrapper obligations.
     A wrapper that opts into the consumption-threshold gate MUST choose `rr_window_size`, crank cadence, deployment size, and threshold so a full structural sweep completes within its intended fast-lane recovery horizon. Very large deployments can otherwise leave `price_move_consumed_bps_this_generation` above threshold for long periods, making `admit_h_min` effectively unavailable. If a deployment cannot sweep quickly enough, it SHOULD shard, increase sweep cadence or window size, raise the threshold, or disable the gate and rely on nonzero `admit_h_min`.
 
 23. **Runtime configuration MUST fit touched-account capacity and compute budget.**  
-    A compliant wrapper / runtime MUST bound `max_revalidations + rr_window_size` so the resulting touched-account set fits the implementation’s actual `ctx` capacity and per-instruction compute budget. The theoretical spec hard bound `MAX_MATERIALIZED_ACCOUNTS` is not a practical per-instruction context size on constrained runtimes; oversized instructions MUST fail conservatively before partial mutation.
+    A compliant wrapper / runtime MUST bound `max_revalidations + rr_window_size` so the resulting touched-account set fits the implementation’s actual `ctx` capacity and per-instruction compute budget. The theoretical spec hard bound `cfg_max_accounts` is not a practical per-instruction context size on constrained runtimes; oversized instructions MUST fail conservatively before partial mutation.
 
 ---
 
@@ -2412,7 +2412,7 @@ A malicious keeper can advance `sweep_generation` themselves by running `keeper_
 
 The consumption threshold and the existing residual-scarcity check in §4.7 compose cleanly. Residual scarcity catches “admission would break `h = 1` right now” — reactive. The consumption threshold catches “recent volatility means reconciliation may still be incomplete” — predictive. Either trigger forces `admit_h_max`.
 
-15. **Large deployments stretch generation turnover.** Because `sweep_generation` advances only on full cursor wraparound past `MAX_MATERIALIZED_ACCOUNTS`, a very large deployment with a small `rr_window_size` can keep `price_move_consumed_bps_this_generation` above threshold for long periods, making the fast lane effectively unavailable even though safety remains intact. This is a deployment-sizing issue, not a safety bug. Wrappers that want fast auto-relaxation SHOULD shard, increase `rr_window_size`, increase crank cadence, or choose a higher threshold.
+15. **Large deployments stretch generation turnover.** Because `sweep_generation` advances only on full cursor wraparound past `cfg_max_accounts`, a very large deployment with a small `rr_window_size` can keep `price_move_consumed_bps_this_generation` above threshold for long periods, making the fast lane effectively unavailable even though safety remains intact. This is a deployment-sizing issue, not a safety bug. Wrappers that want fast auto-relaxation SHOULD shard, increase `rr_window_size`, increase crank cadence, or choose a higher threshold.
 
 ---
 
@@ -2482,7 +2482,7 @@ calls_per_generation ≈ ceil(M / rr_window_size)
 generation_time ≈ calls_per_generation * crank_interval
 ```
 
-So, for a **compact 4096-slot deployment or shard**, generation can advance on the order of every 10-60 seconds under active cranking. For a deployment that really uses the full spec hard bound `MAX_MATERIALIZED_ACCOUNTS = 1_000_000`, generation advances much more slowly unless keepers use very large `rr_window_size`. That is a UX consideration, not a safety issue: the per-envelope cap still enforces goal 52 even if the generation signal turns over slowly.
+So, for a **compact 4096-slot deployment or shard**, generation can advance on the order of every 10-60 seconds under active cranking. For a deployment that really uses the full spec hard bound `cfg_max_accounts = 1_000_000`, generation advances much more slowly unless keepers use very large `rr_window_size`. That is a UX consideration, not a safety issue: the per-envelope cap still enforces goal 52 even if the generation signal turns over slowly.
 
 For `admit_h_max_consumption_threshold_bps_opt = Some(threshold_bps)`, a reasonable starting point is about 50% of the per-envelope cap:
 

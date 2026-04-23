@@ -1117,7 +1117,7 @@ fn v19_rr_window_zero_no_cursor_advance() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let cursor: u8 = kani::any();
-    kani::assume((cursor as u64) < MAX_MATERIALIZED_ACCOUNTS);
+    kani::assume((cursor as u64) < engine.params.max_accounts);
     engine.rr_cursor_position = cursor as u64;
     engine.sweep_generation = kani::any();
     engine.price_move_consumed_bps_this_generation = kani::any();

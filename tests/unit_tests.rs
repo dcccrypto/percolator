@@ -2334,11 +2334,9 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
 #[test]
 fn keeper_crank_phase2_advances_cursor_by_window_size() {
     // Property 93: Phase 2 advances rr_cursor_position by exactly
-    // min(rr_window_size, MAX_MATERIALIZED_ACCOUNTS - rr_cursor_position).
+    // min(rr_window_size, params.max_accounts - rr_cursor_position).
     let mut engine = RiskEngine::new(default_params());
     assert_eq!(engine.rr_cursor_position, 0);
-    // Use admit_h_min=1 to satisfy the §12.21 wrapper-compliance debug_assert
-    // on v2 entrypoints. This test exercises cursor mechanics, not admission.
     let _ = engine
         .keeper_crank_not_atomic(
             1, 1000, &[], 0, 0, 1, 100, None, 5,
@@ -2369,10 +2367,11 @@ fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
 fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
     // Property 94: at cursor wraparound, sweep_generation += 1 and
     // price_move_consumed_bps_this_generation resets to 0 atomically.
-    // Spec §9.7 step 7 wraps at MAX_MATERIALIZED_ACCOUNTS.
+    // Wrap bound is params.max_accounts.
     let mut engine = RiskEngine::new(default_params());
+    let wrap = engine.params.max_accounts;
     // Place cursor one below the wrap bound so a 1-window hit triggers wrap.
-    engine.rr_cursor_position = MAX_MATERIALIZED_ACCOUNTS - 1;
+    engine.rr_cursor_position = wrap - 1;
     engine.sweep_generation = 7;
     engine.price_move_consumed_bps_this_generation = 123;
 
@@ -2381,7 +2380,7 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
             1, 1000, &[], 0, 0, 1, 100, None, 1,
         )
         .unwrap();
-    assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0 at MAX_MATERIALIZED_ACCOUNTS");
+    assert_eq!(engine.rr_cursor_position, 0, "cursor wraps to 0 at params.max_accounts");
     assert_eq!(engine.sweep_generation, 8, "generation +1 on wrap");
     assert_eq!(engine.price_move_consumed_bps_this_generation, 0,
         "consumption resets to 0 on wrap");
@@ -4684,12 +4683,11 @@ fn materialize_anchors_last_fee_slot_at_materialize_slot() {
 }
 
 // ============================================================================
-// v12.19 rev6 follow-up: assert_public_postconditions cheap O(1) checks
-// (reviewer finding #6). The prior assertion only checked conservation,
-// bilateral OI, and active-position caps. Expand to catch cheap invariant
-// violations: pnl_matured <= pnl_pos_tot, materialized_account_count <=
-// MAX_MATERIALIZED_ACCOUNTS, neg_pnl <= materialized, rr_cursor in range,
-// resolved_payout_h_num <= resolved_payout_h_den when ready.
+// assert_public_postconditions cheap O(1) checks. Covers: pnl_matured <=
+// pnl_pos_tot, materialized_account_count <= params.max_accounts, neg_pnl <=
+// materialized, rr_cursor < params.max_accounts, resolved_payout_h_num <=
+// resolved_payout_h_den when ready, oracle-price sentinels, slot monotonicity,
+// and payout-ready flag consistency.
 // ============================================================================
 
 #[test]
@@ -4697,7 +4695,6 @@ fn public_postcondition_rejects_matured_exceeding_pos_tot() {
     let mut engine = RiskEngine::new(default_params());
     engine.pnl_pos_tot = 100;
     engine.pnl_matured_pos_tot = 101; // corrupt: > pos_tot
-    // Any public method that calls assert_public_postconditions should Err.
     let r = engine.top_up_insurance_fund(1, 0);
     assert_eq!(r, Err(RiskError::CorruptState),
         "matured > pos_tot must be rejected via assert_public_postconditions");
@@ -4706,7 +4703,7 @@ fn public_postcondition_rejects_matured_exceeding_pos_tot() {
 #[test]
 fn public_postcondition_rejects_rr_cursor_out_of_range() {
     let mut engine = RiskEngine::new(default_params());
-    engine.rr_cursor_position = MAX_MATERIALIZED_ACCOUNTS; // corrupt: == bound
+    engine.rr_cursor_position = engine.params.max_accounts; // corrupt: == bound
     let r = engine.top_up_insurance_fund(1, 0);
     assert_eq!(r, Err(RiskError::CorruptState));
 }
