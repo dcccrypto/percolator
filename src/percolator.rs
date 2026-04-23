@@ -1298,12 +1298,25 @@ impl RiskEngine {
         let i = idx as usize;
         let next = self.next_free[i];
         let prev = self.prev_free[i];
-        // Freelist-link consistency. Two layers of defense:
-        //   (a) local back-pointer agreement — prev/next's reciprocal
+        // Freelist-link consistency. Three layers of defense:
+        //   (a) bounds check — prev/next must be either u16::MAX (list
+        //       terminator) or a valid slot index < MAX_ACCOUNTS. Without
+        //       this, a corrupted pointer would panic at the array index
+        //       below, violating the deterministic-conservative-failure
+        //       rule. Must come first since (b) and (c) index the arrays.
+        //   (b) local back-pointer agreement — prev/next's reciprocal
         //       pointer must point to idx;
-        //   (b) neighbor-used check — a truly-free neighbor is marked
+        //   (c) neighbor-used check — a truly-free neighbor is marked
         //       unused in the bitmap. If a corrupt neighbor pointer
         //       lands on an allocated slot, reject.
+        if prev != u16::MAX && (prev as usize) >= MAX_ACCOUNTS {
+            self.materialized_account_count -= 1;
+            return Err(RiskError::CorruptState);
+        }
+        if next != u16::MAX && (next as usize) >= MAX_ACCOUNTS {
+            self.materialized_account_count -= 1;
+            return Err(RiskError::CorruptState);
+        }
         if prev == u16::MAX {
             if self.free_head != idx {
                 self.materialized_account_count -= 1;
@@ -5516,12 +5529,15 @@ impl RiskEngine {
         // / `force_close_resolved_not_atomic` /
         // `close_resolved_terminal_not_atomic`.
         //
-        // Resolved market is frozen at self.resolved_slot. No caller input
-        // for the slot anchor — the engine uses the stored boundary. This
-        // removes the earlier ratchet-past-resolved_slot footgun and
-        // eliminates the wrapper-integration hazard of passing wall-clock
-        // slots that the engine would reject.
-        self.current_slot = self.resolved_slot;
+        // Spec §9.9 step 3: require current_slot == resolved_slot.
+        // resolve_market sets current_slot = resolved_slot; subsequent
+        // resolved-mode instructions MUST preserve that invariant rather
+        // than silently repair it. If they diverge, that's a symptom of
+        // post-resolution slot mutation from some other path, and it
+        // should surface as an error rather than be masked.
+        if self.current_slot != self.resolved_slot {
+            return Err(RiskError::CorruptState);
+        }
         let i = idx as usize;
 
         // Always clear reserve metadata (even flat accounts may have ghost bucket flags)
@@ -5843,7 +5859,11 @@ impl RiskEngine {
     // Insurance fund operations
     // ========================================================================
 
-    pub fn top_up_insurance_fund(&mut self, amount: u128, now_slot: u64) -> Result<bool> {
+    /// Top up the insurance fund by `amount`. Returns () on success;
+    /// previously returned `bool` (post-top-up balance > 0) which carries
+    /// no useful signal for callers — the post-balance is trivially
+    /// non-zero whenever `amount > 0` and the pre-balance was >= 0.
+    pub fn top_up_insurance_fund(&mut self, amount: u128, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -5865,8 +5885,8 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.vault = U128::new(new_vault);
         self.insurance_fund.balance = U128::new(new_ins);
-        // Signals whether the insurance fund is non-empty after the top-up.
-        Ok(self.insurance_fund.balance.get() > 0)
+        self.assert_public_postconditions()?;
+        Ok(())
     }
 
     // ========================================================================
@@ -5955,12 +5975,18 @@ impl RiskEngine {
             || self.accounts[i].pending_present != 0 {
             return Err(RiskError::Undercollateralized);
         }
-        // Noop if PnL >= 0 (per spec §9.2.4)
+        // Spec §9.2.4 step 4: set current_slot = now_slot BEFORE the
+        // pnl >= 0 early-return. A successful no-op still advances the
+        // engine's time anchor; without this, a caller can see inconsistent
+        // `current_slot` behavior between no-op and full-path invocations.
+        self.current_slot = now_slot;
+
+        // Noop if PnL >= 0 (spec §9.2.4 step 6-7).
         if self.accounts[i].pnl >= 0 {
+            self.assert_public_postconditions()?;
             return Ok(());
         }
 
-        self.current_slot = now_slot;
         // Settle losses from principal first, then absorb remaining via insurance
         self.settle_losses(i)?;
         self.resolve_flat_negative(i)?;
