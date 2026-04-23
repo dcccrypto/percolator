@@ -1251,6 +1251,14 @@ impl RiskEngine {
         a.pending_remaining_q = 0;
         a.pending_horizon = 0;
         a.pending_created_slot = 0;
+        // Bounds-check free_head before indexing: a corrupt free_head
+        // value in range [MAX_ACCOUNTS, u16::MAX) would panic at the
+        // prev_free[...] write below, violating spec §0 goal 24's
+        // deterministic-conservative-failure rule. Either u16::MAX (empty)
+        // or a valid in-range index is acceptable.
+        if self.free_head != u16::MAX && (self.free_head as usize) >= MAX_ACCOUNTS {
+            return Err(RiskError::CorruptState);
+        }
         self.clear_used(i);
         // Push to head of doubly-linked free list.
         self.next_free[i] = self.free_head;
@@ -3966,6 +3974,13 @@ impl RiskEngine {
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     /// New callers SHOULD use `withdraw_not_atomic_v2` and supply an explicit
     /// consumption-threshold policy per spec §12.21.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `withdraw_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn withdraw_not_atomic(
         &mut self,
         idx: u16,
@@ -4053,7 +4068,14 @@ impl RiskEngine {
                 mul_div_floor_u128(notional, self.params.initial_margin_bps as u128, 10_000),
                 self.params.min_nonzero_im_req,
             );
-            if eq_post < im_req as i128 {
+            // Spec §8.1: Eq_withdraw_raw_i >= IM_req_i. Compare in wide
+            // signed domain — a bare `im_req as i128` can wrap when
+            // im_req > i128::MAX (min_nonzero_im_req is u128; spec §1.4
+            // does not clip it to i128 range), approving an otherwise
+            // undercollateralized withdrawal. Use I256 to avoid the wrap.
+            let eq_post_wide = I256::from_i128(eq_post);
+            let im_req_wide = I256::from_u128(im_req);
+            if eq_post_wide < im_req_wide {
                 return Err(RiskError::Undercollateralized);
             }
         }
@@ -4076,6 +4098,13 @@ impl RiskEngine {
 
     /// Top-level settle wrapper per spec §10.7.
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `settle_account_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn settle_account_not_atomic(
         &mut self,
         idx: u16,
@@ -4142,6 +4171,13 @@ impl RiskEngine {
     // ========================================================================
 
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `execute_trade_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn execute_trade_not_atomic(
         &mut self,
         a: u16,
@@ -4654,6 +4690,13 @@ impl RiskEngine {
     /// Top-level liquidation: creates its own InstructionContext and finalizes resets.
     /// Accepts LiquidationPolicy per spec §10.6.
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `liquidate_at_oracle_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn liquidate_at_oracle_not_atomic(
         &mut self,
         idx: u16,
@@ -5142,6 +5185,13 @@ impl RiskEngine {
 
     /// Explicit voluntary conversion of matured released positive PnL for open-position accounts.
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `convert_released_pnl_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn convert_released_pnl_not_atomic(
         &mut self,
         idx: u16,
@@ -5261,6 +5311,13 @@ impl RiskEngine {
     // ========================================================================
 
     /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use `close_account_not_atomic_v2` to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128, admit_h_min: u64, admit_h_max: u64) -> Result<u128> {
         self.close_account_not_atomic_v2(
             idx, now_slot, oracle_price, funding_rate_e9,
@@ -5656,6 +5713,13 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        // Spec §9.9 step 3: resolved-market instructions MUST run at the
+        // frozen anchor slot. reconcile_resolved_not_atomic enforces this;
+        // terminal close does too — a post-resolution drift of current_slot
+        // is corruption, not recoverable state.
+        if self.current_slot != self.resolved_slot {
+            return Err(RiskError::CorruptState);
+        }
         let i = idx as usize;
         // Reject unreconciled accounts: position must be zeroed, PnL >= 0
         if self.accounts[i].position_basis_q != 0 {
@@ -5883,12 +5947,16 @@ impl RiskEngine {
 
     /// Top up the insurance fund by `amount`. Returns () on success;
     /// previously returned `bool` (post-top-up balance > 0) which carries
-    /// no useful signal for callers — the post-balance is trivially
-    /// non-zero whenever `amount > 0` and the pre-balance was >= 0.
+    /// no useful signal for callers.
+    ///
+    /// Validate-then-mutate: pre-state invariants are checked BEFORE any
+    /// commit. A corrupt pre-state returns Err with no mutation.
     pub fn top_up_insurance_fund(&mut self, amount: u128, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        // Pre-state invariant check: any corruption surfaces BEFORE mutation.
+        self.assert_public_postconditions()?;
         // Spec §10.3.2: time monotonicity
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
@@ -5907,6 +5975,8 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.vault = U128::new(new_vault);
         self.insurance_fund.balance = U128::new(new_ins);
+        // Post-state sanity check (belt-and-suspenders; should be no-op
+        // if pre-check passed and the math is correct).
         self.assert_public_postconditions()?;
         Ok(())
     }
@@ -6105,7 +6175,8 @@ impl RiskEngine {
     /// at most `FeeDebt_i` of it to the account's fee_credits and expects
     /// the wrapper to reject or refund the unused `amount - pay`.
     ///
-    /// The return value reports `pay` so the wrapper can reconcile exactly.
+    /// Validate-then-mutate: pre-state invariants are checked BEFORE any
+    /// commit. Returns `pay`, the exact amount booked against fee_credits.
     pub fn deposit_fee_credits(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<u128> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -6113,6 +6184,8 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        // Pre-state invariant check: any corruption surfaces BEFORE mutation.
+        self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -6125,6 +6198,9 @@ impl RiskEngine {
         if pay == 0 {
             // Spec step 6: if pay == 0, return with current_slot anchored.
             self.current_slot = now_slot;
+            // Post-state check even on no-op: spec §9.2.1 step 12 still
+            // requires V >= C_tot + I.
+            self.assert_public_postconditions()?;
             return Ok(0);
         }
         if pay > i128::MAX as u128 {

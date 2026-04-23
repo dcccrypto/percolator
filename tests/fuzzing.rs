@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Comprehensive Fuzzing Suite for the Risk Engine
 //!
 //! ## Running Tests

@@ -1,5 +1,6 @@
 // End-to-end integration tests with realistic trading scenarios
 // Tests complete user journeys with multiple participants
+#![allow(deprecated)]
 
 #[cfg(feature = "test")]
 use percolator::*;

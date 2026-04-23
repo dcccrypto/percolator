@@ -1,4 +1,8 @@
 #![cfg(feature = "test")]
+// Pre-v12.19 shims (keeper_crank_not_atomic, withdraw_not_atomic, ...) are
+// deprecated on the public surface but exercised here to verify
+// backward-compat behavior; v2 variants have dedicated tests.
+#![allow(deprecated)]
 
 use percolator::*;
 use percolator::wide_math::U256;
