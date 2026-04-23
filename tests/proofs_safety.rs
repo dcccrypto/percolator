@@ -22,7 +22,7 @@ fn bounded_deposit_conservation() {
     let amount: u32 = kani::any();
     kani::assume(amount > 0 && amount <= 10_000_000);
 
-    engine.deposit_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, amount as u128, DEFAULT_SLOT).unwrap();
 
     assert!(engine.vault.get() == amount as u128);
     assert!(engine.c_tot.get() == amount as u128);
@@ -39,12 +39,12 @@ fn bounded_withdraw_conservation() {
     let deposit: u32 = kani::any();
     kani::assume(deposit >= 1000 && deposit <= 1_000_000);
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, deposit as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, deposit as u128, DEFAULT_SLOT).unwrap();
 
     let amount: u32 = kani::any();
     kani::assume(amount > 0 && amount <= deposit);
 
-    let result = engine.withdraw_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
     kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
     if result.is_ok() {
         assert!(engine.check_conservation());
@@ -63,14 +63,14 @@ fn bounded_trade_conservation() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1_000_000 && dep <= 5_000_000);
-    engine.deposit_not_atomic(a, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, dep as u128, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, dep as u128, DEFAULT_SLOT).unwrap();
 
     assert!(engine.check_conservation());
 
     // Symbolic trade size (reasonable range to stay within margin)
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // If trade succeeds (margin allows), conservation must hold
     if result.is_ok() {
@@ -167,7 +167,7 @@ fn bounded_liquidation_conservation() {
 
     let deposit_amt: u32 = kani::any();
     kani::assume(deposit_amt >= 10_000 && deposit_amt <= 1_000_000);
-    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_SLOT).unwrap();
 
     // Give user a negative PnL that makes them underwater (loss > deposit)
     let excess: u16 = kani::any();
@@ -200,7 +200,7 @@ fn bounded_margin_withdrawal() {
 
     let deposit_amt: u32 = kani::any();
     kani::assume(deposit_amt >= 1000 && deposit_amt <= 10_000_000);
-    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_SLOT).unwrap();
 
     let withdraw_amt: u32 = kani::any();
     // Dust guard: post-withdrawal capital must be 0 or >= MIN_INITIAL_DEPOSIT (2).
@@ -208,13 +208,13 @@ fn bounded_margin_withdrawal() {
     let min_dep = 1_000u128 as u32;
     kani::assume(withdraw_amt > 0 && withdraw_amt <= deposit_amt);
     kani::assume(withdraw_amt == deposit_amt || deposit_amt - withdraw_amt >= min_dep);
-    let result = engine.withdraw_not_atomic(a, withdraw_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(a, withdraw_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
     assert!(result.is_ok());
     assert!(engine.check_conservation());
 
     let remaining = engine.accounts[a as usize].capital.get();
     if remaining < u128::MAX {
-        let result2 = engine.withdraw_not_atomic(a, remaining + 1, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+        let result2 = engine.withdraw_not_atomic(a, remaining + 1, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
         assert!(result2.is_err());
     }
 }
@@ -249,10 +249,10 @@ fn proof_deposit_then_withdraw_roundtrip() {
     let amount: u32 = kani::any();
     kani::assume(amount > 0 && amount <= 1_000_000);
 
-    engine.deposit_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, amount as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
-    let result = engine.withdraw_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
     assert!(result.is_ok());
     assert!(engine.accounts[idx as usize].capital.get() == 0);
     assert!(engine.check_conservation());
@@ -272,8 +272,8 @@ fn proof_multiple_deposits_aggregate_correctly() {
     kani::assume(amount_a <= 1_000_000);
     kani::assume(amount_b <= 1_000_000);
 
-    engine.deposit_not_atomic(a, amount_a as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, amount_b as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, amount_a as u128, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, amount_b as u128, DEFAULT_SLOT).unwrap();
 
     let cap_a = engine.accounts[a as usize].capital.get();
     let cap_b = engine.accounts[b as usize].capital.get();
@@ -289,11 +289,11 @@ fn proof_close_account_returns_capital() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 50_000, DEFAULT_SLOT).unwrap();
 
     assert!(engine.check_conservation());
 
-    let result = engine.close_account_not_atomic(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.close_account_not_atomic(idx, DEFAULT_SLOT, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result.is_ok());
     let returned = result.unwrap();
     assert!(returned == 50_000);
@@ -309,11 +309,11 @@ fn proof_trade_pnl_is_zero_sum_algebraic() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_SLOT).unwrap();
 
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result.is_ok(), "trade must succeed with sufficient margin");
 
     // After a trade, PnL must be zero-sum across the two counterparties
@@ -735,8 +735,8 @@ fn proof_protected_principal() {
     let dep_b: u32 = kani::any();
     kani::assume(dep_b > 0 && dep_b <= 1_000_000);
 
-    engine.deposit_not_atomic(a, dep_a as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, dep_b as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, dep_a as u128, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, dep_b as u128, DEFAULT_SLOT).unwrap();
 
     let a_cap_before = engine.accounts[a as usize].capital.get();
 
@@ -777,8 +777,8 @@ fn proof_withdraw_simulation_preserves_residual() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit_not_atomic(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
+    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
@@ -786,15 +786,15 @@ fn proof_withdraw_simulation_preserves_residual() {
 
     // Trade so a has a position (exercises the margin-check + haircut path)
     let size_q = POS_SCALE as i128;
-    engine.execute_trade_not_atomic(a, b, 100, 1, size_q, 100, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, 100, 1, size_q, 100, 0i128, 0, 100, None).unwrap();
 
     // Record haircut before actual withdraw_not_atomic
     let (h_num_before, h_den_before) = engine.haircut_ratio();
     let conservation_before = engine.check_conservation();
     assert!(conservation_before, "conservation must hold before withdraw_not_atomic");
 
-    // Call the real engine.withdraw_not_atomic(, 0i128, 0)
-    let result = engine.withdraw_not_atomic(a, 1_000, 100, 1, 0i128, 0, 100);
+    // Call the real engine.withdraw_not_atomic(, 0i128, 0, None)
+    let result = engine.withdraw_not_atomic(a, 1_000, 100, 1, 0i128, 0, 100, None);
     assert!(result.is_ok(), "withdraw_not_atomic of 1000 from 10M capital must succeed");
 
     let (h_num_after, h_den_after) = engine.haircut_ratio();
@@ -823,16 +823,16 @@ fn proof_funding_rate_validated_before_storage() {
     engine.last_crank_slot = 0;
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
 
     // Pass an invalid funding rate (> MAX_ABS_FUNDING_E9_PER_SLOT) directly
     // v12.16.4: rate is validated inside accrue_market_to
     let bad_rate: i128 = MAX_ABS_FUNDING_E9_PER_SLOT + 1;
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, bad_rate, 0, 100);
+    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, bad_rate, 0, 100, None, 0);
     assert!(result.is_err(), "out-of-bounds rate must be rejected by keeper_crank_not_atomic");
 
     // Valid rate must succeed
-    let result2 = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, 0i128, 0, 100);
+    let result2 = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, 0i128, 0, 100, None, 0);
     assert!(result2.is_ok(),
         "protocol must accept valid funding rate");
 }
@@ -847,7 +847,7 @@ fn proof_gc_dust_preserves_fee_credits() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000, 100, 1).unwrap();
+    engine.deposit_not_atomic(a, 10_000, 1).unwrap();
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
@@ -873,7 +873,7 @@ fn proof_gc_dust_preserves_fee_credits() {
     // Now test negative fee_credits (debt): account SHOULD be collected
     // and the uncollectible debt written off
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(b, 10_000, 100, 1).unwrap();
+    engine.deposit_not_atomic(b, 10_000, 1).unwrap();
     engine.set_capital(b as usize, 0);
     engine.accounts[b as usize].fee_credits = I128::new(-3_000); // debt
     engine.accounts[b as usize].position_basis_q = 0i128;
@@ -905,18 +905,18 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 50_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 50_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Near-max leverage long for a
     let size = (480 * POS_SCALE) as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result.is_ok());
 
     // Crash price to trigger liquidation
     let crash_price = 890u64;
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.liquidate_at_oracle_not_atomic(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i128, 0, 100);
+    let result = engine.liquidate_at_oracle_not_atomic(a, slot2, crash_price, LiquidationPolicy::FullClose, 0i128, 0, 100, None);
     // Liquidation must not revert due to min_liquidation_abs
     assert!(result.is_ok(), "min_liquidation_abs must not block liquidation");
     assert!(engine.check_conservation(), "conservation must hold after liquidation with min_abs");
@@ -933,7 +933,7 @@ fn proof_trading_loss_seniority() {
     let mut engine = RiskEngine::new(params);
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 10_000, DEFAULT_SLOT).unwrap();
 
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = DEFAULT_SLOT;
@@ -975,12 +975,12 @@ fn proof_risk_reducing_exemption_path() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Open leveraged long for a (8x)
     let size = (800 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Inject loss to push a below maintenance margin
     engine.set_pnl(a as usize, -70_000i128);
@@ -989,7 +989,7 @@ fn proof_risk_reducing_exemption_path() {
 
     // Risk-reducing trade: close half the position
     let half_close = size / 2;
-    let reduce_result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100);
+    let reduce_result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // Risk-increasing trade: double the position
     let increase = size;
@@ -998,11 +998,11 @@ fn proof_risk_reducing_exemption_path() {
     engine2.last_crank_slot = DEFAULT_SLOT;
     let a2 = add_user_test(&mut engine2, 0).unwrap();
     let b2 = add_user_test(&mut engine2, 0).unwrap();
-    engine2.deposit_not_atomic(a2, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine2.deposit_not_atomic(b2, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine2.execute_trade_not_atomic(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine2.deposit_not_atomic(a2, 100_000, DEFAULT_SLOT).unwrap();
+    engine2.deposit_not_atomic(b2, 500_000, DEFAULT_SLOT).unwrap();
+    engine2.execute_trade_not_atomic(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
     engine2.set_pnl(a2 as usize, -70_000i128);
-    let increase_result = engine2.execute_trade_not_atomic(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, increase, DEFAULT_ORACLE, 0i128, 0, 100);
+    let increase_result = engine2.execute_trade_not_atomic(a2, b2, DEFAULT_ORACLE, DEFAULT_SLOT, increase, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // Risk-reducing must succeed, risk-increasing must be rejected
     assert!(reduce_result.is_ok(), "risk-reducing trade must be accepted");
@@ -1032,12 +1032,12 @@ fn proof_buffer_masking_blocked() {
 
     let victim = add_user_test(&mut engine, 0).unwrap();
     let attacker = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(victim, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(attacker, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(victim, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(attacker, 500_000, DEFAULT_SLOT).unwrap();
 
     // Victim opens leveraged long
     let size = (400 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(victim, attacker, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Moderate loss — below maintenance but not deeply bankrupt
     engine.set_pnl(victim as usize, -350_000i128);
@@ -1046,7 +1046,7 @@ fn proof_buffer_masking_blocked() {
 
     // Risk-reducing: close half the position at oracle price (no slippage)
     let close_size = size / 2;
-    let result = engine.execute_trade_not_atomic(attacker, victim, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(attacker, victim, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
     kani::cover!(result.is_ok(), "risk-reducing close reachable");
 
     if result.is_ok() {
@@ -1118,7 +1118,7 @@ fn proof_fee_debt_sweep_consumes_released_pnl() {
     // Symbolic capital — covers both debt < cap and debt > cap paths
     let cap: u32 = kani::any();
     kani::assume(cap >= 1 && cap <= 1_000_000);
-    engine.deposit_not_atomic(idx, cap as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, cap as u128, DEFAULT_SLOT).unwrap();
 
     // Symbolic fee debt
     let debt: u32 = kani::any();
@@ -1175,12 +1175,12 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Open position for a
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Drain a's capital to 0, give positive PNL but massive fee debt
     engine.set_capital(a as usize, 0);
@@ -1192,7 +1192,7 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
     // Old code only checks PNL >= 0 which would pass (PNL = 1000 > 0)
 
     let close_size = -size;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, close_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // Must be rejected: Eq_maint_raw < 0 even though PNL > 0
     assert!(result.is_err(),
@@ -1217,19 +1217,19 @@ fn proof_v1126_risk_reducing_fee_neutral() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Open leveraged position
     let size = (800 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Push below maintenance
     engine.set_pnl(a as usize, -50_000i128);
 
     // Risk-reducing: close half at oracle price (no slippage)
     let half_close = size / 2;
-    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // v12.14.0: fee-neutral comparison means pure fee friction should not block
     // a genuine de-risking trade at oracle price.
@@ -1256,12 +1256,12 @@ fn proof_v1126_min_nonzero_margin_floor() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Tiny position: notional so small that proportional MM floors to 0
     let tiny_size = 1i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // With min_nonzero_im_req = 2000, even a tiny position needs IM >= 2000.
     // Account a has 100_000 capital which exceeds 2000, so trade should succeed.
@@ -1288,7 +1288,7 @@ fn proof_gc_reclaims_drained_accounts() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 10_000, DEFAULT_SLOT).unwrap();
 
     // Wrapper drained the capital (modeled here via set_capital(0) to
     // avoid the charge_account_fee state dependencies). Any residual
@@ -1334,14 +1334,14 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     let b = add_user_test(&mut engine, 0).unwrap();
 
     // Both deposit enough for trading
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
     let h_lock = 10u64; // non-zero so PnL goes to cohort reserve
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, h_lock, h_lock).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, h_lock, h_lock, None, 0).unwrap();
 
     // Open positions: a long, b short
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, h_lock, h_lock).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, h_lock, h_lock, None).unwrap();
 
     // Capture h before oracle spike
     let (h_num_before, h_den_before) = engine.haircut_ratio();
@@ -1349,7 +1349,7 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     // Oracle spikes up — a has fresh unrealized profit
     let spike_oracle: u64 = 1_500;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, spike_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock, h_lock).unwrap();
+    engine.keeper_crank_not_atomic(slot2, spike_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock, h_lock, None, 0).unwrap();
 
     // After touch, a has positive PnL but it's reserved (R_i > 0)
     let pnl_a = engine.accounts[a as usize].pnl;
@@ -1378,7 +1378,7 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     // (d) Withdrawal of any profit portion must fail (only capital is available)
     // Try to withdraw_not_atomic more than original capital
     let slot3 = slot2;
-    let withdraw_result = engine.withdraw_not_atomic(a, 500_001, spike_oracle, slot3, 0i128, 0, 100);
+    let withdraw_result = engine.withdraw_not_atomic(a, 500_001, spike_oracle, slot3, 0i128, 0, 100, None);
     assert!(withdraw_result.is_err(),
         "must not be able to withdraw_not_atomic unreserved profit");
 
@@ -1400,18 +1400,18 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
     let b = add_user_test(&mut engine, 0).unwrap();
 
     // a deposits minimal capital, b deposits large
-    engine.deposit_not_atomic(a, 20_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 20_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT).unwrap();
     let h_lock = 10u64; // non-zero so PnL goes to cohort reserve
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, h_lock, h_lock).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, h_lock, h_lock, None, 0).unwrap();
 
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, h_lock, h_lock).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, h_lock, h_lock, None).unwrap();
 
     // Oracle moves up — a gains profit that is reserved (h_lock>0 routes to cohort queue)
     let new_oracle: u64 = 1_100;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, new_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock, h_lock).unwrap();
+    engine.keeper_crank_not_atomic(slot2, new_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock, h_lock, None, 0).unwrap();
 
     // a now has fresh PnL from price increase. This PnL is reserved.
     let pnl_a = engine.accounts[a as usize].pnl;
@@ -1445,7 +1445,7 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
 
     // Advance time partially
     let slot3 = slot2 + 50;
-    engine.keeper_crank_not_atomic(slot3, new_oracle, &[(a, None)], 64, 0i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot3, new_oracle, &[(a, None)], 64, 0i128, 0, 100, None, 0).unwrap();
 
     let eq_maint_after_warmup = engine.account_equity_maint_raw(&engine.accounts[a as usize]);
     // Pure warmup release on unchanged PNL_i must not reduce Eq_maint_raw
@@ -1471,15 +1471,15 @@ fn proof_property_56_exact_raw_im_approval() {
     let b = add_user_test(&mut engine, 0).unwrap();
 
     // Deposit just enough for the test
-    engine.deposit_not_atomic(a, 1, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100).unwrap();
+    engine.deposit_not_atomic(a, 1, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0).unwrap();
 
     // a has C=1, no PnL, no fees. Eq_init_raw = 1.
     // MIN_NONZERO_IM_REQ = 2, so any nonzero position requires IM >= 2.
     // A trade with even 1 unit of position means IM_req >= 2 > 1 = Eq_init_raw.
     let tiny_size = POS_SCALE as i128; // 1 unit
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, tiny_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result.is_err(),
         "trade must be rejected: Eq_init_raw (1) < MIN_NONZERO_IM_REQ (2)");
 
@@ -1506,7 +1506,7 @@ fn proof_audit_fee_sweep_pnl_conservation() {
     let a = add_user_test(&mut engine, 0).unwrap();
 
     // Give account capital that we'll then drain, plus positive PnL
-    engine.deposit_not_atomic(a, 100, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100, DEFAULT_SLOT).unwrap();
 
     // Set up: zero capital but positive released PnL
     engine.set_capital(a as usize, 0);
@@ -1558,7 +1558,7 @@ fn proof_audit_im_uses_exact_raw_equity() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let a = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 100, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100, DEFAULT_SLOT).unwrap();
 
     // Set up a position with very negative PnL to make Eq_init_raw < 0
     engine.accounts[a as usize].position_basis_q = (1 * POS_SCALE) as i128;
@@ -1622,13 +1622,13 @@ fn proof_audit_k_pair_chronology_not_inverted() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0).unwrap();
 
     // Open long for a, short for b
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     let pnl_a_before = engine.accounts[a as usize].pnl;
     let pnl_b_before = engine.accounts[b as usize].pnl;
@@ -1636,7 +1636,7 @@ fn proof_audit_k_pair_chronology_not_inverted() {
     // Oracle rises — favorable for long (a), unfavorable for short (b)
     let high_oracle = 1_200u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i128, 0, 100, None, 0).unwrap();
 
     // a (long) must gain PnL when oracle rises
     assert!(engine.accounts[a as usize].pnl > pnl_a_before,
@@ -1667,12 +1667,12 @@ fn proof_audit2_close_account_structural_safety() {
 
     let deposit_amt: u32 = kani::any();
     kani::assume(deposit_amt >= 1000 && deposit_amt <= 1_000_000);
-    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, deposit_amt as u128, DEFAULT_SLOT).unwrap();
 
     let v_before = engine.vault.get();
 
     // close_account_not_atomic on a flat account with no position
-    let result = engine.close_account_not_atomic(a, DEFAULT_SLOT, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.close_account_not_atomic(a, DEFAULT_SLOT, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result.is_ok(), "flat zero-PnL account must close");
 
     let capital_returned = result.unwrap();
@@ -1700,13 +1700,13 @@ fn proof_audit2_funding_rate_clamped() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine.keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0).unwrap();
 
     // Open positions so funding has effect
     let size_q = (10 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Pass an extreme out-of-range funding rate directly to keeper_crank.
     // v12.16.4: rate is validated inside accrue_market_to, so extreme rates
@@ -1716,7 +1716,7 @@ fn proof_audit2_funding_rate_clamped() {
     let extreme_rate = MAX_ABS_FUNDING_E9_PER_SLOT + (extreme_offset as i128);
 
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &[(a, None), (b, None)], 64, extreme_rate, 0, 100);
+    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &[(a, None), (b, None)], 64, extreme_rate, 0, 100, None, 0);
     // Out-of-bounds rate must be rejected
     assert!(result.is_err(), "extreme funding rate must be rejected");
     // State must be unchanged — conservation preserved
@@ -1995,7 +1995,7 @@ fn proof_audit4_materialize_at_freelist_integrity() {
 
     // Deposit-materialize on slot 2 removes it from freelist interior
     // (slot 2 is in the freelist: head→1→2→3→sentinel)
-    let result = engine.deposit_not_atomic(2, 1000, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result = engine.deposit_not_atomic(2, 1000, DEFAULT_SLOT);
     assert!(result.is_ok());
     assert!(engine.is_used(2));
     assert!(engine.num_used_accounts == 2);
@@ -2009,7 +2009,7 @@ fn proof_audit4_materialize_at_freelist_integrity() {
     // Verify deposit top-up on existing account does NOT re-materialize
     let mat_before = engine.materialized_account_count;
     let used_before = engine.num_used_accounts;
-    engine.deposit_not_atomic(2, 500, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(2, 500, DEFAULT_SLOT).unwrap();
     assert!(engine.materialized_account_count == mat_before);
     assert!(engine.num_used_accounts == used_before);
 
@@ -2020,7 +2020,7 @@ fn proof_audit4_materialize_at_freelist_integrity() {
     assert!(engine.num_used_accounts == 1);
 
     // Re-materialize slot 0 via deposit — must work
-    let result2 = engine.deposit_not_atomic(0, 1000, DEFAULT_ORACLE, DEFAULT_SLOT);
+    let result2 = engine.deposit_not_atomic(0, 1000, DEFAULT_SLOT);
     assert!(result2.is_ok());
     assert!(engine.is_used(0));
 }
@@ -2285,13 +2285,13 @@ fn bounded_trade_conservation_with_fees() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1_000_000 && dep <= 5_000_000);
-    engine.deposit_not_atomic(a, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, dep as u128, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, dep as u128, DEFAULT_SLOT).unwrap();
 
     assert!(engine.check_conservation(), "pre-trade conservation");
 
     let size_q = (100 * POS_SCALE) as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     assert!(engine.check_conservation(),
         "conservation must hold after trade with nonzero fees");
@@ -2315,11 +2315,11 @@ fn proof_partial_liquidation_can_succeed() {
     let b = add_user_test(&mut engine, 0).unwrap();
 
     // Large deposits, moderate position → slight undercollateralization
-    engine.deposit_not_atomic(a, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 1_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT).unwrap();
 
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Moderate price drop — a is slightly underwater but has enough equity
     // for a partial close to restore health
@@ -2330,7 +2330,7 @@ fn proof_partial_liquidation_can_succeed() {
     let q_close = (400 * POS_SCALE) as u128;
     let partial_hint = Some(LiquidationPolicy::ExactPartial(q_close));
     let candidates = [(a, partial_hint)];
-    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0, 100);
+    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0, 100, None, 0);
     assert!(result.is_ok());
 
     // The partial liquidation should have succeeded (not fallen back to full close)
@@ -2357,12 +2357,12 @@ fn proof_sign_flip_trade_conserves() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 2_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 2_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 2_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 2_000_000, DEFAULT_SLOT).unwrap();
 
     // a goes long 100, b goes short 100
     let size1 = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size1, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size1, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
     assert!(engine.effective_pos_q(a as usize) > 0, "a is long");
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
 
@@ -2370,7 +2370,7 @@ fn proof_sign_flip_trade_conserves() {
     // b buys 200 → goes from short 100 to long 100
     let size2 = (200 * POS_SCALE) as i128;
     let slot2 = DEFAULT_SLOT + 1;
-    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, slot2, size2, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, slot2, size2, DEFAULT_ORACLE, 0i128, 0, 100, None);
     kani::cover!(result.is_ok(), "sign-flip trade reachable");
 
     if result.is_ok() {
@@ -2446,8 +2446,8 @@ fn bounded_trade_conservation_symbolic_size() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_SLOT).unwrap();
 
     assert!(engine.check_conservation());
 
@@ -2456,7 +2456,7 @@ fn bounded_trade_conservation_symbolic_size() {
     kani::assume(size_units >= 1 && size_units <= 500);
     let size_q = (size_units as i128) * (POS_SCALE as i128);
 
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     assert!(engine.check_conservation(),
         "conservation must hold for symbolic trade size");
@@ -2480,18 +2480,18 @@ fn proof_convert_released_pnl_conservation() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Open positions
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
     assert!(engine.check_conservation(), "pre-conversion conservation");
 
     // Oracle goes up → a has positive PnL
     let high_oracle = 1_200u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i128, 0, 100, None, 0).unwrap();
 
     // With h_lock=0 (ImmediateRelease), touch already set reserved_pnl=0 → all PnL released
     let released = engine.released_pos(a as usize);
@@ -2504,7 +2504,7 @@ fn proof_convert_released_pnl_conservation() {
         // Symbolic conversion amount: 1..=released
         let x_req: u32 = kani::any();
         kani::assume(x_req >= 1 && (x_req as u128) <= released);
-        let result = engine.convert_released_pnl_not_atomic(a, x_req as u128, high_oracle, slot2 + 1, 0i128, 0, 100);
+        let result = engine.convert_released_pnl_not_atomic(a, x_req as u128, high_oracle, slot2 + 1, 0i128, 0, 100, None);
         kani::cover!(result.is_ok(), "convert_released_pnl_not_atomic Ok path reachable");
         if result.is_ok() {
             assert!(engine.check_conservation(),
@@ -2535,12 +2535,12 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     // Open leveraged position
     let size = (400 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Inject symbolic PnL: from heavily underwater to modestly above water
     let pnl_val: i32 = kani::any();
@@ -2549,7 +2549,7 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
 
     // Risk-reducing trade: close half
     let half_close = size / 2;
-    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(b, a, DEFAULT_ORACLE, DEFAULT_SLOT, half_close, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // Conservation must always hold regardless of accept/reject
     assert!(engine.check_conservation(),
@@ -2588,8 +2588,8 @@ fn proof_execute_trade_full_margin_enforcement() {
     // Capital is concrete to keep the solver tractable (3 symbolic vars times
     // the full execute_trade pipeline exceeds 10-minute budget).
     let capital = 2_000u128;
-    engine.deposit_not_atomic(user, capital, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(lp, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(user, capital, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(lp, 100_000, DEFAULT_SLOT).unwrap();
 
     // Pre-construct initial position directly (avoids a second full trade
     // pipeline which makes the solver intractable). The A/K state is set
@@ -2617,11 +2617,11 @@ fn proof_execute_trade_full_margin_enforcement() {
     let result = if delta_units > 0 {
         let sz = (delta_units as u128) * POS_SCALE;
         engine.execute_trade_not_atomic(
-            user, lp, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i128, 0, 100)
+            user, lp, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i128, 0, 100, None)
     } else {
         let sz = ((-delta_units) as u128) * POS_SCALE;
         engine.execute_trade_not_atomic(
-            lp, user, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i128, 0, 100)
+            lp, user, DEFAULT_ORACLE, DEFAULT_SLOT, sz as i128, DEFAULT_ORACLE, 0i128, 0, 100, None)
     };
 
     if result.is_ok() {
@@ -2699,18 +2699,18 @@ fn proof_convert_released_pnl_exercises_conversion() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    engine.deposit_not_atomic(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
 
     let size_q = (100 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     // Oracle up → a has positive PnL. Touch b FIRST so loss settlement frees
     // residual (c_tot drops), then a's fresh positive PnL admits at h_min=0
     // (matured) rather than h_max (reserve) per v12.18 admission pair.
     let high_oracle = 1_500u64;
     let slot2 = DEFAULT_SLOT + 1;
-    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(b, None), (a, None)], 64, 0i128, 0, 100).unwrap();
+    engine.keeper_crank_not_atomic(slot2, high_oracle, &[(b, None), (a, None)], 64, 0i128, 0, 100, None, 0).unwrap();
 
     // Verify the account still has a position (not flat — won't early-return at step 4)
     assert!(engine.accounts[a as usize].position_basis_q != 0,
@@ -2723,7 +2723,7 @@ fn proof_convert_released_pnl_exercises_conversion() {
     let cap_before = engine.accounts[a as usize].capital.get();
 
     // Convert all released profit
-    let result = engine.convert_released_pnl_not_atomic(a, released, high_oracle, slot2 + 1, 0i128, 0, 100);
+    let result = engine.convert_released_pnl_not_atomic(a, released, high_oracle, slot2 + 1, 0i128, 0, 100, None);
     assert!(result.is_ok(), "conversion must succeed for healthy account with released profit");
 
     // Capital must have increased (the actual conversion happened)
@@ -2758,7 +2758,7 @@ fn v19_cascade_safety_gate_disabled_preserves_invariants() {
 
     let cap: u16 = kani::any();
     kani::assume(cap > 0);
-    engine.deposit_not_atomic(a, cap as u128, 1000, 0).unwrap();
+    engine.deposit_not_atomic(a, cap as u128, 0).unwrap();
 
     // Inject symbolic positive PnL in matured and pending buckets consistent
     // with engine invariants (matured <= pos_tot, reserved <= pnl).
@@ -2778,7 +2778,7 @@ fn v19_cascade_safety_gate_disabled_preserves_invariants() {
     // Ok/Err the persistent invariants must hold (Solana atomicity rolls
     // back Err state at tx boundary; within this harness we verify
     // post-call invariants unconditionally).
-    let _ = engine.keeper_crank_not_atomic_v2(
+    let _ = engine.keeper_crank_not_atomic(
         1, 1000, &[], 0, 0, 0, 10, None, 3,
     );
 

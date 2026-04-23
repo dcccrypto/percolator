@@ -47,8 +47,8 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000_000, 100, 0).unwrap();
-    engine.deposit_not_atomic(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
+    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
 
     engine.side_mode_long = SideMode::ResetPending;
     engine.oi_eff_long_q = 0u128;
@@ -61,7 +61,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     engine.last_crank_slot = 1;
 
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, 100, 1, size_q, 100, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, 100, 1, size_q, 100, 0i128, 0, 100, None);
 
     assert!(result.is_ok(), "trade must succeed after auto-finalization of ready reset side");
     assert!(engine.side_mode_long == SideMode::Normal);
@@ -225,21 +225,21 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let c = add_user_test(&mut engine, 0).unwrap();
 
     // a: long POS_SCALE (entire long side OI), tiny capital → deeply underwater
-    engine.deposit_not_atomic(a, 1, 100, 0).unwrap();
+    engine.deposit_not_atomic(a, 1, 0).unwrap();
     engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
     engine.accounts[a as usize].adl_k_snap = 0i128;
     engine.accounts[a as usize].adl_epoch_snap = 0;
 
     // b: short POS_SCALE, well-funded
-    engine.deposit_not_atomic(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
     engine.accounts[b as usize].position_basis_q = -(POS_SCALE as i128);
     engine.accounts[b as usize].adl_a_basis = ADL_ONE;
     engine.accounts[b as usize].adl_k_snap = 0i128;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     // c: NO position, just capital (should NOT be touched after pending reset)
-    engine.deposit_not_atomic(c, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(c, 10_000_000, 0).unwrap();
 
     // BALANCED OI: 1 long (a) = PS, 1 short (b) = PS
     engine.stored_pos_count_long = 1;
@@ -253,7 +253,7 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let c_cap_before = engine.accounts[c as usize].capital.get();
     let c_pnl_before = engine.accounts[c as usize].pnl;
 
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, Some(LiquidationPolicy::FullClose))], 1, 0i128, 0, 100);
+    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, Some(LiquidationPolicy::FullClose))], 1, 0i128, 0, 100, None, 0);
     assert!(result.is_ok());
 
     assert!(engine.accounts[c as usize].capital.get() == c_cap_before,
@@ -311,14 +311,14 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
     let b = add_user_test(&mut engine, 0).unwrap();
 
     // a: the last stale long account — has a position from epoch 0 (stale)
-    engine.deposit_not_atomic(a, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
     engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
     engine.accounts[a as usize].adl_k_snap = 0i128;
     engine.accounts[a as usize].adl_epoch_snap = 0;  // mismatches adl_epoch_long=1
 
     // b: a short account (non-stale, current epoch)
-    engine.deposit_not_atomic(b, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
     engine.accounts[b as usize].position_basis_q = 0i128;
     engine.accounts[b as usize].adl_a_basis = ADL_ONE;
     engine.accounts[b as usize].adl_k_snap = 0i128;
@@ -333,7 +333,7 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
 
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None), (b, None)], 2, 0i128, 0, 100);
+    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None), (b, None)], 2, 0i128, 0, 100, None, 0);
     assert!(result.is_ok());
 
     assert!(engine.side_mode_long == SideMode::Normal,
@@ -396,13 +396,13 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
     let c = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(c, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(c, 500_000, DEFAULT_SLOT).unwrap();
 
     // Step 1: a goes long, b goes short (bilateral position)
     let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after trade");
 
     // Step 2: make a deeply bankrupt (loss exceeds capital)
@@ -411,7 +411,7 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     // Step 3: liquidate a via keeper_crank_not_atomic
     let slot2 = DEFAULT_SLOT + 1;
     let candidates = [(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose)), (c, Some(LiquidationPolicy::FullClose))];
-    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0, 100);
+    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0, 100, None, 0);
     assert!(result.is_ok());
     let outcome = result.unwrap();
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after liquidation+ADL");
@@ -425,7 +425,7 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     let new_size = (100 * POS_SCALE) as i128;
     let slot3 = slot2 + 1;
     engine.last_crank_slot = slot3;
-    let result2 = engine.execute_trade_not_atomic(c, b, DEFAULT_ORACLE, slot3, new_size, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result2 = engine.execute_trade_not_atomic(c, b, DEFAULT_ORACLE, slot3, new_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
 
     // Trade may or may not succeed (b's equity may be impaired from ADL)
     // but OI balance must hold regardless

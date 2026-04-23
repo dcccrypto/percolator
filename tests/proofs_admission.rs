@@ -653,7 +653,7 @@ fn k201_keeper_crank_rejects_oversized_budget() {
     let req = (MAX_TOUCHED_PER_INSTRUCTION as u16).saturating_add(over as u16);
 
     let r = engine.keeper_crank_not_atomic(
-        DEFAULT_SLOT, DEFAULT_ORACLE, &[], req, 0i128, 0, 100);
+        DEFAULT_SLOT, DEFAULT_ORACLE, &[], req, 0i128, 0, 100, None, 0);
     assert!(r.is_err(),
         "max_revalidations > MAX_TOUCHED_PER_INSTRUCTION MUST reject, not clamp");
 }
@@ -676,7 +676,7 @@ fn k202_postcondition_detects_broken_conservation() {
 
     // Any public entrypoint must fail via postcondition check.
     let r = engine.keeper_crank_not_atomic(
-        DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100);
+        DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0);
     assert!(r.is_err(),
         "broken conservation MUST surface as Err from a public entrypoint");
 }
@@ -1126,7 +1126,7 @@ fn v19_rr_window_zero_no_cursor_advance() {
     let gen_before = engine.sweep_generation;
     let consumed_before = engine.price_move_consumed_bps_this_generation;
 
-    engine.keeper_crank_not_atomic_v2(
+    engine.keeper_crank_not_atomic(
         1, 1000, &[], 0, 0, 0, 100, None, 0,
     ).unwrap();
 

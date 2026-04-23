@@ -117,7 +117,7 @@ fn inductive_top_up_insurance_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 1_000_000);
-    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
     let ins_amt: u32 = kani::any();
@@ -135,7 +135,7 @@ fn inductive_set_capital_decrease_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
     let new_cap: u32 = kani::any();
@@ -174,7 +174,7 @@ fn inductive_deposit_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1 && dep <= 1_000_000);
-    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 }
 
@@ -186,12 +186,12 @@ fn inductive_withdraw_preserves_accounting() {
     let idx = add_user_test(&mut engine, 0).unwrap();
 
     // Concrete deposit to reduce symbolic state space
-    engine.deposit_not_atomic(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, DEFAULT_SLOT).unwrap();
 
     // Symbolic withdrawal amount
     let w: u32 = kani::any();
     kani::assume(w >= 1 && w <= 100_000);
-    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(idx, w as u128, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
     kani::cover!(result.is_ok(), "withdraw Ok path reachable");
     if result.is_ok() {
         assert!(engine.check_conservation());
@@ -207,7 +207,7 @@ fn inductive_settle_loss_preserves_accounting() {
 
     let dep: u32 = kani::any();
     kani::assume(dep >= 1000 && dep <= 1_000_000);
-    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
     let loss: i32 = kani::any();
@@ -264,7 +264,7 @@ fn prop_conservation_holds_after_all_ops() {
 
     let dep: u32 = kani::any();
     kani::assume(dep > 0 && dep <= 5_000_000);
-    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT).unwrap();
     assert!(engine.check_conservation());
 
     let ins_amt: u32 = kani::any();
@@ -386,7 +386,7 @@ fn proof_set_capital_maintains_c_tot() {
 
     let initial: u32 = kani::any();
     kani::assume(initial > 0 && initial <= 1_000_000);
-    engine.deposit_not_atomic(idx, initial as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, initial as u128, DEFAULT_SLOT).unwrap();
 
     assert!(engine.c_tot.get() == engine.accounts[idx as usize].capital.get());
 
@@ -523,19 +523,19 @@ fn proof_side_mode_gating() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(a, 5_000_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 5_000_000, DEFAULT_SLOT).unwrap();
 
     // Open a real bilateral position so DrainOnly is a realistic state.
     let open = (10 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open, DEFAULT_ORACLE, 0i128, 0, 100).unwrap();
+    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, open, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
 
     engine.side_mode_long = SideMode::DrainOnly;
 
     // Second trade (a buys more from b) would further increase long OI —
     // must be blocked by the DrainOnly gate.
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100);
+    let result = engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size_q, DEFAULT_ORACLE, 0i128, 0, 100, None);
     assert!(result == Err(RiskError::SideBlocked));
 }
 

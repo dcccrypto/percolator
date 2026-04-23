@@ -29,27 +29,6 @@
 //! Internal helpers (`enqueue_adl`, `liquidate_at_oracle_internal`, etc.)
 //! are not individually atomic — they rely on the calling `_not_atomic`
 //! method to propagate `Err` to the transaction boundary.
-//!
-//! # ABI-affecting changes across v12.19 `_v2` introduction
-//!
-//! - Six live-op shims (`withdraw_not_atomic`, `settle_account_not_atomic`,
-//!   `execute_trade_not_atomic`, `liquidate_at_oracle_not_atomic`,
-//!   `convert_released_pnl_not_atomic`, `close_account_not_atomic`) are
-//!   `#[deprecated]`. Each has a `_v2` counterpart that accepts an
-//!   `admit_h_max_consumption_threshold_bps_opt: Option<u128>` parameter
-//!   per spec §4.7 step 2. Shim forwarding passes `None`; trusted/private
-//!   wrappers may continue using the shims under spec §12.21's explicit
-//!   carve-out.
-//! - `keeper_crank_not_atomic` is similarly deprecated in favor of
-//!   `keeper_crank_not_atomic_v2` which additionally accepts a
-//!   `rr_window_size: u64` for Phase 2 structural sweep width.
-//! - `deposit_fee_credits` return type: `Result<()>` → `Result<u128>`.
-//!   Returns `pay = min(amount, FeeDebt_i)` per spec §9.2.1 step 5. The
-//!   wrapper is responsible for refunding `amount - pay` externally.
-//!   Callers that pattern-matched `Ok(())` must update to accept `Ok(pay)`.
-//! - `top_up_insurance_fund` return type: `Result<bool>` → `Result<()>`.
-//!   The returned `bool` (post-balance > 0) carried no caller-useful
-//!   signal and was dropped in v12.19.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -4013,12 +3992,9 @@ impl RiskEngine {
     // deposit (spec §9.2)
     // ========================================================================
 
-    /// Spec §9.2 v12.19 `deposit(i, amount, now_slot)`. The `_oracle_price`
-    /// parameter is vestigial — deposit is a pure capital-transfer path
-    /// that MUST NOT call `accrue_market_to` and therefore has no use for
-    /// an oracle. Retained in the signature for backward compatibility;
-    /// callers MAY pass `0` or any placeholder value.
-    pub fn deposit_not_atomic(&mut self, idx: u16, amount: u128, _oracle_price: u64, now_slot: u64) -> Result<()> {
+    /// Spec §9.2: `deposit(i, amount, now_slot)`. Pure capital-transfer path;
+    /// does not call `accrue_market_to` and therefore takes no oracle input.
+    pub fn deposit_not_atomic(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -4095,33 +4071,7 @@ impl RiskEngine {
     // withdraw_not_atomic (spec §10.3)
     // ========================================================================
 
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    /// New callers SHOULD use `withdraw_not_atomic_v2` and supply an explicit
-    /// consumption-threshold policy per spec §12.21.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `withdraw_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
     pub fn withdraw_not_atomic(
-        &mut self,
-        idx: u16,
-        amount: u128,
-        oracle_price: u64,
-        now_slot: u64,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<()> {
-        self.withdraw_not_atomic_v2(
-            idx, amount, oracle_price, now_slot, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn withdraw_not_atomic_v2(
         &mut self,
         idx: u16,
         amount: u128,
@@ -4228,30 +4178,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// Top-level settle wrapper per spec §10.7.
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `settle_account_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
     pub fn settle_account_not_atomic(
-        &mut self,
-        idx: u16,
-        oracle_price: u64,
-        now_slot: u64,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<()> {
-        self.settle_account_not_atomic_v2(
-            idx, oracle_price, now_slot, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn settle_account_not_atomic_v2(
         &mut self,
         idx: u16,
         oracle_price: u64,
@@ -4308,33 +4235,7 @@ impl RiskEngine {
     // execute_trade_not_atomic (spec §10.4)
     // ========================================================================
 
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `execute_trade_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
     pub fn execute_trade_not_atomic(
-        &mut self,
-        a: u16,
-        b: u16,
-        oracle_price: u64,
-        now_slot: u64,
-        size_q: i128,
-        exec_price: u64,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<()> {
-        self.execute_trade_not_atomic_v2(
-            a, b, oracle_price, now_slot, size_q, exec_price, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn execute_trade_not_atomic_v2(
         &mut self,
         a: u16,
         b: u16,
@@ -4838,31 +4739,7 @@ impl RiskEngine {
 
     /// Top-level liquidation: creates its own InstructionContext and finalizes resets.
     /// Accepts LiquidationPolicy per spec §10.6.
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `liquidate_at_oracle_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
     pub fn liquidate_at_oracle_not_atomic(
-        &mut self,
-        idx: u16,
-        now_slot: u64,
-        oracle_price: u64,
-        policy: LiquidationPolicy,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<bool> {
-        self.liquidate_at_oracle_not_atomic_v2(
-            idx, now_slot, oracle_price, policy, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn liquidate_at_oracle_not_atomic_v2(
         &mut self,
         idx: u16,
         now_slot: u64,
@@ -5067,31 +4944,8 @@ impl RiskEngine {
     /// == None` is wrapper-prohibited because it disables the stress-scaled
     /// admission gate entirely. This shim always passes None for the threshold,
     /// so callers MUST either pass `admit_h_min > 0` or migrate to
-    /// `keeper_crank_not_atomic_v2` and pass an explicit `Some(threshold)`.
+    /// `keeper_crank_not_atomic` and pass an explicit `Some(threshold)`.
     /// Preserved here for backward compatibility with trusted/private wrappers.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use keeper_crank_not_atomic_v2 to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
-    pub fn keeper_crank_not_atomic(
-        &mut self,
-        now_slot: u64,
-        oracle_price: u64,
-        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
-        max_revalidations: u16,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<CrankOutcome> {
-        self.keeper_crank_not_atomic_v2(
-            now_slot, oracle_price, ordered_candidates, max_revalidations,
-            funding_rate_e9, admit_h_min, admit_h_max, None, 0,
-        )
-    }
-
     /// v12.19 keeper_crank with Phase 2 round-robin sweep and consumption
     /// threshold (spec §9.7). Phase 1 runs keeper-priority liquidation,
     /// then Phase 2 always runs a mandatory structural sweep over the next
@@ -5099,7 +4953,7 @@ impl RiskEngine {
     /// `rr_cursor_position`. On full cursor wraparound past
     /// MAX_MATERIALIZED_ACCOUNTS, `sweep_generation` increments by 1 and
     /// `price_move_consumed_bps_this_generation` resets to 0.
-    pub fn keeper_crank_not_atomic_v2(
+    pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -5347,31 +5201,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// Explicit voluntary conversion of matured released positive PnL for open-position accounts.
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `convert_released_pnl_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
     pub fn convert_released_pnl_not_atomic(
-        &mut self,
-        idx: u16,
-        x_req: u128,
-        oracle_price: u64,
-        now_slot: u64,
-        funding_rate_e9: i128,
-        admit_h_min: u64,
-        admit_h_max: u64,
-    ) -> Result<()> {
-        self.convert_released_pnl_not_atomic_v2(
-            idx, x_req, oracle_price, now_slot, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn convert_released_pnl_not_atomic_v2(
         &mut self,
         idx: u16,
         x_req: u128,
@@ -5480,22 +5310,7 @@ impl RiskEngine {
     // close_account_not_atomic
     // ========================================================================
 
-    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
-    #[deprecated(
-        since = "v12.19",
-        note = "Use `close_account_not_atomic_v2` to supply an explicit \
-                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
-                This shim passes None which is wrapper-non-compliant for \
-                public wrappers when combined with admit_h_min == 0."
-    )]
-    pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128, admit_h_min: u64, admit_h_max: u64) -> Result<u128> {
-        self.close_account_not_atomic_v2(
-            idx, now_slot, oracle_price, funding_rate_e9,
-            admit_h_min, admit_h_max, None,
-        )
-    }
-
-    pub fn close_account_not_atomic_v2(
+    pub fn close_account_not_atomic(
         &mut self,
         idx: u16,
         now_slot: u64,

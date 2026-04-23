@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 //! Comprehensive Fuzzing Suite for the Risk Engine
 //!
 //! ## Running Tests
@@ -477,7 +475,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.deposit_not_atomic(idx, *amount, oracle, 0);
+                let result = self.engine.deposit_not_atomic(idx, *amount, 0);
 
                 match result {
                     Ok(()) => {
@@ -503,7 +501,7 @@ impl FuzzState {
                 let vault_before = self.engine.vault;
 
                 let now_slot = self.engine.current_slot;
-                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i128, 0, 100);
+                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i128, 0, 100, None);
 
                 match result {
                     Ok(()) => {
@@ -604,7 +602,7 @@ impl FuzzState {
 
                 let result =
                     self.engine
-                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i128, 0, 100);
+                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i128, 0, 100, None);
 
                 match result {
                     Ok(_) => {
@@ -684,7 +682,7 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, 0);
+            let _ = state.engine.deposit_not_atomic(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -722,7 +720,7 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, 0);
+            let _ = state.engine.deposit_not_atomic(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -931,7 +929,7 @@ fn run_deterministic_fuzzer(
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, rng.u128(5_000, 50_000), DEFAULT_ORACLE, 0);
+            let _ = state.engine.deposit_not_atomic(idx, rng.u128(5_000, 50_000), 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -1055,7 +1053,7 @@ proptest! {
         let vault_before = engine.vault;
         let principal_before = engine.accounts[user_idx as usize].capital;
 
-        let _ = engine.deposit_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0);
+        let _ = engine.deposit_not_atomic(user_idx, amount, 0);
 
         prop_assert_eq!(engine.vault, vault_before + amount);
         prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before + amount);
@@ -1070,12 +1068,12 @@ proptest! {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
         let user_idx = add_user_test(&mut engine, 1).unwrap();
 
-        engine.deposit_not_atomic(user_idx, deposit_amount, DEFAULT_ORACLE, 0).unwrap();
+        engine.deposit_not_atomic(user_idx, deposit_amount, 0).unwrap();
 
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i128, 0, 100);
+        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i128, 0, 100, None);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1098,13 +1096,13 @@ proptest! {
         let user_idx = add_user_test(&mut engine, 1).unwrap();
 
         for amount in deposits {
-            let _ = engine.deposit_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0);
+            let _ = engine.deposit_not_atomic(user_idx, amount, 0);
         }
 
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i128, 0, 100);
+            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i128, 0, 100, None);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1125,8 +1123,8 @@ fn conservation_after_trade_and_funding_regression() {
     // Create LP and user with positions
     let lp_idx = add_lp_test(&mut engine, [0u8; 32], [0u8; 32], 1).unwrap();
     let user_idx = add_user_test(&mut engine, 1).unwrap();
-    engine.deposit_not_atomic(lp_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
-    engine.deposit_not_atomic(user_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
+    engine.deposit_not_atomic(lp_idx, 100_000, 0).unwrap();
+    engine.deposit_not_atomic(user_idx, 100_000, 0).unwrap();
 
     // Make crank fresh
     engine.last_crank_slot = 0;
@@ -1135,7 +1133,7 @@ fn conservation_after_trade_and_funding_regression() {
 
     // Execute trade to create positions
     engine
-        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i128, 0, 100)
+        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i128, 0, 100, None)
         .unwrap();
 
     // Accrue market with funding (rate passed directly)
@@ -1171,7 +1169,7 @@ fn harness_rollback_simulation_test() {
 
     // Create user with some capital
     let user_idx = add_user_test(&mut engine, 1).unwrap();
-    engine.deposit_not_atomic(user_idx, 1000, DEFAULT_ORACLE, 0).unwrap();
+    engine.deposit_not_atomic(user_idx, 1000, 0).unwrap();
 
     // Accrue market to create state that could be mutated (rate passed directly)
     engine.last_oracle_price = DEFAULT_ORACLE;
@@ -1188,7 +1186,7 @@ fn harness_rollback_simulation_test() {
     let expected_pnl = engine.accounts[user_idx as usize].pnl;
 
     // Try to withdraw_not_atomic more than available - will fail
-    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i128, 0, 100);
+    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i128, 0, 100, None);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"
