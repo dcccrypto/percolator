@@ -1,6 +1,6 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v12.18.0
+//! Formally Verified Risk Engine for Perpetual DEX — v12.19
 //!
-//! Implements the v12.18.0 spec.
+//! Implements the v12.19 spec (rev6).
 //!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. Protected principal for flat accounts
@@ -97,10 +97,10 @@ pub const LIQ_BUDGET_PER_CRANK: u16 = 64;
 /// POS_SCALE = 1_000_000 (spec §1.2)
 pub const POS_SCALE: u128 = 1_000_000;
 
-/// ADL_ONE = 1_000_000 (spec §1.3)
+/// ADL_ONE = 1e15 (spec §1.3)
 pub const ADL_ONE: u128 = 1_000_000_000_000_000;
 
-/// MIN_A_SIDE = 1_000 (spec §1.4)
+/// MIN_A_SIDE = 1e14 (spec §1.4)
 pub const MIN_A_SIDE: u128 = 100_000_000_000_000;
 
 /// MAX_ORACLE_PRICE = 1_000_000_000_000 (spec §1.4)
@@ -2252,8 +2252,13 @@ impl RiskEngine {
     /// `last_market_slot == resolved_slot` and the envelope still
     /// applies.
     fn check_live_accrual_envelope(&self, now_slot: u64) -> Result<()> {
+        // checked_add (not saturating_add): at last_market_slot near u64::MAX,
+        // saturating_add would cap at u64::MAX and make the envelope
+        // vacuously permissive. checked_add with None → Overflow is the
+        // correct conservative-failure path.
         let envelope_top = self.last_market_slot
-            .saturating_add(self.params.max_accrual_dt_slots);
+            .checked_add(self.params.max_accrual_dt_slots)
+            .ok_or(RiskError::Overflow)?;
         if now_slot > envelope_top {
             return Err(RiskError::Overflow);
         }
@@ -2327,31 +2332,30 @@ impl RiskEngine {
         //   require abs(oracle_price - P_last) * 10_000
         //           <= cfg_max_price_move_bps_per_slot * dt * P_last
         //
-        // RHS can exceed u128 at global bounds (10_000 * u64::MAX * u64::MAX).
-        // Compute in U256 exactly. Check fires BEFORE any K/F/P_last/slot_last
-        // mutation — conservation on failure.
+        // The check fires whenever price_move_active is true, INCLUDING
+        // dt == 0. With dt == 0 and any nonzero price move, RHS = 0 and
+        // LHS > 0 → rejects correctly. This closes the same-slot bypass
+        // that would otherwise let live OI be marked through an arbitrary
+        // price jump with zero elapsed time, weakening goal 52.
         //
-        // This is the construction-level safety boundary for goal 52. Within
-        // one accrual envelope the oracle can move at most
-        // `cfg_max_price_move_bps_per_slot * cfg_max_accrual_dt_slots` bps,
-        // which the init-time solvency inequality guarantees is less than
-        // cfg_maintenance_bps minus funding and liquidation budgets.
-        //
-        // Must be unconditional on price_move_active: if P_last changes from
-        // zero to nonzero this path is not taken (we'd be in the delta_p==0
-        // shortcut above), so the guard below always has P_last > 0 when
-        // delta_p != 0 AND total_dt > 0 AND a side has live OI.
+        // Check fires BEFORE any K/F/P_last/slot_last/consumption mutation.
         let mut consumed_this_step: u128 = 0;
-        if price_move_active && total_dt > 0 {
+        if price_move_active {
             let abs_dp = (oracle_price as i128 - self.last_oracle_price as i128).unsigned_abs();
-            let lhs = U256::from_u128(abs_dp)
-                .checked_mul(U256::from_u128(10_000))
+            // LHS = abs_dp * 10_000. abs_dp <= 2 * MAX_ORACLE_PRICE (2e12),
+            // so LHS <= 2e16 — fits u128 trivially.
+            let lhs = abs_dp
+                .checked_mul(10_000u128)
                 .ok_or(RiskError::Overflow)?;
+            // RHS = cap * dt * P_last. cap <= MAX_MARGIN_BPS (1e4, validated
+            // in validate_params), dt <= u64::MAX (1.8e19), P_last <= 1e12,
+            // product can exceed u128 (1.8e35), so compute in U256.
             let rhs = U256::from_u128(self.params.max_price_move_bps_per_slot as u128)
                 .checked_mul(U256::from_u128(total_dt as u128))
                 .and_then(|v| v.checked_mul(U256::from_u128(self.last_oracle_price as u128)))
                 .ok_or(RiskError::Overflow)?;
-            if lhs > rhs {
+            let lhs_wide = U256::from_u128(lhs);
+            if lhs_wide > rhs {
                 return Err(RiskError::Overflow);
             }
 
@@ -2359,13 +2363,11 @@ impl RiskEngine {
             // not ceil — sub-bps jitter MUST NOT round up into whole-bps
             // consumption. `floor(abs_dp * 10_000 / P_last)`.
             //
-            // Upper bound: abs_dp * 10_000 <= max_price_move * total_dt * P_last
-            // so consumed_this_step <= max_price_move * total_dt which fits u128.
-            let num = U256::from_u128(abs_dp).checked_mul(U256::from_u128(10_000))
-                .ok_or(RiskError::Overflow)?;
-            let den = U256::from_u128(self.last_oracle_price as u128);
-            let consumed_wide = num.checked_div(den).ok_or(RiskError::Overflow)?;
-            consumed_this_step = consumed_wide.try_into_u128().ok_or(RiskError::Overflow)?;
+            // lhs already == abs_dp * 10_000 (u128), P_last > 0 here
+            // (price_move_active checked that), so u128 division is exact.
+            // Upper bound: consumed_this_step <= cap * dt fits u128 by the
+            // cap check above.
+            consumed_this_step = lhs / (self.last_oracle_price as u128);
         }
 
         // Use scratch K values for the entire mark + funding computation.
@@ -2438,7 +2440,16 @@ impl RiskEngine {
             }
         }
 
-        // ALL computations succeeded — commit K/F values and synchronize state
+        // Spec §5.5 step 9a (v12.19): precompute consumption accumulator
+        // result BEFORE any persistent mutation. This keeps accrue_market_to
+        // validate-then-mutate: if adding consumed_this_step overflows, we
+        // fail before committing K, F, P_last, slot_last.
+        let new_consumption = self
+            .price_move_consumed_bps_this_generation
+            .checked_add(consumed_this_step)
+            .ok_or(RiskError::Overflow)?;
+
+        // ALL computations succeeded — commit all state atomically.
         self.adl_coeff_long = k_long;
         self.adl_coeff_short = k_short;
         self.f_long_num = f_long;
@@ -2447,16 +2458,7 @@ impl RiskEngine {
         self.last_market_slot = now_slot;
         self.last_oracle_price = oracle_price;
         self.fund_px_last = oracle_price;
-
-        // Spec §5.5 step 9a (v12.19): commit consumption after all other
-        // state mutations succeed, so the accumulator is rolled back
-        // atomically with the K/F commit on any earlier failure.
-        if consumed_this_step > 0 {
-            self.price_move_consumed_bps_this_generation = self
-                .price_move_consumed_bps_this_generation
-                .checked_add(consumed_this_step)
-                .ok_or(RiskError::Overflow)?;
-        }
+        self.price_move_consumed_bps_this_generation = new_consumption;
 
         Ok(())
     }
@@ -3926,6 +3928,9 @@ impl RiskEngine {
     // withdraw_not_atomic (spec §10.3)
     // ========================================================================
 
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
+    /// New callers SHOULD use `withdraw_not_atomic_v2` and supply an explicit
+    /// consumption-threshold policy per spec §12.21.
     pub fn withdraw_not_atomic(
         &mut self,
         idx: u16,
@@ -3936,7 +3941,25 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<()> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.withdraw_not_atomic_v2(
+            idx, amount, oracle_price, now_slot, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn withdraw_not_atomic_v2(
+        &mut self,
+        idx: u16,
+        amount: u128,
+        oracle_price: u64,
+        now_slot: u64,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<()> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -3954,7 +3977,9 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -4015,7 +4040,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// Top-level settle wrapper per spec §10.7.
-    /// If settlement is exposed as a standalone instruction, this wrapper MUST be used.
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     pub fn settle_account_not_atomic(
         &mut self,
         idx: u16,
@@ -4025,7 +4050,24 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<()> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.settle_account_not_atomic_v2(
+            idx, oracle_price, now_slot, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn settle_account_not_atomic_v2(
+        &mut self,
+        idx: u16,
+        oracle_price: u64,
+        now_slot: u64,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<()> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4038,7 +4080,9 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -4062,6 +4106,7 @@ impl RiskEngine {
     // execute_trade_not_atomic (spec §10.4)
     // ========================================================================
 
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     pub fn execute_trade_not_atomic(
         &mut self,
         a: u16,
@@ -4074,7 +4119,27 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<()> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.execute_trade_not_atomic_v2(
+            a, b, oracle_price, now_slot, size_q, exec_price, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn execute_trade_not_atomic_v2(
+        &mut self,
+        a: u16,
+        b: u16,
+        oracle_price: u64,
+        now_slot: u64,
+        size_q: i128,
+        exec_price: u64,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<()> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -4111,7 +4176,9 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Step 10: accrue market once
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -4551,6 +4618,7 @@ impl RiskEngine {
 
     /// Top-level liquidation: creates its own InstructionContext and finalizes resets.
     /// Accepts LiquidationPolicy per spec §10.6.
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     pub fn liquidate_at_oracle_not_atomic(
         &mut self,
         idx: u16,
@@ -4561,24 +4629,38 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<bool> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.liquidate_at_oracle_not_atomic_v2(
+            idx, now_slot, oracle_price, policy, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn liquidate_at_oracle_not_atomic_v2(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        policy: LiquidationPolicy,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<bool> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         // Spec §9.6 step 2: require account materialized (public entry point).
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
 
-        // Bounds and existence check BEFORE touch_account_live_local to prevent
-        // market-state mutation (accrue_market_to) on missing accounts.
-        if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
-            return Ok(false);
-        }
-
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -4741,9 +4823,25 @@ impl RiskEngine {
     /// keeper_crank_not_atomic (spec §10.8): Minimal on-chain permissionless shortlist processor.
     /// Candidate discovery is performed off-chain. ordered_candidates[] is untrusted.
     /// Each candidate is (account_idx, optional liquidation policy hint).
-    /// Public keeper_crank shim (pre-v12.19 signature) that forwards to
-    /// the v12.19 two-phase implementation with rr_window_size=0 and
-    /// threshold_opt=None. Preserves backward-compat for existing tests.
+    ///
+    /// Pre-v12.19 shim: forwards to the v12.19 two-phase implementation with
+    /// `rr_window_size=0` and `threshold_opt=None`. Phase 2 is effectively
+    /// a no-op at rr_window_size=0 (cursor and generation do not advance).
+    ///
+    /// **WARNING for public/permissionless wrappers:** per spec §12.21, the
+    /// combination `admit_h_min == 0` + `admit_h_max_consumption_threshold_bps_opt
+    /// == None` is wrapper-prohibited because it disables the stress-scaled
+    /// admission gate entirely. This shim always passes None for the threshold,
+    /// so callers MUST either pass `admit_h_min > 0` or migrate to
+    /// `keeper_crank_not_atomic_v2` and pass an explicit `Some(threshold)`.
+    /// Preserved here for backward compatibility with trusted/private wrappers.
+    #[deprecated(
+        since = "v12.19",
+        note = "Use keeper_crank_not_atomic_v2 to supply an explicit \
+                admit_h_max_consumption_threshold_bps_opt per spec §12.21. \
+                This shim passes None which is wrapper-non-compliant for \
+                public wrappers when combined with admit_h_min == 0."
+    )]
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -5006,6 +5104,7 @@ impl RiskEngine {
     // ========================================================================
 
     /// Explicit voluntary conversion of matured released positive PnL for open-position accounts.
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     pub fn convert_released_pnl_not_atomic(
         &mut self,
         idx: u16,
@@ -5016,7 +5115,25 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<()> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.convert_released_pnl_not_atomic_v2(
+            idx, x_req, oracle_price, now_slot, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn convert_released_pnl_not_atomic_v2(
+        &mut self,
+        idx: u16,
+        x_req: u128,
+        oracle_price: u64,
+        now_slot: u64,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<()> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
@@ -5029,7 +5146,9 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -5104,8 +5223,26 @@ impl RiskEngine {
     // close_account_not_atomic
     // ========================================================================
 
+    /// Pre-v12.19 signature: forwards to v2 with threshold_opt=None.
     pub fn close_account_not_atomic(&mut self, idx: u16, now_slot: u64, oracle_price: u64, funding_rate_e9: i128, admit_h_min: u64, admit_h_max: u64) -> Result<u128> {
-                Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        self.close_account_not_atomic_v2(
+            idx, now_slot, oracle_price, funding_rate_e9,
+            admit_h_min, admit_h_max, None,
+        )
+    }
+
+    pub fn close_account_not_atomic_v2(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<u128> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -5115,7 +5252,9 @@ impl RiskEngine {
             return Err(RiskError::AccountNotFound);
         }
 
-        let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max);
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min, admit_h_max, admit_h_max_consumption_threshold_bps_opt,
+        );
 
         // Accrue market + live local touch + finalize
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -5911,7 +6050,13 @@ impl RiskEngine {
     // Fee credits
     // ========================================================================
 
-    pub fn deposit_fee_credits(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
+    /// Spec §9.2.1 v12.19: `pay = min(amount, FeeDebt_i)`. The wrapper
+    /// transfers `amount` tokens of its own accounting; the engine applies
+    /// at most `FeeDebt_i` of it to the account's fee_credits and expects
+    /// the wrapper to reject or refund the unused `amount - pay`.
+    ///
+    /// The return value reports `pay` so the wrapper can reconcile exactly.
+    pub fn deposit_fee_credits(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<u128> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -5923,39 +6068,35 @@ impl RiskEngine {
         }
         // Reject time jumps that would brick subsequent accrue_market_to.
         self.check_live_accrual_envelope(now_slot)?;
-        // Spec §2.1: fee_credits <= 0. The caller externally moves `amount`
-        // tokens; the engine must book exactly that. Previously the method
-        // silently capped at outstanding debt, which made the real-token ↔
-        // engine.vault correspondence divergent (amount moved > debt booked).
-        // Reject anything other than exact-or-smaller-than-debt payment.
+
+        // Spec §9.2.1 step 5: pay = min(amount, FeeDebt_i).
         let debt = fee_debt_u128_checked(self.accounts[idx as usize].fee_credits.get());
-        if amount > debt {
-            return Err(RiskError::Overflow);
-        }
-        if amount == 0 {
-            // Even zero: no debt, no mutation except current_slot.
+        let pay = core::cmp::min(amount, debt);
+        if pay == 0 {
+            // Spec step 6: if pay == 0, return with current_slot anchored.
             self.current_slot = now_slot;
-            return Ok(());
+            return Ok(0);
         }
-        if amount > i128::MAX as u128 {
+        if pay > i128::MAX as u128 {
             return Err(RiskError::Overflow);
         }
-        let new_vault = self.vault.get().checked_add(amount)
+        let new_vault = self.vault.get().checked_add(pay)
             .ok_or(RiskError::Overflow)?;
         if new_vault > MAX_VAULT_TVL {
             return Err(RiskError::Overflow);
         }
-        let new_ins = self.insurance_fund.balance.get().checked_add(amount)
+        let new_ins = self.insurance_fund.balance.get().checked_add(pay)
             .ok_or(RiskError::Overflow)?;
         let new_credits = self.accounts[idx as usize].fee_credits
-            .checked_add(amount as i128)
+            .checked_add(pay as i128)
             .ok_or(RiskError::Overflow)?;
         // All checks passed — commit state.
         self.current_slot = now_slot;
         self.vault = U128::new(new_vault);
         self.insurance_fund.balance = U128::new(new_ins);
         self.accounts[idx as usize].fee_credits = new_credits;
-        Ok(())
+        self.assert_public_postconditions()?;
+        Ok(pay)
     }
 
     // ========================================================================

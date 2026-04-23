@@ -1265,23 +1265,23 @@ fn test_deposit_fee_credits() {
     // Give the account fee debt first (spec §2.1: fee_credits <= 0)
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
-    // Pay off 3000 of the 5000 debt
-    engine.deposit_fee_credits(idx, 3000, slot).expect("deposit_fee_credits");
+    // Pay off 3000 of the 5000 debt. v12.19 spec §9.2.1 step 5:
+    // `pay = min(amount, FeeDebt_i)` — returns `pay`.
+    let paid = engine.deposit_fee_credits(idx, 3000, slot).expect("deposit_fee_credits");
+    assert_eq!(paid, 3000);
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), -2000,
         "fee_credits must reflect partial payoff");
 
     // Pay off the remaining 2000
-    engine.deposit_fee_credits(idx, 2000, slot).expect("deposit_fee_credits");
+    let paid = engine.deposit_fee_credits(idx, 2000, slot).expect("deposit_fee_credits");
+    assert_eq!(paid, 2000);
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0,
         "fee_credits must be zero after full payoff");
 
-    // v12.18.1: over-payment must reject (previously silently capped).
-    // The caller externally moves `amount` tokens; engine booking < amount
-    // would desync real-token vs engine.vault. Reject explicitly instead.
-    let r = engine.deposit_fee_credits(idx, 9999, slot);
-    assert_eq!(r, Err(RiskError::Overflow),
-        "amount > outstanding debt MUST reject (no silent cap)");
-    // State unchanged: fee_credits still 0, vault still reflects prior payoffs.
+    // v12.19 spec: pay = min(amount, FeeDebt_i). When amount > debt=0,
+    // pay = 0, no mutation except current_slot.
+    let paid = engine.deposit_fee_credits(idx, 9999, slot).expect("zero debt no-op");
+    assert_eq!(paid, 0, "pay == min(amount, 0) == 0 when no debt");
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
 }
 
@@ -1768,10 +1768,10 @@ fn test_i128_size_q_construction() {
 }
 
 #[test]
-fn test_deposit_fee_credits_rejects_when_amount_exceeds_outstanding_debt() {
-    // Reviewer regression: engine must not silently cap. Real-token accounting
-    // requires that amount moved externally == amount booked by the engine,
-    // otherwise engine.vault drifts from actual vault tokens.
+fn test_deposit_fee_credits_caps_at_outstanding_debt() {
+    // v12.19 spec §9.2.1 step 5: pay = min(amount, FeeDebt_i). When
+    // amount > debt, engine applies `debt` and returns `debt`. The wrapper
+    // is responsible for refunding `amount - pay` back to the caller.
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.accounts[idx as usize].fee_credits = I128::new(-10);
@@ -1779,27 +1779,27 @@ fn test_deposit_fee_credits_rejects_when_amount_exceeds_outstanding_debt() {
     let v_before = engine.vault.get();
     let i_before = engine.insurance_fund.balance.get();
 
-    let r = engine.deposit_fee_credits(idx, 15, 100);
-    assert_eq!(r, Err(RiskError::Overflow),
-        "amount (15) > debt (10) MUST reject");
-    // No mutation on Err (validate-then-mutate contract).
-    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), -10);
-    assert_eq!(engine.vault.get(), v_before);
-    assert_eq!(engine.insurance_fund.balance.get(), i_before);
+    let paid = engine.deposit_fee_credits(idx, 15, 100).unwrap();
+    assert_eq!(paid, 10, "pay = min(15, 10) = 10");
+    // Exactly debt applied.
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
+    assert_eq!(engine.vault.get(), v_before + 10);
+    assert_eq!(engine.insurance_fund.balance.get(), i_before + 10);
 }
 
 #[test]
-fn test_deposit_fee_credits_rejects_when_no_debt_exists() {
-    // If there's no debt, any positive amount is over-payment.
+fn test_deposit_fee_credits_zero_pay_when_no_debt() {
+    // v12.19 spec §9.2.1: when FeeDebt_i = 0, pay = min(amount, 0) = 0,
+    // no mutation except current_slot advances.
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
 
     let v_before = engine.vault.get();
-    let r = engine.deposit_fee_credits(idx, 1, 100);
-    assert_eq!(r, Err(RiskError::Overflow),
-        "amount > 0 with no debt MUST reject");
+    let paid = engine.deposit_fee_credits(idx, 100, 50).unwrap();
+    assert_eq!(paid, 0);
     assert_eq!(engine.vault.get(), v_before);
+    assert_eq!(engine.current_slot, 50, "current_slot must advance even on zero pay");
 }
 
 #[test]
@@ -2082,7 +2082,14 @@ fn test_self_trade_rejected() {
 // ============================================================================
 
 #[test]
-fn test_same_slot_price_change_applies_mark() {
+fn test_same_slot_price_change_on_live_exposure_rejects() {
+    // v12.19 §5.5 step 9: with live exposure and dt = 0, any nonzero price
+    // move must REJECT. The cap is `abs_dp * 10_000 <= cap * dt * P_last`;
+    // at dt=0 the RHS is 0, so any nonzero LHS fails the check.
+    //
+    // This closes the same-slot A1-class bypass where live OI could be
+    // marked through an arbitrary price jump with zero elapsed time,
+    // which would weaken goal 52's one-envelope insurance-siphon boundary.
     let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
     let slot = 1u64;
@@ -2096,20 +2103,35 @@ fn test_same_slot_price_change_applies_mark() {
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
+    let p_last_before = engine.last_oracle_price;
 
-    // Same slot, different price: mark-only update must apply
+    // Same slot, different price, live exposure — must reject.
     let new_oracle = 1100u64;
-    engine.accrue_market_to(slot, new_oracle, 0).expect("accrue");
+    let r = engine.accrue_market_to(slot, new_oracle, 0);
+    assert!(r.is_err(),
+        "dt=0 same-slot price move on live OI must reject (got {:?})", r);
 
-    // K_long must increase (price went up, longs gain)
-    assert!(engine.adl_coeff_long > k_long_before,
-        "K_long must increase on same-slot price rise");
-    // K_short must decrease (shorts lose)
-    assert!(engine.adl_coeff_short < k_short_before,
-        "K_short must decrease on same-slot price rise");
-    // Oracle price must be updated
-    assert!(engine.last_oracle_price == new_oracle,
-        "last_oracle_price must be updated");
+    // State MUST be unchanged on rejection.
+    assert_eq!(engine.adl_coeff_long, k_long_before);
+    assert_eq!(engine.adl_coeff_short, k_short_before);
+    assert_eq!(engine.last_oracle_price, p_last_before);
+}
+
+#[test]
+fn test_same_slot_price_change_no_oi_accepted() {
+    // Zero-OI idle market: dt=0 with price change is still allowed because
+    // price_move_active is false (no live exposure to siphon through).
+    let mut engine = RiskEngine::new(default_params());
+    engine.current_slot = 1;
+    engine.last_oracle_price = 1000;
+    engine.last_market_slot = 1;
+    // No OI on either side.
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+
+    // Zero-OI fast-forward at any price must succeed.
+    engine.accrue_market_to(1, 2000, 0).expect("idle fast-forward must succeed");
+    assert_eq!(engine.last_oracle_price, 2000);
 }
 
 // ============================================================================
