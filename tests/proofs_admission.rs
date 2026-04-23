@@ -1085,3 +1085,49 @@ fn v19_rr_window_zero_no_cursor_advance() {
     // Accrue at same price with zero OI doesn't touch consumption either.
     assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before);
 }
+
+// ============================================================================
+// v12.19 atomicity rollback proofs (spec §5.5 and §9.7 footer notes)
+// Priority #6 from rev6 plan.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_accrual_consumption_only_commits_on_success() {
+    // Spec §5.5 step 9a footer: if a later leg of accrue_market_to fails
+    // (e.g. K/F overflow), price_move_consumed_bps_this_generation is NOT
+    // incremented — it is committed only after all other state commits.
+    //
+    // Construct a state where step 9 (price-move cap) passes but step 11
+    // (mark-to-market) would overflow K_long.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = 1_000_000;
+    engine.oi_eff_short_q = 1_000_000;
+    engine.last_oracle_price = 100_000;
+    engine.fund_px_last = 100_000;
+    engine.last_market_slot = 0;
+    // Put K_long near i128::MAX so any positive mark delta overflows.
+    engine.adl_coeff_long = i128::MAX - 1;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    let consumed_before = engine.price_move_consumed_bps_this_generation;
+    let k_long_before = engine.adl_coeff_long;
+    let p_last_before = engine.last_oracle_price;
+    let slot_before = engine.last_market_slot;
+
+    // Move price up by 1 at P=100_000. abs_dp*10_000 = 10_000. Cap at dt=1,
+    // P=100_000 = 4 * 1 * 100_000 = 400_000 (zero_fee_params has
+    // max_price_move=4). So step 9 passes. But step 11 computes
+    // K_long += ADL_ONE * 1 = 1e15 → K already at i128::MAX-1 → overflow.
+    let r = engine.accrue_market_to(1, 100_001, 0);
+    assert!(r.is_err(), "K overflow must reject the accrual");
+
+    // Consumption must NOT have been committed.
+    assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before,
+        "price_move_consumed must roll back atomically with K/F commit");
+    assert_eq!(engine.adl_coeff_long, k_long_before);
+    assert_eq!(engine.last_oracle_price, p_last_before);
+    assert_eq!(engine.last_market_slot, slot_before);
+}
