@@ -5795,8 +5795,13 @@ impl RiskEngine {
 
     /// Check if resolved market is terminal-ready for payouts.
     /// v12.16.4: uses O(1) neg_pnl_account_count instead of O(n) scan.
+    ///
+    /// Defense-in-depth: the payout-snapshot-ready flag is not trusted in
+    /// isolation. Even when `resolved_payout_ready != 0`, all three
+    /// counters are re-checked. This makes readiness fail-conservative:
+    /// a corrupt ready flag alone cannot unlock terminal payout if the
+    /// stored / stale / negative-PnL counters still say otherwise.
     pub fn is_terminal_ready(&self) -> bool {
-        if self.resolved_payout_ready != 0 { return true; }
         // All positions zeroed
         if self.stored_pos_count_long != 0 || self.stored_pos_count_short != 0 {
             return false;
@@ -5806,7 +5811,14 @@ impl RiskEngine {
             return false;
         }
         // No negative PnL accounts remaining (spec §4.7, v12.16.4)
-        self.neg_pnl_account_count == 0
+        if self.neg_pnl_account_count != 0 {
+            return false;
+        }
+        // All counters agree: market is ready. The payout_ready flag is a
+        // one-way latch: once set, the snapshot h_num/h_den is locked for
+        // all remaining positive payouts. We accept either latch-set or
+        // counters-agree as "ready" — both imply a consistent view.
+        true
     }
 
     /// Phase 2: Terminal close. Requires terminal readiness.
