@@ -1423,16 +1423,15 @@ fn proof_fee_debt_sweep_consumes_released_pnl() {
 // proof_touch_drops_excess_at_fee_credits_limit deleted — tested removed feature.
 
 // ############################################################################
-// v12.14.0 compliance: flat-close guard uses Eq_maint_raw_i >= 0
+// Flat-close approval uses fee-neutral negative-shortfall comparison
 // ############################################################################
 
-/// v12.14.0 change #2: A trade that closes to flat must use Eq_maint_raw_i >= 0,
-/// not just PNL_i >= 0. An account with positive PNL but large fee debt
-/// (Eq_maint_raw_i = C + PNL - FeeDebt < 0) must be rejected.
+/// A flat result may leave negative raw equity only if the fee-neutral
+/// negative shortfall does not worsen against the captured pre-trade state.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_v1126_flat_close_uses_eq_maint_raw() {
+fn proof_flat_close_shortfall_predicate() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
@@ -1444,7 +1443,6 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
     engine.oi_eff_short_q = size as u128;
 
     // C=0, PNL=1000, fee debt=5000 => Eq_maint_raw=-4000.
-    // The flat-close guard must reject despite positive local PNL.
     engine.accounts[a as usize].pnl = 1000;
     engine.accounts[a as usize].fee_credits = I128::new(-5000);
     engine.pnl_pos_tot = 1000;
@@ -1452,30 +1450,43 @@ fn proof_v1126_flat_close_uses_eq_maint_raw() {
     assert!(engine.accounts[a as usize].pnl > 0);
     assert!(engine.account_equity_maint_raw_wide(&engine.accounts[a as usize]) < I256::ZERO);
 
-    let reject = engine.enforce_flat_close_bankruptcy_guard(a as usize, b as usize, 0, -size);
-    assert!(
-        matches!(reject, Err(RiskError::Undercollateralized)),
-        "flat close must reject when Eq_maint_raw < 0 even if PNL > 0"
+    let not_pre = mul_div_ceil_u128(size.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE);
+    let mm_req_pre = core::cmp::max(
+        mul_div_floor_u128(
+            not_pre,
+            engine.params.maintenance_margin_bps as u128,
+            10_000,
+        ),
+        engine.params.min_nonzero_mm_req,
     );
-
-    engine.accounts[a as usize].fee_credits = I128::new(-500);
-    assert!(engine.account_equity_maint_raw_wide(&engine.accounts[a as usize]) >= I256::ZERO);
+    let buffer_equal = I256::from_i128(-4000)
+        .checked_sub(I256::from_u128(mm_req_pre))
+        .expect("I256 sub");
     assert!(
         engine
-            .enforce_flat_close_bankruptcy_guard(a as usize, b as usize, 0, -size,)
+            .enforce_one_side_margin(a as usize, DEFAULT_ORACLE, &size, &0, buffer_equal, 0, 0)
             .is_ok(),
-        "flat close must pass when Eq_maint_raw >= 0"
+        "flat close may leave negative raw equity when shortfall is unchanged"
+    );
+
+    let buffer_worse = I256::from_i128(-3999)
+        .checked_sub(I256::from_u128(mm_req_pre))
+        .expect("I256 sub");
+    let reject =
+        engine.enforce_one_side_margin(a as usize, DEFAULT_ORACLE, &size, &0, buffer_worse, 0, 0);
+    assert!(
+        matches!(reject, Err(RiskError::Undercollateralized)),
+        "flat close must reject when negative shortfall worsens"
     );
 
     assert!(engine.check_conservation());
-    kani::cover!(reject.is_err(), "raw-equity flat-close rejection reachable");
+    kani::cover!(reject.is_err(), "flat-close shortfall rejection reachable");
 }
 
 // ############################################################################
-// v12.14.0 compliance: risk-reducing exemption is fee-neutral
+// Risk-reducing exemption is fee-neutral
 // ############################################################################
 
-/// v12.14.0 change #1: The risk-reducing buffer comparison must be fee-neutral.
 /// A genuine de-risking trade must not fail solely because the trading fee
 /// reduces post-trade equity.
 #[kani::proof]
@@ -3229,7 +3240,7 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
     let eq_pre = I256::from_i128(500_000 + pnl);
     let mm_req_pre = core::cmp::max(
         mul_div_floor_u128(
-            mul_div_floor_u128(old_eff.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE),
+            mul_div_ceil_u128(old_eff.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE),
             engine.params.maintenance_margin_bps as u128,
             10_000,
         ),
@@ -3347,7 +3358,7 @@ fn proof_execute_trade_full_margin_enforcement() {
     let mm_req_pre = if old_eff == 0 {
         0u128
     } else {
-        let not_pre = mul_div_floor_u128(old_eff.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE);
+        let not_pre = mul_div_ceil_u128(old_eff.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE);
         core::cmp::max(
             mul_div_floor_u128(
                 not_pre,

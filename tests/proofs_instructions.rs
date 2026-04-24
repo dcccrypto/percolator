@@ -1375,12 +1375,12 @@ fn proof_fee_shortfall_routes_to_fee_credits() {
 }
 
 // ############################################################################
-// SPEC PROPERTY #16: organic-close bankruptcy guard
+// SPEC PROPERTY #16: flat-close shortfall predicate
 // ############################################################################
 
 #[kani::proof]
 #[kani::solver(cadical)]
-fn proof_organic_close_bankruptcy_guard() {
+fn proof_flat_close_shortfall_non_worsening() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
 
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -1401,22 +1401,52 @@ fn proof_organic_close_bankruptcy_guard() {
     );
     assert!(engine.check_conservation());
 
-    let basis_before = engine.accounts[a as usize].position_basis_q;
-    let result2 = engine.enforce_flat_close_bankruptcy_guard(b as usize, a as usize, 0i128, 0i128);
-
-    assert!(
-        matches!(result2, Err(RiskError::Undercollateralized)),
-        "organic close that leaves uncovered negative PnL must be rejected"
+    let not_pre = mul_div_ceil_u128(size.unsigned_abs(), DEFAULT_ORACLE as u128, POS_SCALE);
+    let mm_req_pre = core::cmp::max(
+        mul_div_floor_u128(
+            not_pre,
+            engine.params.maintenance_margin_bps as u128,
+            10_000,
+        ),
+        engine.params.min_nonzero_mm_req,
     );
+    let buffer_pre_equal = I256::from_i128(-1)
+        .checked_sub(I256::from_u128(mm_req_pre))
+        .expect("I256 sub");
     assert!(
         engine
-            .enforce_flat_close_bankruptcy_guard(b as usize, a as usize, 0i128, size)
+            .enforce_one_side_margin(
+                a as usize,
+                DEFAULT_ORACLE,
+                &size,
+                &0,
+                buffer_pre_equal,
+                0,
+                0
+            )
             .is_ok(),
-        "the guard must reject only flat closes, not non-flat risk reductions"
+        "flat close may leave negative raw equity when shortfall does not worsen"
+    );
+
+    engine.accounts[a as usize].pnl = -2;
+    assert!(
+        matches!(
+            engine.enforce_one_side_margin(
+                a as usize,
+                DEFAULT_ORACLE,
+                &size,
+                &0,
+                buffer_pre_equal,
+                0,
+                0
+            ),
+            Err(RiskError::Undercollateralized)
+        ),
+        "flat close must reject when negative shortfall worsens"
     );
     assert!(
-        engine.accounts[a as usize].position_basis_q == basis_before,
-        "rejected organic close must not flatten the bankrupt account"
+        engine.accounts[a as usize].position_basis_q == size,
+        "margin check must not mutate position state"
     );
 }
 
@@ -1450,13 +1480,6 @@ fn proof_solvent_flat_close_succeeds() {
 
     let new_eff_a = 0i128;
     let new_eff_b = 0i128;
-    assert!(
-        engine
-            .enforce_flat_close_bankruptcy_guard(a as usize, b as usize, new_eff_a, new_eff_b)
-            .is_ok(),
-        "solvent flat close must pass the bankruptcy guard"
-    );
-
     let mm_req_pre = 50i128; // notional 1000 * 500 bps / 10_000
     let buffer_pre = I256::from_i128(1_000_000 - mm_req_pre);
     assert!(

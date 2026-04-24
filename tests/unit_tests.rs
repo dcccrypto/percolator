@@ -414,6 +414,29 @@ fn test_trade_succeeds_without_fresh_crank() {
 }
 
 #[test]
+fn trade_fast_forwards_idle_exposure_when_price_and_funding_are_unchanged() {
+    let (mut engine, a, b) = setup_two_users(1_000_000, 1_000_000);
+    let oracle = 1000u64;
+    let open_q = make_size_q(10);
+    engine
+        .execute_trade_not_atomic(a, b, oracle, 1, open_q, oracle, 0i128, 0, 100, None)
+        .unwrap();
+
+    let later_slot = 1 + engine.params.max_accrual_dt_slots + 25;
+    let reduce_q = make_size_q(1);
+    let result = engine.execute_trade_not_atomic(
+        b, a, oracle, later_slot, reduce_q, oracle, 0i128, 0, 100, None,
+    );
+
+    assert!(
+        result.is_ok(),
+        "trade accrual must fast-forward unchanged price and zero funding"
+    );
+    assert_eq!(engine.current_slot, later_slot);
+    assert_eq!(engine.last_market_slot, later_slot);
+}
+
+#[test]
 fn test_trade_undercollateralized_rejected() {
     let (mut engine, a, b) = setup_two_users(1_000, 1_000);
     let oracle = 1000u64;
@@ -1205,10 +1228,14 @@ fn adl_k_write_preserves_future_mark_headroom() {
     let init_px = 100_000u64;
     let mut engine = RiskEngine::new_with_market(params, 0, init_px);
 
+    let long = add_user_test(&mut engine, 0).unwrap();
+    let short = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(long as usize, 2).unwrap();
+    engine
+        .attach_effective_position(short as usize, -2)
+        .unwrap();
     engine.oi_eff_long_q = 2;
     engine.oi_eff_short_q = 2;
-    engine.stored_pos_count_short = 1;
-    engine.stored_pos_count_long = 1;
     let mut ctx = percolator::InstructionContext::new();
     let a_ps = ADL_ONE.checked_mul(POS_SCALE).unwrap();
     // Pick d so delta_k_abs ~ i128::MAX: ADL pushes K_short near the edge.
@@ -1759,9 +1786,14 @@ fn test_reset_pending_blocks_new_trades() {
     let (mut engine, a, b) = setup_two_users(100_000, 100_000);
     let oracle = 1000u64;
     let slot = 1u64;
+    let stale = add_user_test(&mut engine, 0).unwrap();
 
     // ResetPending with stale_account_count > 0 is NOT auto-finalizable,
     // so it must still block OI-increasing trades.
+    engine
+        .attach_effective_position(stale as usize, -make_size_q(1))
+        .unwrap();
+    engine.adl_epoch_short = 1;
     engine.side_mode_short = SideMode::ResetPending;
     engine.stale_account_count_short = 1;
 
@@ -4505,6 +4537,18 @@ fn test_withdraw_partial_and_full_ok() {
 // ============================================================================
 
 #[test]
+fn released_pos_is_mode_specific() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+    engine.accounts[idx].pnl = 100;
+    engine.accounts[idx].reserved_pnl = 40;
+
+    assert_eq!(engine.released_pos(idx), 60);
+    engine.market_mode = MarketMode::Resolved;
+    assert_eq!(engine.released_pos(idx), 100);
+}
+
+#[test]
 fn test_property_52_convert_released_pnl_explicit() {
     let oracle = 1_000u64;
     let slot = 1u64;
@@ -6225,17 +6269,25 @@ fn free_slot_rejects_double_free() {
 }
 
 #[test]
-fn free_slot_rejects_nonzero_fee_credits() {
-    // Fee debt (fee_credits < 0) must not be silently forgiven by free_slot.
+fn free_slot_forgives_fee_debt() {
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
-    // Capital 0, pnl 0, no buckets — all the pre-existing checks pass.
     engine.accounts[idx as usize].fee_credits = I128::new(-1);
+
+    engine.free_slot(idx).unwrap();
+    assert!(!engine.is_used(idx as usize));
+    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
+}
+
+#[test]
+fn free_slot_rejects_positive_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(1);
 
     let res = engine.free_slot(idx);
     assert_eq!(res, Err(RiskError::CorruptState));
     assert!(engine.is_used(idx as usize));
-    assert_eq!(engine.accounts[idx as usize].fee_credits.get(), -1);
 }
 
 #[test]
@@ -6303,11 +6355,7 @@ fn materialize_anchors_last_fee_slot_at_materialize_slot() {
 }
 
 // ============================================================================
-// assert_public_postconditions cheap O(1) checks. Covers: pnl_matured <=
-// pnl_pos_tot, materialized_account_count <= params.max_accounts, neg_pnl <=
-// materialized, rr_cursor < params.max_accounts, resolved_payout_h_num <=
-// resolved_payout_h_den when ready, oracle-price sentinels, slot monotonicity,
-// and payout-ready flag consistency.
+// assert_public_postconditions checks global and account invariants.
 // ============================================================================
 
 #[test]
@@ -6337,6 +6385,45 @@ fn public_postcondition_rejects_neg_pnl_exceeding_materialized() {
     engine.materialized_account_count = 2;
     engine.neg_pnl_account_count = 3; // corrupt: > materialized
     let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_vault_above_max() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.vault = U128::new(MAX_VAULT_TVL + 1);
+    let r = engine.top_up_insurance_fund(0, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_positive_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(1);
+    let r = engine.top_up_insurance_fund(0, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_malformed_reserve_shape() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].pnl = 10;
+    engine.accounts[idx as usize].reserved_pnl = 1;
+    let r = engine.top_up_insurance_fund(0, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_stored_position_count_mismatch() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine
+        .attach_effective_position(idx as usize, make_size_q(1))
+        .unwrap();
+    engine.stored_pos_count_long = 0;
+    let r = engine.top_up_insurance_fund(0, 0);
     assert_eq!(r, Err(RiskError::CorruptState));
 }
 
@@ -6380,6 +6467,14 @@ fn public_postcondition_rejects_live_with_nonzero_resolved_price() {
 fn public_postcondition_rejects_live_with_nonzero_resolved_k_delta() {
     let mut engine = RiskEngine::new(default_params());
     engine.resolved_k_long_terminal_delta = 1;
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_live_with_nonzero_resolved_slot() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.resolved_slot = 1;
     let r = engine.top_up_insurance_fund(1, 0);
     assert_eq!(r, Err(RiskError::CorruptState));
 }
