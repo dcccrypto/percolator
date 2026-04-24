@@ -732,7 +732,6 @@ fn t11_54_worked_example_regression() {
     engine
         .deposit_not_atomic(b, 10_000_000, DEFAULT_SLOT)
         .unwrap();
-    engine.last_crank_slot = DEFAULT_SLOT;
 
     let size_q = (2 * POS_SCALE) as i128;
     engine.accounts[a as usize].position_basis_q = size_q;

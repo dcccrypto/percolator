@@ -642,68 +642,6 @@ fn proof_keeper_hint_fullclose_passthrough() {
 }
 
 // ############################################################################
-// FIX 10: GC cursor advances by actual scan count, not max_scan
-// ############################################################################
-
-/// After garbage_collect_dust with no dust accounts, gc_cursor must still
-/// advance by the number of slots scanned (all MAX_ACCOUNTS when no early break).
-/// With zero used accounts, scanned == min(ACCOUNTS_PER_CRANK, MAX_ACCOUNTS)
-/// and gc_cursor wraps around accordingly.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_gc_cursor_advances_by_scanned() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let cursor_before = engine.gc_cursor;
-
-    // No accounts → nothing to GC, but cursor must advance by scanned count
-    let num_freed = engine.garbage_collect_dust().unwrap();
-    assert_eq!(num_freed, 0, "no accounts to GC");
-
-    let cursor_after = engine.gc_cursor;
-    let max_scan = core::cmp::min(ACCOUNTS_PER_CRANK as usize, MAX_ACCOUNTS);
-    let mask = MAX_ACCOUNTS - 1;
-    let expected = ((cursor_before as usize + max_scan) & mask) as u16;
-    assert_eq!(
-        cursor_after, expected,
-        "gc_cursor must advance by actual scanned count"
-    );
-}
-
-/// When some dust accounts exist, gc_cursor advances by exactly the number
-/// of offsets scanned (not max_scan). Under Kani (MAX_ACCOUNTS=4),
-/// GC_CLOSE_BUDGET=32 > MAX_ACCOUNTS so the budget never triggers early break,
-/// but the scanned-count tracking is still exercised.
-#[kani::proof]
-#[kani::unwind(34)]
-#[kani::solver(cadical)]
-fn proof_gc_cursor_with_drained_accounts() {
-    // After min_initial_deposit removal, GC reclaims only fully-drained
-    // accounts (capital == 0). Wrappers drain residuals via
-    // charge_account_fee_not_atomic before expecting GC to recycle.
-    let mut engine = RiskEngine::new(zero_fee_params());
-
-    let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 1, DEFAULT_SLOT).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(b, 1, DEFAULT_SLOT).unwrap();
-
-    // Simulate the wrapper having drained all capital (via
-    // charge_account_fee, which routes residual into insurance).
-    engine.set_capital(a as usize, 0).unwrap();
-    engine.set_capital(b as usize, 0).unwrap();
-
-    engine.gc_cursor = 0;
-    let num_freed = engine.garbage_collect_dust().unwrap();
-
-    assert_eq!(num_freed, 2, "both drained accounts should be freed");
-
-    let max_scan = core::cmp::min(ACCOUNTS_PER_CRANK as usize, MAX_ACCOUNTS);
-    let mask = MAX_ACCOUNTS - 1;
-    assert_eq!(engine.gc_cursor, ((0 + max_scan) & mask) as u16);
-}
-
-// ############################################################################
 // FIX 11: validate_params rejects min_liquidation_abs > liquidation_fee_cap
 // ############################################################################
 
@@ -785,7 +723,6 @@ fn proof_withdraw_no_crank_gate() {
         .deposit_not_atomic(idx, 10_000, DEFAULT_SLOT)
         .unwrap();
 
-    // last_crank_slot is 0, now_slot is ahead (within max_accrual_dt_slots=1000 envelope).
     // Must still succeed — no keeper_crank_not_atomic required.
     let far_slot = DEFAULT_SLOT + 500;
     let result =
@@ -797,26 +734,18 @@ fn proof_withdraw_no_crank_gate() {
 }
 
 /// Trade entry must be admitted even when no keeper_crank_not_atomic has ever
-/// run. Spec §10.5 does not gate execute_trade_not_atomic on keeper liveness;
-/// the relevant time gate is the market accrual envelope, not last_crank_slot.
+/// run. Spec §10.5 gates on the market accrual envelope only.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_trade_no_crank_gate() {
-    let mut params = zero_fee_params();
-    params.max_crank_staleness_slots = 0;
-    let mut engine = RiskEngine::new_with_market(params, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
     engine.deposit_not_atomic(b, 100_000, DEFAULT_SLOT).unwrap();
 
-    // last_crank_slot is stale relative to now_slot, and the configured
-    // max_crank_staleness is zero. A keeper-freshness gate would reject here.
     let size: i128 = POS_SCALE as i128;
-    assert!(engine.last_crank_slot == 0);
-    assert!(DEFAULT_SLOT > engine.last_crank_slot);
-    assert!(engine.params.max_crank_staleness_slots == 0);
 
     let entry = engine.validate_execute_trade_entry(
         a,
@@ -834,47 +763,35 @@ fn proof_trade_no_crank_gate() {
         "trade entry must not require fresh crank (spec §0 goal 6)"
     );
 
-    let last_crank_before = engine.last_crank_slot;
     let accrual = engine.accrue_market_to(DEFAULT_SLOT, DEFAULT_ORACLE, 0i128);
     assert!(
         accrual.is_ok(),
         "trade's market accrual step must not require fresh crank"
     );
-    assert!(
-        engine.last_crank_slot == last_crank_before,
-        "market accrual must not synthesize a keeper crank"
-    );
     assert!(engine.check_conservation());
 }
 
 // ############################################################################
-// FIX 14: GC skips accounts with negative PnL (spec §2.6 precondition)
+// FIX 14: Reclaim rejects accounts with negative PnL
 // ############################################################################
 
-/// garbage_collect_dust must NOT free an account with PNL < 0.
 /// Spec §2.6 requires PNL_i == 0 as a precondition for reclamation.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_gc_skips_negative_pnl() {
+fn proof_reclaim_rejects_negative_pnl() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = add_user_test(&mut engine, 0).unwrap();
-    // Deposit 1 token (below min_initial_deposit=2), making it a dust candidate
     engine.deposit_not_atomic(idx, 1, DEFAULT_SLOT).unwrap();
 
-    // Directly set negative PnL to simulate a flat account with unresolved loss.
-    // In production this arises when a position is closed at a loss but
-    // touch_account_live_local → §7.3 hasn't run yet.
     engine.set_pnl(idx as usize, -100i128);
 
     let ins_before = engine.insurance_fund.balance.get();
 
-    engine.gc_cursor = 0;
-    let num_freed = engine.garbage_collect_dust().unwrap();
+    let result = engine.reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT);
 
-    // GC must skip the account (PNL != 0 per §2.6 precondition)
-    assert_eq!(num_freed, 0, "GC must not free account with PNL < 0");
+    assert!(result.is_err(), "reclaim must reject account with PNL < 0");
     assert!(engine.is_used(idx as usize), "account must remain used");
     assert_eq!(
         engine.insurance_fund.balance.get(),

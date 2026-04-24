@@ -109,7 +109,6 @@ pub fn zero_fee_params() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 0,
         max_accounts: MAX_ACCOUNTS as u64,
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 0,
         liquidation_fee_cap: U128::ZERO,
         min_liquidation_abs: U128::ZERO,
@@ -143,7 +142,7 @@ pub fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16>
     // moving capital/vault. The public engine API only materializes via
     // deposit_not_atomic(amount >= min_initial_deposit); that spec-strict
     // path is exercised in dedicated materialization tests.
-    engine.materialize_at(idx, DEFAULT_SLOT)?;
+    engine.materialize_at(idx, engine.current_slot)?;
     Ok(idx)
 }
 
@@ -199,7 +198,6 @@ pub fn default_params() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: MAX_ACCOUNTS as u64,
-        max_crank_staleness_slots: 1000,
         liquidation_fee_bps: 100,
         liquidation_fee_cap: U128::new(1_000_000),
         min_liquidation_abs: U128::new(0),

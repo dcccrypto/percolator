@@ -26,7 +26,6 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 64,
-        max_crank_staleness_slots: 1000,
         liquidation_fee_bps: 100,
         liquidation_fee_cap: U128::new(1_000_000),
         min_liquidation_abs: U128::new(0),
@@ -54,7 +53,6 @@ fn wide_price_move_params() -> RiskParams {
         initial_margin_bps: 3500,
         trading_fee_bps: 10,
         max_accounts: 64,
-        max_crank_staleness_slots: 1000,
         liquidation_fee_bps: 100,
         liquidation_fee_cap: U128::new(1_000_000),
         min_liquidation_abs: U128::new(0),
@@ -97,7 +95,7 @@ fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16> {
     if idx == u16::MAX || (idx as usize) >= MAX_ACCOUNTS {
         return Err(RiskError::Overflow);
     }
-    engine.materialize_at(idx, 100)?;
+    engine.materialize_at(idx, engine.current_slot)?;
     Ok(idx)
 }
 
@@ -204,12 +202,14 @@ fn test_params_allow_mm_eq_im() {
 }
 
 #[test]
-#[should_panic(expected = "maintenance_margin_bps must be <= initial_margin_bps")]
 fn test_params_require_mm_le_im() {
     let mut params = default_params();
     params.maintenance_margin_bps = 1500;
-    params.initial_margin_bps = 1000; // mm > im => should panic
-    let _ = RiskEngine::new(params);
+    params.initial_margin_bps = 1000;
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 // ============================================================================
@@ -1344,7 +1344,6 @@ fn trade_at_position_cap_still_rejects_real_overflow() {
 }
 
 #[test]
-#[should_panic(expected = "funding lifetime")]
 fn validate_params_rejects_short_funding_lifetime() {
     // Regression: validate_params must refuse any (max_rate, min_lifetime)
     // pair that allows cumulative F saturation within min_lifetime_slots.
@@ -1355,20 +1354,24 @@ fn validate_params_rejects_short_funding_lifetime() {
     let mut params = default_params();
     params.max_accrual_dt_slots = 1;
     params.max_abs_funding_e9_per_slot = 10_000;
-    // rate * lifetime = 1e4 * 2e7 = 2e11 > 1.7e11 → cumulative assert panics.
     params.min_funding_lifetime_slots = 20_000_000;
-    let _e = RiskEngine::new(params);
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
-#[should_panic(expected = "min_funding_lifetime_slots must be >=")]
 fn validate_params_rejects_lifetime_below_max_dt() {
     // min_funding_lifetime_slots >= max_accrual_dt_slots: the cumulative
     // bound must be at least as strong as the per-call bound.
     let mut params = default_params();
     params.max_accrual_dt_slots = 1_000;
-    params.min_funding_lifetime_slots = 500; // < max_dt → reject
-    let _e = RiskEngine::new(params);
+    params.min_funding_lifetime_slots = 500;
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 // ============================================================================
@@ -1386,41 +1389,49 @@ fn validate_params_accepts_tight_solvency_envelope() {
 }
 
 #[test]
-#[should_panic(expected = "solvency envelope")]
 fn validate_params_rejects_price_budget_breach() {
     // price_budget blown out by raising per-slot cap beyond envelope
     // price = 10 * 100 = 1000 > 400 headroom → reject.
     let mut params = default_params();
     params.max_price_move_bps_per_slot = 10;
-    let _e = RiskEngine::new(params);
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
-#[should_panic(expected = "solvency envelope")]
 fn validate_params_rejects_funding_budget_breach() {
     // Raise max_dt so funding_budget dominates:
     // funding_budget = floor(10_000 * 10_000 * 10_000 / 1e9) = 1000 > 500 alone.
     // (Also price_budget = 3 * 10_000 = 30_000 ≫ maintenance.) Rejected.
     let mut params = default_params();
     params.max_accrual_dt_slots = 10_000;
-    let _e = RiskEngine::new(params);
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
-#[should_panic(expected = "solvency envelope")]
 fn validate_params_rejects_liquidation_fee_breach() {
     // Raise liq_fee beyond remaining envelope.
     let mut params = default_params();
     params.liquidation_fee_bps = 400; // 300 price + 10 funding + 400 liq = 710 > 500
-    let _e = RiskEngine::new(params);
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
-#[should_panic(expected = "max_price_move_bps_per_slot must be > 0")]
 fn validate_params_rejects_zero_price_move_cap() {
     let mut params = default_params();
     params.max_price_move_bps_per_slot = 0;
-    let _e = RiskEngine::new(params);
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
@@ -1660,12 +1671,12 @@ fn test_keeper_crank_advances_slot() {
             0,
         )
         .expect("crank");
-    assert!(outcome.advanced);
-    assert_eq!(engine.last_crank_slot, slot);
+    assert_eq!(outcome.num_liquidations, 0);
+    assert_eq!(engine.current_slot, slot);
 }
 
 #[test]
-fn test_keeper_crank_same_slot_not_advanced() {
+fn test_keeper_crank_same_slot_preserves_slot() {
     let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
     let slot = 10u64;
@@ -1697,7 +1708,8 @@ fn test_keeper_crank_same_slot_not_advanced() {
             0,
         )
         .expect("crank2");
-    assert!(!outcome.advanced);
+    assert_eq!(outcome.num_liquidations, 0);
+    assert_eq!(engine.current_slot, slot);
 }
 
 #[test]
@@ -1721,7 +1733,7 @@ fn test_keeper_crank_no_engine_native_maintenance_fee() {
     let outcome = engine
         .keeper_crank_not_atomic(slot2, oracle, &[(caller, None)], 64, 0i128, 0, 100, None, 0)
         .expect("crank");
-    assert!(outcome.advanced);
+    assert_eq!(outcome.num_liquidations, 0);
 
     let capital_after = engine.accounts[caller as usize].capital.get();
     assert_eq!(
@@ -3463,7 +3475,8 @@ fn test_keeper_crank_processes_candidates() {
     let outcome = engine
         .keeper_crank_not_atomic(5, 1000, &[(a, None), (b, None)], 64, 0i128, 0, 100, None, 0)
         .unwrap();
-    assert!(outcome.advanced, "crank must advance slot");
+    assert_eq!(outcome.num_liquidations, 0);
+    assert_eq!(engine.current_slot, 5);
 }
 
 #[test]
@@ -3740,7 +3753,6 @@ fn test_charge_fee_safe_rejects_pnl_at_i256_min() {
     engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = oracle;
     engine.last_market_slot = slot;
-    engine.last_crank_slot = slot;
 
     // Liquidation should handle this gracefully (return Err or succeed without i128::MIN)
     let result = engine.liquidate_at_oracle_not_atomic(
@@ -3987,140 +3999,6 @@ fn test_multiple_cranks_do_not_brick_protocol() {
     assert!(
         result.is_ok(),
         "protocol must not be bricked by a previous crank"
-    );
-}
-
-// ============================================================================
-// Issue #3: GC must not delete accounts with fee_credits
-// ============================================================================
-
-#[test]
-fn test_gc_dust_preserves_fee_credits() {
-    let mut engine = RiskEngine::new(default_params());
-    let oracle = 1000u64;
-    let slot = 1u64;
-    engine.current_slot = slot;
-
-    let a = add_user_test(&mut engine, 1000).unwrap();
-    engine.deposit_not_atomic(a, 10_000, slot).unwrap();
-    engine
-        .keeper_crank_not_atomic(
-            slot,
-            oracle,
-            &[] as &[(u16, Option<LiquidationPolicy>)],
-            64,
-            0i128,
-            0,
-            100,
-            None,
-            0,
-        )
-        .unwrap();
-
-    // Set up dust-like state: 0 capital, 0 position, but positive fee_credits
-    engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
-    engine.set_pnl(a as usize, 0i128);
-    engine.accounts[a as usize].fee_credits = I128::new(5_000);
-
-    assert!(engine.is_used(a as usize), "account must exist before GC");
-
-    engine.garbage_collect_dust();
-
-    assert!(
-        engine.is_used(a as usize),
-        "GC must not delete account with non-zero fee_credits"
-    );
-    assert_eq!(
-        engine.accounts[a as usize].fee_credits.get(),
-        5_000,
-        "fee_credits must be preserved"
-    );
-}
-
-// ============================================================================
-// Bug fix #1: GC must collect dead accounts with negative fee_credits (debt)
-// ============================================================================
-
-#[test]
-fn test_gc_collects_dead_account_with_negative_fee_credits() {
-    // Before the fix: fee_credits negative causes GC to skip the dead account forever.
-    let mut engine = RiskEngine::new(default_params());
-    let oracle = 1000u64;
-    let slot = 1u64;
-    engine.current_slot = slot;
-
-    let a = add_user_test(&mut engine, 1000).unwrap();
-    engine.deposit_not_atomic(a, 10_000, slot).unwrap();
-    engine
-        .keeper_crank_not_atomic(
-            slot,
-            oracle,
-            &[] as &[(u16, Option<LiquidationPolicy>)],
-            64,
-            0i128,
-            0,
-            100,
-            None,
-            0,
-        )
-        .unwrap();
-
-    // Simulate abandoned account: zero everything, inject negative fee_credits
-    engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
-    engine.set_pnl(a as usize, 0i128);
-    engine.accounts[a as usize].fee_credits = I128::new(-500);
-
-    let num_used_before = engine.num_used_accounts;
-    engine.garbage_collect_dust();
-
-    // Account must be collected despite negative fee_credits
-    assert!(
-        !engine.is_used(a as usize),
-        "dead account with negative fee_credits must be collected by GC"
-    );
-    assert!(
-        engine.num_used_accounts < num_used_before,
-        "used account count must decrease"
-    );
-}
-
-#[test]
-fn test_gc_still_protects_positive_fee_credits() {
-    // Regression: the fix must not break protection of prepaid credits
-    let mut engine = RiskEngine::new(default_params());
-    let oracle = 1000u64;
-    let slot = 1u64;
-    engine.current_slot = slot;
-
-    let a = add_user_test(&mut engine, 1000).unwrap();
-    engine.deposit_not_atomic(a, 10_000, slot).unwrap();
-    engine
-        .keeper_crank_not_atomic(
-            slot,
-            oracle,
-            &[] as &[(u16, Option<LiquidationPolicy>)],
-            64,
-            0i128,
-            0,
-            100,
-            None,
-            0,
-        )
-        .unwrap();
-
-    engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
-    engine.set_pnl(a as usize, 0i128);
-    // Large positive prepaid credits
-    engine.accounts[a as usize].fee_credits = I128::new(1_000_000);
-
-    engine.garbage_collect_dust();
-
-    assert!(
-        engine.is_used(a as usize),
-        "GC must protect accounts with positive (prepaid) fee_credits"
     );
 }
 
@@ -6314,7 +6192,7 @@ fn init_in_place_fully_canonicalizes_nonzero_memory() {
     engine.c_tot = U128::new(999);
     engine.vault = U128::new(999);
 
-    engine.init_in_place(default_params(), 0, 1);
+    engine.init_in_place(default_params(), 0, 1).unwrap();
 
     assert!(engine.used.iter().all(|&w| w == 0));
     assert_eq!(engine.num_used_accounts, 0);
@@ -6413,6 +6291,47 @@ fn public_postcondition_rejects_malformed_reserve_shape() {
     engine.accounts[idx as usize].reserved_pnl = 1;
     let r = engine.top_up_insurance_fund(0, 0);
     assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_noncanonical_account_fields() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].kind = 9;
+    assert_eq!(
+        engine.top_up_insurance_fund(0, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].sched_present = 2;
+    assert_eq!(
+        engine.top_up_insurance_fund(0, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].last_fee_slot = engine.current_slot + 1;
+    assert_eq!(
+        engine.top_up_insurance_fund(0, 0),
+        Err(RiskError::CorruptState)
+    );
+}
+
+#[test]
+fn checked_views_reject_bad_indices_and_unused_slots() {
+    let engine = RiskEngine::new(default_params());
+    assert_eq!(
+        engine.try_effective_pos_q(MAX_ACCOUNTS),
+        Err(RiskError::AccountNotFound)
+    );
+    assert_eq!(
+        engine.try_notional(0, 1000),
+        Err(RiskError::AccountNotFound)
+    );
+    assert_eq!(engine.try_released_pos(0), Err(RiskError::AccountNotFound));
 }
 
 #[test]
@@ -6808,7 +6727,7 @@ fn init_in_place_zeroes_last_fee_slot_for_all_accounts() {
         engine.accounts[i].last_fee_slot = (i as u64) + 9999;
     }
 
-    engine.init_in_place(default_params(), 0, 1);
+    engine.init_in_place(default_params(), 0, 1).unwrap();
 
     for i in 0..MAX_ACCOUNTS {
         assert_eq!(
@@ -6926,14 +6845,14 @@ fn force_close_resolved_uses_stored_resolved_slot_not_caller_input() {
 }
 
 #[test]
-#[should_panic(expected = "h_max must be > 0")]
 fn validate_params_rejects_zero_hmax() {
-    // Reviewer claim 2: h_max == 0 makes every live op fail at
-    // validate_admission_pair. Fail fast at init instead.
     let mut p = default_params();
     p.h_min = 0;
     p.h_max = 0;
-    let _e = RiskEngine::new(p);
+    assert_eq!(
+        RiskEngine::try_validate_params(&p),
+        Err(RiskError::Overflow)
+    );
 }
 
 // ============================================================================
@@ -7039,7 +6958,7 @@ fn recurring_fee_api_docs_warn_against_double_charge() {
     // last_fee_slot, this test must be updated in lockstep so callers
     // aren't silently migrated to a different contract.
     let mut engine = RiskEngine::new(wide_envelope_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
+    let idx = engine.free_head;
     engine.deposit_not_atomic(idx, 1_000_000, 100).unwrap();
     assert_eq!(engine.accounts[idx as usize].last_fee_slot, 100);
 
@@ -7207,7 +7126,7 @@ fn sync_caps_and_advances_even_when_raw_product_exceeds_u128() {
         r.is_ok(),
         "sync MUST NOT fail solely because uncapped raw fee exceeds u128"
     );
-    // Anchor advanced (engine picks current_slot = now_slot = 200 on Live).
+    // Fee anchor moves to the live sync slot.
     assert_eq!(engine.accounts[idx as usize].last_fee_slot, 200);
     // Capital drained to zero, fee_credits absorbs remainder of the cap.
     assert_eq!(engine.accounts[idx as usize].capital.get(), 0);

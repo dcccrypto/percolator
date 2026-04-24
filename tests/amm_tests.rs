@@ -21,7 +21,6 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 3500,
         trading_fee_bps: 10,
         max_accounts: 64,
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
         min_liquidation_abs: U128::new(0),
@@ -47,7 +46,7 @@ fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16> {
     if idx == u16::MAX || (idx as usize) >= MAX_ACCOUNTS {
         return Err(RiskError::Overflow);
     }
-    engine.materialize_at(idx, 100)?;
+    engine.materialize_at(idx, engine.current_slot)?;
     Ok(idx)
 }
 

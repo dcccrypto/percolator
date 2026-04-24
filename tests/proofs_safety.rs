@@ -36,7 +36,6 @@ fn bounded_deposit_conservation() {
 #[kani::solver(cadical)]
 fn bounded_withdraw_conservation() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.last_crank_slot = DEFAULT_SLOT;
 
     let deposit: u32 = kani::any();
     kani::assume(deposit >= 1000 && deposit <= 1_000_000);
@@ -314,7 +313,6 @@ fn proof_top_up_insurance_preserves_conservation() {
 #[kani::solver(cadical)]
 fn proof_deposit_then_withdraw_roundtrip() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.last_crank_slot = DEFAULT_SLOT;
 
     let idx = add_user_test(&mut engine, 0).unwrap();
     let amount: u32 = kani::any();
@@ -977,7 +975,6 @@ fn proof_funding_rate_validated_before_storage() {
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
-    engine.last_crank_slot = 0;
 
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
@@ -997,12 +994,12 @@ fn proof_funding_rate_validated_before_storage() {
 }
 
 // ============================================================================
-// proof_gc_dust_preserves_fee_credits
+// proof_reclaim_empty_fee_credit_policy
 // ============================================================================
 
 #[kani::proof]
 #[kani::solver(cadical)]
-fn proof_gc_dust_preserves_fee_credits() {
+fn proof_reclaim_empty_fee_credit_policy() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -1010,7 +1007,6 @@ fn proof_gc_dust_preserves_fee_credits() {
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 1;
-    engine.last_crank_slot = 1;
     engine.current_slot = 1;
 
     // Account has 0 capital, 0 position, but positive fee_credits (prepaid)
@@ -1021,20 +1017,18 @@ fn proof_gc_dust_preserves_fee_credits() {
     engine.set_pnl(a as usize, 0i128);
 
     assert!(engine.is_used(a as usize));
-    engine.garbage_collect_dust();
+    let positive = engine.reclaim_empty_account_not_atomic(a, 1);
 
-    // Positive fee_credits: account must be PRESERVED (prepaid credits)
+    assert!(positive.is_err());
     assert!(
         engine.is_used(a as usize),
-        "GC must not delete account with positive fee_credits"
+        "reclaim must not delete account with positive fee_credits"
     );
     assert!(
         engine.accounts[a as usize].fee_credits.get() == 5_000,
         "fee_credits must be preserved"
     );
 
-    // Now test negative fee_credits (debt): account SHOULD be collected
-    // and the uncollectible debt written off
     let b = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(b, 10_000, 1).unwrap();
     engine.set_capital(b as usize, 0);
@@ -1044,12 +1038,12 @@ fn proof_gc_dust_preserves_fee_credits() {
     engine.set_pnl(b as usize, 0i128);
 
     assert!(engine.is_used(b as usize));
-    engine.garbage_collect_dust();
+    let negative = engine.reclaim_empty_account_not_atomic(b, 1);
 
-    // Negative fee_credits (debt) on dead account: must be collected and debt written off
+    assert!(negative.is_ok());
     assert!(
         !engine.is_used(b as usize),
-        "GC must collect dead account with negative fee_credits (uncollectible debt)"
+        "reclaim must collect empty account with fee debt"
     );
 }
 
@@ -1658,17 +1652,10 @@ fn proof_v1126_min_nonzero_margin_floor() {
 // v12.14.0 §2.6: flat-dust reclamation (GC sweeps 0 < C_i < MIN_INITIAL_DEPOSIT)
 // ############################################################################
 
-/// A flat account with 0 < C_i < MIN_INITIAL_DEPOSIT, zero PnL/basis/reserved,
-/// and nonpositive fee credits must be reclaimable by garbage_collect_dust.
-/// The dust capital must be swept into insurance, not lost.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_gc_reclaims_drained_accounts() {
-    // After min_initial_deposit removal, GC reclaims only accounts with
-    // capital == 0. Any residual is swept to insurance by the wrapper
-    // (via charge_account_fee) before GC runs. The empty-market
-    // rounding-surplus sweep still fires at the end of GC.
+fn proof_reclaim_empty_account_reclaims_drained_accounts() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let idx = add_user_test(&mut engine, 0).unwrap();
@@ -1676,38 +1663,21 @@ fn proof_gc_reclaims_drained_accounts() {
         .deposit_not_atomic(idx, 10_000, DEFAULT_SLOT)
         .unwrap();
 
-    // Wrapper drained the capital (modeled here via set_capital(0) to
-    // avoid the charge_account_fee state dependencies). Any residual
-    // that would normally route to insurance is already in insurance.
     engine.set_capital(idx as usize, 0).unwrap();
 
     assert!(engine.accounts[idx as usize].pnl == 0);
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
     assert!(engine.is_used(idx as usize));
 
-    let ins_before = engine.insurance_fund.balance.get();
-
-    // GC must reclaim this drained account.
-    engine.garbage_collect_dust();
+    engine
+        .reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT)
+        .unwrap();
 
     assert!(
         !engine.is_used(idx as usize),
-        "GC must reclaim flat account with capital == 0"
+        "reclaim must recycle flat account with capital == 0"
     );
 
-    // The empty-market sweep absorbs any vault ↔ (c_tot + insurance)
-    // residual into insurance once num_used_accounts == 0 after the free.
-    let ins_after = engine.insurance_fund.balance.get();
-    assert!(
-        ins_after >= ins_before,
-        "insurance must be non-decreasing across reclaim"
-    );
-    assert!(
-        engine.vault.get() == ins_after,
-        "after empty-market close, vault must equal insurance"
-    );
-
-    // Conservation must hold
     assert!(engine.check_conservation());
 }
 
@@ -2059,27 +2029,24 @@ fn proof_audit_im_uses_exact_raw_equity() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_audit_empty_lp_gc_reclaimable() {
-    // An LP account drained to zero capital, zero position, zero PnL
-    // must be reclaimable by garbage_collect_dust per spec §2.6.
+fn proof_audit_empty_lp_reclaimable() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     let lp = add_lp_test(&mut engine, [0u8; 32], [0u8; 32], 0).unwrap();
     assert!(engine.is_used(lp as usize), "LP must be materialized");
     assert!(engine.accounts[lp as usize].is_lp(), "must be LP account");
 
-    // LP has zero capital, zero PnL, zero position — it's dead
     assert!(engine.accounts[lp as usize].capital.get() == 0);
     assert!(engine.accounts[lp as usize].pnl == 0);
     assert!(engine.accounts[lp as usize].position_basis_q == 0);
 
-    // GC should reclaim this empty LP slot
-    let freed = engine.garbage_collect_dust();
+    engine
+        .reclaim_empty_account_not_atomic(lp, DEFAULT_SLOT)
+        .unwrap();
 
-    // Per spec §2.6: empty accounts must be reclaimable
     assert!(
         !engine.is_used(lp as usize),
-        "empty LP account must be reclaimed by garbage_collect_dust"
+        "empty LP account must be reclaimable"
     );
 }
 
@@ -2387,8 +2354,6 @@ fn proof_audit4_init_in_place_canonical() {
     engine.pnl_pos_tot = 333;
     engine.pnl_matured_pos_tot = 222;
     engine.current_slot = 42;
-    engine.last_crank_slot = 77;
-    engine.gc_cursor = 2;
     engine.adl_mult_long = 42;
     engine.adl_mult_short = 43;
     engine.adl_coeff_long = 100;
@@ -2416,7 +2381,7 @@ fn proof_audit4_init_in_place_canonical() {
     engine.free_head = u16::MAX; // break the freelist
 
     // Re-initialize — must fully reset all fields
-    engine.init_in_place(params, 0, DEFAULT_ORACLE);
+    engine.init_in_place(params, 0, DEFAULT_ORACLE).unwrap();
 
     // ---- Vault / insurance ----
     assert!(engine.vault.get() == 0);
@@ -2429,8 +2394,6 @@ fn proof_audit4_init_in_place_canonical() {
 
     // ---- Slots / cursors ----
     assert!(engine.current_slot == 0);
-    assert!(engine.last_crank_slot == 0);
-    assert!(engine.gc_cursor == 0);
     assert!(engine.f_long_num == 0);
     assert!(engine.f_short_num == 0);
 

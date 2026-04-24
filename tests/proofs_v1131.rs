@@ -579,14 +579,28 @@ fn proof_deposit_sweep_when_pnl_nonneg() {
 // ############################################################################
 
 /// top_up_insurance_fund uses checked addition, enforces MAX_VAULT_TVL,
-/// accepts only monotone slots inside the live-accrual envelope, and is
-/// validate-then-mutate on stale/envelope rejection.
+/// accepts monotone zero-OI idle fast-forward, rejects exposed over-envelope
+/// no-accrual time jumps, and is validate-then-mutate on rejection.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_top_up_insurance_now_slot() {
     let mut engine = RiskEngine::new(zero_fee_params());
     engine.current_slot = 50;
+
+    let exposed: bool = kani::any();
+    if exposed {
+        let a = add_user_test(&mut engine, 0).unwrap();
+        let b = add_user_test(&mut engine, 0).unwrap();
+        engine
+            .attach_effective_position(a as usize, POS_SCALE as i128)
+            .unwrap();
+        engine
+            .attach_effective_position(b as usize, -(POS_SCALE as i128))
+            .unwrap();
+        engine.oi_eff_long_q = POS_SCALE;
+        engine.oi_eff_short_q = POS_SCALE;
+    }
 
     let amount: u32 = kani::any();
     kani::assume(amount > 0 && amount <= 1_000_000);
@@ -603,11 +617,11 @@ fn proof_top_up_insurance_now_slot() {
         .expect("envelope top");
 
     let result = engine.top_up_insurance_fund(amount as u128, now_slot);
-    let should_accept = now_slot >= current_before && now_slot <= envelope_top;
+    let should_accept = now_slot >= current_before && (!exposed || now_slot <= envelope_top);
 
     assert!(
         result.is_ok() == should_accept,
-        "top_up acceptance must match monotone live-accrual envelope"
+        "top_up acceptance must match no-accrual public path guard"
     );
     if should_accept {
         assert!(
@@ -638,8 +652,18 @@ fn proof_top_up_insurance_now_slot() {
     }
     assert!(engine.check_conservation());
 
-    kani::cover!(should_accept, "top_up accepted inside accrual envelope");
-    kani::cover!(!should_accept, "top_up rejected outside accrual envelope");
+    kani::cover!(
+        !exposed && now_slot > envelope_top && result.is_ok(),
+        "zero-OI top_up may fast-forward outside envelope"
+    );
+    kani::cover!(
+        exposed && now_slot <= envelope_top && result.is_ok(),
+        "exposed top_up accepted inside accrual envelope"
+    );
+    kani::cover!(
+        exposed && now_slot > envelope_top && result.is_err(),
+        "exposed top_up rejected outside accrual envelope"
+    );
 }
 
 /// top_up_insurance_fund rejects now_slot < current_slot.

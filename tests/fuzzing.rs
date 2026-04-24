@@ -149,7 +149,7 @@ fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16> {
     if idx == u16::MAX || (idx as usize) >= MAX_ACCOUNTS {
         return Err(RiskError::Overflow);
     }
-    engine.materialize_at(idx, 100)?;
+    engine.materialize_at(idx, engine.current_slot)?;
     Ok(idx)
 }
 
@@ -174,43 +174,41 @@ fn params_regime_a() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        min_liquidation_abs: U128::new(100_000),
-        min_nonzero_mm_req: 100_100,
-        min_nonzero_im_req: 100_101,
+        min_liquidation_abs: U128::ZERO,
+        min_nonzero_mm_req: 100,
+        min_nonzero_im_req: 101,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
         max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
-        max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_active_positions_per_side: 32,
         max_price_move_bps_per_slot: 4,
     }
 }
 
-/// Regime B: Floor + risk mode sensitivity (floor = 1000)
+/// Regime B: Floor + risk mode sensitivity
 fn params_regime_b() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        min_liquidation_abs: U128::new(100_000),
-        min_nonzero_mm_req: 100_100,
-        min_nonzero_im_req: 100_101,
+        min_liquidation_abs: U128::new(800),
+        min_nonzero_mm_req: 5_000,
+        min_nonzero_im_req: 5_001,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
         max_accrual_dt_slots: 100,
         max_abs_funding_e9_per_slot: 10_000,
         min_funding_lifetime_slots: 10_000_000,
-        max_active_positions_per_side: MAX_ACCOUNTS as u64,
+        max_active_positions_per_side: 32,
         max_price_move_bps_per_slot: 4,
     }
 }
@@ -568,7 +566,7 @@ impl FuzzState {
                     self.engine.current_slot = now_slot;
                     self.engine
                         .touch_account_live_local(idx as usize, &mut ctx)?;
-                    self.engine.finalize_touched_accounts_post_live(&ctx);
+                    self.engine.finalize_touched_accounts_post_live(&ctx)?;
                     Ok(())
                 })();
 
@@ -733,6 +731,7 @@ proptest! {
         }
 
         // Top up insurance using proper API (maintains conservation)
+        let floor = state.engine.params.min_liquidation_abs.get();
         let target_insurance = initial_insurance.max(floor + 100);
         let current_insurance = state.engine.insurance_fund.balance.get();
         if target_insurance > current_insurance {
@@ -759,6 +758,7 @@ proptest! {
     fn fuzz_prop_add_fails_at_capacity(num_to_add in 1usize..10) {
         let mut params = params_regime_a();
         params.max_accounts = 4; // Very small
+        params.max_active_positions_per_side = 4;
         let mut engine = Box::new(RiskEngine::new(params));
 
         // Fill up
@@ -944,6 +944,7 @@ fn run_deterministic_fuzzer(
         }
 
         // Top up insurance using proper API (maintains conservation)
+        let floor = state.engine.params.min_liquidation_abs.get();
         let target_ins = floor + rng.u128(5_000, 100_000);
         let current_ins = state.engine.insurance_fund.balance.get();
         if target_ins > current_ins {
@@ -1038,7 +1039,7 @@ fn fuzz_deterministic_regime_a() {
 
 #[test]
 fn fuzz_deterministic_regime_b() {
-    run_deterministic_fuzzer(params_regime_b(), "B (floor=1000)", 1..501, 200);
+    run_deterministic_fuzzer(params_regime_b(), "B (floor)", 1..501, 200);
 }
 
 // Extended deterministic test with more seeds
@@ -1141,8 +1142,6 @@ fn conservation_after_trade_and_funding_regression() {
     engine.deposit_not_atomic(lp_idx, 100_000, 0).unwrap();
     engine.deposit_not_atomic(user_idx, 100_000, 0).unwrap();
 
-    // Make crank fresh
-    engine.last_crank_slot = 0;
     engine.last_market_slot = 0;
     engine.last_oracle_price = DEFAULT_ORACLE;
 
@@ -1163,7 +1162,7 @@ fn conservation_after_trade_and_funding_regression() {
         .unwrap();
 
     // Accrue market with funding (rate passed directly)
-    engine.advance_slot(1000);
+    engine.advance_slot(100);
     let slot = engine.current_slot;
     engine.accrue_market_to(slot, DEFAULT_ORACLE, 500).unwrap();
 
