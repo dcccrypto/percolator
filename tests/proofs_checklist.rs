@@ -572,13 +572,16 @@ fn proof_goal23_deposit_no_insurance_draw() {
     kani::assume(amount > 0 && amount <= 500_000);
 
     let result = engine.deposit_not_atomic(idx, amount, DEFAULT_SLOT + 1);
-    if result.is_ok() {
-        let ins_after = engine.insurance_fund.balance.get();
-        assert!(
-            ins_after >= ins_before,
-            "Goal 23: deposit must never decrease insurance"
-        );
-    }
+    assert!(
+        result.is_ok(),
+        "valid existing-account deposit must succeed"
+    );
+
+    let ins_after = engine.insurance_fund.balance.get();
+    assert!(
+        ins_after >= ins_before,
+        "Goal 23: deposit must never decrease insurance"
+    );
 
     kani::cover!(result.is_ok(), "deposit succeeds without insurance draw");
 }

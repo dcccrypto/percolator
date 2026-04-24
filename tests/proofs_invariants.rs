@@ -210,10 +210,9 @@ fn inductive_withdraw_preserves_accounting() {
         100,
         None,
     );
+    assert!(result.is_ok(), "valid flat funded withdrawal must succeed");
     kani::cover!(result.is_ok(), "withdraw Ok path reachable");
-    if result.is_ok() {
-        assert!(engine.check_conservation());
-    }
+    assert!(engine.check_conservation());
 }
 
 #[kani::proof]

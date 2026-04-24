@@ -57,11 +57,10 @@ fn bounded_withdraw_conservation() {
         100,
         None,
     );
+    assert!(result.is_ok(), "valid flat funded withdrawal must succeed");
     kani::cover!(result.is_ok(), "withdraw_not_atomic Ok path reachable");
-    if result.is_ok() {
-        assert!(engine.check_conservation());
-        assert!(engine.accounts[idx as usize].capital.get() == deposit as u128 - amount as u128);
-    }
+    assert!(engine.check_conservation());
+    assert!(engine.accounts[idx as usize].capital.get() == deposit as u128 - amount as u128);
 }
 
 #[kani::proof]
@@ -2313,12 +2312,12 @@ fn proof_audit3_compute_trade_pnl_no_panic_at_boundary() {
 
     let result = compute_trade_pnl(size_q as i128, price_diff as i128);
 
-    // Must never panic — only Ok or Err
+    assert!(result.is_ok(), "i8 trade PnL domain cannot overflow");
+    let pnl = result.unwrap();
+
     if size_q == 0 || price_diff == 0 {
-        // Zero input must return Ok(0)
-        assert!(result.is_ok());
-        assert!(result.unwrap() == 0, "zero input must produce zero PnL");
-    } else if let Ok(pnl) = result {
+        assert!(pnl == 0, "zero input must produce zero PnL");
+    } else {
         // Sign consistency: pnl must agree with sign of (size_q * price_diff)
         let input_positive = (size_q > 0) == (price_diff > 0);
         if input_positive {
@@ -2330,7 +2329,6 @@ fn proof_audit3_compute_trade_pnl_no_panic_at_boundary() {
             );
         }
     }
-    // Err is acceptable for overflow — just must not panic
 }
 
 // ============================================================================
