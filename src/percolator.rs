@@ -166,7 +166,15 @@ use wide_math::{
 // representations, so &*(ptr as *const Account) is always sound.
 // pub enum AccountKind { User = 0, LP = 1 }  // replaced by constants below
 
-/// Market mode (spec §2.2)
+/// Market mode (spec §2.2).
+///
+/// **Repr contract:** `#[repr(u8)]` with discriminants fixed at
+/// `Live=0, Resolved=1`. The byte layout in `RiskEngine::market_mode` is
+/// equivalent to a `u8` at those values. Any other byte value is UB when
+/// reached through a safe `&RiskEngine`/`&mut RiskEngine` reference —
+/// forming such a reference over memory with invalid discriminant bytes
+/// is the caller's obligation to avoid (init_in_place's safety
+/// contract). Zero-initialized memory is always valid (maps to `Live`).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarketMode {
@@ -205,7 +213,12 @@ pub enum ReserveMode {
     NoPositiveIncreaseAllowed,
 }
 
-/// Side mode for OI sides (spec §2.4)
+/// Side mode for OI sides (spec §2.4).
+///
+/// **Repr contract:** same as `MarketMode` — `#[repr(u8)]` with fixed
+/// discriminants `Normal=0, DrainOnly=1, ResetPending=2`. Zero-initialized
+/// memory maps to `Normal`. See `MarketMode` docstring for the
+/// safe-reference discriminant-validity contract.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideMode {
@@ -2384,6 +2397,11 @@ impl RiskEngine {
     // ========================================================================
 
     pub fn accrue_market_to(&mut self, now_slot: u64, oracle_price: u64, funding_rate_e9: i128) -> Result<()> {
+        // Pre-state invariant check: any corruption (including zero
+        // last_oracle_price, out-of-range cursors, ready-flag inconsistency)
+        // surfaces BEFORE any mutation. Same validate-then-mutate contract
+        // as top_up_insurance_fund and deposit_fee_credits.
+        self.assert_public_postconditions()?;
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -2574,6 +2592,9 @@ impl RiskEngine {
         self.fund_px_last = oracle_price;
         self.price_move_consumed_bps_this_generation = new_consumption;
 
+        // Post-state sanity check — should be a no-op if pre-state was valid
+        // and the math is correct.
+        self.assert_public_postconditions()?;
         Ok(())
     }
 
@@ -3511,6 +3532,30 @@ impl RiskEngine {
             && self.resolved_payout_h_num > self.resolved_payout_h_den
         {
             return Err(RiskError::CorruptState);
+        }
+        // Mode-specific state shape (spec §2.2).
+        match self.market_mode {
+            MarketMode::Live => {
+                // All resolved_* fields MUST be zero on Live markets.
+                if self.resolved_price != 0
+                    || self.resolved_live_price != 0
+                    || self.resolved_k_long_terminal_delta != 0
+                    || self.resolved_k_short_terminal_delta != 0
+                    || self.resolved_payout_ready != 0
+                {
+                    return Err(RiskError::CorruptState);
+                }
+            }
+            MarketMode::Resolved => {
+                // resolved_price and resolved_live_price MUST be strictly positive.
+                if self.resolved_price == 0 || self.resolved_live_price == 0 {
+                    return Err(RiskError::CorruptState);
+                }
+                // Spec §9.9 step 3: current_slot frozen at resolved_slot.
+                if self.current_slot != self.resolved_slot {
+                    return Err(RiskError::CorruptState);
+                }
+            }
         }
         Ok(())
     }
@@ -4991,16 +5036,17 @@ impl RiskEngine {
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
         rr_window_size: u64,
     ) -> Result<CrankOutcome> {
+        // Pre-state invariant check. Catches corrupt inputs like
+        // rr_cursor_position out of range or ready-snapshot inconsistency
+        // BEFORE any mutation. §12.21: the (admit_h_min == 0,
+        // threshold_opt == None) combination is wrapper-prohibited for
+        // public wrappers but accepted at the engine layer because the
+        // engine cannot distinguish trusted from public callers.
+        self.assert_public_postconditions()?;
+
         // Step 1 (spec §9.0): validate inputs pre-mutation.
         Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
         Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
-        // Spec §12.21: public wrappers MUST NOT combine
-        //   (admit_h_min == 0, admit_h_max_consumption_threshold_bps_opt = None).
-        // The engine accepts the combination because it cannot distinguish
-        // trusted/private wrappers (permitted) from public wrappers
-        // (forbidden) at this layer. Compliance is enforced above the
-        // engine. Engine-level invariants still hold per property 107
-        // (the v19_cascade_safety Kani proof).
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);

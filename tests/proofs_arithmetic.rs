@@ -236,7 +236,7 @@ fn proof_notional_scales_with_price() {
     // through the floor(abs(eff_pos_q) * price / POS_SCALE) formula.
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 10_000_000, 100, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
 
     // Give the account a non-zero position
     let q_mul: u8 = kani::any();
@@ -267,7 +267,7 @@ fn proof_notional_scales_with_price() {
 fn proof_warmup_release_bounded_by_reserved() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 100_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, DEFAULT_SLOT).unwrap();
 
     let pnl_val: u16 = kani::any();
     kani::assume(pnl_val > 0 && pnl_val <= 10_000);

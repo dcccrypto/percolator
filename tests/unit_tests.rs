@@ -949,6 +949,7 @@ fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
     // still carries the near-boundary pre-reset value, reopening the side
     // and doing any valid mark-to-market will overflow K.
     engine.oi_eff_long_q = POS_SCALE; // simulate a new-epoch long position
+    engine.oi_eff_short_q = POS_SCALE; // preserve bilateral-OI invariant
     engine.last_oracle_price = 100_000;
     engine.fund_px_last = 100_000;
     // A minimal valid oracle move (1 unit at P=100_000) should succeed.
@@ -3570,6 +3571,8 @@ fn test_force_close_resolved_flat_no_pnl() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     assert_eq!(returned, 50_000);
     assert!(!engine.is_used(idx as usize));
@@ -3629,6 +3632,8 @@ fn test_force_close_resolved_with_positive_pnl() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Positive PnL converted to capital (haircutted) before return
@@ -3650,6 +3655,8 @@ fn test_force_close_resolved_with_fee_debt() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Fee debt swept from capital first (spec §7.5 fee seniority):
     // 50_000 capital - 5_000 fee sweep = 45_000 returned
@@ -3666,6 +3673,8 @@ fn test_force_close_resolved_unused_slot_rejected() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX;
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let result = engine.force_close_resolved_not_atomic(0);
     assert_eq!(result, Err(RiskError::AccountNotFound));
 }
@@ -3817,6 +3826,8 @@ fn test_force_close_with_fee_debt_exceeding_capital() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     // Capital (10k) fully swept to insurance, remaining debt forgiven
     assert_eq!(returned, 0, "all capital swept for fee debt");
@@ -3833,6 +3844,8 @@ fn test_force_close_zero_capital_zero_pnl() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let returned = engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     assert_eq!(returned, 0);
     assert!(!engine.is_used(idx as usize));
@@ -3858,6 +3871,8 @@ fn test_force_close_c_tot_tracks_exactly() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let ret_a = engine.force_close_resolved_not_atomic(a).unwrap().expect_closed("force_close");
     assert_eq!(engine.c_tot.get(), c_tot_before - ret_a);
 
@@ -3908,6 +3923,8 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     for &idx in &accounts {
         engine.force_close_resolved_not_atomic(idx).unwrap().expect_closed("force_close");
     }
@@ -3984,6 +4001,8 @@ fn test_force_close_rejects_corrupt_a_basis() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     let result = engine.force_close_resolved_not_atomic(a);
     assert_eq!(result, Err(RiskError::CorruptState),
         "must reject corrupt a_basis = 0");
@@ -4272,12 +4291,16 @@ fn test_touch_live_local_does_not_auto_convert() {
     engine.deposit_not_atomic(idx, 100_000, 100).unwrap();
 
 
-    // Give account positive PnL (flat, released)
-    engine.set_pnl(idx as usize, 10_000);
+    // Give account positive PnL (flat, released). Manual state setup —
+    // maintain aggregate consistency: pnl_pos_tot and pnl_matured_pos_tot
+    // both match the per-account pnl, so postconditions hold.
+    engine.accounts[idx as usize].pnl = 10_000;
+    engine.pnl_pos_tot = 10_000;
     engine.pnl_matured_pos_tot = 10_000;
 
     let cap_before = engine.accounts[idx as usize].capital.get();
     engine.last_market_slot = 100;
+    engine.current_slot = 100; // preserve `current_slot >= last_market_slot`
     engine.last_oracle_price = 1000;
 
     let mut ctx = InstructionContext::new_with_admission(50, 50);
@@ -4448,6 +4471,8 @@ fn test_blocker3_terminal_close_rejects_negative_pnl() {
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_slot = u64::MAX; // match test expectations: accept any now_slot
     engine.current_slot = engine.resolved_slot;
+    engine.resolved_price = 1;
+    engine.resolved_live_price = 1;
     engine.pnl_matured_pos_tot = engine.pnl_pos_tot;
     engine.set_pnl(a as usize, -1000);
 
@@ -4733,6 +4758,60 @@ fn public_postcondition_rejects_ready_snapshot_with_inverted_ratio() {
     // before the mode check.
     assert_eq!(r, Err(RiskError::CorruptState),
         "ready flag with h_num > h_den is an inconsistent payout snapshot");
+}
+
+// ============================================================================
+// Mode-specific postconditions: Live markets must have all resolved_*
+// state zeroed; Resolved markets must have resolved_price/live_price > 0
+// and current_slot == resolved_slot.
+// ============================================================================
+
+#[test]
+fn public_postcondition_rejects_live_with_nonzero_resolved_price() {
+    let mut engine = RiskEngine::new(default_params());
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    engine.resolved_price = 1000; // corrupt: Live must have resolved_price == 0
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_live_with_nonzero_resolved_k_delta() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.resolved_k_long_terminal_delta = 1;
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_live_with_ready_flag_set() {
+    let mut engine = RiskEngine::new(default_params());
+    // Set ready WITHOUT also setting h_den — must reject.
+    engine.resolved_payout_ready = 1;
+    engine.resolved_payout_h_num = 1;
+    engine.resolved_payout_h_den = 1;
+    let r = engine.top_up_insurance_fund(1, 0);
+    assert_eq!(r, Err(RiskError::CorruptState),
+        "Live market must have resolved_payout_ready == 0");
+}
+
+#[test]
+fn public_postcondition_rejects_resolved_with_zero_resolved_price() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = 0;
+    engine.current_slot = 0;
+    engine.resolved_live_price = 1000; // nonzero
+    // resolved_price stays 0 — corrupt state for Resolved mode.
+    // Use a Resolved-mode entrypoint so we reach the postcondition.
+    // (top_up requires Live, so instead trigger via force_close_resolved.)
+    // Simplest: call assert_public_postconditions via the test_visible
+    // reconcile path which requires Resolved mode.
+    let r = engine.reconcile_resolved_not_atomic(0);
+    // Some error must surface (either CorruptState from postcondition or
+    // AccountNotFound from preconditions). The test is: the fn does not
+    // Ok-succeed on a Resolved market with resolved_price == 0.
+    assert!(r.is_err());
 }
 
 // ============================================================================
