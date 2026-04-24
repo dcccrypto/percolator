@@ -664,21 +664,22 @@ fn proof_account_equity_net_nonnegative() {
 #[kani::solver(cadical)]
 fn proof_effective_pos_q_epoch_mismatch_returns_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
 
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-
-    engine.adl_epoch_long = 1;
-    let eff = engine.effective_pos_q(idx as usize);
+    engine
+        .attach_effective_position(idx, POS_SCALE as i128)
+        .unwrap();
+    engine.begin_full_drain_reset(Side::Long).unwrap();
+    let eff = engine.effective_pos_q(idx);
     assert!(eff == 0);
 
-    engine.accounts[idx as usize].position_basis_q = -(POS_SCALE as i128);
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.adl_epoch_short = 1;
-    let eff2 = engine.effective_pos_q(idx as usize);
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+    engine
+        .attach_effective_position(idx, -(POS_SCALE as i128))
+        .unwrap();
+    engine.begin_full_drain_reset(Side::Short).unwrap();
+    let eff2 = engine.effective_pos_q(idx);
     assert!(eff2 == 0);
 }
 

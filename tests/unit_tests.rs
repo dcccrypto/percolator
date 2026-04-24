@@ -1880,22 +1880,19 @@ fn test_adl_epoch_changes() {
 
 #[test]
 fn test_effective_pos_epoch_mismatch() {
-    let (mut engine, a, b) = setup_two_users(100_000, 100_000);
-    let oracle = 1000u64;
-    let slot = 1u64;
-
-    // Open position
-    let size_q = make_size_q(50);
+    let mut engine = RiskEngine::new(default_params());
+    let a = add_user_test(&mut engine, 0).unwrap();
     engine
-        .execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 0, 100, None)
-        .expect("trade");
+        .attach_effective_position(a as usize, make_size_q(50))
+        .unwrap();
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
-    // Manually bump the long epoch to simulate a reset
-    engine.adl_epoch_long += 1;
-
-    // Effective position should be zero due to epoch mismatch
+    // Valid ResetPending stale positions have zero effective exposure.
     let eff = engine.effective_pos_q(a as usize);
-    assert!(eff == 0, "epoch mismatch should zero effective position");
+    assert!(
+        eff == 0,
+        "valid stale position should zero effective position"
+    );
 }
 
 // ============================================================================
@@ -6332,6 +6329,59 @@ fn checked_views_reject_bad_indices_and_unused_slots() {
         Err(RiskError::AccountNotFound)
     );
     assert_eq!(engine.try_released_pos(0), Err(RiskError::AccountNotFound));
+}
+
+#[test]
+fn checked_effective_pos_rejects_invalid_stale_epoch_shape() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+    engine
+        .attach_effective_position(idx, make_size_q(1))
+        .unwrap();
+
+    engine.accounts[idx].adl_epoch_snap = engine.adl_epoch_long.saturating_add(7);
+    assert_eq!(
+        engine.try_effective_pos_q(idx),
+        Err(RiskError::CorruptState)
+    );
+
+    engine.accounts[idx].adl_epoch_snap = engine.adl_epoch_long;
+    engine.begin_full_drain_reset(Side::Long).unwrap();
+    assert_eq!(engine.try_effective_pos_q(idx).unwrap(), 0);
+}
+
+#[test]
+fn max_safe_flat_conversion_rejects_malformed_haircut_ratio() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 10_000).unwrap() as usize;
+    assert_eq!(
+        engine.max_safe_flat_conversion_released(idx, 1_000, 2, 1),
+        0
+    );
+    assert_eq!(
+        engine.max_safe_flat_conversion_released(idx, 1_000, 0, 0),
+        0
+    );
+}
+
+#[test]
+fn local_fee_mutators_reject_corrupt_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 1_000).unwrap() as usize;
+
+    engine.accounts[idx].fee_credits = I128::new(1);
+    assert_eq!(
+        engine.charge_fee_to_insurance(idx, 10),
+        Err(RiskError::CorruptState)
+    );
+    assert_eq!(engine.fee_debt_sweep(idx), Err(RiskError::CorruptState));
+
+    engine.accounts[idx].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.charge_fee_to_insurance(idx, 10),
+        Err(RiskError::CorruptState)
+    );
+    assert_eq!(engine.fee_debt_sweep(idx), Err(RiskError::CorruptState));
 }
 
 #[test]

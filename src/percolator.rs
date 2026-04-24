@@ -849,26 +849,26 @@ impl RiskEngine {
     }
 
     #[cfg(not(kani))]
-    fn solvency_envelope_holds_for_notional(
+    fn solvency_envelope_total_for_notional(
         params: &RiskParams,
         n: u128,
         loss_budget_num: u128,
         loss_budget_den: u128,
         price_budget_bps: u128,
-    ) -> bool {
+    ) -> Option<u128> {
         let loss = match Self::ceil_mul_div_u128(n, loss_budget_num, loss_budget_den) {
             Some(v) => v,
-            None => return false,
+            None => return None,
         };
 
         let worst_liq_multiplier = match 10_000u128.checked_add(price_budget_bps) {
             Some(v) => v,
-            None => return false,
+            None => return None,
         };
         let worst_liq_notional = match Self::ceil_mul_div_u128(n, worst_liq_multiplier, 10_000u128)
         {
             Some(v) => v,
-            None => return false,
+            None => return None,
         };
 
         let liq_fee_raw = match Self::ceil_mul_div_u128(
@@ -877,26 +877,139 @@ impl RiskEngine {
             10_000u128,
         ) {
             Some(v) => v,
-            None => return false,
+            None => return None,
         };
         let liq_fee = core::cmp::min(
             core::cmp::max(liq_fee_raw, params.min_liquidation_abs.get()),
             params.liquidation_fee_cap.get(),
         );
 
+        loss.checked_add(liq_fee)
+    }
+
+    #[cfg(not(kani))]
+    fn maintenance_requirement_for_notional(params: &RiskParams, n: u128) -> Option<u128> {
         let mm_prop = match n
             .checked_mul(params.maintenance_margin_bps as u128)
             .and_then(|v| v.checked_div(10_000u128))
         {
             Some(v) => v,
+            None => return None,
+        };
+        Some(core::cmp::max(mm_prop, params.min_nonzero_mm_req))
+    }
+
+    #[cfg(not(kani))]
+    fn solvency_envelope_holds_for_notional(
+        params: &RiskParams,
+        n: u128,
+        loss_budget_num: u128,
+        loss_budget_den: u128,
+        price_budget_bps: u128,
+    ) -> bool {
+        let total = match Self::solvency_envelope_total_for_notional(
+            params,
+            n,
+            loss_budget_num,
+            loss_budget_den,
+            price_budget_bps,
+        ) {
+            Some(v) => v,
             None => return false,
         };
-        let mm_req = core::cmp::max(mm_prop, params.min_nonzero_mm_req);
+        let mm_req = match Self::maintenance_requirement_for_notional(params, n) {
+            Some(v) => v,
+            None => return false,
+        };
+        total <= mm_req
+    }
 
-        match loss.checked_add(liq_fee) {
-            Some(total) => total <= mm_req,
-            None => false,
+    #[cfg(not(kani))]
+    fn solvency_envelope_interval_certifies(
+        params: &RiskParams,
+        lo: u128,
+        hi: u128,
+        loss_budget_num: u128,
+        loss_budget_den: u128,
+        price_budget_bps: u128,
+    ) -> Option<bool> {
+        let total_hi = Self::solvency_envelope_total_for_notional(
+            params,
+            hi,
+            loss_budget_num,
+            loss_budget_den,
+            price_budget_bps,
+        )?;
+        let mm_lo = Self::maintenance_requirement_for_notional(params, lo)?;
+        Some(total_hi <= mm_lo)
+    }
+
+    #[cfg(not(kani))]
+    fn validate_solvency_envelope_range(
+        params: &RiskParams,
+        lo: u128,
+        hi: u128,
+        loss_budget_num: u128,
+        loss_budget_den: u128,
+        price_budget_bps: u128,
+    ) -> Result<()> {
+        if lo > hi {
+            return Ok(());
         }
+
+        const MAX_SOLVENCY_INTERVALS: usize = 96;
+        const EXACT_CHUNK: u128 = 64;
+
+        let mut stack = [(0u128, 0u128); MAX_SOLVENCY_INTERVALS];
+        let mut len = 1usize;
+        stack[0] = (lo, hi);
+
+        while len != 0 {
+            len -= 1;
+            let (range_lo, range_hi) = stack[len];
+
+            if Self::solvency_envelope_interval_certifies(
+                params,
+                range_lo,
+                range_hi,
+                loss_budget_num,
+                loss_budget_den,
+                price_budget_bps,
+            ) == Some(true)
+            {
+                continue;
+            }
+
+            if range_hi == range_lo || range_hi - range_lo <= EXACT_CHUNK {
+                let mut n = range_lo;
+                loop {
+                    if !Self::solvency_envelope_holds_for_notional(
+                        params,
+                        n,
+                        loss_budget_num,
+                        loss_budget_den,
+                        price_budget_bps,
+                    ) {
+                        return Err(RiskError::Overflow);
+                    }
+                    if n == range_hi {
+                        break;
+                    }
+                    n = n.checked_add(1).ok_or(RiskError::Overflow)?;
+                }
+                continue;
+            }
+
+            let mid = range_lo + (range_hi - range_lo) / 2;
+            if len + 2 > MAX_SOLVENCY_INTERVALS {
+                return Err(RiskError::Overflow);
+            }
+            stack[len] = (mid.checked_add(1).ok_or(RiskError::Overflow)?, range_hi);
+            stack[len + 1] = (range_lo, mid);
+            len += 2;
+        }
+
+        Ok(())
     }
 
     #[cfg(not(kani))]
@@ -963,9 +1076,13 @@ impl RiskEngine {
         let loss_budget_num = loss_budget_num.try_into_u128().ok_or(RiskError::Overflow)?;
         let loss_budget_den = loss_budget_den.try_into_u128().ok_or(RiskError::Overflow)?;
 
+        // Normative domain: account RiskNotional is capped at MAX_ACCOUNT_NOTIONAL.
+        let domain_max = MAX_ACCOUNT_NOTIONAL;
+
         // Floor-region proof. While proportional maintenance is below the
         // configured minimum, loss+fee is monotone in risk notional, so the
-        // largest floor-covered notional is the only point that must be checked.
+        // largest floor-covered notional inside the normative domain is the
+        // only point that must be checked.
         let floor_region_max = U256::from_u128(
             params
                 .min_nonzero_mm_req
@@ -977,16 +1094,20 @@ impl RiskEngine {
         .and_then(|v| v.checked_div(U256::from_u128(params.maintenance_margin_bps as u128)))
         .and_then(|v| v.try_into_u128())
         .ok_or(RiskError::Overflow)?;
-        if floor_region_max != 0
+        let floor_region_end = core::cmp::min(floor_region_max, domain_max);
+        if floor_region_end != 0
             && !Self::solvency_envelope_holds_for_notional(
                 params,
-                floor_region_max,
+                floor_region_end,
                 loss_budget_num,
                 loss_budget_den,
                 price_budget_bps,
             )
         {
             return Err(RiskError::Overflow);
+        }
+        if floor_region_max >= domain_max {
+            return Ok(());
         }
 
         // Linear-tail proof. For N above this bound, the slope gap between
@@ -1019,35 +1140,20 @@ impl RiskEngine {
         .ok_or(RiskError::Overflow)?;
 
         let exact_tail = core::cmp::max(tail_for_linear, tail_for_fee_floor);
-        if exact_tail <= floor_region_max.saturating_add(1) {
+        let exact_start = floor_region_end.checked_add(1).ok_or(RiskError::Overflow)?;
+        if exact_tail <= exact_start {
             return Ok(());
         }
 
-        #[cfg(any(feature = "test", feature = "audit-scan", debug_assertions, kani))]
-        {
-            if exact_tail > 100_000 {
-                return Err(RiskError::Overflow);
-            }
-            let mut n = floor_region_max.saturating_add(1);
-            while n < exact_tail {
-                if !Self::solvency_envelope_holds_for_notional(
-                    params,
-                    n,
-                    loss_budget_num,
-                    loss_budget_den,
-                    price_budget_bps,
-                ) {
-                    return Err(RiskError::Overflow);
-                }
-                n += 1;
-            }
-            return Ok(());
-        }
-
-        #[cfg(not(any(feature = "test", feature = "audit-scan", debug_assertions, kani)))]
-        {
-            Err(RiskError::Overflow)
-        }
+        let exact_end = core::cmp::min(exact_tail.saturating_sub(1), domain_max);
+        Self::validate_solvency_envelope_range(
+            params,
+            exact_start,
+            exact_end,
+            loss_budget_num,
+            loss_budget_den,
+            price_budget_bps,
+        )
     }
 
     #[cfg(kani)]
@@ -2472,6 +2578,11 @@ impl RiskEngine {
         let epoch_side = self.get_epoch_side(side);
 
         if epoch_snap != epoch_side {
+            if self.get_side_mode(side) != SideMode::ResetPending
+                || epoch_snap.checked_add(1) != Some(epoch_side)
+            {
+                return Err(RiskError::CorruptState);
+            }
             return Ok(0i128);
         }
 
@@ -3602,7 +3713,10 @@ impl RiskEngine {
         if e_before <= 0 {
             return 0;
         }
-        if h_den == 0 || h_num == h_den {
+        if h_den == 0 || h_num > h_den {
+            return 0;
+        }
+        if h_num == h_den {
             return x_cap;
         }
         let haircut_loss_num = h_den - h_num;
@@ -4514,7 +4628,13 @@ impl RiskEngine {
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
     test_visible! {
     fn fee_debt_sweep(&mut self, idx: usize) -> Result<()> {
+        if idx >= MAX_ACCOUNTS {
+            return Err(RiskError::AccountNotFound);
+        }
         let fc = self.accounts[idx].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
             return Ok(());
@@ -5251,6 +5371,13 @@ impl RiskEngine {
     /// Any excess beyond collectible headroom is silently dropped.
     /// Returns (fee_paid_to_insurance, fee_equity_impact, fee_dropped) per spec §4.14.
     fn charge_fee_to_insurance(&mut self, idx: usize, fee: u128) -> Result<(u128, u128, u128)> {
+        if idx >= MAX_ACCOUNTS {
+            return Err(RiskError::AccountNotFound);
+        }
+        let current_fc = self.accounts[idx].fee_credits.get();
+        if current_fc > 0 || current_fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
         if fee > MAX_PROTOCOL_FEE_ABS {
             return Err(RiskError::Overflow);
         }
@@ -5267,7 +5394,6 @@ impl RiskEngine {
             // Route collectible shortfall through fee_credits (debit).
             // Cap at collectible headroom to avoid reverting (spec §8.2.2):
             // fee_credits must stay in [-(i128::MAX), 0]; any excess is dropped.
-            let current_fc = self.accounts[idx].fee_credits.get();
             // Headroom = current_fc - (-(i128::MAX)) = current_fc + i128::MAX
             let headroom = match current_fc.checked_add(i128::MAX) {
                 Some(h) if h > 0 => h as u128,
