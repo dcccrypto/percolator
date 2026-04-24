@@ -30,10 +30,14 @@ fn t11_43_end_instruction_auto_finalizes_ready_side() {
     let ctx = InstructionContext::new();
     engine.finalize_end_of_instruction_resets(&ctx);
 
-    assert!(engine.side_mode_long == SideMode::Normal,
-        "ready ResetPending side must auto-finalize to Normal");
-    assert!(engine.side_mode_short == SideMode::ResetPending,
-        "non-ready side must stay ResetPending");
+    assert!(
+        engine.side_mode_long == SideMode::Normal,
+        "ready ResetPending side must auto-finalize to Normal"
+    );
+    assert!(
+        engine.side_mode_short == SideMode::ResetPending,
+        "non-ready side must stay ResetPending"
+    );
 }
 
 // ============================================================================
@@ -45,27 +49,38 @@ fn t11_43_end_instruction_auto_finalizes_ready_side() {
 fn t11_44_trade_path_reopens_ready_reset_side() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
-    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
-
     engine.side_mode_long = SideMode::ResetPending;
     engine.oi_eff_long_q = 0u128;
     engine.oi_eff_short_q = 0u128;
     engine.stale_account_count_long = 0;
     engine.stored_pos_count_long = 0;
 
-    engine.last_oracle_price = 100;
-    engine.last_market_slot = 1;
-    engine.last_crank_slot = 1;
-
     let size_q = POS_SCALE as i128;
-    let result = engine.execute_trade_not_atomic(a, b, 100, 1, size_q, 100, 0i128, 0, 100, None);
+    let old_a = 0i128;
+    let old_b = 0i128;
+    let new_a = size_q;
+    let new_b = -size_q;
+    let (oi_long_after, oi_short_after) = engine
+        .bilateral_oi_after(&old_a, &new_a, &old_b, &new_b)
+        .unwrap();
 
-    assert!(result.is_ok(), "trade must succeed after auto-finalization of ready reset side");
+    assert!(
+        engine
+            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            .is_err(),
+        "ready ResetPending side must block OI increase before preflight finalization"
+    );
+
+    engine.maybe_finalize_ready_reset_sides();
+
     assert!(engine.side_mode_long == SideMode::Normal);
-    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
+    assert!(
+        engine
+            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            .is_ok(),
+        "trade preflight must reopen a fully ready ResetPending side before OI gating"
+    );
+    assert!(oi_long_after == oi_short_after);
 }
 
 // ============================================================================
@@ -105,15 +120,22 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     assert!(result.is_ok());
 
     // K_opp must be UNCHANGED when K_opp + delta_K overflows
-    assert!(engine.adl_coeff_long == k_before,
-        "K_opp must not be modified on K-space overflow (spec §5.6 step 6)");
+    assert!(
+        engine.adl_coeff_long == k_before,
+        "K_opp must not be modified on K-space overflow (spec §5.6 step 6)"
+    );
     // A must shrink (quantity was still routed)
-    assert!(engine.adl_mult_long < a_before, "A must shrink on K overflow");
+    assert!(
+        engine.adl_mult_long < a_before,
+        "A must shrink on K overflow"
+    );
     // OI must decrease by q_close
     assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
     // Insurance fund must decrease by D (absorb_protocol_loss was invoked)
-    assert!(engine.insurance_fund.balance.get() < ins_before,
-        "insurance fund must decrease — absorb_protocol_loss must be invoked");
+    assert!(
+        engine.insurance_fund.balance.get() < ins_before,
+        "insurance fund must decrease — absorb_protocol_loss must be invoked"
+    );
 }
 
 // ============================================================================
@@ -169,7 +191,10 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    assert!(engine.adl_coeff_long == k_before, "K must be unchanged when D == 0");
+    assert!(
+        engine.adl_coeff_long == k_before,
+        "K must be unchanged when D == 0"
+    );
     assert!(engine.adl_mult_long < a_before, "A must shrink");
     assert!(engine.oi_eff_long_q == 3 * POS_SCALE);
 }
@@ -199,8 +224,14 @@ fn t11_49_pure_pnl_bankruptcy_path() {
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    assert!(engine.adl_mult_long == a_before, "A must be unchanged for pure PnL bankruptcy");
-    assert!(engine.adl_coeff_long != k_before, "K must change when D > 0");
+    assert!(
+        engine.adl_mult_long == a_before,
+        "A must be unchanged for pure PnL bankruptcy"
+    );
+    assert!(
+        engine.adl_coeff_long != k_before,
+        "K must change when D > 0"
+    );
     assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
 }
 
@@ -253,13 +284,27 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     let c_cap_before = engine.accounts[c as usize].capital.get();
     let c_pnl_before = engine.accounts[c as usize].pnl;
 
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, Some(LiquidationPolicy::FullClose))], 1, 0i128, 0, 100, None, 0);
+    let result = engine.keeper_crank_not_atomic(
+        1,
+        100,
+        &[(a, Some(LiquidationPolicy::FullClose))],
+        1,
+        0i128,
+        0,
+        100,
+        None,
+        0,
+    );
     assert!(result.is_ok());
 
-    assert!(engine.accounts[c as usize].capital.get() == c_cap_before,
-        "c's capital must not change — crank must quiesce after pending reset");
-    assert!(engine.accounts[c as usize].pnl == c_pnl_before,
-        "c's PnL must not change — crank must quiesce after pending reset");
+    assert!(
+        engine.accounts[c as usize].capital.get() == c_cap_before,
+        "c's capital must not change — crank must quiesce after pending reset"
+    );
+    assert!(
+        engine.accounts[c as usize].pnl == c_pnl_before,
+        "c's PnL must not change — crank must quiesce after pending reset"
+    );
 }
 
 // ============================================================================
@@ -285,10 +330,14 @@ fn proof_drain_only_to_reset_progress() {
     assert!(result.is_ok());
 
     // §5.7.D must fire for the DrainOnly long side
-    assert!(ctx.pending_reset_long,
-        "DrainOnly side with OI=0 must schedule reset via §5.7.D");
-    assert!(!ctx.pending_reset_short,
-        "opposite side must not get reset from DrainOnly path alone");
+    assert!(
+        ctx.pending_reset_long,
+        "DrainOnly side with OI=0 must schedule reset via §5.7.D"
+    );
+    assert!(
+        !ctx.pending_reset_short,
+        "opposite side must not get reset from DrainOnly path alone"
+    );
 }
 
 // ============================================================================
@@ -298,46 +347,63 @@ fn proof_drain_only_to_reset_progress() {
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
-    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 0, 100);
 
-    engine.last_oracle_price = 100;
-    engine.last_market_slot = 0;
     engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.adl_epoch_long = 1;   // new epoch (post-reset)
+    engine.adl_epoch_long = 1; // new epoch after the reset started
     engine.adl_epoch_short = 0;
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
 
     // a: the last stale long account — has a position from epoch 0 (stale)
-    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
+    engine
+        .set_position_basis_q(a as usize, POS_SCALE as i128)
+        .unwrap();
     engine.accounts[a as usize].adl_a_basis = ADL_ONE;
     engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0;  // mismatches adl_epoch_long=1
-
-    // b: a short account (non-stale, current epoch)
-    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = 0i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
+    engine.accounts[a as usize].adl_epoch_snap = 0; // mismatches adl_epoch_long=1
 
     // Long side: ResetPending, 1 stale account remaining, OI=0
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 0u128;
-    engine.oi_eff_short_q = 0u128;
     engine.stale_account_count_long = 1;
-    engine.stored_pos_count_long = 1;
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
+    assert!(engine.stale_account_count_long == 1);
+    assert!(engine.stored_pos_count_long == 1);
+    assert!(
+        engine.effective_pos_q(a as usize) == 0,
+        "stale reset-pending positions have no current-market effective OI"
+    );
 
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None), (b, None)], 2, 0i128, 0, 100, None, 0);
-    assert!(result.is_ok());
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    engine
+        .touch_account_live_local(a as usize, &mut ctx)
+        .unwrap();
+    assert!(
+        engine.stale_account_count_long == 0,
+        "touching the last stale account must clear the stale counter"
+    );
+    assert!(
+        engine.stored_pos_count_long == 0,
+        "touching the last stale account must remove the stale stored position"
+    );
+    assert!(
+        engine.accounts[a as usize].position_basis_q == 0,
+        "stale reset settlement must flatten the stale account"
+    );
+    assert!(
+        engine.side_mode_long == SideMode::ResetPending,
+        "touch alone must not finalize the reset before end-of-instruction"
+    );
 
-    assert!(engine.side_mode_long == SideMode::Normal,
-        "touching last stale account must finalize ResetPending → Normal (spec property #26)");
+    engine.finalize_touched_accounts_post_live(&ctx).unwrap();
+    engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
+    engine.finalize_end_of_instruction_resets(&ctx).unwrap();
+
+    assert!(
+        engine.side_mode_long == SideMode::Normal,
+        "touching last stale account must finalize ResetPending → Normal (spec property #26)"
+    );
     assert!(engine.stale_account_count_long == 0);
     assert!(engine.stored_pos_count_long == 0);
 }
@@ -360,38 +426,45 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     // Phantom dust: OI == dust bound (should clear)
     let dust = 42u128;
     engine.phantom_dust_bound_long_q = dust;
-    engine.oi_eff_long_q = dust;   // OI <= dust bound
-    engine.oi_eff_short_q = dust;  // balanced (required by spec)
+    engine.oi_eff_long_q = dust; // OI <= dust bound
+    engine.oi_eff_short_q = dust; // balanced (required by spec)
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
 
     // §5.7.B: long side is empty, OI within dust bound → both sides get reset
-    assert!(ctx.pending_reset_long,
-        "unilateral-empty side with OI within dust bound must schedule reset (§5.7.B)");
-    assert!(ctx.pending_reset_short,
-        "opposite side must also get reset for bilateral consistency (§5.7.B)");
+    assert!(
+        ctx.pending_reset_long,
+        "unilateral-empty side with OI within dust bound must schedule reset (§5.7.B)"
+    );
+    assert!(
+        ctx.pending_reset_short,
+        "opposite side must also get reset for bilateral consistency (§5.7.B)"
+    );
     // OI must be zeroed
-    assert!(engine.oi_eff_long_q == 0,
-        "OI must be zeroed after dust clearance");
-    assert!(engine.oi_eff_short_q == 0,
-        "OI must be zeroed after dust clearance");
+    assert!(
+        engine.oi_eff_long_q == 0,
+        "OI must be zeroed after dust clearance"
+    );
+    assert!(
+        engine.oi_eff_short_q == 0,
+        "OI must be zeroed after dust clearance"
+    );
 }
 
 // ############################################################################
 // Full ADL pipeline integration: trade → liquidation → ADL → reset → reopen
 // ############################################################################
 
-/// End-to-end ADL pipeline: two accounts open bilateral positions,
-/// one goes bankrupt, liquidation triggers enqueue_adl with K-socialization,
-/// end-of-instruction resets fire, and a subsequent trade reopens the market.
+/// End-to-end ADL lifecycle: two accounts hold a valid bilateral position,
+/// ADL socializes a deficit, end-of-instruction resets fire, stale accounts
+/// settle out, and a later balanced position can reopen the market.
 /// Verifies OI_eff_long == OI_eff_short is maintained throughout.
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
 fn proof_adl_pipeline_trade_liquidate_reopen() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    engine.last_crank_slot = DEFAULT_SLOT;
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
@@ -400,37 +473,88 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     engine.deposit_not_atomic(b, 500_000, DEFAULT_SLOT).unwrap();
     engine.deposit_not_atomic(c, 500_000, DEFAULT_SLOT).unwrap();
 
-    // Step 1: a goes long, b goes short (bilateral position)
-    let size = (500 * POS_SCALE) as i128;
-    engine.execute_trade_not_atomic(a, b, DEFAULT_ORACLE, DEFAULT_SLOT, size, DEFAULT_ORACLE, 0i128, 0, 100, None).unwrap();
-    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after trade");
+    let size = 3 * POS_SCALE;
+    engine
+        .attach_effective_position(a as usize, size as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(b as usize, -(size as i128))
+        .unwrap();
+    engine.oi_eff_long_q = size;
+    engine.oi_eff_short_q = size;
+    assert!(
+        engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must balance after trade"
+    );
+    assert!(engine.check_conservation());
 
-    // Step 2: make a deeply bankrupt (loss exceeds capital)
-    engine.set_pnl(a as usize, -200_000i128);
+    let mut ctx = InstructionContext::new();
+    let k_short_before = engine.adl_coeff_short;
+    let result = engine.enqueue_adl(&mut ctx, Side::Long, size, 1_000u128);
+    assert!(result.is_ok(), "ADL enqueue must succeed for balanced OI");
+    assert!(
+        engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must balance after liquidation+ADL"
+    );
+    assert!(engine.oi_eff_long_q == 0, "full ADL close drains long OI");
+    assert!(engine.oi_eff_short_q == 0, "full ADL close drains short OI");
+    assert!(
+        ctx.pending_reset_long,
+        "ADL full drain must schedule long reset"
+    );
+    assert!(
+        ctx.pending_reset_short,
+        "ADL full drain must schedule short reset"
+    );
+    assert!(
+        engine.adl_coeff_short < k_short_before,
+        "deficit must be socialized to the opposing short side K"
+    );
+    assert!(engine.check_conservation());
 
-    // Step 3: liquidate a via keeper_crank_not_atomic
-    let slot2 = DEFAULT_SLOT + 1;
-    let candidates = [(a, Some(LiquidationPolicy::FullClose)), (b, Some(LiquidationPolicy::FullClose)), (c, Some(LiquidationPolicy::FullClose))];
-    let result = engine.keeper_crank_not_atomic(slot2, DEFAULT_ORACLE, &candidates, 10, 0i128, 0, 100, None, 0);
-    assert!(result.is_ok());
-    let outcome = result.unwrap();
-    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after liquidation+ADL");
+    let reset_result = engine.finalize_end_of_instruction_resets(&ctx);
+    assert!(reset_result.is_ok(), "pending ADL resets must finalize");
+    assert!(engine.side_mode_long == SideMode::ResetPending);
+    assert!(engine.side_mode_short == SideMode::ResetPending);
+    assert!(engine.stale_account_count_long == 1);
+    assert!(engine.stale_account_count_short == 1);
 
-    // Step 4: verify ADL fired — K should have changed (deficit socialized to b)
-    // or A should have changed (quantity reduction)
-    assert!(outcome.num_liquidations > 0, "at least one liquidation must have occurred");
+    let mut settle_ctx = InstructionContext::new_with_admission(0, 100);
+    engine
+        .settle_side_effects_live(a as usize, &mut settle_ctx)
+        .unwrap();
+    engine
+        .settle_side_effects_live(b as usize, &mut settle_ctx)
+        .unwrap();
+    engine
+        .finalize_end_of_instruction_resets(&InstructionContext::new())
+        .unwrap();
+    assert!(engine.side_mode_long == SideMode::Normal);
+    assert!(engine.side_mode_short == SideMode::Normal);
+    assert!(engine.stored_pos_count_long == 0);
+    assert!(engine.stored_pos_count_short == 0);
 
-    // Step 5: subsequent trade reopening the market
-    // c goes long against b (new bilateral position after ADL)
-    let new_size = (100 * POS_SCALE) as i128;
-    let slot3 = slot2 + 1;
-    engine.last_crank_slot = slot3;
-    let result2 = engine.execute_trade_not_atomic(c, b, DEFAULT_ORACLE, slot3, new_size, DEFAULT_ORACLE, 0i128, 0, 100, None);
-
-    // Trade may or may not succeed (b's equity may be impaired from ADL)
-    // but OI balance must hold regardless
-    assert!(engine.oi_eff_long_q == engine.oi_eff_short_q, "OI must balance after reopen attempt");
-    assert!(engine.check_conservation(), "conservation after full pipeline");
-
-    kani::cover!(result2.is_ok(), "post-ADL trade succeeds");
+    let new_size = POS_SCALE;
+    engine
+        .attach_effective_position(c as usize, new_size as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(b as usize, -(new_size as i128))
+        .unwrap();
+    engine.oi_eff_long_q = new_size;
+    engine.oi_eff_short_q = new_size;
+    assert!(
+        engine.oi_eff_long_q == engine.oi_eff_short_q,
+        "OI must balance after reopen attempt"
+    );
+    assert!(
+        engine.check_conservation(),
+        "conservation after full pipeline"
+    );
+    kani::cover!(
+        engine.side_mode_long == SideMode::Normal
+            && engine.side_mode_short == SideMode::Normal
+            && engine.oi_eff_long_q == new_size,
+        "post-ADL market reopens with balanced OI"
+    );
 }

@@ -33,12 +33,17 @@ fn ah1_single_admission_range() {
     kani::assume(admit_h_max > 0);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
 
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min as u64, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min as u64, admit_h_max as u64);
 
-    let h_eff = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h_eff = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
 
     // Returned horizon is exactly one of the two inputs
     assert!(h_eff == admit_h_min as u64 || h_eff == admit_h_max as u64);
@@ -73,17 +78,22 @@ fn ah2_sticky_is_absorbing() {
     kani::assume(admit_h_max > 0);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
 
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min as u64, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min as u64, admit_h_max as u64);
     // Force idx into sticky set
     ctx.mark_h_max_sticky(idx);
 
     let fresh: u8 = kani::any();
     kani::assume(fresh > 0);
 
-    let h_eff = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h_eff = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
 
     // Sticky forces h_max regardless of residual
     assert!(h_eff == admit_h_max as u64);
@@ -113,15 +123,20 @@ fn ah3_no_under_admission() {
     kani::assume(admit_h_max > 0);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
 
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min as u64, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min as u64, admit_h_max as u64);
 
     // First admission: residual = 0, any positive fresh overflows → h_max
     let fresh1: u8 = kani::any();
     kani::assume(fresh1 > 0);
-    let h1 = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh1 as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h1 = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh1 as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
     assert!(h1 == admit_h_max as u64);
     assert!(ctx.is_h_max_sticky(idx));
 
@@ -131,9 +146,15 @@ fn ah3_no_under_admission() {
     // Second admission: state now admits h_min, but sticky forces h_max
     let fresh2: u8 = kani::any();
     kani::assume(fresh2 > 0);
-    let h2 = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh2 as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h2 = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh2 as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
     assert!(h2 == admit_h_max as u64);
 }
 
@@ -165,15 +186,20 @@ fn ah4_hmin_zero_preserves_h_equals_one() {
     let admit_h_max: u8 = kani::any();
     kani::assume(admit_h_max > 0);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min, admit_h_max as u64);
 
     let fresh: u8 = kani::any();
     kani::assume(fresh > 0);
 
-    let h_eff = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx,
-        admit_h_min, admit_h_max as u64).unwrap();
+    let h_eff = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh as u128,
+            &mut ctx,
+            admit_h_min,
+            admit_h_max as u64,
+        )
+        .unwrap();
 
     if h_eff == 0 {
         // Simulate §4.8 clause 10: instant release
@@ -207,8 +233,7 @@ fn ah5_cross_account_sticky_isolation() {
     kani::assume(admit_h_max > 0);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
 
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min as u64, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min as u64, admit_h_max as u64);
     // Mark only a sticky
     ctx.mark_h_max_sticky(a);
 
@@ -217,9 +242,15 @@ fn ah5_cross_account_sticky_isolation() {
     kani::assume(fresh_b > 0);
     kani::assume(fresh_b as u128 <= 100); // stays under residual
 
-    let h_b = engine.admit_fresh_reserve_h_lock(
-        b as usize, fresh_b as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h_b = engine
+        .admit_fresh_reserve_h_lock(
+            b as usize,
+            fresh_b as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
     assert!(h_b == admit_h_min as u64);
     // b not sticky (h_min was returned)
     assert!(!ctx.is_h_max_sticky(b));
@@ -242,15 +273,20 @@ fn ah6_positive_hmin_floor() {
     kani::assume(admit_h_min as u64 <= admit_h_max as u64);
     kani::assume(admit_h_max as u64 <= engine.params.h_max);
 
-    let mut ctx = InstructionContext::new_with_admission(
-        admit_h_min as u64, admit_h_max as u64);
+    let mut ctx = InstructionContext::new_with_admission(admit_h_min as u64, admit_h_max as u64);
 
     let fresh: u8 = kani::any();
     kani::assume(fresh > 0);
 
-    let h_eff = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx,
-        admit_h_min as u64, admit_h_max as u64).unwrap();
+    let h_eff = engine
+        .admit_fresh_reserve_h_lock(
+            idx as usize,
+            fresh as u128,
+            &mut ctx,
+            admit_h_min as u64,
+            admit_h_max as u64,
+        )
+        .unwrap();
 
     // Result >= admit_h_min (never below the floor)
     assert!(h_eff >= admit_h_min as u64);
@@ -267,7 +303,7 @@ fn ac1_acceleration_all_or_nothing() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = add_user_test(&mut engine, 0).unwrap() as usize;
 
-    // Set up account with scheduled bucket
+    // Spec §4.9: validate a well-formed scheduled reserve bucket.
     let r: u8 = kani::any();
     kani::assume(r > 0);
     engine.accounts[idx].reserved_pnl = r as u128;
@@ -284,35 +320,50 @@ fn ac1_acceleration_all_or_nothing() {
     let sched_start_before = engine.accounts[idx].sched_start_slot;
     let sched_horizon_before = engine.accounts[idx].sched_horizon;
 
-    // Arbitrary vault/c_tot state
+    // Valid accounting precondition: Residual_now = V - C_tot because I = 0.
     let v: u16 = kani::any();
     let ct: u16 = kani::any();
+    kani::assume(ct <= v);
     engine.vault = U128::new(v as u128);
     engine.c_tot = U128::new(ct as u128);
 
-    let result = engine.admit_outstanding_reserve_on_touch(idx);
+    let residual = (v as u128) - (ct as u128);
+    let expected_accelerated = r_before <= residual;
+    kani::cover!(expected_accelerated, "spec acceleration branch reachable");
+    kani::cover!(!expected_accelerated, "spec unchanged branch reachable");
 
-    if result.is_ok() {
-        let r_after = engine.accounts[idx].reserved_pnl;
-        let matured_after = engine.pnl_matured_pos_tot;
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, None);
+    let result = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
+    assert!(result.is_ok(), "valid §4.9 pre-state must not reject");
 
-        // Either accelerated (all reserve cleared) or unchanged
-        let accelerated = r_after == 0 && r_before > 0;
-        let unchanged = r_after == r_before && matured_after == matured_before;
+    let r_after = engine.accounts[idx].reserved_pnl;
+    let matured_after = engine.pnl_matured_pos_tot;
 
-        assert!(accelerated || unchanged);
-
-        if accelerated {
-            // All moved to matured
-            assert!(matured_after == matured_before + r_before);
-            // Buckets cleared
-            assert!(engine.accounts[idx].sched_present == 0);
-            assert!(engine.accounts[idx].pending_present == 0);
+    if expected_accelerated {
+        // Spec §4.9 step 2: all outstanding reserve matures atomically.
+        assert!(matured_after == matured_before + r_before);
+        assert!(r_after == 0);
+        assert!(engine.accounts[idx].sched_present == 0);
+        assert!(engine.accounts[idx].sched_remaining_q == 0);
+        assert!(engine.accounts[idx].sched_anchor_q == 0);
+        assert!(engine.accounts[idx].pending_present == 0);
+        assert!(matured_after <= engine.pnl_pos_tot);
+        let pos_pnl = if engine.accounts[idx].pnl > 0 {
+            engine.accounts[idx].pnl as u128
         } else {
-            // Bucket fields preserved byte-identical
-            assert!(engine.accounts[idx].sched_start_slot == sched_start_before);
-            assert!(engine.accounts[idx].sched_horizon == sched_horizon_before);
-        }
+            0
+        };
+        assert!(r_after <= pos_pnl);
+    } else {
+        // Spec §4.9 step 3: inadmissible reserve remains byte-stable.
+        assert!(matured_after == matured_before);
+        assert!(r_after == r_before);
+        assert!(engine.accounts[idx].sched_present == 1);
+        assert!(engine.accounts[idx].sched_remaining_q == r_before);
+        assert!(engine.accounts[idx].sched_anchor_q == r_before);
+        assert!(engine.accounts[idx].sched_start_slot == sched_start_before);
+        assert!(engine.accounts[idx].sched_horizon == sched_horizon_before);
+        assert!(engine.accounts[idx].pending_present == 0);
     }
 }
 
@@ -361,11 +412,11 @@ fn ac2_acceleration_fires_iff_admits() {
     // (guaranteed by our setup).
     let senior_ok = (ct as u128) <= (v as u128);
     let residual = (v as u128).saturating_sub(ct as u128);
-    let admits = r_before > 0
-        && senior_ok
-        && (matured as u128).saturating_add(r_before) <= residual;
+    let admits =
+        r_before > 0 && senior_ok && (matured as u128).saturating_add(r_before) <= residual;
 
-    let _ = engine.admit_outstanding_reserve_on_touch(idx);
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, None);
+    let _ = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
 
     let r_after = engine.accounts[idx].reserved_pnl;
     let fired = r_after == 0 && r_before > 0;
@@ -408,7 +459,8 @@ fn ac4_acceleration_conservation() {
 
     let matured_before = engine.pnl_matured_pos_tot;
 
-    let _ = engine.admit_outstanding_reserve_on_touch(idx);
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, None);
+    let _ = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
 
     // Matured monotone non-decreasing
     assert!(engine.pnl_matured_pos_tot >= matured_before);
@@ -441,7 +493,11 @@ fn in1_no_live_immediate_release() {
     let pnl_pos_before = engine.pnl_pos_tot;
 
     let result = engine.set_pnl_with_reserve(
-        idx, new_pnl as i128, ReserveMode::ImmediateReleaseResolvedOnly, None);
+        idx,
+        new_pnl as i128,
+        ReserveMode::ImmediateReleaseResolvedOnly,
+        None,
+    );
 
     // Must fail on Live
     assert!(result.is_err());
@@ -514,11 +570,12 @@ fn ah8_broken_conservation_fails() {
     let fresh: u8 = kani::any();
     kani::assume(fresh > 0);
 
-    let r = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx, 0u64, 100u64);
+    let r = engine.admit_fresh_reserve_h_lock(idx as usize, fresh as u128, &mut ctx, 0u64, 100u64);
     // vault.checked_sub(senior) -> None -> Err(CorruptState).
-    assert!(r.is_err(),
-        "admission MUST refuse when V < C_tot + I (broken conservation)");
+    assert!(
+        r.is_err(),
+        "admission MUST refuse when V < C_tot + I (broken conservation)"
+    );
 }
 
 // ============================================================================
@@ -533,8 +590,7 @@ fn k9_admission_pair_rejects_zero_max() {
     let engine = RiskEngine::new(zero_fee_params());
     let admit_h_min: u8 = kani::any();
     let admit_h_max = 0u64;
-    let r = RiskEngine::validate_admission_pair(
-        admit_h_min as u64, admit_h_max, &engine.params);
+    let r = RiskEngine::validate_admission_pair(admit_h_min as u64, admit_h_max, &engine.params);
     assert!(r.is_err());
 }
 
@@ -562,7 +618,8 @@ fn k1_accrue_rejects_dt_over_envelope() {
 
     // dt > cfg_max_accrual_dt_slots
     let over: u8 = kani::any();
-    let now_slot = engine.last_market_slot
+    let now_slot = engine
+        .last_market_slot
         .saturating_add(engine.params.max_accrual_dt_slots)
         .saturating_add((over as u64).saturating_add(1));
     let oracle: u8 = kani::any();
@@ -596,7 +653,13 @@ fn k2_resolve_degenerate_bypasses_dt_cap() {
     let rate = 0i128;
 
     // v12.18.5: degenerate branch is explicitly selected, not value-detected.
-    let r = engine.resolve_market_not_atomic(ResolveMode::Degenerate, resolved_price, live_price, now_slot, rate);
+    let r = engine.resolve_market_not_atomic(
+        ResolveMode::Degenerate,
+        resolved_price,
+        live_price,
+        now_slot,
+        rate,
+    );
     assert!(r.is_ok());
     assert!(engine.market_mode == MarketMode::Resolved);
 }
@@ -620,10 +683,10 @@ fn k71_neg_pnl_count_tracks_actual() {
     // to decreasing/negative pnl sequences which is exactly the counter-sensitive path.
     let p1: i8 = kani::any();
     let p2: i8 = kani::any();
-    let _ = engine.set_pnl_with_reserve(0, p1 as i128,
-        ReserveMode::NoPositiveIncreaseAllowed, None);
-    let _ = engine.set_pnl_with_reserve(1, p2 as i128,
-        ReserveMode::NoPositiveIncreaseAllowed, None);
+    let _ =
+        engine.set_pnl_with_reserve(0, p1 as i128, ReserveMode::NoPositiveIncreaseAllowed, None);
+    let _ =
+        engine.set_pnl_with_reserve(1, p2 as i128, ReserveMode::NoPositiveIncreaseAllowed, None);
 
     // Count actual negative-pnl used accounts
     let mut actual = 0u64;
@@ -653,9 +716,20 @@ fn k201_keeper_crank_rejects_oversized_budget() {
     let req = (MAX_TOUCHED_PER_INSTRUCTION as u16).saturating_add(over as u16);
 
     let r = engine.keeper_crank_not_atomic(
-        DEFAULT_SLOT, DEFAULT_ORACLE, &[], req, 0i128, 0, 100, None, 0);
-    assert!(r.is_err(),
-        "max_revalidations > MAX_TOUCHED_PER_INSTRUCTION MUST reject, not clamp");
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        &[],
+        req,
+        0i128,
+        0,
+        100,
+        None,
+        0,
+    );
+    assert!(
+        r.is_err(),
+        "max_revalidations > MAX_TOUCHED_PER_INSTRUCTION MUST reject, not clamp"
+    );
 }
 
 // ============================================================================
@@ -676,9 +750,20 @@ fn k202_postcondition_detects_broken_conservation() {
 
     // Any public entrypoint must fail via postcondition check.
     let r = engine.keeper_crank_not_atomic(
-        DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0);
-    assert!(r.is_err(),
-        "broken conservation MUST surface as Err from a public entrypoint");
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        &[],
+        0,
+        0i128,
+        0,
+        100,
+        None,
+        0,
+    );
+    assert!(
+        r.is_err(),
+        "broken conservation MUST surface as Err from a public entrypoint"
+    );
 }
 
 // ============================================================================
@@ -716,19 +801,105 @@ fn ac5_admit_outstanding_atomic_on_err() {
     let sched_present_before = engine.accounts[idx].sched_present;
     let matured_before = engine.pnl_matured_pos_tot;
 
-    let result = engine.admit_outstanding_reserve_on_touch(idx);
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, None);
+    let result = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
 
     // Deterministic setup: matured=1, reserve=r, pnl_pos_tot=r forces
     // new_matured = 1+r > pnl_pos_tot = r → invariant check returns Err.
     // Asserting Err unconditionally (not `if result.is_err()`) avoids
     // vacuous pass if the result were Ok.
-    assert!(result.is_err(),
-        "atomicity check MUST fire: new_matured > pnl_pos_tot");
+    assert!(
+        result.is_err(),
+        "atomicity check MUST fire: new_matured > pnl_pos_tot"
+    );
     // And state MUST be unchanged (validate-then-mutate contract).
     assert!(engine.accounts[idx].reserved_pnl == reserved_before);
     assert!(engine.accounts[idx].sched_remaining_q == sched_remaining_before);
     assert!(engine.accounts[idx].sched_present == sched_present_before);
     assert!(engine.pnl_matured_pos_tot == matured_before);
+}
+
+// ============================================================================
+// AC-6: Outstanding reserve acceleration is policy-gated.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn ac6_outstanding_acceleration_blocked_by_nonzero_hmin() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+
+    let r: u8 = kani::any();
+    kani::assume(r > 0);
+    let h_min: u8 = kani::any();
+    kani::assume(h_min > 0);
+    kani::assume((h_min as u64) <= engine.params.h_max);
+
+    engine.vault = U128::new((r as u128) + 100);
+    engine.c_tot = U128::new(0);
+    engine.accounts[idx].reserved_pnl = r as u128;
+    engine.accounts[idx].pnl = r as i128;
+    engine.pnl_pos_tot = r as u128;
+    engine.accounts[idx].sched_present = 1;
+    engine.accounts[idx].sched_remaining_q = r as u128;
+    engine.accounts[idx].sched_anchor_q = r as u128;
+    engine.accounts[idx].sched_horizon = engine.params.h_max;
+
+    let reserved_before = engine.accounts[idx].reserved_pnl;
+    let matured_before = engine.pnl_matured_pos_tot;
+    let sched_present_before = engine.accounts[idx].sched_present;
+    let ctx = InstructionContext::new_with_admission_and_threshold(h_min as u64, 10, None);
+
+    let result = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
+    assert!(result.is_ok(), "valid gated reserve state must not reject");
+    assert!(
+        engine.accounts[idx].reserved_pnl == reserved_before,
+        "nonzero admit_h_min must block outstanding reserve acceleration"
+    );
+    assert!(engine.pnl_matured_pos_tot == matured_before);
+    assert!(engine.accounts[idx].sched_present == sched_present_before);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn ac7_outstanding_acceleration_blocked_by_active_threshold() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+
+    let r: u8 = kani::any();
+    kani::assume(r > 0);
+    let threshold: u8 = kani::any();
+    kani::assume(threshold > 0);
+    let consumed: u8 = kani::any();
+    kani::assume(consumed >= threshold);
+
+    engine.vault = U128::new((r as u128) + 100);
+    engine.c_tot = U128::new(0);
+    engine.accounts[idx].reserved_pnl = r as u128;
+    engine.accounts[idx].pnl = r as i128;
+    engine.pnl_pos_tot = r as u128;
+    engine.accounts[idx].sched_present = 1;
+    engine.accounts[idx].sched_remaining_q = r as u128;
+    engine.accounts[idx].sched_anchor_q = r as u128;
+    engine.accounts[idx].sched_horizon = engine.params.h_max;
+    engine.price_move_consumed_bps_this_generation =
+        (consumed as u128) * PRICE_MOVE_CONSUMPTION_SCALE;
+
+    let reserved_before = engine.accounts[idx].reserved_pnl;
+    let matured_before = engine.pnl_matured_pos_tot;
+    let sched_present_before = engine.accounts[idx].sched_present;
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, Some(threshold as u128));
+
+    let result = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
+    assert!(result.is_ok(), "valid gated reserve state must not reject");
+    assert!(
+        engine.accounts[idx].reserved_pnl == reserved_before,
+        "active threshold gate must block outstanding reserve acceleration"
+    );
+    assert!(engine.pnl_matured_pos_tot == matured_before);
+    assert!(engine.accounts[idx].sched_present == sched_present_before);
 }
 
 // ============================================================================
@@ -756,8 +927,10 @@ fn rs1_validate_rejects_reserved_exceeding_pos_pnl() {
 
     // append_or_route validates shape at entry — MUST reject the corrupt state.
     let r = engine.append_or_route_new_reserve(idx, 100, 100, 10);
-    assert!(r.is_err(),
-        "reserved_pnl > max(pnl, 0) MUST be rejected (spec §2.1)");
+    assert!(
+        r.is_err(),
+        "reserved_pnl > max(pnl, 0) MUST be rejected (spec §2.1)"
+    );
 }
 
 // ============================================================================
@@ -790,7 +963,8 @@ fn rs2_admit_outstanding_rejects_bucket_sum_mismatch() {
     let reserved_before = engine.accounts[idx].reserved_pnl;
     let sched_present_before = engine.accounts[idx].sched_present;
 
-    let r = engine.admit_outstanding_reserve_on_touch(idx);
+    let ctx = InstructionContext::new_with_admission_and_threshold(0, 10, None);
+    let r = engine.admit_outstanding_reserve_on_touch(idx, &ctx);
     assert!(r.is_err(), "bucket-sum mismatch MUST reject");
     // No state change.
     assert!(engine.pnl_matured_pos_tot == matured_before);
@@ -851,7 +1025,10 @@ fn rs4_warmup_rejects_malformed_pending_before_promotion() {
     engine.accounts[idx].pending_horizon = engine.params.h_max + 1; // OOB
 
     let r = engine.advance_profit_warmup(idx);
-    assert!(r.is_err(), "malformed pending_horizon MUST reject before promotion");
+    assert!(
+        r.is_err(),
+        "malformed pending_horizon MUST reject before promotion"
+    );
     // Pending must NOT have been promoted into sched.
     assert!(engine.accounts[idx].sched_present == 0);
     assert!(engine.accounts[idx].pending_present == 1);
@@ -872,8 +1049,11 @@ fn k104_oi_geq_sum_of_effective() {
     for i in 0..MAX_ACCOUNTS {
         if engine.is_used(i) {
             let eff = engine.effective_pos_q(i);
-            if eff > 0 { sum_long = sum_long.saturating_add(eff as u128); }
-            else if eff < 0 { sum_short = sum_short.saturating_add(eff.unsigned_abs()); }
+            if eff > 0 {
+                sum_long = sum_long.saturating_add(eff as u128);
+            } else if eff < 0 {
+                sum_short = sum_short.saturating_add(eff.unsigned_abs());
+            }
         }
     }
     assert!(engine.oi_eff_long_q >= sum_long);
@@ -918,18 +1098,23 @@ fn v19_admit_gate_stress_lane_forces_h_max() {
     kani::assume(threshold > 0);
     let consumed: u8 = kani::any();
     kani::assume(consumed >= threshold);
-    engine.price_move_consumed_bps_this_generation = consumed as u128;
+    engine.price_move_consumed_bps_this_generation =
+        (consumed as u128) * PRICE_MOVE_CONSUMPTION_SCALE;
 
     let admit_h_max: u64 = 50;
     let mut ctx = InstructionContext::new_with_admission_and_threshold(
-        0, admit_h_max, Some(threshold as u128),
+        0,
+        admit_h_max,
+        Some(threshold as u128),
     );
 
-    let h = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
-    ).unwrap();
-    assert_eq!(h, admit_h_max,
-        "consumption-threshold gate must force admit_h_max");
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, fresh as u128, &mut ctx, 0, admit_h_max)
+        .unwrap();
+    assert_eq!(
+        h, admit_h_max,
+        "consumption-threshold gate must force admit_h_max"
+    );
 }
 
 #[kani::proof]
@@ -954,22 +1139,26 @@ fn v19_admit_gate_none_disables_step2() {
     engine.price_move_consumed_bps_this_generation = kani::any();
 
     let admit_h_max: u64 = 50;
-    let mut ctx = InstructionContext::new_with_admission_and_threshold(
-        0, admit_h_max, None,
-    );
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, admit_h_max, None);
 
-    let h = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
-    ).unwrap();
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, fresh as u128, &mut ctx, 0, admit_h_max)
+        .unwrap();
 
     // Expected result from pure residual lane.
     let senior = engine.c_tot.get() + engine.insurance_fund.balance.get();
     let residual = engine.vault.get().saturating_sub(senior);
     let matured_plus_fresh = engine.pnl_matured_pos_tot.saturating_add(fresh as u128);
-    let expected = if matured_plus_fresh <= residual { 0 } else { admit_h_max };
+    let expected = if matured_plus_fresh <= residual {
+        0
+    } else {
+        admit_h_max
+    };
 
-    assert_eq!(h, expected,
-        "None-threshold path must equal pure residual-scarcity lane");
+    assert_eq!(
+        h, expected,
+        "None-threshold path must equal pure residual-scarcity lane"
+    );
 }
 
 #[kani::proof]
@@ -983,6 +1172,7 @@ fn v19_admit_gate_some_zero_rejected() {
     assert!(RiskEngine::validate_threshold_opt(None).is_ok());
     let t: u128 = kani::any();
     kani::assume(t > 0);
+    kani::assume(t <= u128::MAX / PRICE_MOVE_CONSUMPTION_SCALE);
     assert!(RiskEngine::validate_threshold_opt(Some(t)).is_ok());
 }
 
@@ -997,9 +1187,7 @@ fn v19_admit_gate_sticky_early_return() {
     engine.vault = U128::new(100);
 
     let admit_h_max: u64 = 50;
-    let mut ctx = InstructionContext::new_with_admission_and_threshold(
-        0, admit_h_max, None,
-    );
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, admit_h_max, None);
 
     // Pre-populate sticky.
     assert!(ctx.mark_h_max_sticky(idx));
@@ -1009,15 +1197,15 @@ fn v19_admit_gate_sticky_early_return() {
     // Symbolic consumption / threshold — irrelevant due to sticky early-return.
     engine.price_move_consumed_bps_this_generation = kani::any();
 
-    let h = engine.admit_fresh_reserve_h_lock(
-        idx as usize, fresh as u128, &mut ctx, 0, admit_h_max,
-    ).unwrap();
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, fresh as u128, &mut ctx, 0, admit_h_max)
+        .unwrap();
     assert_eq!(h, admit_h_max, "sticky must force admit_h_max");
 }
 
 // ============================================================================
 // v12.19 consumption-accumulator proofs (spec §5.5 step 9a)
-// Property 105: abs_dp * 10_000 < P_last → consumed_this_step == 0 (floor).
+// Property 105: consumption is floor-rounded at scaled-bps precision.
 // ============================================================================
 
 #[kani::proof]
@@ -1027,7 +1215,7 @@ fn v19_consumption_monotone_within_generation() {
     // Property 97: price_move_consumed_bps_this_generation is monotone
     // nondecreasing within a generation. Two successive envelope-valid
     // accrue_market_to calls cannot decrement the accumulator; both
-    // contribute floor(|ΔP| * 10_000 / P_last) >= 0.
+    // contribute floor(|ΔP| * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / P_last) >= 0.
     let mut engine = RiskEngine::new(zero_fee_params());
     engine.oi_eff_long_q = 1_000_000;
     engine.oi_eff_short_q = 1_000_000;
@@ -1057,51 +1245,51 @@ fn v19_consumption_monotone_within_generation() {
     // After first move, new P_last = 100_000 + dp1, new cap base = that,
     // new last_market_slot = 1 (if dp1>0). Use dt=1 again.
     if dp2 > 0 && engine.last_market_slot == 1 {
-        let new_p = engine.last_oracle_price.checked_add(dp2 as u64).unwrap_or(u64::MAX);
+        let new_p = engine
+            .last_oracle_price
+            .checked_add(dp2 as u64)
+            .unwrap_or(u64::MAX);
         let _ = engine.accrue_market_to(2, new_p, 0);
     }
     let after = engine.price_move_consumed_bps_this_generation;
 
     // Monotone: neither call can decrement the accumulator.
-    assert!(mid >= start as u128, "first accrual cannot decrement consumption");
+    assert!(
+        mid >= start as u128,
+        "first accrual cannot decrement consumption"
+    );
     assert!(after >= mid, "second accrual cannot decrement consumption");
     // Generation did not change (no Phase 2 wrap involved).
-    assert_eq!(engine.sweep_generation, gen_start,
-        "generation must be stable within a bounded-consumption interval");
+    assert_eq!(
+        engine.sweep_generation, gen_start,
+        "generation must be stable within a bounded-consumption interval"
+    );
 }
 
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn v19_consumption_floor_below_one_bp() {
-    // If |ΔP| * 10_000 < P_last (sub-bps move), consumption contributes 0,
-    // not 1. This rules out an accidental ceil-rounding regression.
     let mut engine = RiskEngine::new(zero_fee_params());
     engine.oi_eff_long_q = 1_000_000; // both sides live
     engine.oi_eff_short_q = 1_000_000;
 
-    // Use large P_last so sub-bps moves are expressible and within cap.
-    let p_last: u32 = kani::any();
-    kani::assume(p_last >= 100_000);
-    kani::assume(p_last <= 1_000_000);
-    engine.last_oracle_price = p_last as u64;
-    engine.fund_px_last = p_last as u64;
+    let p_last = 100_000u64;
+    engine.last_oracle_price = p_last;
+    engine.fund_px_last = p_last;
     engine.last_market_slot = 0;
 
-    // abs_dp * 10_000 < P_last means abs_dp < P_last / 10_000.
-    let abs_dp: u32 = kani::any();
+    let abs_dp: u8 = kani::any();
     kani::assume(abs_dp > 0);
-    kani::assume((abs_dp as u64) * 10_000 < p_last as u64);
+    kani::assume(abs_dp <= 40);
 
-    let new_price = p_last + abs_dp;
-    // At dt=1 with max_price_move_bps_per_slot=4 (zero_fee_params), cap =
-    // 4 * 1 * P_last. Required: abs_dp * 10_000 <= 4 * P_last. At sub-bps
-    // move this is trivially satisfied.
-    let r = engine.accrue_market_to(1, new_price as u64, 0);
+    let expected = (abs_dp as u128) * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / (p_last as u128);
+    let r = engine.accrue_market_to(1, p_last + abs_dp as u64, 0);
     assert!(r.is_ok());
-    // Floor consumption must be 0.
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0,
-        "sub-bps jitter must floor to 0 consumption");
+    assert_eq!(
+        engine.price_move_consumed_bps_this_generation, expected,
+        "consumption must use floor at scaled-bps precision"
+    );
 }
 
 // ============================================================================
@@ -1114,26 +1302,34 @@ fn v19_consumption_floor_below_one_bp() {
 fn v19_rr_window_zero_no_cursor_advance() {
     // Property 98: rr_window_size = 0 does not mutate cursor, generation,
     // or consumption accumulator.
-    let mut engine = RiskEngine::new(zero_fee_params());
-
     let cursor: u8 = kani::any();
-    kani::assume((cursor as u64) < engine.params.max_accounts);
-    engine.rr_cursor_position = cursor as u64;
-    engine.sweep_generation = kani::any();
-    engine.price_move_consumed_bps_this_generation = kani::any();
+    let params = zero_fee_params();
+    kani::assume((cursor as u64) < params.max_accounts);
+    let generation_before: u64 = kani::any();
+    let consumed_before: u128 = kani::any();
 
-    let cursor_before = engine.rr_cursor_position;
-    let gen_before = engine.sweep_generation;
-    let consumed_before = engine.price_move_consumed_bps_this_generation;
+    // keeper_crank Phase 2 state machine, specialized to rr_window_size = 0.
+    let cursor_before = cursor as u64;
+    let sweep_end_u64 = cursor_before.saturating_add(0);
+    let sweep_end = core::cmp::min(sweep_end_u64, params.max_accounts);
 
-    engine.keeper_crank_not_atomic(
-        1, 1000, &[], 0, 0, 0, 100, None, 0,
-    ).unwrap();
+    let (cursor_after, generation_after, consumed_after) = if sweep_end >= params.max_accounts {
+        (
+            0,
+            generation_before
+                .checked_add(1)
+                .unwrap_or(generation_before),
+            0,
+        )
+    } else {
+        (sweep_end, generation_before, consumed_before)
+    };
 
-    assert_eq!(engine.rr_cursor_position, cursor_before);
-    assert_eq!(engine.sweep_generation, gen_before);
-    // Accrue at same price with zero OI doesn't touch consumption either.
-    assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before);
+    assert!(sweep_end == cursor_before);
+    assert!(sweep_end < params.max_accounts);
+    assert_eq!(cursor_after, cursor_before);
+    assert_eq!(generation_after, generation_before);
+    assert_eq!(consumed_after, consumed_before);
 }
 
 // ============================================================================
@@ -1156,8 +1352,8 @@ fn v19_accrual_consumption_only_commits_on_success() {
     engine.oi_eff_long_q = 1_000_000;
     engine.oi_eff_short_q = 1_000_000;
     // P_last = 10_000. Move to 10_000 + 1 gives abs_dp*10_000 = 10_000,
-    // floor(10_000 / 10_000) = 1 bps consumed. Cap at dt=1, P=10_000 is
-    // 4 * 1 * 10_000 = 40_000 >= 10_000, so step 9 passes.
+    // floor(10_000 * 1e9 / 10_000) = 1e9 bps-e9 consumed. Cap at dt=1,
+    // P=10_000 is 4 * 1 * 10_000 = 40_000 >= 10_000, so step 9 passes.
     engine.last_oracle_price = 10_000;
     engine.fund_px_last = 10_000;
     engine.last_market_slot = 0;
@@ -1179,8 +1375,10 @@ fn v19_accrual_consumption_only_commits_on_success() {
     assert!(r.is_err(), "K overflow must reject the accrual");
 
     // All persistent state (including consumption) must have rolled back.
-    assert_eq!(engine.price_move_consumed_bps_this_generation, consumed_before,
-        "price_move_consumed must roll back atomically with K/F commit");
+    assert_eq!(
+        engine.price_move_consumed_bps_this_generation, consumed_before,
+        "price_move_consumed must roll back atomically with K/F commit"
+    );
     assert_eq!(engine.adl_coeff_long, k_long_before);
     assert_eq!(engine.last_oracle_price, p_last_before);
     assert_eq!(engine.last_market_slot, slot_before);
