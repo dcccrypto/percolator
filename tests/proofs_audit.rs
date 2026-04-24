@@ -345,7 +345,9 @@ fn proof_keeper_crank_invalid_partial_no_action() {
     // Tiny partial won't restore health; spec §11.1 rule 3 maps invalid
     // keeper hints to None, so keeper_crank performs no liquidation action.
     let bad_hint = Some(LiquidationPolicy::ExactPartial(POS_SCALE as u128));
-    let validated = engine.validate_keeper_hint(a, eff_before, &bad_hint, crash_oracle);
+    let validated = engine
+        .validate_keeper_hint(a, eff_before, &bad_hint, crash_oracle)
+        .unwrap();
     assert!(
         validated.is_none(),
         "invalid partial hint must validate to no action"
@@ -570,7 +572,9 @@ fn proof_keeper_hint_none_returns_none() {
     );
 
     // None hint must return None per §11.2
-    let result = engine.validate_keeper_hint(a, eff, &None, DEFAULT_ORACLE);
+    let result = engine
+        .validate_keeper_hint(a, eff, &None, DEFAULT_ORACLE)
+        .unwrap();
     assert!(
         result.is_none(),
         "None hint must return None per spec §11.2"
@@ -618,7 +622,9 @@ fn proof_keeper_hint_fullclose_passthrough() {
     );
 
     let hint = Some(LiquidationPolicy::FullClose);
-    let result = engine.validate_keeper_hint(a, eff, &hint, DEFAULT_ORACLE);
+    let result = engine
+        .validate_keeper_hint(a, eff, &hint, DEFAULT_ORACLE)
+        .unwrap();
     assert!(
         matches!(result, Some(LiquidationPolicy::FullClose)),
         "FullClose hint must pass through"
@@ -843,7 +849,9 @@ fn proof_validate_hint_preflight_conservative() {
     let eff = engine.effective_pos_q(a as usize);
     let hint = Some(LiquidationPolicy::ExactPartial(q_close));
 
-    let validated = engine.validate_keeper_hint(a, eff, &hint, DEFAULT_ORACLE);
+    let validated = engine
+        .validate_keeper_hint(a, eff, &hint, DEFAULT_ORACLE)
+        .unwrap();
 
     // If pre-flight approves ExactPartial, step 14 must also pass
     if let Some(LiquidationPolicy::ExactPartial(q)) = validated {
@@ -928,7 +936,9 @@ fn proof_validate_hint_preflight_oracle_shift() {
     let eff = engine.effective_pos_q(a as usize);
     let hint = Some(LiquidationPolicy::ExactPartial(q_close));
 
-    let validated = engine.validate_keeper_hint(a, eff, &hint, crank_oracle);
+    let validated = engine
+        .validate_keeper_hint(a, eff, &hint, crank_oracle)
+        .unwrap();
 
     if let Some(LiquidationPolicy::ExactPartial(q)) = validated {
         assert_eq!(q, q_close, "approved q must match");

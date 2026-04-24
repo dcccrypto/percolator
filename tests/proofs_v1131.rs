@@ -833,7 +833,9 @@ fn proof_partial_liquidation_remainder_nonzero() {
     );
 
     let hint = Some(LiquidationPolicy::ExactPartial(q_close));
-    let validated = engine.validate_keeper_hint(a, size, &hint, DEFAULT_ORACLE);
+    let validated = engine
+        .validate_keeper_hint(a, size, &hint, DEFAULT_ORACLE)
+        .unwrap();
     assert!(
         matches!(validated, Some(LiquidationPolicy::ExactPartial(q)) if q == q_close),
         "keeper pre-flight must approve a health-restoring partial close"

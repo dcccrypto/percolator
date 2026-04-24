@@ -1098,8 +1098,8 @@ fn execute_trade_clears_dust_before_opening_fresh_oi() {
     // bilateral_oi_after is computed, so fresh OI is clean.
     let mut params = default_params();
     params.trading_fee_bps = 0;
-    // v12.19: maintenance must stay > 0 to satisfy the solvency envelope.
-    // Use default 500 + liq_fee = 0 so there's plenty of slack.
+    // This test is not exercising the zero-bps floor-only envelope; keep the
+    // default proportional maintenance and remove liquidation-fee pressure.
     params.liquidation_fee_bps = 0;
     params.max_abs_funding_e9_per_slot = 0;
     // Keep max_dt small so the test's slot arithmetic is tight but valid;
@@ -1278,8 +1278,8 @@ fn trade_at_position_cap_accepts_valid_replacement() {
     let mut params = default_params();
     params.max_active_positions_per_side = 1;
     params.trading_fee_bps = 0;
-    // v12.19: maintenance_margin_bps must be > 0 to satisfy the solvency
-    // envelope. Use default 500 — margin checks are slack with 1M capital.
+    // Keep default proportional maintenance; margin checks are slack with 1M
+    // capital, so this test only exercises position-cap accounting.
     let px = 1_000u64;
     let mut e = RiskEngine::new_with_market(params, 0, px);
     e.deposit_not_atomic(0, 1_000_000, 0).unwrap();
@@ -1321,8 +1321,8 @@ fn trade_at_position_cap_still_rejects_real_overflow() {
     let mut params = default_params();
     params.max_active_positions_per_side = 1;
     params.trading_fee_bps = 0;
-    // v12.19: maintenance_margin_bps must be > 0 to satisfy the solvency
-    // envelope. Use default 500 — margin checks are slack with 1M capital.
+    // Keep default proportional maintenance; margin checks are slack with 1M
+    // capital, so this test only exercises position-cap accounting.
     let px = 1_000u64;
     let mut e = RiskEngine::new_with_market(params, 0, px);
     e.deposit_not_atomic(0, 1_000_000, 0).unwrap();
@@ -1431,6 +1431,36 @@ fn validate_params_accepts_capped_liquidation_fee_envelope() {
     params.liquidation_fee_cap = U128::new(1);
     params.min_liquidation_abs = U128::ZERO;
     RiskEngine::try_validate_params(&params).unwrap();
+}
+
+#[test]
+fn validate_params_accepts_capped_liquidation_fee_with_min_near_cap() {
+    let mut params = default_params();
+    params.liquidation_fee_bps = 10_000;
+    params.liquidation_fee_cap = U128::new(100);
+    params.min_liquidation_abs = U128::new(99);
+    params.min_nonzero_mm_req = 300;
+    params.min_nonzero_im_req = 301;
+    RiskEngine::try_validate_params(&params).unwrap();
+}
+
+#[test]
+fn validate_params_accepts_zero_maintenance_when_floor_covers_domain() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 0;
+    params.min_nonzero_mm_req = 4_000_000_000_000_000_000;
+    params.min_nonzero_im_req = 4_000_000_000_000_000_001;
+    RiskEngine::try_validate_params(&params).unwrap();
+}
+
+#[test]
+fn validate_params_rejects_zero_maintenance_when_floor_is_too_low() {
+    let mut params = default_params();
+    params.maintenance_margin_bps = 0;
+    assert_eq!(
+        RiskEngine::try_validate_params(&params),
+        Err(RiskError::Overflow)
+    );
 }
 
 #[test]
@@ -6420,6 +6450,111 @@ fn local_fee_mutators_reject_corrupt_fee_credits() {
         Err(RiskError::CorruptState)
     );
     assert_eq!(engine.fee_debt_sweep(idx), Err(RiskError::CorruptState));
+}
+
+#[test]
+fn deposit_existing_nonflat_rejects_i128_min_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 100_000, 0).unwrap();
+
+    let size = make_size_q(1);
+    engine.set_position_basis_q(a as usize, size).unwrap();
+    engine.set_position_basis_q(b as usize, -size).unwrap();
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.accounts[a as usize].fee_credits = I128::new(i128::MIN);
+
+    let vault_before = engine.vault.get();
+    let capital_before = engine.accounts[a as usize].capital.get();
+    assert_eq!(
+        engine.deposit_not_atomic(a, 1, 0),
+        Err(RiskError::CorruptState)
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.accounts[a as usize].capital.get(), capital_before);
+}
+
+#[test]
+fn deposit_existing_rejects_malformed_reserve_shape() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, 0).unwrap();
+    engine.accounts[idx as usize].pnl = 10;
+    engine.accounts[idx as usize].reserved_pnl = 1;
+
+    let vault_before = engine.vault.get();
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    assert_eq!(
+        engine.deposit_not_atomic(idx, 1, 0),
+        Err(RiskError::CorruptState)
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), capital_before);
+}
+
+#[test]
+fn account_local_public_paths_reject_i128_min_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.credit_account_from_insurance_not_atomic(idx, 0, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.charge_account_fee_not_atomic(idx, 0, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.settle_flat_negative_pnl_not_atomic(idx, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.sync_account_fee_to_slot_not_atomic(idx, 0, 0),
+        Err(RiskError::CorruptState)
+    );
+}
+
+#[test]
+fn keeper_hint_rejects_corrupt_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.validate_keeper_hint(idx, 0, &None, 1000),
+        Err(RiskError::CorruptState)
+    );
+}
+
+#[test]
+fn reconcile_resolved_rejects_i128_min_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10_000, 100).unwrap();
+    engine.accrue_market_to(100, 1000, 0).unwrap();
+    engine
+        .resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 100, 0)
+        .unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+
+    assert_eq!(
+        engine.reconcile_resolved_not_atomic(idx),
+        Err(RiskError::CorruptState)
+    );
 }
 
 #[test]

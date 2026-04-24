@@ -2870,7 +2870,9 @@ fn proof_partial_liquidation_can_succeed() {
     let q_close = (400 * POS_SCALE) as u128;
     let eff = engine.effective_pos_q(a as usize);
     let partial_hint = Some(LiquidationPolicy::ExactPartial(q_close));
-    let validated = engine.validate_keeper_hint(a, eff, &partial_hint, DEFAULT_ORACLE);
+    let validated = engine
+        .validate_keeper_hint(a, eff, &partial_hint, DEFAULT_ORACLE)
+        .unwrap();
     assert!(
         matches!(validated, Some(LiquidationPolicy::ExactPartial(q)) if q == q_close),
         "pre-flight must approve a partial close that restores maintenance health"

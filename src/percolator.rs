@@ -1078,6 +1078,20 @@ impl RiskEngine {
 
         // Normative domain: account RiskNotional is capped at MAX_ACCOUNT_NOTIONAL.
         let domain_max = MAX_ACCOUNT_NOTIONAL;
+        if params.maintenance_margin_bps == 0 {
+            // With no proportional term, the absolute floor is the whole
+            // maintenance requirement; the monotone worst case is domain max.
+            if Self::solvency_envelope_holds_for_notional(
+                params,
+                domain_max,
+                loss_budget_num,
+                loss_budget_den,
+                price_budget_bps,
+            ) {
+                return Ok(());
+            }
+            return Err(RiskError::Overflow);
+        }
 
         // Floor-region proof. While proportional maintenance is below the
         // configured minimum, loss+fee is monotone in risk notional, so the
@@ -1545,10 +1559,7 @@ impl RiskEngine {
         if !self.accounts[i].capital.is_zero() {
             return Err(RiskError::CorruptState);
         }
-        let fc = self.accounts[i].fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
+        self.validate_fee_credits_shape(i)?;
         // The current free-list head must be a genuine free head before
         // this slot is prepended.
         if self.free_head != u16::MAX {
@@ -3117,6 +3128,7 @@ impl RiskEngine {
         if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx)?;
         let last = self.accounts[idx].last_fee_slot;
         if fee_slot_anchor < last { return Err(RiskError::Overflow); }
         // Mode-specific upper bound on the anchor.
@@ -4200,10 +4212,7 @@ impl RiskEngine {
             if account.pnl < 0 {
                 neg_count = neg_count.checked_add(1).ok_or(RiskError::CorruptState)?;
             }
-            let fee_credits = account.fee_credits.get();
-            if fee_credits > 0 || fee_credits == i128::MIN {
-                return Err(RiskError::CorruptState);
-            }
+            self.validate_fee_credits_shape(idx)?;
             self.validate_reserve_shape(idx)?;
 
             if account.position_basis_q != 0 {
@@ -4419,6 +4428,17 @@ impl RiskEngine {
     /// Absent bucket => all fields zero. Present scheduled => horizon > 0,
     /// release <= anchor, remaining <= anchor - release.
     /// Total: sched_remaining + pending_remaining == reserved_pnl.
+    fn validate_fee_credits_shape(&self, idx: usize) -> Result<()> {
+        if idx >= MAX_ACCOUNTS {
+            return Err(RiskError::AccountNotFound);
+        }
+        let fc = self.accounts[idx].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(())
+    }
+
     fn validate_reserve_shape(&self, idx: usize) -> Result<()> {
         let a = &self.accounts[idx];
         if a.sched_present == 0 {
@@ -4660,10 +4680,8 @@ impl RiskEngine {
         if idx >= MAX_ACCOUNTS {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx)?;
         let fc = self.accounts[idx].fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
         let debt = fee_debt_u128_checked(fc);
         if debt == 0 {
             return Ok(());
@@ -4699,6 +4717,7 @@ impl RiskEngine {
         if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx)?;
         if !ctx.add_touched(idx as u16) {
             return Err(RiskError::Overflow); // touched-set capacity exceeded
         }
@@ -4856,10 +4875,13 @@ impl RiskEngine {
             }
             self.materialize_at(idx, now_slot)?;
         }
+        let i = idx as usize;
+        self.validate_fee_credits_shape(i)?;
+        self.validate_reserve_shape(i)?;
 
         // Pre-validate: settle_losses can only fail on i128::MIN PNL (corruption).
         // Check before any mutation to maintain validate-then-mutate contract.
-        if self.is_used(idx as usize) && self.accounts[idx as usize].pnl == i128::MIN {
+        if self.accounts[i].pnl == i128::MIN {
             return Err(RiskError::CorruptState);
         }
 
@@ -4868,15 +4890,15 @@ impl RiskEngine {
         self.vault = U128::new(v_candidate);
 
         // Step 6: set_capital(i, C_i + capital_amount)
-        let new_cap = self.accounts[idx as usize]
+        let new_cap = self.accounts[i]
             .capital
             .get()
             .checked_add(capital_amount)
             .ok_or(RiskError::Overflow)?;
-        self.set_capital(idx as usize, new_cap)?;
+        self.set_capital(i, new_cap)?;
 
         // Step 7: settle_losses_from_principal
-        self.settle_losses(idx as usize)?;
+        self.settle_losses(i)?;
 
         // Step 8: deposit MUST NOT invoke resolve_flat_negative (spec §7.3).
         // A pure deposit path that does not call accrue_market_to MUST NOT
@@ -4886,9 +4908,8 @@ impl RiskEngine {
         // Step 9: if flat and PNL >= 0, sweep fee debt (spec §7.5)
         // Per spec §10.3: deposit into account with basis != 0 MUST defer.
         // Per spec §7.5: only a surviving negative PNL_i blocks the sweep.
-        if self.accounts[idx as usize].position_basis_q == 0 && self.accounts[idx as usize].pnl >= 0
-        {
-            self.fee_debt_sweep(idx as usize)?;
+        if self.accounts[i].position_basis_q == 0 && self.accounts[i].pnl >= 0 {
+            self.fee_debt_sweep(i)?;
         }
 
         self.assert_public_postconditions()?;
@@ -4931,6 +4952,7 @@ impl RiskEngine {
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -5030,6 +5052,7 @@ impl RiskEngine {
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -5145,6 +5168,8 @@ impl RiskEngine {
             admit_h_max,
             admit_h_max_consumption_threshold_bps_opt,
         )?;
+        self.validate_fee_credits_shape(a as usize)?;
+        self.validate_fee_credits_shape(b as usize)?;
         let mut ctx = InstructionContext::new_with_admission_and_threshold(
             admit_h_min,
             admit_h_max,
@@ -5404,10 +5429,8 @@ impl RiskEngine {
         if idx >= MAX_ACCOUNTS {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx)?;
         let current_fc = self.accounts[idx].fee_credits.get();
-        if current_fc > 0 || current_fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
         if fee > MAX_PROTOCOL_FEE_ABS {
             return Err(RiskError::Overflow);
         }
@@ -5685,6 +5708,7 @@ impl RiskEngine {
         if (idx as usize) >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -5977,7 +6001,7 @@ impl RiskEngine {
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
                         if let Some(policy) =
-                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)
+                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
                         {
                             match self.liquidate_at_oracle_internal(
                                 candidate_idx,
@@ -6065,21 +6089,26 @@ impl RiskEngine {
         eff: i128,
         hint: &Option<LiquidationPolicy>,
         oracle_price: u64,
-    ) -> Option<LiquidationPolicy> {
+    ) -> Result<Option<LiquidationPolicy>> {
+        let i = idx as usize;
+        if i >= MAX_ACCOUNTS || !self.is_used(i) {
+            return Err(RiskError::AccountNotFound);
+        }
+        self.validate_fee_credits_shape(i)?;
         match hint {
             // Spec §11.2: absent hint means no liquidation action for this candidate.
-            None => None,
-            Some(LiquidationPolicy::FullClose) => Some(LiquidationPolicy::FullClose),
+            None => Ok(None),
+            Some(LiquidationPolicy::FullClose) => Ok(Some(LiquidationPolicy::FullClose)),
             Some(LiquidationPolicy::ExactPartial(q_close_q)) => {
                 let abs_eff = eff.unsigned_abs();
                 // Bounds check: 0 < q_close_q < abs(eff)
                 // Spec §11.1 rule 3: invalid hint → no liquidation action (None)
                 if *q_close_q == 0 || *q_close_q >= abs_eff {
-                    return None;
+                    return Ok(None);
                 }
 
                 // Stateless pre-flight: predict post-partial maintenance health.
-                let account = &self.accounts[idx as usize];
+                let account = &self.accounts[i];
 
                 // 1. Predict liquidation fee
                 let notional_closed = mul_div_floor_u128(*q_close_q, oracle_price as u128, POS_SCALE);
@@ -6106,7 +6135,7 @@ impl RiskEngine {
                 let eq_raw_wide = self.account_equity_maint_raw_wide(account);
                 let predicted_eq = match eq_raw_wide.checked_sub(I256::from_u128(fee_applied)) {
                     Some(v) => v,
-                    None => return None,
+                    None => return Ok(None),
                 };
 
                 // 3. Predict post-partial MM_req
@@ -6122,10 +6151,10 @@ impl RiskEngine {
                 // 4. Health check: predicted_eq > predicted_mm_req
                 // Spec §11.1 rule 3: failed pre-flight → no liquidation action (None)
                 if predicted_eq <= I256::from_u128(predicted_mm_req) {
-                    return None;
+                    return Ok(None);
                 }
 
-                Some(LiquidationPolicy::ExactPartial(*q_close_q))
+                Ok(Some(LiquidationPolicy::ExactPartial(*q_close_q)))
             }
         }
     }
@@ -6216,6 +6245,7 @@ impl RiskEngine {
         if !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
@@ -6273,6 +6303,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         let mut ctx = InstructionContext::new_with_admission_and_threshold(
             admit_h_min,
@@ -6530,6 +6561,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         // Recurring maintenance-fee ordering is a WRAPPER responsibility.
         // The engine provides `sync_account_fee_to_slot_not_atomic` as a
         // primitive for wrappers that enable fees, but does not enforce
@@ -6672,6 +6704,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         // Spec §9.9 step 3: resolved-market instructions MUST run at the
         // frozen anchor slot. reconcile_resolved_not_atomic enforces this;
         // terminal close does too — a post-resolution drift of current_slot
@@ -6749,10 +6782,8 @@ impl RiskEngine {
             }
         }
         self.fee_debt_sweep(i)?;
+        self.validate_fee_credits_shape(i)?;
         let fc = self.accounts[i].fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
         if fc < 0 {
             self.accounts[i].fee_credits = I128::ZERO;
         }
@@ -6783,6 +6814,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -6804,10 +6836,7 @@ impl RiskEngine {
         if account.sched_present != 0 || account.pending_present != 0 {
             return Err(RiskError::Undercollateralized);
         }
-        let fc = account.fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
+        self.validate_fee_credits_shape(idx as usize)?;
 
         // Step 4: anchor current_slot
         self.current_slot = now_slot;
@@ -6827,10 +6856,8 @@ impl RiskEngine {
         }
 
         // Forgive uncollectible fee debt (spec §2.6).
+        self.validate_fee_credits_shape(idx as usize)?;
         let fc = self.accounts[idx as usize].fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
         if fc < 0 {
             self.accounts[idx as usize].fee_credits = I128::ZERO;
         }
@@ -6903,6 +6930,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
@@ -7023,6 +7051,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -7060,6 +7089,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -7131,6 +7161,7 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -7187,10 +7218,8 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        self.validate_fee_credits_shape(idx as usize)?;
         let fc = self.accounts[idx as usize].fee_credits.get();
-        if fc > 0 || fc == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
         // Pre-state invariant check: any corruption surfaces BEFORE mutation.
         self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
