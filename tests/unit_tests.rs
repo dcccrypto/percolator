@@ -8282,3 +8282,88 @@ fn test_resolved_context_getter() {
     assert_eq!(price, oracle);
     assert_eq!(rslot, slot);
 }
+
+#[test]
+fn test_fast_postconditions_reject_persistent_kf_i128_min() {
+    let mut engine = RiskEngine::new(default_params());
+
+    engine.adl_coeff_long = i128::MIN;
+    assert!(matches!(
+        engine.top_up_insurance_fund(0, 0),
+        Err(RiskError::CorruptState)
+    ));
+
+    let mut engine = RiskEngine::new(default_params());
+    engine.f_short_num = i128::MIN;
+    assert!(matches!(
+        engine.top_up_insurance_fund(0, 0),
+        Err(RiskError::CorruptState)
+    ));
+}
+
+#[test]
+fn test_accrue_rejects_persisting_i128_min_k() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    engine
+        .execute_trade_not_atomic(a, b, 1000, 2, make_size_q(1), 1000, 0, 0, 100, None)
+        .unwrap();
+
+    let pre_k = i128::MIN + ADL_ONE as i128;
+    engine.adl_coeff_long = pre_k;
+    let result = engine.accrue_market_to(3, 999, 0);
+
+    assert!(matches!(result, Err(RiskError::Overflow)));
+    assert_eq!(engine.adl_coeff_long, pre_k);
+}
+
+#[test]
+fn test_public_account_paths_reject_used_slot_outside_configured_capacity() {
+    let mut params = default_params();
+    params.max_accounts = 1;
+    params.max_active_positions_per_side = 1;
+    let mut engine = RiskEngine::new(params);
+    let _idx0 = add_user_test(&mut engine, 0).unwrap();
+
+    engine.used[0] |= 1u64 << 1;
+    engine.num_used_accounts += 1;
+    engine.materialized_account_count += 1;
+
+    assert!(matches!(
+        engine.try_effective_pos_q(1),
+        Err(RiskError::AccountNotFound)
+    ));
+    assert!(matches!(
+        engine.deposit_not_atomic(1, 1, 0),
+        Err(RiskError::AccountNotFound)
+    ));
+}
+
+#[test]
+fn test_direct_resolved_reconcile_finalizes_ready_reset_side() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+    let basis = make_size_q(1);
+
+    engine.set_position_basis_q(idx, basis).unwrap();
+    engine.accounts[idx].adl_a_basis = ADL_ONE;
+    engine.accounts[idx].adl_k_snap = 0;
+    engine.accounts[idx].f_snap = 0;
+    engine.accounts[idx].adl_epoch_snap = 0;
+    engine.adl_epoch_long = 1;
+    engine.adl_epoch_start_k_long = 0;
+    engine.f_epoch_start_long_num = 0;
+    engine.side_mode_long = SideMode::ResetPending;
+    engine.stale_account_count_long = 1;
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_price = 1000;
+    engine.resolved_live_price = 1000;
+    engine.resolved_slot = engine.current_slot;
+
+    engine.reconcile_resolved_not_atomic(idx as u16).unwrap();
+
+    assert_eq!(engine.accounts[idx].position_basis_q, 0);
+    assert_eq!(engine.stored_pos_count_long, 0);
+    assert_eq!(engine.stale_account_count_long, 0);
+    assert_eq!(engine.side_mode_long, SideMode::Normal);
+}
