@@ -854,6 +854,78 @@ fn test_top_up_insurance_fund() {
 }
 
 #[test]
+fn absorb_protocol_loss_consumes_insurance_without_draining_vault() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.vault = U128::new(1_000);
+    engine.c_tot = U128::new(300);
+    engine.insurance_fund.balance = U128::new(200);
+
+    let residual = |e: &RiskEngine| {
+        let senior = e.c_tot.get() + e.insurance_fund.balance.get();
+        e.vault.get() - senior
+    };
+
+    let v_before = engine.vault.get();
+    let c_before = engine.c_tot.get();
+    let residual_before = residual(&engine);
+
+    engine.absorb_protocol_loss(125);
+
+    assert_eq!(engine.vault.get(), v_before);
+    assert_eq!(engine.c_tot.get(), c_before);
+    assert_eq!(engine.insurance_fund.balance.get(), 75);
+    assert_eq!(residual(&engine), residual_before + 125);
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn absorb_protocol_loss_drains_only_available_insurance() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.vault = U128::new(1_000);
+    engine.c_tot = U128::new(300);
+    engine.insurance_fund.balance = U128::new(200);
+
+    let residual = |e: &RiskEngine| {
+        let senior = e.c_tot.get() + e.insurance_fund.balance.get();
+        e.vault.get() - senior
+    };
+
+    let residual_before = residual(&engine);
+
+    engine.absorb_protocol_loss(500);
+
+    assert_eq!(engine.vault.get(), 1_000);
+    assert_eq!(engine.c_tot.get(), 300);
+    assert_eq!(engine.insurance_fund.balance.get(), 0);
+    assert_eq!(residual(&engine), residual_before + 200);
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn top_up_insurance_preserves_junior_residual() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.vault = U128::new(1_000);
+    engine.c_tot = U128::new(300);
+    engine.insurance_fund.balance = U128::new(200);
+
+    let residual = |e: &RiskEngine| {
+        let senior = e.c_tot.get() + e.insurance_fund.balance.get();
+        e.vault.get() - senior
+    };
+
+    let residual_before = residual(&engine);
+    let c_before = engine.c_tot.get();
+
+    engine.top_up_insurance_fund(125, 0).expect("top up");
+
+    assert_eq!(engine.vault.get(), 1_125);
+    assert_eq!(engine.c_tot.get(), c_before);
+    assert_eq!(engine.insurance_fund.balance.get(), 325);
+    assert_eq!(residual(&engine), residual_before);
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn top_up_cannot_jump_current_slot_past_accrual_envelope() {
     // Regression: a permissionless top_up_insurance_fund (amount=0) must
     // not be able to advance current_slot so far that the next
