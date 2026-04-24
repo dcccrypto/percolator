@@ -1425,6 +1425,15 @@ fn validate_params_rejects_liquidation_fee_breach() {
 }
 
 #[test]
+fn validate_params_accepts_capped_liquidation_fee_envelope() {
+    let mut params = default_params();
+    params.liquidation_fee_bps = 10_000;
+    params.liquidation_fee_cap = U128::new(1);
+    params.min_liquidation_abs = U128::ZERO;
+    RiskEngine::try_validate_params(&params).unwrap();
+}
+
+#[test]
 fn validate_params_rejects_zero_price_move_cap() {
     let mut params = default_params();
     params.max_price_move_bps_per_slot = 0;
@@ -1576,6 +1585,24 @@ fn test_deposit_fee_credits() {
         .expect("zero debt no-op");
     assert_eq!(paid, 0, "pay == min(amount, 0) == 0 when no debt");
     assert_eq!(engine.accounts[idx as usize].fee_credits.get(), 0);
+}
+
+#[test]
+fn deposit_fee_credits_rejects_malformed_fee_credit_state() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 1000).unwrap();
+
+    engine.accounts[idx as usize].fee_credits = I128::new(1);
+    assert_eq!(
+        engine.deposit_fee_credits(idx, 1, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+    assert_eq!(
+        engine.deposit_fee_credits(idx, 1, 0),
+        Err(RiskError::CorruptState)
+    );
 }
 
 #[test]
@@ -6166,6 +6193,17 @@ fn free_slot_rejects_positive_fee_credits() {
 }
 
 #[test]
+fn free_slot_rejects_i128_min_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].fee_credits = I128::new(i128::MIN);
+
+    let res = engine.free_slot(idx);
+    assert_eq!(res, Err(RiskError::CorruptState));
+    assert!(engine.is_used(idx as usize));
+}
+
+#[test]
 fn init_in_place_fully_canonicalizes_nonzero_memory() {
     // Reviewer regression: the doc says "safe even on non-zeroed memory".
     // Previously the account loop only set adl_a_basis; everything else
@@ -7755,6 +7793,19 @@ fn test_reclaim_requires_zero_capital() {
     let r2 = engine.reclaim_empty_account_not_atomic(a, 100);
     assert!(r2.is_ok(), "reclaim must succeed once capital is zero");
     assert!(!engine.is_used(a as usize));
+}
+
+#[test]
+fn reclaim_rejects_i128_min_fee_credits() {
+    let mut engine = RiskEngine::new(default_params());
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let idx = a as usize;
+    engine.accounts[idx].fee_credits = I128::new(i128::MIN);
+
+    let result = engine.reclaim_empty_account_not_atomic(a, 0);
+    assert_eq!(result, Err(RiskError::CorruptState));
+    assert!(engine.is_used(idx));
+    assert_eq!(engine.accounts[idx].fee_credits.get(), i128::MIN);
 }
 
 #[test]

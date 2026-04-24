@@ -567,15 +567,11 @@ pub struct RiskParams {
     /// price-moving live-exposed market where
     /// `abs_delta_price * 10_000 > max_price_move_bps_per_slot * dt * P_last`.
     ///
-    /// Init-time solvency-envelope invariant (spec §1.4):
-    ///   `max_price_move_bps_per_slot * max_accrual_dt_slots
-    ///    + floor(max_abs_funding_e9_per_slot * max_accrual_dt_slots
-    ///            * 10_000 / FUNDING_DEN)
-    ///    + liquidation_fee_bps
-    ///    <= maintenance_margin_bps`
-    ///
-    /// This is the construction-level invariant backing §0 goal 52
-    /// (self-neutral insurance-siphon resistance).
+    /// Init-time solvency-envelope invariant (spec §1.4): the exact bounded
+    /// verifier must prove, for every account RiskNotional in
+    /// `[1, MAX_ACCOUNT_NOTIONAL]`, that the configured maintenance
+    /// requirement covers worst-case price movement, funding, and capped
+    /// liquidation fee.
     pub max_price_move_bps_per_slot: u64,
 }
 
@@ -958,13 +954,20 @@ impl RiskEngine {
         }
 
         const MAX_SOLVENCY_INTERVALS: usize = 96;
+        const MAX_SOLVENCY_STEPS: usize = 4096;
         const EXACT_CHUNK: u128 = 64;
 
         let mut stack = [(0u128, 0u128); MAX_SOLVENCY_INTERVALS];
         let mut len = 1usize;
+        let mut steps = 0usize;
         stack[0] = (lo, hi);
 
         while len != 0 {
+            steps = steps.checked_add(1).ok_or(RiskError::Overflow)?;
+            if steps > MAX_SOLVENCY_STEPS {
+                return Err(RiskError::Overflow);
+            }
+
             len -= 1;
             let (range_lo, range_hi) = stack[len];
 
@@ -1058,19 +1061,16 @@ impl RiskEngine {
             ten_thousand,
         )
         .ok_or(RiskError::Overflow)?;
-
         let linear_budget_bps = loss_budget_bps_ceil
             .checked_add(worst_liq_budget_bps_ceil)
             .ok_or(RiskError::Overflow)?;
+
         let exact_full_margin_loss_only = params.maintenance_margin_bps == 10_000
             && loss_budget_bps_ceil == 10_000
             && worst_liq_budget_bps_ceil == 0
             && params.min_liquidation_abs.get() == 0;
         if exact_full_margin_loss_only {
             return Ok(());
-        }
-        if linear_budget_bps >= params.maintenance_margin_bps as u128 {
-            return Err(RiskError::Overflow);
         }
 
         let loss_budget_num = loss_budget_num.try_into_u128().ok_or(RiskError::Overflow)?;
@@ -1110,37 +1110,84 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Linear-tail proof. For N above this bound, the slope gap between
-        // maintenance and the conservative rounded loss+fee upper bound covers
-        // all ceil/floor slack.
-        let slope_gap = (params.maintenance_margin_bps as u128) - linear_budget_bps;
+        let exact_start = floor_region_end.checked_add(1).ok_or(RiskError::Overflow)?;
+
+        if linear_budget_bps < params.maintenance_margin_bps as u128 {
+            // Fast conservative proof: treating liquidation fees as uncapped
+            // is stronger than the spec, and gives a small exact tail for
+            // ordinary parameter sets.
+            let slope_gap = (params.maintenance_margin_bps as u128) - linear_budget_bps;
+            let rounding_slack = 3u128;
+            let tail_for_linear = ceil_div_positive_checked(
+                U256::from_u128(rounding_slack * 10_000),
+                U256::from_u128(slope_gap),
+            )
+            .try_into_u128()
+            .ok_or(RiskError::Overflow)?;
+
+            let loss_gap = (params.maintenance_margin_bps as u128)
+                .checked_sub(loss_budget_bps_ceil)
+                .ok_or(RiskError::Overflow)?;
+            let floor_fee_slack = params
+                .min_liquidation_abs
+                .get()
+                .checked_add(2)
+                .ok_or(RiskError::Overflow)?;
+            let tail_for_fee_floor = ceil_div_positive_checked(
+                U256::from_u128(floor_fee_slack)
+                    .checked_mul(ten_thousand)
+                    .ok_or(RiskError::Overflow)?,
+                U256::from_u128(loss_gap),
+            )
+            .try_into_u128()
+            .ok_or(RiskError::Overflow)?;
+
+            let exact_tail = core::cmp::max(tail_for_linear, tail_for_fee_floor);
+            if exact_tail <= exact_start {
+                return Ok(());
+            }
+
+            let exact_end = core::cmp::min(exact_tail.saturating_sub(1), domain_max);
+            return Self::validate_solvency_envelope_range(
+                params,
+                exact_start,
+                exact_end,
+                loss_budget_num,
+                loss_budget_den,
+                price_budget_bps,
+            );
+        }
+
+        if loss_budget_bps_ceil >= params.maintenance_margin_bps as u128 {
+            return Self::validate_solvency_envelope_range(
+                params,
+                exact_start,
+                domain_max,
+                loss_budget_num,
+                loss_budget_den,
+                price_budget_bps,
+            );
+        }
+
+        // Capped-fee proof: when uncapped liquidation fee slope would exceed
+        // maintenance, the exact validator covers the finite prefix and the
+        // tail proof uses liquidation_fee_cap as a bounded additive term.
+        let slope_gap = (params.maintenance_margin_bps as u128) - loss_budget_bps_ceil;
         let rounding_slack = 3u128;
-        let tail_for_linear = ceil_div_positive_checked(
-            U256::from_u128(rounding_slack * 10_000),
+        let capped_fee_slack = params
+            .liquidation_fee_cap
+            .get()
+            .checked_add(rounding_slack)
+            .ok_or(RiskError::Overflow)?;
+        let exact_tail = ceil_div_positive_checked(
+            U256::from_u128(capped_fee_slack)
+                .checked_mul(ten_thousand)
+                .ok_or(RiskError::Overflow)?,
             U256::from_u128(slope_gap),
         )
         .try_into_u128()
         .ok_or(RiskError::Overflow)?;
 
-        let loss_gap = (params.maintenance_margin_bps as u128)
-            .checked_sub(loss_budget_bps_ceil)
-            .ok_or(RiskError::Overflow)?;
-        let floor_fee_slack = params
-            .min_liquidation_abs
-            .get()
-            .checked_add(2)
-            .ok_or(RiskError::Overflow)?;
-        let tail_for_fee_floor = ceil_div_positive_checked(
-            U256::from_u128(floor_fee_slack)
-                .checked_mul(ten_thousand)
-                .ok_or(RiskError::Overflow)?,
-            U256::from_u128(loss_gap),
-        )
-        .try_into_u128()
-        .ok_or(RiskError::Overflow)?;
-
-        let exact_tail = core::cmp::max(tail_for_linear, tail_for_fee_floor);
-        let exact_start = floor_region_end.checked_add(1).ok_or(RiskError::Overflow)?;
         if exact_tail <= exact_start {
             return Ok(());
         }
@@ -1224,25 +1271,6 @@ impl RiskEngine {
             .map(|v| v <= i128_max)
             .unwrap_or(false);
         if !lifetime_ok {
-            return Err(RiskError::Overflow);
-        }
-
-        let ten_thousand = U256::from_u128(10_000u128);
-        let funding_den = U256::from_u128(FUNDING_DEN);
-        let price_budget = U256::from_u128(params.max_price_move_bps_per_slot as u128)
-            .checked_mul(dt)
-            .ok_or(RiskError::Overflow)?;
-        let funding_budget = rate
-            .checked_mul(dt)
-            .and_then(|v| v.checked_mul(ten_thousand))
-            .and_then(|v| v.checked_div(funding_den))
-            .ok_or(RiskError::Overflow)?;
-        let solvency_ok = price_budget
-            .checked_add(funding_budget)
-            .and_then(|v| v.checked_add(U256::from_u128(params.liquidation_fee_bps as u128)))
-            .map(|v| v <= U256::from_u128(params.maintenance_margin_bps as u128))
-            .unwrap_or(false);
-        if !solvency_ok {
             return Err(RiskError::Overflow);
         }
 
@@ -1517,7 +1545,8 @@ impl RiskEngine {
         if !self.accounts[i].capital.is_zero() {
             return Err(RiskError::CorruptState);
         }
-        if self.accounts[i].fee_credits.get() > 0 {
+        let fc = self.accounts[i].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
             return Err(RiskError::CorruptState);
         }
         // The current free-list head must be a genuine free head before
@@ -4944,7 +4973,6 @@ impl RiskEngine {
             // Post-withdrawal equity: current withdraw equity minus withdrawal amount
             let eq_withdraw =
                 self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize);
-            let eq_post = eq_withdraw.saturating_sub(amount as i128);
             let notional = self.notional_checked(idx as usize, oracle_price, false)?;
             // eff != 0 here, so always enforce min_nonzero_im_req. The
             // risk notional itself is ceil-rounded, but proportional IM can
@@ -4958,7 +4986,9 @@ impl RiskEngine {
             // im_req > i128::MAX (min_nonzero_im_req is u128; spec §1.4
             // does not clip it to i128 range), approving an otherwise
             // undercollateralized withdrawal. Use I256 to avoid the wrap.
-            let eq_post_wide = I256::from_i128(eq_post);
+            let eq_post_wide = I256::from_i128(eq_withdraw)
+                .checked_sub(I256::from_u128(amount))
+                .ok_or(RiskError::Overflow)?;
             let im_req_wide = I256::from_u128(im_req);
             if eq_post_wide < im_req_wide {
                 return Err(RiskError::Undercollateralized);
@@ -6476,6 +6506,7 @@ impl RiskEngine {
 
         // Finalize any sides that are fully ready for reopening
         self.maybe_finalize_ready_reset_sides();
+        self.assert_public_postconditions()?;
 
         // pnl <= 0: can close immediately (loser/zero — no payout gate)
         // pnl > 0: needs terminal readiness for payout
@@ -6718,7 +6749,11 @@ impl RiskEngine {
             }
         }
         self.fee_debt_sweep(i)?;
-        if self.accounts[i].fee_credits.get() < 0 {
+        let fc = self.accounts[i].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
+        if fc < 0 {
             self.accounts[i].fee_credits = I128::ZERO;
         }
         let capital = self.accounts[i].capital;
@@ -6769,7 +6804,8 @@ impl RiskEngine {
         if account.sched_present != 0 || account.pending_present != 0 {
             return Err(RiskError::Undercollateralized);
         }
-        if account.fee_credits.get() > 0 {
+        let fc = account.fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
             return Err(RiskError::CorruptState);
         }
 
@@ -6791,8 +6827,12 @@ impl RiskEngine {
         }
 
         // Forgive uncollectible fee debt (spec §2.6).
-        if self.accounts[idx as usize].fee_credits.get() < 0 {
-            self.accounts[idx as usize].fee_credits = I128::new(0);
+        let fc = self.accounts[idx as usize].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
+        if fc < 0 {
+            self.accounts[idx as usize].fee_credits = I128::ZERO;
         }
 
         // Free the slot
@@ -7147,6 +7187,10 @@ impl RiskEngine {
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
+        let fc = self.accounts[idx as usize].fee_credits.get();
+        if fc > 0 || fc == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
         // Pre-state invariant check: any corruption surfaces BEFORE mutation.
         self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
@@ -7156,7 +7200,7 @@ impl RiskEngine {
         self.check_live_accrual_envelope(now_slot)?;
 
         // Spec §9.2.1 step 5: pay = min(amount, FeeDebt_i).
-        let debt = fee_debt_u128_checked(self.accounts[idx as usize].fee_credits.get());
+        let debt = fee_debt_u128_checked(fc);
         let pay = core::cmp::min(amount, debt);
         if pay == 0 {
             // Spec step 6: if pay == 0, return with current_slot anchored.
