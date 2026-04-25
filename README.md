@@ -83,6 +83,36 @@ No admin intervention. No governance vote. The state machine always makes progre
 
 ---
 
+## Price Movement Bound
+
+There is a third system-level invariant: an exposed market cannot be cranked
+through an arbitrary oracle jump in one step.
+
+For any crank that advances the engine price while open interest exists, the
+allowed price move is capped by the elapsed slots:
+
+```
+abs(P_new - P_last) / P_last
+    <= max_price_move_bps_per_slot * dt
+```
+
+At a high level this means the maximum price movement between cranks is bounded
+to roughly the system's risk budget. If the market is configured around `L`
+times leverage, the safe one-step move is on the order of `1 / L`, with room
+reserved for funding, liquidation fees, integer rounding, and fee floors/caps.
+
+This turns "crank often enough" into a hard solvency boundary rather than an
+operator preference. A stale or fast-moving oracle target must be fed into the
+engine as a capped staircase of effective prices. Same-slot exposed cranks use
+the previous price; they cannot mark live OI through a zero-time jump.
+
+The result is a bounded-loss system step: before any K/F/price/slot mutation,
+the engine checks that the next price move fits inside the initialization-time
+solvency envelope. If it does not fit, the crank fails closed instead of moving
+the market into an unbudgeted state.
+
+---
+
 ## How They Compose
 
 | | H | A/K |
@@ -96,6 +126,7 @@ Together:
 - No user can withdraw more than exists.
 - No user is singled out for forced closure.
 - Markets always recover.
+- Each exposed crank is bounded to the configured price-move budget.
 - Flat accounts keep their deposits.
 
 A/K fairness is exact for open-position economics. H fairness is exact only for the currently stored realized claim set, not for the economically "true" claim set you would get after globally cranking everyone.
