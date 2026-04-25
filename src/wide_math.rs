@@ -247,12 +247,7 @@ impl U256 {
     /// Create from low 128 bits and high 128 bits.
     #[inline]
     pub const fn new(lo: u128, hi: u128) -> Self {
-        Self([
-            lo as u64,
-            (lo >> 64) as u64,
-            hi as u64,
-            (hi >> 64) as u64,
-        ])
+        Self([lo as u64, (lo >> 64) as u64, hi as u64, (hi >> 64) as u64])
     }
 
     #[inline]
@@ -623,21 +618,30 @@ impl I256 {
         }
     }
 
-
     /// Checked signed I256 * I256 multiplication via abs/sign decomposition.
     /// Returns None on overflow (result doesn't fit I256).
     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
-        if self.is_zero() || rhs.is_zero() { return Some(I256::ZERO); }
+        if self.is_zero() || rhs.is_zero() {
+            return Some(I256::ZERO);
+        }
         let neg = self.is_negative() != rhs.is_negative();
         // Handle MIN carefully: abs_u256 panics on MIN, but MIN * 1 = MIN, MIN * -1 = overflow
         if self == I256::MIN {
-            if rhs == I256::ONE { return Some(I256::MIN); }
-            if rhs == I256::MINUS_ONE { return None; } // -MIN > MAX
+            if rhs == I256::ONE {
+                return Some(I256::MIN);
+            }
+            if rhs == I256::MINUS_ONE {
+                return None;
+            } // -MIN > MAX
             return None; // |MIN| * |rhs>1| > MAX
         }
         if rhs == I256::MIN {
-            if self == I256::ONE { return Some(I256::MIN); }
-            if self == I256::MINUS_ONE { return None; }
+            if self == I256::ONE {
+                return Some(I256::MIN);
+            }
+            if self == I256::MINUS_ONE {
+                return None;
+            }
             return None;
         }
         let abs_a = self.abs_u256();
@@ -646,10 +650,16 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0).checked_add(U256::from_u128(1u128 << 127)).unwrap_or(U256::MAX);
+            let min_mag = U256::from_u128(0)
+                .checked_add(U256::from_u128(1u128 << 127))
+                .unwrap_or(U256::MAX);
             // For exactly 2^255, result is MIN
-            if product == min_mag { return Some(I256::MIN); }
-            if product > min_mag { return None; }
+            if product == min_mag {
+                return Some(I256::MIN);
+            }
+            if product > min_mag {
+                return None;
+            }
             // product < 2^255: fits as negative I256
             let pos = I256::from_u256_or_overflow(product)?;
             pos.checked_neg()
@@ -748,7 +758,9 @@ impl I256 {
     /// Convert U256 to I256, returning None if the value exceeds i256 max (sign bit set).
     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
         // Sign bit is bit 255 = bit 127 of hi limb
-        if v.hi() >> 127 != 0 { return None; }
+        if v.hi() >> 127 != 0 {
+            return None;
+        }
         Some(Self::from_raw_u256(v))
     }
 }
@@ -829,21 +841,30 @@ impl I256 {
 
     // -- checked arithmetic --
 
-
     /// Checked signed I256 * I256 multiplication via abs/sign decomposition.
     /// Returns None on overflow (result doesn't fit I256).
     pub fn checked_mul_i256(self, rhs: I256) -> Option<I256> {
-        if self.is_zero() || rhs.is_zero() { return Some(I256::ZERO); }
+        if self.is_zero() || rhs.is_zero() {
+            return Some(I256::ZERO);
+        }
         let neg = self.is_negative() != rhs.is_negative();
         // Handle MIN carefully: abs_u256 panics on MIN, but MIN * 1 = MIN, MIN * -1 = overflow
         if self == I256::MIN {
-            if rhs == I256::ONE { return Some(I256::MIN); }
-            if rhs == I256::MINUS_ONE { return None; } // -MIN > MAX
+            if rhs == I256::ONE {
+                return Some(I256::MIN);
+            }
+            if rhs == I256::MINUS_ONE {
+                return None;
+            } // -MIN > MAX
             return None; // |MIN| * |rhs>1| > MAX
         }
         if rhs == I256::MIN {
-            if self == I256::ONE { return Some(I256::MIN); }
-            if self == I256::MINUS_ONE { return None; }
+            if self == I256::ONE {
+                return Some(I256::MIN);
+            }
+            if self == I256::MINUS_ONE {
+                return None;
+            }
             return None;
         }
         let abs_a = self.abs_u256();
@@ -852,10 +873,16 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0).checked_add(U256::from_u128(1u128 << 127)).unwrap_or(U256::MAX);
+            let min_mag = U256::from_u128(0)
+                .checked_add(U256::from_u128(1u128 << 127))
+                .unwrap_or(U256::MAX);
             // For exactly 2^255, result is MIN
-            if product == min_mag { return Some(I256::MIN); }
-            if product > min_mag { return None; }
+            if product == min_mag {
+                return Some(I256::MIN);
+            }
+            if product > min_mag {
+                return None;
+            }
             // product < 2^255: fits as negative I256
             let pos = I256::from_u256_or_overflow(product)?;
             pos.checked_neg()
@@ -870,8 +897,11 @@ impl I256 {
         let r_lo = rhs.lo_u128();
         let r_hi = rhs.hi_u128();
         let (lo, carry) = s_lo.overflowing_add(r_lo);
-        let (hi, overflow1) = s_hi.overflowing_add(r_hi);
-        let (hi, overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
+        // overflow bits unused — this is a wrapping-add for signed I256; the
+        // sign-based overflow detection below uses the result, not the
+        // unsigned-overflow flags.
+        let (hi, _overflow1) = s_hi.overflowing_add(r_hi);
+        let (hi, _overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
         let result = I256::from_lo_hi(lo, hi);
 
         let self_neg = self.is_negative();
@@ -944,12 +974,7 @@ impl I256 {
     }
 
     fn from_lo_hi(lo: u128, hi: u128) -> Self {
-        Self([
-            lo as u64,
-            (lo >> 64) as u64,
-            hi as u64,
-            (hi >> 64) as u64,
-        ])
+        Self([lo as u64, (lo >> 64) as u64, hi as u64, (hi >> 64) as u64])
     }
 
     fn as_raw_u256(self) -> U256 {
@@ -962,7 +987,9 @@ impl I256 {
 
     /// Convert U256 to I256, returning None if the value exceeds i256 max (sign bit set).
     pub fn from_u256_or_overflow(v: U256) -> Option<Self> {
-        if v.hi() >> 127 != 0 { return None; }
+        if v.hi() >> 127 != 0 {
+            return None;
+        }
         Some(Self::from_raw_u256(v))
     }
 }
@@ -1031,18 +1058,17 @@ fn widening_mul_u128(a: u128, b: u128) -> (u128, u128) {
     let b_lo = b as u64 as u128;
     let b_hi = (b >> 64) as u64 as u128;
 
-    let ll = a_lo * b_lo;                  // 0..2^128
-    let lh = a_lo * b_hi;                  // 0..2^128
-    let hl = a_hi * b_lo;                  // 0..2^128
-    let hh = a_hi * b_hi;                  // 0..2^128
+    let ll = a_lo * b_lo; // 0..2^128
+    let lh = a_lo * b_hi; // 0..2^128
+    let hl = a_hi * b_lo; // 0..2^128
+    let hh = a_hi * b_hi; // 0..2^128
 
     // Accumulate:
     //   result = ll + (lh + hl) << 64 + hh << 128
     let (mid, mid_carry) = lh.overflowing_add(hl); // mid_carry means +2^128
 
     let (lo, lo_carry) = ll.overflowing_add(mid << 64);
-    let hi = hh + (mid >> 64) + ((mid_carry as u128) << 64)
-           + (lo_carry as u128);
+    let hi = hh + (mid >> 64) + ((mid_carry as u128) << 64) + (lo_carry as u128);
     // lo_carry is at most 1, captured in hi
 
     (lo, hi)
@@ -1336,7 +1362,10 @@ impl U512 {
 /// Computes floor(n / d) where d > 0. Uses truncation toward zero, then
 /// adjusts: if n < 0 and there is a non-zero remainder, subtract 1.
 pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
-    assert!(!d.is_zero(), "floor_div_signed_conservative: zero denominator");
+    assert!(
+        !d.is_zero(),
+        "floor_div_signed_conservative: zero denominator"
+    );
 
     if n.is_zero() {
         return I256::ZERO;
@@ -1371,7 +1400,8 @@ pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
         let q_final = if r.is_zero() {
             q
         } else {
-            q.checked_add(U256::ONE).expect("floor_div quotient overflow")
+            q.checked_add(U256::ONE)
+                .expect("floor_div quotient overflow")
         };
 
         // Negate q_final to get the negative I256 result.
@@ -1389,7 +1419,10 @@ pub fn floor_div_signed_conservative(n: I256, d: U256) -> I256 {
 /// negative infinity. Mirrors `floor_div_signed_conservative` but uses native
 /// i128/u128 arithmetic for the funding-term computation (spec §5.4).
 pub fn floor_div_signed_conservative_i128(n: i128, d: u128) -> i128 {
-    assert!(d != 0, "floor_div_signed_conservative_i128: zero denominator");
+    assert!(
+        d != 0,
+        "floor_div_signed_conservative_i128: zero denominator"
+    );
 
     if n == 0 {
         return 0;
@@ -1404,8 +1437,10 @@ pub fn floor_div_signed_conservative_i128(n: i128, d: u128) -> i128 {
         let q = abs_n / d;
         let r = abs_n % d;
         let q_final = if r != 0 { q + 1 } else { q };
-        assert!(q_final <= i128::MAX as u128,
-            "floor_div_signed_conservative_i128: result out of range");
+        assert!(
+            q_final <= i128::MAX as u128,
+            "floor_div_signed_conservative_i128: result out of range"
+        );
         -(q_final as i128)
     }
 }
@@ -1435,7 +1470,10 @@ pub fn mul_div_floor_u256(a: U256, b: U256, d: U256) -> U256 {
 /// Like mul_div_floor_u256 but also returns the remainder.
 /// Returns (floor(a * b / d), (a * b) mod d).
 pub fn mul_div_floor_u256_with_rem(a: U256, b: U256, d: U256) -> (U256, U256) {
-    assert!(!d.is_zero(), "mul_div_floor_u256_with_rem: zero denominator");
+    assert!(
+        !d.is_zero(),
+        "mul_div_floor_u256_with_rem: zero denominator"
+    );
     let product = U512::mul_u256(a, b);
     product.div_rem_by_u256(d)
 }
@@ -1496,7 +1534,10 @@ pub fn fee_debt_u128_checked(fee_credits: i128) -> u128 {
 /// Uses the sign of `k_diff`. Computes `abs_basis * abs(k_diff)` as U512,
 /// then applies floor_div_signed_conservative logic.
 pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U256) -> I256 {
-    assert!(!denominator.is_zero(), "wide_signed_mul_div_floor: zero denominator");
+    assert!(
+        !denominator.is_zero(),
+        "wide_signed_mul_div_floor: zero denominator"
+    );
 
     if k_diff.is_zero() || abs_basis.is_zero() {
         return I256::ZERO;
@@ -1504,7 +1545,10 @@ pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U25
 
     let negative = k_diff.is_negative();
     let abs_k = if negative {
-        assert!(k_diff != I256::MIN, "wide_signed_mul_div_floor: k_diff == I256::MIN");
+        assert!(
+            k_diff != I256::MIN,
+            "wide_signed_mul_div_floor: k_diff == I256::MIN"
+        );
         k_diff.abs_u256()
     } else {
         k_diff.abs_u256()
@@ -1522,13 +1566,15 @@ pub fn wide_signed_mul_div_floor(abs_basis: U256, k_diff: I256, denominator: U25
         let q_final = if r.is_zero() {
             q
         } else {
-            q.checked_add(U256::ONE).expect("wide_signed_mul_div_floor quotient overflow")
+            q.checked_add(U256::ONE)
+                .expect("wide_signed_mul_div_floor quotient overflow")
         };
         if q_final.is_zero() {
             I256::ZERO
         } else {
             let qi = I256::from_raw_u256(q_final);
-            qi.checked_neg().expect("wide_signed_mul_div_floor result out of I256 range")
+            qi.checked_neg()
+                .expect("wide_signed_mul_div_floor result out of I256 range")
         }
     }
 }
@@ -1560,7 +1606,11 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
     assert!(d > 0, "mul_div_ceil_u128: division by zero");
     let p = a.checked_mul(b).expect("mul_div_ceil_u128: a*b overflow");
     let q = p / d;
-    if p % d != 0 { q + 1 } else { q }
+    if p % d != 0 {
+        q + 1
+    } else {
+        q
+    }
 }
 
 /// Exact wide multiply-divide floor using U256 intermediate.
@@ -1568,17 +1618,26 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {
 pub fn wide_mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {
     assert!(d > 0, "wide_mul_div_floor_u128: division by zero");
     let result = mul_div_floor_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d));
-    result.try_into_u128().expect("wide_mul_div_floor_u128: result exceeds u128")
+    result
+        .try_into_u128()
+        .expect("wide_mul_div_floor_u128: result exceeds u128")
 }
 
 /// Safe K-difference settlement (spec §4.8 lines 720-732).
 /// Computes K-difference in wide intermediate, then multiplies and divides.
-pub fn wide_signed_mul_div_floor_from_k_pair(abs_basis: u128, k_then: i128, k_now: i128, den: u128) -> i128 {
+pub fn wide_signed_mul_div_floor_from_k_pair(
+    abs_basis: u128,
+    k_then: i128,
+    k_now: i128,
+    den: u128,
+) -> i128 {
     assert!(den > 0, "wide_signed_mul_div_floor_from_k_pair: den == 0");
     // Compute d = k_now - k_then in wide signed to avoid i128 overflow (spec §4.8)
     let k_now_wide = I256::from_i128(k_now);
     let k_then_wide = I256::from_i128(k_then);
-    let d = k_now_wide.checked_sub(k_then_wide).expect("K-diff overflow in wide");
+    let d = k_now_wide
+        .checked_sub(k_then_wide)
+        .expect("K-diff overflow in wide");
     if d.is_zero() || abs_basis == 0 {
         return 0i128;
     }
@@ -1586,7 +1645,9 @@ pub fn wide_signed_mul_div_floor_from_k_pair(abs_basis: u128, k_then: i128, k_no
     let abs_basis_u256 = U256::from_u128(abs_basis);
     let den_u256 = U256::from_u128(den);
     // p = abs_basis * abs(d), exact wide product
-    let p = abs_basis_u256.checked_mul(abs_d).expect("wide product overflow");
+    let p = abs_basis_u256
+        .checked_mul(abs_d)
+        .expect("wide product overflow");
     let (q, rem) = div_rem_u256(p, den_u256);
     if d.is_negative() {
         // mag = q + 1 if r != 0 else q
@@ -1596,11 +1657,17 @@ pub fn wide_signed_mul_div_floor_from_k_pair(abs_basis: u128, k_then: i128, k_no
             q
         };
         let mag_u128 = mag.try_into_u128().expect("mag exceeds u128");
-        assert!(mag_u128 <= i128::MAX as u128, "wide_signed_mul_div_floor_from_k_pair: mag > i128::MAX");
+        assert!(
+            mag_u128 <= i128::MAX as u128,
+            "wide_signed_mul_div_floor_from_k_pair: mag > i128::MAX"
+        );
         -(mag_u128 as i128)
     } else {
         let q_u128 = q.try_into_u128().expect("quotient exceeds u128");
-        assert!(q_u128 <= i128::MAX as u128, "wide_signed_mul_div_floor_from_k_pair: q > i128::MAX");
+        assert!(
+            q_u128 <= i128::MAX as u128,
+            "wide_signed_mul_div_floor_from_k_pair: q > i128::MAX"
+        );
         q_u128 as i128
     }
 }
@@ -1611,8 +1678,15 @@ pub struct OverI128Magnitude;
 
 /// ADL delta_K representability check.
 /// Returns Ok(v) if the ceil result fits in i128 magnitude, Err otherwise.
-pub fn wide_mul_div_ceil_u128_or_over_i128max(a: u128, b: u128, d: u128) -> core::result::Result<u128, OverI128Magnitude> {
-    assert!(d > 0, "wide_mul_div_ceil_u128_or_over_i128max: division by zero");
+pub fn wide_mul_div_ceil_u128_or_over_i128max(
+    a: u128,
+    b: u128,
+    d: u128,
+) -> core::result::Result<u128, OverI128Magnitude> {
+    assert!(
+        d > 0,
+        "wide_mul_div_ceil_u128_or_over_i128max: division by zero"
+    );
     let result = mul_div_ceil_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d));
     match result.try_into_u128() {
         Some(v) if v <= i128::MAX as u128 => Ok(v),
@@ -1725,7 +1799,7 @@ mod tests {
     fn test_u256_mul_overflow() {
         let a = U256::new(0, 1); // 2^128
         let b = U256::new(0, 1); // 2^128
-        // Product would be 2^256, which overflows.
+                                 // Product would be 2^256, which overflows.
         assert_eq!(a.checked_mul(b), None);
     }
 
@@ -1927,9 +2001,15 @@ mod tests {
     #[test]
     fn test_ceil_div_positive() {
         // ceil(7 / 3) = 3
-        assert_eq!(ceil_div_positive_checked(U256::from_u128(7), U256::from_u128(3)), U256::from_u128(3));
+        assert_eq!(
+            ceil_div_positive_checked(U256::from_u128(7), U256::from_u128(3)),
+            U256::from_u128(3)
+        );
         // ceil(6 / 3) = 2
-        assert_eq!(ceil_div_positive_checked(U256::from_u128(6), U256::from_u128(3)), U256::from_u128(2));
+        assert_eq!(
+            ceil_div_positive_checked(U256::from_u128(6), U256::from_u128(3)),
+            U256::from_u128(2)
+        );
     }
 
     // --- saturating_mul_u256_u64 ---
@@ -2060,8 +2140,14 @@ mod tests {
     #[test]
     fn test_mul_div_max() {
         // MAX * 1 / 1 = MAX
-        assert_eq!(mul_div_floor_u256(U256::MAX, U256::ONE, U256::ONE), U256::MAX);
+        assert_eq!(
+            mul_div_floor_u256(U256::MAX, U256::ONE, U256::ONE),
+            U256::MAX
+        );
         // 1 * 1 / 1 = 1
-        assert_eq!(mul_div_floor_u256(U256::ONE, U256::ONE, U256::ONE), U256::ONE);
+        assert_eq!(
+            mul_div_floor_u256(U256::ONE, U256::ONE, U256::ONE),
+            U256::ONE
+        );
     }
 }
