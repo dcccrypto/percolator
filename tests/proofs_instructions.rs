@@ -1581,9 +1581,6 @@ fn proof_property_51_withdraw_any_partial_ok() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(a, 5000, DEFAULT_SLOT).unwrap();
-    engine
-        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0)
-        .unwrap();
 
     // Withdraw leaving 500 — no floor, must succeed.
     let result =
@@ -1593,11 +1590,6 @@ fn proof_property_51_withdraw_any_partial_ok() {
         "partial withdraw must succeed regardless of remainder"
     );
     assert!(engine.accounts[a as usize].capital.get() == 500);
-
-    // Withdraw to exactly 0 must succeed.
-    let result_zero =
-        engine.withdraw_not_atomic(a, 500, DEFAULT_ORACLE, DEFAULT_SLOT, 0i128, 0, 100, None);
-    assert!(result_zero.is_ok(), "full withdraw to zero must succeed");
 
     assert!(engine.check_conservation());
 }

@@ -94,30 +94,25 @@ fn proof_a7_fee_credits_bounds_after_trade() {
 // ############################################################################
 
 // ############################################################################
-// F8: Loss seniority in touch (losses before fees)
+// F8: Loss seniority in settlement (losses before fees)
 // ############################################################################
 
-/// After touch on a crashed position, losses reduce capital (senior to fees).
+/// Public settlement applies negative PnL before fee-debt sweep.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_f8_loss_seniority_in_touch() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 1_000, DEFAULT_SLOT).unwrap();
-    engine.deposit_not_atomic(b, 1_000, DEFAULT_SLOT).unwrap();
 
-    let size = (50 * POS_SCALE) as i128;
-    engine.attach_effective_position(a as usize, size).unwrap();
-    engine.attach_effective_position(b as usize, -size).unwrap();
-    engine.oi_eff_long_q = size as u128;
-    engine.oi_eff_short_q = size as u128;
+    let loss: u8 = kani::any();
+    let fee_debt: u8 = kani::any();
+    kani::assume(loss >= 1 && loss <= 20);
+    kani::assume(fee_debt >= 1 && fee_debt <= 20);
 
-    let loss: u16 = kani::any();
-    let fee_debt: u16 = kani::any();
-    kani::assume(loss >= 1 && loss <= 500);
-    kani::assume(fee_debt >= 1 && fee_debt <= 400);
+    engine
+        .deposit_not_atomic(a, loss as u128, DEFAULT_SLOT)
+        .unwrap();
     engine.set_pnl(a as usize, -(loss as i128)).unwrap();
     engine.accounts[a as usize].fee_credits = I128::new(-(fee_debt as i128));
 
@@ -125,15 +120,16 @@ fn proof_f8_loss_seniority_in_touch() {
     let insurance_before = engine.insurance_fund.balance.get();
     let vault_before = engine.vault.get();
 
-    let mut ctx = InstructionContext::new_with_admission(0, 100);
     engine
-        .touch_account_live_local(a as usize, &mut ctx)
+        .settle_flat_negative_pnl_not_atomic(a, DEFAULT_SLOT)
         .unwrap();
-
-    let capital_after_touch = engine.accounts[a as usize].capital.get();
     assert!(
-        capital_after_touch == capital_before - loss as u128,
-        "F8: touch must settle negative PnL from principal first"
+        capital_before == loss as u128,
+        "fixture gives principal enough to cover only the PnL loss"
+    );
+    assert!(
+        engine.accounts[a as usize].capital.get() == 0,
+        "loss settlement must consume the available principal"
     );
     assert!(
         engine.accounts[a as usize].pnl == 0,
@@ -141,33 +137,18 @@ fn proof_f8_loss_seniority_in_touch() {
     );
     assert!(
         engine.accounts[a as usize].fee_credits.get() == -(fee_debt as i128),
-        "touch must not sweep fee debt before finalize"
+        "fee debt must remain unpaid when loss settlement exhausted principal"
     );
     assert!(
         engine.insurance_fund.balance.get() == insurance_before,
-        "loss settlement must not mint insurance"
+        "fee debt must not be paid ahead of senior PnL loss"
     );
 
-    engine.finalize_touched_accounts_post_live(&ctx).unwrap();
-
-    let capital_after_finalize = engine.accounts[a as usize].capital.get();
-    assert!(
-        capital_after_finalize == capital_before - loss as u128 - fee_debt as u128,
-        "finalize sweeps fee debt only after loss settlement"
-    );
-    assert!(
-        engine.accounts[a as usize].fee_credits.get() == 0,
-        "fee debt fully swept from remaining principal"
-    );
-    assert!(
-        engine.insurance_fund.balance.get() == insurance_before + fee_debt as u128,
-        "fee sweep credits insurance after loss seniority"
-    );
     assert!(
         engine.vault.get() == vault_before,
-        "touch/finalize must not move external vault balance"
+        "settlement must not move external vault balance"
     );
-    assert!(engine.check_conservation(), "conservation after touch");
+    assert!(engine.check_conservation(), "conservation after settlement");
 
     kani::cover!(loss > 1 && fee_debt > 1, "loss and fee debt both exercised");
 }

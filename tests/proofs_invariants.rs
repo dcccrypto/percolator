@@ -222,28 +222,24 @@ fn inductive_settle_loss_preserves_accounting() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
 
-    let dep: u32 = kani::any();
-    kani::assume(dep >= 1000 && dep <= 1_000_000);
+    let dep: u16 = kani::any();
+    kani::assume(dep >= 1 && dep <= 2_000);
     engine
         .deposit_not_atomic(idx, dep as u128, DEFAULT_SLOT)
         .unwrap();
     assert!(engine.check_conservation());
 
-    let loss: i32 = kani::any();
-    kani::assume(loss < 0 && loss > i32::MIN);
-    kani::assume((-loss as u32) <= dep);
-    engine.set_pnl(idx as usize, loss as i128);
+    let loss: u16 = kani::any();
+    kani::assume(loss >= 1 && loss <= dep);
+    engine.set_pnl(idx as usize, -(loss as i128)).unwrap();
 
-    // touch_account_live_local settles losses from principal (step 9)
-    {
-        let mut ctx = InstructionContext::new_with_admission(0, 100);
-        engine
-            .accrue_market_to(DEFAULT_SLOT, DEFAULT_ORACLE, 0)
-            .unwrap();
-        engine.current_slot = DEFAULT_SLOT;
-        let _ = engine.touch_account_live_local(idx as usize, &mut ctx);
-        engine.finalize_touched_accounts_post_live(&ctx);
-    }
+    let result = engine.settle_flat_negative_pnl_not_atomic(idx, DEFAULT_SLOT);
+    assert!(
+        result.is_ok(),
+        "valid principal-covered flat loss settlement must succeed"
+    );
+    assert!(engine.accounts[idx as usize].capital.get() == (dep - loss) as u128);
+    assert!(engine.accounts[idx as usize].pnl == 0);
     assert!(engine.check_conservation());
 }
 

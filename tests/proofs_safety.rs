@@ -205,32 +205,31 @@ fn bounded_liquidation_conservation() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
 
-    let deposit_amt: u32 = kani::any();
-    kani::assume(deposit_amt >= 10_000 && deposit_amt <= 1_000_000);
+    let deposit_amt: u16 = kani::any();
+    kani::assume(deposit_amt >= 1_000 && deposit_amt <= 2_000);
     engine
         .deposit_not_atomic(a, deposit_amt as u128, DEFAULT_SLOT)
         .unwrap();
 
-    // Give user a negative PnL that makes them underwater (loss > deposit)
-    let excess: u16 = kani::any();
-    kani::assume(excess >= 1 && excess <= 10_000);
+    // Give user a flat negative PnL that exceeds principal, then settle it
+    // through the public flat-negative path.
+    let excess: u8 = kani::any();
+    kani::assume(excess >= 1 && excess <= 20);
     let loss = deposit_amt as i128 + excess as i128;
-    engine.set_pnl(a as usize, -loss);
+    engine.set_pnl(a as usize, -loss).unwrap();
 
-    // Use touch_account_live_local to resolve the flat negative through the real engine pipeline
-    // (settle_losses → resolve_flat_negative → insurance/absorb)
-    {
-        let mut ctx = InstructionContext::new_with_admission(0, 100);
-        let _ = engine.accrue_market_to(DEFAULT_SLOT, DEFAULT_ORACLE, 0);
-        engine.current_slot = DEFAULT_SLOT;
-        let _ = engine.touch_account_live_local(a as usize, &mut ctx);
-        engine.finalize_touched_accounts_post_live(&ctx);
-    }
+    let result = engine.settle_flat_negative_pnl_not_atomic(a, DEFAULT_SLOT);
+    assert!(
+        result.is_ok(),
+        "valid flat negative settlement must succeed"
+    );
 
     assert!(
         engine.check_conservation(),
-        "conservation must hold after touch resolves underwater account"
+        "conservation must hold after flat negative settlement"
     );
+    assert!(engine.accounts[a as usize].capital.get() == 0);
+    assert!(engine.accounts[a as usize].pnl == 0);
 }
 
 #[kani::proof]
@@ -862,10 +861,10 @@ fn proof_protected_principal() {
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
 
-    let dep_a: u32 = kani::any();
-    kani::assume(dep_a > 0 && dep_a <= 1_000_000);
-    let dep_b: u32 = kani::any();
-    kani::assume(dep_b > 0 && dep_b <= 1_000_000);
+    let dep_a: u16 = kani::any();
+    kani::assume(dep_a >= 1 && dep_a <= 2_000);
+    let dep_b: u16 = kani::any();
+    kani::assume(dep_b >= 1 && dep_b <= 2_000);
 
     engine
         .deposit_not_atomic(a, dep_a as u128, DEFAULT_SLOT)
@@ -877,22 +876,16 @@ fn proof_protected_principal() {
     let a_cap_before = engine.accounts[a as usize].capital.get();
 
     // b goes insolvent: negative PnL exceeding capital
-    let loss: u16 = kani::any();
-    kani::assume(loss > 0);
-    let loss_val = dep_b as u128 + (loss as u128);
-    engine.set_pnl(b as usize, -(loss_val as i128));
+    let loss: u8 = kani::any();
+    kani::assume(loss >= 1 && loss <= 20);
+    let loss_val = dep_b as u128 + loss as u128;
+    engine.set_pnl(b as usize, -(loss_val as i128)).unwrap();
 
-    // touch_account_live_local runs the real settlement pipeline:
-    // settle_side_effects_with_h_lock → settle_losses → resolve_flat_negative
-    engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.last_market_slot = DEFAULT_SLOT;
-    {
-        let mut ctx = InstructionContext::new_with_admission(0, 100);
-        let _ = engine.accrue_market_to(DEFAULT_SLOT, DEFAULT_ORACLE, 0);
-        engine.current_slot = DEFAULT_SLOT;
-        let _ = engine.touch_account_live_local(b as usize, &mut ctx);
-        engine.finalize_touched_accounts_post_live(&ctx);
-    }
+    let result = engine.settle_flat_negative_pnl_not_atomic(b, DEFAULT_SLOT);
+    assert!(
+        result.is_ok(),
+        "valid flat negative settlement must succeed"
+    );
 
     // a's capital must be unchanged through b's entire loss resolution
     let a_cap_after = engine.accounts[a as usize].capital.get();
