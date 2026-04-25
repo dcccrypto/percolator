@@ -1,5 +1,5 @@
-use percolator::*;
 use core::mem::offset_of;
+use percolator::*;
 fn main() {
     println!("capital={}", offset_of!(Account, capital));
     println!("kind={}", offset_of!(Account, kind));
