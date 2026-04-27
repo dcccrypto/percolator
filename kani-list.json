@@ -36,7 +36,11 @@
       "v19_admit_gate_stress_lane_forces_h_max",
       "v19_consumption_floor_below_one_bp",
       "v19_consumption_monotone_within_generation",
-      "v19_rr_window_zero_no_cursor_advance"
+      "v19_generation_advances_at_most_once_per_slot",
+      "v19_greedy_phase2_model_respects_touch_budget_and_bounds",
+      "v19_pending_stress_reset_requires_later_wrap",
+      "v19_rr_touch_zero_no_cursor_advance",
+      "v19_same_slot_stress_wrap_defers_generation_reset"
     ],
     "tests/proofs_arithmetic.rs": [
       "proof_ceil_div_positive_checked",
@@ -331,7 +335,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 305,
+    "standard-harnesses": 309,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }

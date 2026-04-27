@@ -144,6 +144,7 @@ pub const MAX_PROTOCOL_FEE_ABS: u128 = 1_000_000_000_000_000_000_000_000_000_000
 
 pub const MAX_WARMUP_SLOTS: u64 = u64::MAX;
 pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
+const NO_SLOT: u64 = u64::MAX;
 
 // ============================================================================
 // BPF-Safe 128-bit Types
@@ -636,24 +637,33 @@ pub struct RiskEngine {
 
     /// Round-robin sweep cursor (spec §2.2, v12.19).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
-    /// `0 <= rr_cursor_position < params.max_accounts`. Wraps (and
-    /// advances sweep_generation) at the deployment's physical slab size
-    /// so generation turnover is proportional to the actual shard — the
-    /// spec's theoretical 1e6 hard bound collapsed onto runtime config.
+    /// `0 <= rr_cursor_position < params.max_accounts`. Greedy Phase 2
+    /// skips unused slots and touches up to the supplied account budget before
+    /// stopping or wrapping at the deployment's physical slab size.
     pub rr_cursor_position: u64,
     /// Sweep generation counter (spec §2.2, v12.19).
-    /// Incremented exactly once per full wraparound of `rr_cursor_position`.
+    /// Incremented at most once per slot after a full wraparound of
+    /// `rr_cursor_position`.
     /// Read-only from the wrapper perspective; can only advance by running
     /// `keeper_crank` through a complete cursor wrap.
     pub sweep_generation: u64,
     /// Cumulative price-move consumption since the last generation advance
     /// (spec §2.2, §5.5 step 9a, v12.19). In scaled bps, measured as
     /// `Σ floor(|ΔP| * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / P_last)` over
-    /// successful live `accrue_market_to` calls with price movement. Resets to
-    /// 0 atomically on `sweep_generation` advance. Consulted by
+    /// successful live `accrue_market_to` calls with price movement. Resets
+    /// only on a sweep-generation advance that is not in the same slot as
+    /// stress consumption. Consulted by
     /// `admit_fresh_reserve_h_lock` step 2 when the wrapper supplies
     /// `admit_h_max_consumption_threshold_bps_opt = Some(t)`.
     pub price_move_consumed_bps_this_generation: u128,
+    /// Last slot where price movement added nonzero stress consumption.
+    /// `NO_SLOT` means no stress has ever been consumed.
+    pub last_stress_consumption_slot: u64,
+    /// Last slot where `sweep_generation` advanced. `NO_SLOT` means never.
+    pub last_sweep_generation_advance_slot: u64,
+    /// A completed cursor wrap whose stress reset is delayed until a later
+    /// slot because stress was consumed in the wrap slot. Canonical 0/1.
+    pub stress_reset_pending: u8,
 
     /// Last oracle price used in accrue_market_to (P_last, spec §5.5)
     pub last_oracle_price: u64,
@@ -1364,6 +1374,9 @@ impl RiskEngine {
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
+            last_stress_consumption_slot: NO_SLOT,
+            last_sweep_generation_advance_slot: NO_SLOT,
+            stress_reset_pending: 0,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
@@ -1457,6 +1470,9 @@ impl RiskEngine {
         self.rr_cursor_position = 0;
         self.sweep_generation = 0;
         self.price_move_consumed_bps_this_generation = 0;
+        self.last_stress_consumption_slot = NO_SLOT;
+        self.last_sweep_generation_advance_slot = NO_SLOT;
+        self.stress_reset_pending = 0;
         self.last_oracle_price = init_oracle_price;
         self.fund_px_last = init_oracle_price;
         self.last_market_slot = init_slot;
@@ -2996,6 +3012,9 @@ impl RiskEngine {
         self.last_oracle_price = oracle_price;
         self.fund_px_last = oracle_price;
         self.price_move_consumed_bps_this_generation = new_consumption;
+        if consumed_this_step > 0 {
+            self.last_stress_consumption_slot = now_slot;
+        }
 
         // Post-state sanity check — should be a no-op if pre-state was valid
         // and the math is correct.
@@ -4104,6 +4123,19 @@ impl RiskEngine {
         if self.rr_cursor_position >= self.params.max_accounts {
             return Err(RiskError::CorruptState);
         }
+        if self.stress_reset_pending > 1 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.last_stress_consumption_slot != NO_SLOT
+            && self.last_stress_consumption_slot > self.current_slot
+        {
+            return Err(RiskError::CorruptState);
+        }
+        if self.last_sweep_generation_advance_slot != NO_SLOT
+            && self.last_sweep_generation_advance_slot > self.current_slot
+        {
+            return Err(RiskError::CorruptState);
+        }
         // Oracle-price sentinels are always valid (spec §1.5).
         if self.last_oracle_price == 0 || self.last_oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::CorruptState);
@@ -4159,6 +4191,28 @@ impl RiskEngine {
             }
         }
         Ok(())
+    }
+
+    fn advance_sweep_generation_and_clear_stress(&mut self, now_slot: u64) -> Result<()> {
+        self.sweep_generation = self
+            .sweep_generation
+            .checked_add(1)
+            .ok_or(RiskError::Overflow)?;
+        self.last_sweep_generation_advance_slot = now_slot;
+        self.price_move_consumed_bps_this_generation = 0;
+        self.stress_reset_pending = 0;
+        Ok(())
+    }
+
+    fn complete_cursor_wrap(&mut self, now_slot: u64) -> Result<()> {
+        if self.last_stress_consumption_slot == now_slot {
+            self.stress_reset_pending = 1;
+            return Ok(());
+        }
+        if self.last_sweep_generation_advance_slot == now_slot {
+            return Ok(());
+        }
+        self.advance_sweep_generation_and_clear_stress(now_slot)
     }
 
     #[cfg(all(
@@ -6001,11 +6055,11 @@ impl RiskEngine {
     /// `(account_idx, optional liquidation policy hint)`.
     ///
     /// Two-phase: Phase 1 runs keeper-priority liquidation; Phase 2 always
-    /// runs a mandatory structural sweep over the next `rr_window_size`
-    /// materialized-account indices starting from `rr_cursor_position`. On
-    /// cursor wraparound past `params.max_accounts`, `sweep_generation`
-    /// increments by 1 and `price_move_consumed_bps_this_generation` resets
-    /// to 0.
+    /// runs a mandatory greedy structural sweep starting from
+    /// `rr_cursor_position`. It skips unused slots and touches up to
+    /// `rr_touch_limit` materialized accounts. Cursor wrap can advance
+    /// `sweep_generation` at most once per slot, and price-move stress
+    /// consumed in a slot cannot be cleared in that same slot.
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -6016,7 +6070,7 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
-        rr_window_size: u64,
+        rr_touch_limit: u64,
     ) -> Result<CrankOutcome> {
         // Pre-state invariant check catches corrupt inputs like
         // rr_cursor_position out of range or ready-snapshot inconsistency
@@ -6036,8 +6090,10 @@ impl RiskEngine {
         }
 
         // Combined Phase 1 + Phase 2 touched-account budget must fit the
-        // runtime ctx capacity.
-        let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_window_size);
+        // runtime ctx capacity. In Phase 2, rr_touch_limit is a touched-account
+        // budget; unused slots are authenticated by the engine bitmap and do
+        // not consume touched-account capacity.
+        let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_touch_limit);
         if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
             return Err(RiskError::Overflow);
         }
@@ -6122,8 +6178,8 @@ impl RiskEngine {
         // Runs unconditionally — including when Phase 1 exited early on a
         // pending reset. Phase 2 does NOT execute liquidations, does NOT
         // count against max_revalidations, and does NOT break on pending
-        // reset. Its job is to deterministically walk the next
-        // rr_window_size indices, touching materialized accounts so
+        // reset. Its job is to deterministically walk index space, skip unused
+        // slots, and touch up to rr_touch_limit materialized accounts so
         // warmup/reserve state advances uniformly across the deployment.
         //
         // Cursor wrap bound: params.max_accounts (runtime slab capacity).
@@ -6132,29 +6188,24 @@ impl RiskEngine {
         // value so compact shards do not spend most of a generation
         // walking non-existent index space.
         let wrap_bound = self.params.max_accounts;
-        let cursor_start = self.rr_cursor_position;
-        let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
-        let sweep_end = core::cmp::min(sweep_end_u64, wrap_bound);
-
-        let mut i = cursor_start;
-        while i < sweep_end {
+        let mut i = self.rr_cursor_position;
+        let mut phase2_touched = 0u64;
+        while i < wrap_bound && phase2_touched < rr_touch_limit {
             let iu = i as usize;
             if self.is_used(iu) {
                 self.touch_account_live_local(iu, &mut ctx)?;
+                phase2_touched = phase2_touched.checked_add(1).ok_or(RiskError::Overflow)?;
             }
             i += 1;
         }
 
-        // Advance cursor; on wraparound reset and bump generation.
-        if sweep_end >= wrap_bound {
+        // Advance cursor; on wraparound, generation/stress reset is
+        // slot-rate-limited by complete_cursor_wrap.
+        if i >= wrap_bound {
             self.rr_cursor_position = 0;
-            self.sweep_generation = self
-                .sweep_generation
-                .checked_add(1)
-                .ok_or(RiskError::Overflow)?;
-            self.price_move_consumed_bps_this_generation = 0;
+            self.complete_cursor_wrap(now_slot)?;
         } else {
-            self.rr_cursor_position = sweep_end;
+            self.rr_cursor_position = i;
         }
 
         // Finalize: compute fresh snapshot from post-mutation state, apply

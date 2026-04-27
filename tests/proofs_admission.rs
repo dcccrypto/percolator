@@ -1297,39 +1297,141 @@ fn v19_consumption_floor_below_one_bp() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_rr_window_zero_no_cursor_advance() {
-    // Property 98: rr_window_size = 0 does not mutate cursor, generation,
+fn v19_rr_touch_zero_no_cursor_advance() {
+    // Property 98: rr_touch_limit = 0 does not mutate cursor, generation,
     // or consumption accumulator.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
     let cursor: u8 = kani::any();
-    let params = zero_fee_params();
-    kani::assume((cursor as u64) < params.max_accounts);
-    let generation_before: u64 = kani::any();
-    let consumed_before: u128 = kani::any();
+    let generation_before: u8 = kani::any();
+    let consumed_before: u8 = kani::any();
+    kani::assume((cursor as u64) < engine.params.max_accounts);
+    engine.rr_cursor_position = cursor as u64;
+    engine.sweep_generation = generation_before as u64;
+    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
 
-    // keeper_crank Phase 2 state machine, specialized to rr_window_size = 0.
-    let cursor_before = cursor as u64;
-    let sweep_end_u64 = cursor_before.saturating_add(0);
-    let sweep_end = core::cmp::min(sweep_end_u64, params.max_accounts);
+    let r = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 0);
+    assert!(r.is_ok());
+    assert_eq!(engine.rr_cursor_position, cursor as u64);
+    assert_eq!(engine.sweep_generation, generation_before as u64);
+    assert_eq!(
+        engine.price_move_consumed_bps_this_generation,
+        consumed_before as u128
+    );
+}
 
-    let (cursor_after, generation_after, consumed_after) = if sweep_end >= params.max_accounts {
-        (
-            0,
-            generation_before
-                .checked_add(1)
-                .unwrap_or(generation_before),
-            0,
-        )
-    } else {
-        (sweep_end, generation_before, consumed_before)
-    };
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn v19_greedy_phase2_model_respects_touch_budget_and_bounds() {
+    // Small spec model for greedy Phase 2. It skips unused slots, touches at
+    // most rr_touch_limit used slots, and never scans outside the sweep limit.
+    let cursor: u8 = kani::any();
+    let rr_touch_limit: u8 = kani::any();
+    let used_mask: u8 = kani::any();
+    let sweep_limit = 8u64;
+    kani::assume((cursor as u64) < sweep_limit);
+    kani::assume(rr_touch_limit <= 4);
 
-    assert!(sweep_end == cursor_before);
-    assert!(sweep_end < params.max_accounts);
-    assert_eq!(cursor_after, cursor_before);
-    assert_eq!(generation_after, generation_before);
-    assert_eq!(consumed_after, consumed_before);
+    let mut i = cursor as u64;
+    let mut touched = 0u64;
+    while i < sweep_limit && touched < rr_touch_limit as u64 {
+        let used = ((used_mask >> (i as u32)) & 1) != 0;
+        if used {
+            touched += 1;
+        }
+        i += 1;
+    }
+    let cursor_after = if i >= sweep_limit { 0 } else { i };
+
+    assert!(touched <= rr_touch_limit as u64);
+    assert!(i <= sweep_limit);
+    assert!(cursor_after < sweep_limit);
+    if rr_touch_limit == 0 {
+        assert_eq!(cursor_after, cursor as u64);
+        assert_eq!(touched, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_same_slot_stress_wrap_defers_generation_reset() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
+    let generation_before: u8 = kani::any();
+    let consumed_before: u8 = kani::any();
+    kani::assume(consumed_before > 0);
+
+    engine.rr_cursor_position = engine.params.max_accounts - 1;
+    engine.sweep_generation = generation_before as u64;
+    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
+    engine.last_stress_consumption_slot = 1;
+
+    let r = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    assert!(r.is_ok());
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.sweep_generation, generation_before as u64);
+    assert_eq!(
+        engine.price_move_consumed_bps_this_generation,
+        consumed_before as u128
+    );
+    assert_eq!(engine.stress_reset_pending, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_pending_stress_reset_requires_later_wrap() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
+    let generation_before: u8 = kani::any();
+    let consumed_before: u8 = kani::any();
+    kani::assume(consumed_before > 0);
+
+    engine.sweep_generation = generation_before as u64;
+    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
+    engine.last_stress_consumption_slot = 1;
+    engine.stress_reset_pending = 1;
+
+    let no_wrap = engine.keeper_crank_not_atomic(2, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 0);
+    assert!(no_wrap.is_ok());
+    assert_eq!(engine.sweep_generation, generation_before as u64);
+    assert_eq!(
+        engine.price_move_consumed_bps_this_generation,
+        consumed_before as u128
+    );
+    assert_eq!(engine.stress_reset_pending, 1);
+
+    engine.rr_cursor_position = engine.params.max_accounts - 1;
+    let wrap = engine.keeper_crank_not_atomic(2, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    assert!(wrap.is_ok());
+    assert_eq!(engine.sweep_generation, generation_before as u64 + 1);
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
+    assert_eq!(engine.stress_reset_pending, 0);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 2);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_generation_advances_at_most_once_per_slot() {
+    let mut params = zero_fee_params();
+    params.max_accounts = 2;
+    params.max_active_positions_per_side = 2;
+    let mut engine = RiskEngine::new_with_market(params, 1, DEFAULT_ORACLE);
+    let generation_before: u8 = kani::any();
+    engine.sweep_generation = generation_before as u64;
+    engine.rr_cursor_position = 1;
+
+    let first = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    assert!(first.is_ok());
+    let after_first = engine.sweep_generation;
+    assert_eq!(after_first, generation_before as u64 + 1);
+
+    let second = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    assert!(second.is_ok());
+    assert_eq!(engine.sweep_generation, after_first);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
 }
 
 // ============================================================================

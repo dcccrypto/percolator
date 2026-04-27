@@ -313,6 +313,8 @@ phantom_dust_bound_long_q, phantom_dust_bound_short_q: u128
 materialized_account_count, neg_pnl_account_count: u64
 rr_cursor_position, sweep_generation: u64
 price_move_consumed_bps_e9_this_generation: u128
+last_stress_consumption_slot, last_sweep_generation_advance_slot: u64 or NO_SLOT
+stress_reset_pending: bool
 market_mode in {Live, Resolved}
 resolved_price, resolved_live_price: u64
 resolved_slot: u64
@@ -618,7 +620,9 @@ consumed = floor(abs_delta_price * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / P_las
 price_move_consumed_bps_e9_this_generation = saturating_add(price_move_consumed_bps_e9_this_generation, consumed)
 ```
 
-The accumulator is a stress signal, not a conservation quantity; overflow MUST saturate at `u128::MAX` and force slow-lane admission for finite thresholds until generation reset.
+If `consumed > 0`, set `last_stress_consumption_slot = now_slot`.
+
+The accumulator is a stress signal, not a conservation quantity; overflow MUST saturate at `u128::MAX` and force slow-lane admission for finite thresholds until an eligible generation reset. A generation reset MUST NOT clear stress consumed in the same slot.
 
 Mark-to-market once:
 
@@ -798,20 +802,29 @@ It syncs fees if enabled, touches both accounts in deterministic ascending stora
 
 ### 8.7 Keeper crank
 
-`keeper_crank(now_slot, oracle_price, funding_rate, admit_h_min, admit_h_max, threshold_opt, ordered_candidates[], max_revalidations, rr_window_size[, fee_fn])` is live-only and accrues exactly once before both phases.
+`keeper_crank(now_slot, oracle_price, funding_rate, admit_h_min, admit_h_max, threshold_opt, ordered_candidates[], max_revalidations, rr_touch_limit[, fee_fn])` is live-only and accrues exactly once before both phases.
 
 Phase 1 processes keeper-supplied candidates in supplied order until `max_revalidations` is exhausted or a pending reset is scheduled. Authenticated missing-account skips do not count. If a candidate slot is materialized, its account state MUST be available; omission/unreadability fails conservatively. Liquidation is Phase 1 only.
 
-Phase 2 always runs, even if Phase 1 stopped on pending reset. It does not count against `max_revalidations`, does not liquidate, and does not stop on pending reset. Let:
+Phase 2 always runs, even if Phase 1 stopped on pending reset. It does not count against `max_revalidations`, does not liquidate, and does not stop on pending reset. It greedily scans authenticated index space and touches up to `rr_touch_limit` materialized accounts:
 
 ```text
 sweep_limit = cfg_account_index_capacity
-remaining = sweep_limit - rr_cursor_position
-rr_advance = min(rr_window_size, remaining)
-sweep_end = rr_cursor_position + rr_advance
+i = rr_cursor_position
+touched = 0
+while i < sweep_limit and touched < rr_touch_limit:
+    if authenticated engine state proves missing:
+        i += 1
+        continue
+    require account data
+    touch_account_live_local(i)
+    touched += 1
+    i += 1
 ```
 
-For each index in `[rr_cursor_position, sweep_end)`, skip only if authenticated engine state proves missing; otherwise require account data and call `touch_account_live_local`. Then set `rr_cursor_position = sweep_end`. If it reaches `sweep_limit`, wrap to `0`, increment `sweep_generation`, and reset `price_move_consumed_bps_e9_this_generation = 0` atomically.
+Then set `rr_cursor_position = i` if `i < sweep_limit`. If `i >= sweep_limit`, set `rr_cursor_position = 0` and complete a cursor wrap. A cursor wrap MUST NOT advance `sweep_generation` more than once per slot. If `last_stress_consumption_slot == now_slot`, set `stress_reset_pending = true` and do not clear `price_move_consumed_bps_e9_this_generation`. Otherwise, if `last_sweep_generation_advance_slot != now_slot`, increment `sweep_generation`, set `last_sweep_generation_advance_slot = now_slot`, clear `price_move_consumed_bps_e9_this_generation`, and clear `stress_reset_pending`. A pending same-slot stress reset only clears on such a later eligible cursor wrap; a later slot alone is not sufficient.
+
+Because greedy Phase 2 may inspect authenticated unused slots without touching them, `cfg_account_index_capacity` MUST be compute-safe for the deployment, or the implementation MUST define a deterministic scan cap that still preserves full-sweep coverage before generation reset. The stress-generation gate is only an admission-lane selector between `admit_h_min` and `admit_h_max`; it is not a substitute for the public-wrapper requirement that untrusted positive live PnL use nonzero minimum warmup.
 
 ### 8.8 Resolution and resolved close
 
@@ -842,12 +855,12 @@ A zero payout MUST NOT be the only encoding of progress-only.
 5. Wrappers MUST monitor accrual envelopes and K/F headroom, and crank or resolve before exposed markets exceed live envelopes.
 6. Public wrappers MUST separate raw oracle target state from effective engine price state and MUST feed capped staircase prices, not cap-violating raw jumps, into exposed live accrual. Same-slot exposed cranks MUST pass the unchanged engine price. If exposed catch-up would have `target != P_last`, `dt > 0`, and `max_delta == 0`, the wrapper MUST enter recovery or wait for enough elapsed slots; it MUST NOT advance `slot_last` with the unchanged price as a silent bypass.
 7. While raw target and effective engine price differ, public wrappers MUST reject or conservatively shadow-check extraction-sensitive user actions (`withdraw`, `convert_released_pnl`, user-triggered settlement/finalization that can release or convert positive PnL, and any close path whose payout depends on lagged PnL) and MUST reject risk-increasing user trades unless a stricter dual-price policy prices and margin-checks the trade against the lag.
-8. Public wrappers using the sweep-generation stress gate MUST pass nonzero `rr_window_size` on normal keeper cranks and ensure `max_revalidations + rr_window_size` fits touched-account capacity and compute budget. `rr_window_size = 0` is reserved for trusted/private compatibility or explicit recovery flows.
+8. Public wrappers using the sweep-generation stress gate MUST pass nonzero `rr_touch_limit` on normal keeper cranks and ensure `max_revalidations + rr_touch_limit` fits touched-account capacity and compute budget. `rr_touch_limit = 0` is reserved for trusted/private compatibility or explicit recovery flows.
 9. Public wrappers SHOULD enforce execution-price admissibility, e.g. bounded deviation from effective engine price and, during oracle catch-up lag, from the raw target as well.
 10. User value-moving operations must be account-authorized. Intended permissionless paths are settlement, liquidation, reclaim, flat-negative cleanup, resolved close, and keeper crank.
 11. If recurring fees are enabled, wrappers MUST sync fee-current state before health-sensitive checks, reclaim checks, and resolved terminal close, and MUST use `resolved_slot` on resolved markets.
 12. Wrappers own account-materialization anti-spam economics: minimum deposit, recurring fees, and reclaim incentives.
-13. Runtime configuration MUST bound `max_revalidations + rr_window_size` to fit actual context capacity and compute budget.
+13. Runtime configuration MUST bound `max_revalidations + rr_touch_limit` to fit actual context capacity, and MUST bound worst-case greedy Phase 2 index inspection to fit compute budget by choosing a compute-safe account-index capacity or an explicit deterministic scan cap.
 ---
 
 ## 10. Required test coverage
@@ -868,9 +881,9 @@ Implementations and public wrappers MUST test at least:
 12. target/effective-price divergence policy: public risk-increasing trades and extraction-sensitive actions are rejected or pass a stricter dual-price shadow check;
 13. zero-OI no-accrual fast-forward and exposed-market no-accrual envelope rejection using checked subtraction near `u64::MAX`;
 14. exact insurance spending `min(loss_abs, I)`;
-15. stress accumulator floor-at-scaled-bps precision, saturating addition, threshold activation, and reset only on generation advance;
-16. deterministic Phase 2 cursor arithmetic over `cfg_account_index_capacity`, authenticated missing-slot skips, and failure on omitted materialized account data;
-17. public keeper wrappers using the stress gate pass nonzero `rr_window_size` on normal cranks and enforce touched-account budget;
+15. stress accumulator floor-at-scaled-bps precision, saturating addition, threshold activation, reset only on eligible generation advance, and no same-slot stress clear;
+16. deterministic greedy Phase 2 cursor arithmetic over `cfg_account_index_capacity`, authenticated missing-slot skips, touched-account limits, generation advancement at most once per slot, and failure on omitted materialized account data;
+17. public keeper wrappers using the stress gate pass nonzero `rr_touch_limit` on normal cranks and enforce touched-account budget;
 18. deterministic ascending trade touch order and pre-open dust/reset flush;
 19. all position zeroing through `set_position_basis_q` and all frees through `free_empty_account_slot`;
 20. resolved payout readiness, shared snapshot stability, and explicit progress-vs-close outcome;

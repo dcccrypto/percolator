@@ -3081,23 +3081,26 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
 // ============================================================================
 
 #[test]
-fn keeper_crank_phase2_advances_cursor_by_window_size() {
-    // Property 93: Phase 2 advances rr_cursor_position by exactly
-    // min(rr_window_size, params.max_accounts - rr_cursor_position).
+fn keeper_crank_phase2_skips_unused_slots_to_touch_budget() {
+    // Phase 2 treats the keeper argument as a touched-account budget. It may
+    // skip authenticated-unused slots without spending that budget.
     let mut engine = RiskEngine::new(default_params());
-    assert_eq!(engine.rr_cursor_position, 0);
+    engine.deposit_not_atomic(5, 1_000, 0).unwrap();
+    assert!(!engine.is_used(0));
+    assert!(engine.is_used(5));
+
     let _ = engine
-        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 5)
+        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
         .unwrap();
     assert_eq!(
-        engine.rr_cursor_position, 5,
-        "rr_cursor_position must advance by rr_window_size"
+        engine.rr_cursor_position, 6,
+        "cursor must scan past unused slots and the touched account"
     );
 }
 
 #[test]
 fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
-    // Property 98: rr_window_size = 0 does NOT advance cursor or generation.
+    // Property 98: rr_touch_limit = 0 does NOT advance cursor or generation.
     let mut engine = RiskEngine::new(default_params());
     engine.rr_cursor_position = 42;
     engine.sweep_generation = 3;
@@ -3134,6 +3137,81 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
         engine.price_move_consumed_bps_this_generation, 0,
         "consumption resets to 0 on wrap"
     );
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
+    assert_eq!(engine.stress_reset_pending, 0);
+}
+
+#[test]
+fn keeper_crank_phase2_wrap_after_same_slot_stress_defers_reset() {
+    let mut engine = RiskEngine::new(default_params());
+    let wrap = engine.params.max_accounts;
+    engine.current_slot = 1;
+    engine.rr_cursor_position = wrap - 1;
+    engine.sweep_generation = 7;
+    engine.price_move_consumed_bps_this_generation = 123;
+    engine.last_stress_consumption_slot = 1;
+
+    engine
+        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(
+        engine.sweep_generation, 7,
+        "same-slot stress must not be cleared by a wrap"
+    );
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 123);
+    assert_eq!(engine.stress_reset_pending, 1);
+}
+
+#[test]
+fn keeper_crank_phase2_pending_stress_reset_waits_for_later_wrap() {
+    let mut engine = RiskEngine::new(default_params());
+    let wrap = engine.params.max_accounts;
+    engine.current_slot = 1;
+    engine.rr_cursor_position = 0;
+    engine.sweep_generation = 7;
+    engine.price_move_consumed_bps_this_generation = 123;
+    engine.last_stress_consumption_slot = 1;
+    engine.stress_reset_pending = 1;
+
+    engine
+        .keeper_crank_not_atomic(2, 1000, &[], 0, 0, 1, 100, None, 0)
+        .unwrap();
+    assert_eq!(
+        engine.sweep_generation, 7,
+        "later slot alone must not clear pending stress before cursor wrap"
+    );
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 123);
+    assert_eq!(engine.stress_reset_pending, 1);
+
+    engine.rr_cursor_position = wrap - 1;
+    engine
+        .keeper_crank_not_atomic(2, 1000, &[], 0, 0, 1, 100, None, 1)
+        .unwrap();
+    assert_eq!(engine.sweep_generation, 8);
+    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
+    assert_eq!(engine.stress_reset_pending, 0);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 2);
+}
+
+#[test]
+fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
+    let mut engine = RiskEngine::new(default_params());
+    let wrap = engine.params.max_accounts;
+    engine.rr_cursor_position = wrap - 1;
+
+    engine
+        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .unwrap();
+    assert_eq!(engine.sweep_generation, 1);
+
+    // Greedy sparse scanning can wrap again in the same slot. The generation
+    // counter must not advance again.
+    engine
+        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .unwrap();
+    assert_eq!(engine.sweep_generation, 1);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
 }
 
 #[test]
@@ -6392,6 +6470,30 @@ fn public_postcondition_rejects_rr_cursor_out_of_range() {
     engine.rr_cursor_position = engine.params.max_accounts; // corrupt: == bound
     let r = engine.top_up_insurance_fund(1, 0);
     assert_eq!(r, Err(RiskError::CorruptState));
+}
+
+#[test]
+fn public_postcondition_rejects_malformed_stress_reset_state() {
+    let mut pending = RiskEngine::new(default_params());
+    pending.stress_reset_pending = 2; // corrupt: canonical bool is 0/1
+    assert_eq!(
+        pending.top_up_insurance_fund(1, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut future_stress = RiskEngine::new(default_params());
+    future_stress.last_stress_consumption_slot = future_stress.current_slot + 1;
+    assert_eq!(
+        future_stress.top_up_insurance_fund(1, 0),
+        Err(RiskError::CorruptState)
+    );
+
+    let mut future_generation = RiskEngine::new(default_params());
+    future_generation.last_sweep_generation_advance_slot = future_generation.current_slot + 1;
+    assert_eq!(
+        future_generation.top_up_insurance_fund(1, 0),
+        Err(RiskError::CorruptState)
+    );
 }
 
 #[test]
