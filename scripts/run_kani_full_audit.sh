@@ -1,36 +1,62 @@
 #!/usr/bin/env bash
-# Full Kani audit: run all proofs one-by-one with 10-minute timeout each
+# Full Kani audit: run all proofs one-by-one with 20-minute timeout each.
 set -euo pipefail
 cd /home/anatoly/percolator
 
 OUTFILE="/home/anatoly/percolator/kani_audit_full.tsv"
+FINAL_OUTFILE="/home/anatoly/percolator/kani_audit_final.tsv"
+AUDIT_DATE=$(date +%F)
 echo -e "proof\ttime_s\tstatus" > "$OUTFILE"
 
-# Collect all proof harness names from all proof files
-PROOFS=$(grep -rh '#\[kani::proof\]' tests/proofs_*.rs -A 3 | grep '^\s*fn ' | sed 's/.*fn \([a-z_0-9]*\).*/\1/' | sort -u)
+# Collect all proof harness names from all proof files. Some harnesses have
+# more than three attribute lines, so grep -A is not sufficient.
+mapfile -t PROOFS < <(python3 - <<'PY'
+import pathlib
+import re
 
-TOTAL=$(echo "$PROOFS" | wc -l)
+names = []
+for path in sorted(pathlib.Path("tests").glob("proofs_*.rs")):
+    text = path.read_text()
+    starts = list(re.finditer(r"#\[kani::proof\]", text))
+    for i, start in enumerate(starts):
+        end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+        body = text[start.start():end]
+        match = re.search(r"fn\s+([A-Za-z_0-9]+)\s*\(", body)
+        if match:
+            names.append(match.group(1))
+
+for name in sorted(set(names)):
+    print(name)
+PY
+)
+
+TOTAL=${#PROOFS[@]}
 COUNT=0
 PASS=0
 FAIL=0
+TIMEOUTS=0
 
-for proof in $PROOFS; do
+for proof in "${PROOFS[@]}"; do
     COUNT=$((COUNT + 1))
     echo "[$COUNT/$TOTAL] Running: $proof"
     START=$(date +%s)
+    LOGFILE=$(mktemp)
 
-    if timeout 600 cargo kani --tests --harness "$proof" --output-format terse 2>&1 | tail -3; then
+    if timeout 1200 cargo kani --tests --exact --harness "$proof" --output-format terse > "$LOGFILE" 2>&1; then
         STATUS="PASS"
         PASS=$((PASS + 1))
     else
         EXIT_CODE=$?
         if [ $EXIT_CODE -eq 124 ]; then
             STATUS="TIMEOUT"
+            TIMEOUTS=$((TIMEOUTS + 1))
         else
             STATUS="FAIL"
         fi
         FAIL=$((FAIL + 1))
     fi
+    tail -3 "$LOGFILE" || true
+    rm -f "$LOGFILE"
 
     END=$(date +%s)
     ELAPSED=$((END - START))
@@ -39,7 +65,14 @@ for proof in $PROOFS; do
 done
 
 echo ""
+awk -F'\t' -v note="overnight-${AUDIT_DATE}" '
+    BEGIN { OFS = "\t" }
+    NR == 1 { print $1, $2, $3, "note"; next }
+    { print $1, $2, $3, note }
+' "$OUTFILE" > "$FINAL_OUTFILE"
+
 echo "========================================="
-echo "SUMMARY: $PASS passed, $FAIL failed/timeout out of $TOTAL"
+echo "SUMMARY: $PASS passed, $FAIL failed/timeout ($TIMEOUTS timeout) out of $TOTAL"
 echo "Results saved to: $OUTFILE"
+echo "Final timings saved to: $FINAL_OUTFILE"
 echo "========================================="

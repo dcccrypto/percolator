@@ -113,12 +113,9 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         sum_capital
     );
     assert_eq!(
-        engine.pnl_pos_tot,
-        sum_pnl_pos,
+        engine.pnl_pos_tot, sum_pnl_pos,
         "{}: pnl_pos_tot={} != sum(max(pnl,0))={}",
-        context,
-        engine.pnl_pos_tot,
-        sum_pnl_pos
+        context, engine.pnl_pos_tot, sum_pnl_pos
     );
 
     // 3. Account local sanity (for each used account)
@@ -145,6 +142,31 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
 // SECTION 3: PARAMETER REGIMES
 // ============================================================================
 
+/// Helper: allocate a user slot without moving capital (back-door via
+/// materialize_at). Spec-strict deposit materialization is tested separately.
+fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16> {
+    let idx = engine.free_head;
+    if idx == u16::MAX || (idx as usize) >= MAX_ACCOUNTS {
+        return Err(RiskError::Overflow);
+    }
+    engine.materialize_at(idx, engine.current_slot)?;
+    Ok(idx)
+}
+
+#[allow(dead_code)]
+fn add_lp_test(
+    engine: &mut RiskEngine,
+    matcher_program: [u8; 32],
+    matcher_context: [u8; 32],
+    _fee_payment: u128,
+) -> Result<u16> {
+    let idx = add_user_test(engine, 0)?;
+    engine.accounts[idx as usize].kind = Account::KIND_LP;
+    engine.accounts[idx as usize].matcher_program = matcher_program;
+    engine.accounts[idx as usize].matcher_context = matcher_context;
+    Ok(idx)
+}
+
 /// Regime A: Normal mode (small floors)
 fn params_regime_a() -> RiskParams {
     RiskParams {
@@ -152,40 +174,42 @@ fn params_regime_a() -> RiskParams {
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        new_account_fee: U128::new(0),
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        min_liquidation_abs: U128::new(100_000),
-        min_initial_deposit: U128::new(2),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
-        insurance_floor: U128::ZERO,
+        min_liquidation_abs: U128::ZERO,
+        min_nonzero_mm_req: 100,
+        min_nonzero_im_req: 101,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
+        max_accrual_dt_slots: 100,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 10_000_000,
+        max_active_positions_per_side: 32,
+        max_price_move_bps_per_slot: 4,
     }
 }
 
-/// Regime B: Floor + risk mode sensitivity (floor = 1000)
+/// Regime B: Floor + risk mode sensitivity
 fn params_regime_b() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
         trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
-        new_account_fee: U128::new(0),
-        max_crank_staleness_slots: u64::MAX,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
-        min_liquidation_abs: U128::new(100_000),
-        min_initial_deposit: U128::new(1000),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
-        insurance_floor: U128::ZERO,
+        min_liquidation_abs: U128::new(800),
+        min_nonzero_mm_req: 5_000,
+        min_nonzero_im_req: 5_001,
         h_min: 0,
         h_max: 100,
         resolve_price_deviation_bps: 1000,
+        max_accrual_dt_slots: 100,
+        max_abs_funding_e9_per_slot: 10_000,
+        min_funding_lifetime_slots: 10_000_000,
+        max_active_positions_per_side: 32,
+        max_price_move_bps_per_slot: 4,
     }
 }
 
@@ -296,7 +320,7 @@ struct FuzzState {
     engine: Box<RiskEngine>,
     live_accounts: Vec<u16>,
     lp_idx: Option<u16>,
-    rng_state: u64,        // For deterministic selector resolution
+    rng_state: u64,         // For deterministic selector resolution
     last_oracle_price: u64, // Track last oracle price for conservation checks with mark PnL
 }
 
@@ -375,7 +399,7 @@ impl FuzzState {
                 let live_before = self.live_accounts.clone();
                 let num_used_before = self.count_used();
 
-                let result = self.engine.add_user(*fee_payment);
+                let result = add_user_test(&mut self.engine, *fee_payment);
 
                 match result {
                     Ok(idx) => {
@@ -410,7 +434,7 @@ impl FuzzState {
                 let lp_before = self.lp_idx;
                 let num_used_before = self.count_used();
 
-                let result = self.engine.add_lp([0u8; 32], [0u8; 32], *fee_payment);
+                let result = add_lp_test(&mut self.engine, [0u8; 32], [0u8; 32], *fee_payment);
 
                 match result {
                     Ok(idx) => {
@@ -446,7 +470,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.deposit_not_atomic(idx, *amount, oracle, 0);
+                let result = self.engine.deposit_not_atomic(idx, *amount, 0);
 
                 match result {
                     Ok(()) => {
@@ -472,7 +496,9 @@ impl FuzzState {
                 let vault_before = self.engine.vault;
 
                 let now_slot = self.engine.current_slot;
-                let result = self.engine.withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i128, 0);
+                let result = self
+                    .engine
+                    .withdraw_not_atomic(idx, *amount, oracle, now_slot, 0i128, 0, 100, None);
 
                 match result {
                     Ok(()) => {
@@ -513,9 +539,9 @@ impl FuzzState {
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
                 // v12.16.4: pass funding rate directly to accrue_market_to
-                let result = self
-                    .engine
-                    .accrue_market_to(now_slot, *oracle_price, *rate_bps as i128);
+                let result =
+                    self.engine
+                        .accrue_market_to(now_slot, *oracle_price, *rate_bps as i128);
 
                 match result {
                     Ok(()) => {
@@ -535,11 +561,12 @@ impl FuzzState {
                 let now_slot = self.engine.current_slot;
 
                 let result = (|| -> Result<()> {
-                    let mut ctx = InstructionContext::new_with_h_lock(0);
+                    let mut ctx = InstructionContext::new_with_admission(0, 100);
                     self.engine.accrue_market_to(now_slot, oracle, 0)?;
                     self.engine.current_slot = now_slot;
-                    self.engine.touch_account_live_local(idx as usize, &mut ctx)?;
-                    self.engine.finalize_touched_accounts_post_live(&ctx);
+                    self.engine
+                        .touch_account_live_local(idx as usize, &mut ctx)?;
+                    self.engine.finalize_touched_accounts_post_live(&ctx)?;
                     Ok(())
                 })();
 
@@ -571,9 +598,18 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let now_slot = self.engine.current_slot;
 
-                let result =
-                    self.engine
-                        .execute_trade_not_atomic(lp_idx, user_idx, *oracle_price, now_slot, *size, *oracle_price, 0i128, 0);
+                let result = self.engine.execute_trade_not_atomic(
+                    lp_idx,
+                    user_idx,
+                    *oracle_price,
+                    now_slot,
+                    *size,
+                    *oracle_price,
+                    0i128,
+                    0,
+                    100,
+                    None,
+                );
 
                 match result {
                     Ok(_) => {
@@ -639,21 +675,21 @@ proptest! {
         let mut state = FuzzState::new(params_regime_a());
 
         // Setup: Add initial LP and users
-        let lp_result = state.engine.add_lp([0u8; 32], [0u8; 32], 1);
+        let lp_result = add_lp_test(&mut state.engine, [0u8; 32], [0u8; 32], 1);
         if let Ok(idx) = lp_result {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
         }
 
         for _ in 0..2 {
-            if let Ok(idx) = state.engine.add_user(1) {
+            if let Ok(idx) = add_user_test(&mut state.engine, 1) {
                 state.live_accounts.push(idx);
                 }
         }
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, 0);
+            let _ = state.engine.deposit_not_atomic(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -677,25 +713,25 @@ proptest! {
         let mut state = FuzzState::new(params_regime_b());
 
         // Setup: Add initial LP and users
-        let lp_result = state.engine.add_lp([0u8; 32], [0u8; 32], 1);
+        let lp_result = add_lp_test(&mut state.engine, [0u8; 32], [0u8; 32], 1);
         if let Ok(idx) = lp_result {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
         }
 
         for _ in 0..2 {
-            if let Ok(idx) = state.engine.add_user(1) {
+            if let Ok(idx) = add_user_test(&mut state.engine, 1) {
                 state.live_accounts.push(idx);
                 }
         }
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, 10_000, DEFAULT_ORACLE, 0);
+            let _ = state.engine.deposit_not_atomic(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.insurance_floor.get();
+        let floor = state.engine.params.min_liquidation_abs.get();
         let target_insurance = initial_insurance.max(floor + 100);
         let current_insurance = state.engine.insurance_fund.balance.get();
         if target_insurance > current_insurance {
@@ -722,16 +758,17 @@ proptest! {
     fn fuzz_prop_add_fails_at_capacity(num_to_add in 1usize..10) {
         let mut params = params_regime_a();
         params.max_accounts = 4; // Very small
+        params.max_active_positions_per_side = 4;
         let mut engine = Box::new(RiskEngine::new(params));
 
         // Fill up
         for _ in 0..4 {
-            let _ = engine.add_user(1);
+            let _ = add_user_test(&mut engine, 1);
         }
 
         // Additional adds should fail
         for _ in 0..num_to_add {
-            let result = engine.add_user(1);
+            let result = add_user_test(&mut engine, 1);
             prop_assert!(result.is_err(), "add_user should fail at capacity");
         }
     }
@@ -888,29 +925,33 @@ fn run_deterministic_fuzzer(
         let mut action_history: Vec<String> = Vec::with_capacity(10);
 
         // Setup: create LP and 2 users
-        if let Ok(idx) = state.engine.add_lp([0u8; 32], [0u8; 32], 1) {
+        if let Ok(idx) = add_lp_test(&mut state.engine, [0u8; 32], [0u8; 32], 1) {
             state.live_accounts.push(idx);
             state.lp_idx = Some(idx);
         }
 
         for _ in 0..2 {
-            if let Ok(idx) = state.engine.add_user(1) {
+            if let Ok(idx) = add_user_test(&mut state.engine, 1) {
                 state.live_accounts.push(idx);
             }
         }
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit_not_atomic(idx, rng.u128(5_000, 50_000), DEFAULT_ORACLE, 0);
+            let _ = state
+                .engine
+                .deposit_not_atomic(idx, rng.u128(5_000, 50_000), 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
-        let floor = state.engine.params.insurance_floor.get();
+        let floor = state.engine.params.min_liquidation_abs.get();
         let target_ins = floor + rng.u128(5_000, 100_000);
         let current_ins = state.engine.insurance_fund.balance.get();
         if target_ins > current_ins {
             let now_slot = state.engine.current_slot;
-            let _ = state.engine.top_up_insurance_fund(target_ins - current_ins, now_slot);
+            let _ = state
+                .engine
+                .top_up_insurance_fund(target_ins - current_ins, now_slot);
         }
 
         // Verify conservation after setup
@@ -918,14 +959,16 @@ fn run_deterministic_fuzzer(
             eprintln!("Conservation failed after setup for seed {}", seed);
             eprintln!(
                 "  vault={}, insurance={}",
-                state.engine.vault.get(), state.engine.insurance_fund.balance.get()
+                state.engine.vault.get(),
+                state.engine.insurance_fund.balance.get()
             );
             eprintln!("  live_accounts={:?}", state.live_accounts);
             let mut total_cap = 0u128;
             for &idx in &state.live_accounts {
                 eprintln!(
                     "  account[{}]: capital={}",
-                    idx, state.engine.accounts[idx as usize].capital.get()
+                    idx,
+                    state.engine.accounts[idx as usize].capital.get()
                 );
                 total_cap += state.engine.accounts[idx as usize].capital.get();
             }
@@ -996,7 +1039,7 @@ fn fuzz_deterministic_regime_a() {
 
 #[test]
 fn fuzz_deterministic_regime_b() {
-    run_deterministic_fuzzer(params_regime_b(), "B (floor=1000)", 1..501, 200);
+    run_deterministic_fuzzer(params_regime_b(), "B (floor)", 1..501, 200);
 }
 
 // Extended deterministic test with more seeds
@@ -1021,12 +1064,12 @@ proptest! {
     #[test]
     fn fuzz_deposit_increases_balance(amount in amount_strategy()) {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
+        let user_idx = add_user_test(&mut engine, 1).unwrap();
 
         let vault_before = engine.vault;
         let principal_before = engine.accounts[user_idx as usize].capital;
 
-        let _ = engine.deposit_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0);
+        let _ = engine.deposit_not_atomic(user_idx, amount, 0);
 
         prop_assert_eq!(engine.vault, vault_before + amount);
         prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before + amount);
@@ -1039,14 +1082,14 @@ proptest! {
         withdraw_amount in amount_strategy()
     ) {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
+        let user_idx = add_user_test(&mut engine, 1).unwrap();
 
-        engine.deposit_not_atomic(user_idx, deposit_amount, DEFAULT_ORACLE, 0).unwrap();
+        engine.deposit_not_atomic(user_idx, deposit_amount, 0).unwrap();
 
         // Snapshot for rollback simulation
         let before = (*engine).clone();
 
-        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i128, 0);
+        let result = engine.withdraw_not_atomic(user_idx, withdraw_amount, DEFAULT_ORACLE, 0, 0i128, 0, 100, None);
 
         if result.is_ok() {
             prop_assert!(engine.vault <= before.vault);
@@ -1066,16 +1109,16 @@ proptest! {
         withdrawals in prop::collection::vec(amount_strategy(), 1..10)
     ) {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
-        let user_idx = engine.add_user(1).unwrap();
+        let user_idx = add_user_test(&mut engine, 1).unwrap();
 
         for amount in deposits {
-            let _ = engine.deposit_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0);
+            let _ = engine.deposit_not_atomic(user_idx, amount, 0);
         }
 
         prop_assert!(engine.check_conservation());
 
         for amount in withdrawals {
-            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i128, 0);
+            let _ = engine.withdraw_not_atomic(user_idx, amount, DEFAULT_ORACLE, 0, 0i128, 0, 100, None);
         }
 
         prop_assert!(engine.check_conservation());
@@ -1094,23 +1137,32 @@ fn conservation_after_trade_and_funding_regression() {
     let mut engine = Box::new(RiskEngine::new(params_regime_a()));
 
     // Create LP and user with positions
-    let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
-    let user_idx = engine.add_user(1).unwrap();
-    engine.deposit_not_atomic(lp_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
-    engine.deposit_not_atomic(user_idx, 100_000, DEFAULT_ORACLE, 0).unwrap();
+    let lp_idx = add_lp_test(&mut engine, [0u8; 32], [0u8; 32], 1).unwrap();
+    let user_idx = add_user_test(&mut engine, 1).unwrap();
+    engine.deposit_not_atomic(lp_idx, 100_000, 0).unwrap();
+    engine.deposit_not_atomic(user_idx, 100_000, 0).unwrap();
 
-    // Make crank fresh
-    engine.last_crank_slot = 0;
     engine.last_market_slot = 0;
     engine.last_oracle_price = DEFAULT_ORACLE;
 
     // Execute trade to create positions
     engine
-        .execute_trade_not_atomic(lp_idx, user_idx, DEFAULT_ORACLE, 0, 1000, DEFAULT_ORACLE, 0i128, 0)
+        .execute_trade_not_atomic(
+            lp_idx,
+            user_idx,
+            DEFAULT_ORACLE,
+            0,
+            1000,
+            DEFAULT_ORACLE,
+            0i128,
+            0,
+            100,
+            None,
+        )
         .unwrap();
 
     // Accrue market with funding (rate passed directly)
-    engine.advance_slot(1000);
+    engine.advance_slot(100);
     let slot = engine.current_slot;
     engine.accrue_market_to(slot, DEFAULT_ORACLE, 500).unwrap();
 
@@ -1141,8 +1193,8 @@ fn harness_rollback_simulation_test() {
     let mut engine = Box::new(RiskEngine::new(params_regime_a()));
 
     // Create user with some capital
-    let user_idx = engine.add_user(1).unwrap();
-    engine.deposit_not_atomic(user_idx, 1000, DEFAULT_ORACLE, 0).unwrap();
+    let user_idx = add_user_test(&mut engine, 1).unwrap();
+    engine.deposit_not_atomic(user_idx, 1000, 0).unwrap();
 
     // Accrue market to create state that could be mutated (rate passed directly)
     engine.last_oracle_price = DEFAULT_ORACLE;
@@ -1159,7 +1211,8 @@ fn harness_rollback_simulation_test() {
     let expected_pnl = engine.accounts[user_idx as usize].pnl;
 
     // Try to withdraw_not_atomic more than available - will fail
-    let result = engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i128, 0);
+    let result =
+        engine.withdraw_not_atomic(user_idx, 999_999, DEFAULT_ORACLE, slot, 0i128, 0, 100, None);
     assert!(
         result.is_err(),
         "Withdraw should fail with insufficient balance"
