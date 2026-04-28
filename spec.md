@@ -1,10 +1,10 @@
-# Risk Engine Spec (Source of Truth) — v12.19.13
+# Risk Engine Spec (Source of Truth) — v12.19.14
 
 **Design:** protected principal + junior profit claims + lazy A/K/F side indices, native 128-bit persistent state.
 **Status:** implementation source of truth. Normative terms are **MUST**, **MUST NOT**, **SHOULD**, **MAY**.
 **Scope:** one perpetual DEX risk engine for one quote-token vault.
 
-This revision supersedes v12.19.12. It is a consolidation and oracle-catchup hardening pass: it preserves the v12.19.12 economics, keeps the spec succinct, and makes two safety clarifications from first principles:
+This revision supersedes v12.19.13. It preserves the v12.19.13 economics and adds the account-free catchup composition rule: wrappers may not use a no-touch catchup instruction to perform equity-active accrual on exposed markets.
 
 > The stress-scaled consumption threshold is **not** an anti-oracle-manipulation warmup. Public or permissionless wrappers using untrusted live oracle or execution-price PnL MUST use a nonzero live admission minimum (`admit_h_min > 0`) for positive PnL. `admit_h_min = 0` is only appropriate for trusted/private deployments or other non-public flows that explicitly accept immediate-release semantics.
 >
@@ -16,9 +16,10 @@ The engine safety boundary is:
 2. exact positive-PnL junior-claim haircuts bounded by `Residual = V - (C_tot + I)`;
 3. mandatory warmup/admission for live positive PnL;
 4. exact candidate-trade positive-slippage neutralization;
-5. an exact per-risk-notional solvency envelope checked at initialization; and
-6. per-accrual price-move and funding envelopes checked before any K/F/price/slot mutation; and
-7. wrapper-owned oracle-target catch-up that never feeds a cap-violating raw jump into live exposed accrual.
+5. an exact per-risk-notional solvency envelope checked at initialization;
+6. per-accrual price-move and funding envelopes checked before any K/F/price/slot mutation;
+7. wrapper-owned oracle-target catch-up that never feeds a cap-violating raw jump into live exposed accrual; and
+8. no account-free wrapper instruction may perform equity-active accrual while the market has open interest.
 
 Every top-level instruction is atomic. Any failed precondition, checked arithmetic guard, missing authenticated account proof, context-capacity overflow, or conservative-failure condition MUST roll back every mutation performed by that instruction.
 
@@ -232,6 +233,15 @@ Normative consequences:
 - Feeding a cap-violating raw target into exposed live accrual is non-compliant and should fail before engine state mutation.
 
 While `oracle_target_price != P_last`, the market is intentionally using a lagged effective engine price. For public wrappers, keeper progress, liquidation attempts, settlement, and structural sweep MAY continue at the effective price, but user operations that are risk-increasing or extraction-sensitive MUST either be rejected or pass a conservative wrapper shadow policy using both the effective engine price and the raw target. At minimum, public wrappers MUST reject risk-increasing user trades during target/effective-price divergence unless they are priced and margin-checked under a stricter dual-price policy that removes the known-lag free option.
+
+Account-free catchup is a wrapper composition boundary. A public wrapper instruction that has no candidate list, no account touch set, and no liquidation/revalidation phase MUST NOT perform equity-active accrual while the market is exposed. Equity-active means either:
+
+```text
+price_move_active = (P_last > 0 && next_price != P_last && (OI_eff_long != 0 || OI_eff_short != 0))
+funding_active    = (funding_rate != 0 && OI_eff_long != 0 && OI_eff_short != 0 && fund_px_last > 0)
+```
+
+Such an instruction MAY prove oracle liveness, update liveness stamps, or advance no-op time when both `price_move_active == false` and `funding_active == false`. If price movement or active funding would move account equity, the wrapper MUST reject and require an account-touching path such as keeper crank, liquidation, or another specified procedure that revalidates/touches the affected accounts within the same atomic instruction.
 
 ---
 
@@ -879,16 +889,17 @@ Implementations and public wrappers MUST test at least:
 10. price-move cap rejection before any K/F/price/slot/consumption mutation;
 11. wrapper oracle catch-up clamp: raw target is stored separately, next effective price moves toward target by at most `floor(P_last * cap * dt / 10_000)`, and same-slot exposed cranks pass `P_last`;
 12. target/effective-price divergence policy: public risk-increasing trades and extraction-sensitive actions are rejected or pass a stricter dual-price shadow check;
-13. zero-OI no-accrual fast-forward and exposed-market no-accrual envelope rejection using checked subtraction near `u64::MAX`;
-14. exact insurance spending `min(loss_abs, I)`;
-15. stress accumulator floor-at-scaled-bps precision, saturating addition, threshold activation, reset only on eligible generation advance, and no same-slot stress clear;
-16. deterministic greedy Phase 2 cursor arithmetic over `cfg_account_index_capacity`, authenticated missing-slot skips, touched-account limits, generation advancement at most once per slot, and failure on omitted materialized account data;
-17. public keeper wrappers using the stress gate pass nonzero `rr_touch_limit` on normal cranks and enforce touched-account budget;
-18. deterministic ascending trade touch order and pre-open dust/reset flush;
-19. all position zeroing through `set_position_basis_q` and all frees through `free_empty_account_slot`;
-20. resolved payout readiness, shared snapshot stability, and explicit progress-vs-close outcome;
-21. degenerate resolution requires explicit mode and exact degenerate inputs; ordinary resolution never value-detects into degenerate mode;
-22. ADL exact K deficit computation, overflow fallback to uninsured loss while quantity socialization continues, and phantom-dust clearance bounds;
-23. self-neutral insurance/oracle-siphon scenarios across multiple valid accrual envelopes;
-24. exposed `target != P_last`, `dt > 0`, `max_delta == 0` cannot advance `slot_last` by feeding `P_last`; it must wait, reject as catch-up-required, or enter explicit recovery;
-25. raw target jumps beyond the cap are never fed directly to exposed live engine accrual except in an explicit recovery/resolution test that confirms conservative failure or privileged recovery semantics.
+13. account-free catchup rejects exposed price movement and active funding, while still allowing flat/no-op catchup;
+14. zero-OI no-accrual fast-forward and exposed-market no-accrual envelope rejection using checked subtraction near `u64::MAX`;
+15. exact insurance spending `min(loss_abs, I)`;
+16. stress accumulator floor-at-scaled-bps precision, saturating addition, threshold activation, reset only on eligible generation advance, and no same-slot stress clear;
+17. deterministic greedy Phase 2 cursor arithmetic over `cfg_account_index_capacity`, authenticated missing-slot skips, touched-account limits, generation advancement at most once per slot, and failure on omitted materialized account data;
+18. public keeper wrappers using the stress gate pass nonzero `rr_touch_limit` on normal cranks and enforce touched-account budget;
+19. deterministic ascending trade touch order and pre-open dust/reset flush;
+20. all position zeroing through `set_position_basis_q` and all frees through `free_empty_account_slot`;
+21. resolved payout readiness, shared snapshot stability, and explicit progress-vs-close outcome;
+22. degenerate resolution requires explicit mode and exact degenerate inputs; ordinary resolution never value-detects into degenerate mode;
+23. ADL exact K deficit computation, overflow fallback to uninsured loss while quantity socialization continues, and phantom-dust clearance bounds;
+24. self-neutral insurance/oracle-siphon scenarios across multiple valid accrual envelopes;
+25. exposed `target != P_last`, `dt > 0`, `max_delta == 0` cannot advance `slot_last` by feeding `P_last`; it must wait, reject as catch-up-required, or enter explicit recovery;
+26. raw target jumps beyond the cap are never fed directly to exposed live engine accrual except in an explicit recovery/resolution test that confirms conservative failure or privileged recovery semantics.

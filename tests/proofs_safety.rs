@@ -3506,7 +3506,7 @@ fn proof_convert_released_pnl_exercises_conversion() {
 // ============================================================================
 
 #[kani::proof]
-#[kani::unwind(4)]
+#[kani::unwind(6)]
 #[kani::solver(cadical)]
 fn v19_cascade_safety_gate_disabled_preserves_invariants() {
     // Property 107: when admit_h_min = 0 and threshold_opt = None, the
@@ -3518,7 +3518,7 @@ fn v19_cascade_safety_gate_disabled_preserves_invariants() {
     // Harness exercises the non-compliant combination on a user that has
     // symbolic positive PnL (modeling the "cascade" input shape) and
     // verifies invariants both before and after a Phase 2 keeper_crank
-    // with rr_window_size > 0.
+    // with rr_touch_limit > 0.
     let mut engine = RiskEngine::new(zero_fee_params());
     let a = add_user_test(&mut engine, 0).unwrap();
 
