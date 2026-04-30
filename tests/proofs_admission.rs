@@ -1353,6 +1353,45 @@ fn v19_rr_touch_zero_no_cursor_advance() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_rr_scan_zero_no_stress_progress() {
+    // Spec §9.7/§10 coverage: rr_scan_limit = 0 cannot authenticate any
+    // post-stress index coverage, even when rr_touch_limit is nonzero.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
+    let cursor: u8 = kani::any();
+    let generation_before: u8 = kani::any();
+    let consumed_before: u8 = kani::any();
+    kani::assume(consumed_before > 0);
+    kani::assume((cursor as u64) < engine.params.max_accounts);
+    engine.rr_cursor_position = cursor as u64;
+    engine.sweep_generation = generation_before as u64;
+    let max_accounts = engine.params.max_accounts;
+    seed_active_stress_envelope(&mut engine, consumed_before as u128, 1, max_accounts);
+
+    let r = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 2,
+        oracle_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 0,
+    });
+    assert!(r.is_ok());
+    assert_eq!(engine.rr_cursor_position, cursor as u64);
+    assert_eq!(engine.sweep_generation, generation_before as u64);
+    assert_eq!(
+        engine.stress_consumed_bps_e9_since_envelope,
+        consumed_before as u128
+    );
+    assert_eq!(engine.stress_envelope_remaining_indices, max_accounts);
+}
+
+#[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn v19_greedy_phase2_model_respects_touch_budget_and_bounds() {

@@ -2870,6 +2870,49 @@ fn test_same_slot_price_change_no_oi_accepted() {
 // ============================================================================
 
 #[test]
+fn unilateral_empty_dust_requires_both_side_local_bounds() {
+    let mut engine = RiskEngine::new(default_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.stored_pos_count_long = 0;
+    engine.stored_pos_count_short = 2;
+    engine.phantom_dust_bound_long_q = 50;
+    engine.phantom_dust_bound_short_q = 49;
+    engine.oi_eff_long_q = 50;
+    engine.oi_eff_short_q = 50;
+
+    assert_eq!(
+        engine.schedule_end_of_instruction_resets(&mut ctx),
+        Err(RiskError::CorruptState),
+        "empty-side dust bound alone must not clear non-empty-side OI"
+    );
+}
+
+#[test]
+fn unilateral_empty_dust_clears_when_both_bounds_cover_residual() {
+    let mut engine = RiskEngine::new(default_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.stored_pos_count_long = 0;
+    engine.stored_pos_count_short = 2;
+    engine.phantom_dust_bound_long_q = 50;
+    engine.phantom_dust_bound_short_q = 50;
+    engine.oi_eff_long_q = 50;
+    engine.oi_eff_short_q = 50;
+
+    engine
+        .schedule_end_of_instruction_resets(&mut ctx)
+        .expect("both side-local dust bounds should clear residual OI");
+
+    assert!(ctx.pending_reset_long);
+    assert!(ctx.pending_reset_short);
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(engine.phantom_dust_bound_long_q, 0);
+    assert_eq!(engine.phantom_dust_bound_short_q, 0);
+}
+
+#[test]
 fn test_schedule_reset_error_propagated_in_withdraw() {
     let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
@@ -3163,6 +3206,35 @@ fn keeper_crank_request_scan_limit_bounds_unused_slot_skips() {
         engine.rr_cursor_position, 6,
         "next bounded scan reaches and touches the used account"
     );
+}
+
+#[test]
+fn keeper_crank_request_scan_limit_zero_makes_no_stress_progress() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.rr_cursor_position = 7;
+    engine.sweep_generation = 3;
+    let max_accounts = engine.params.max_accounts;
+    seed_active_stress_envelope(&mut engine, 25, 1, max_accounts);
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 2,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: Some(1),
+            rr_touch_limit: 10,
+            rr_scan_limit: 0,
+        })
+        .unwrap();
+
+    assert_eq!(engine.rr_cursor_position, 7);
+    assert_eq!(engine.sweep_generation, 3);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 25);
+    assert_eq!(engine.stress_envelope_remaining_indices, max_accounts);
 }
 
 #[test]

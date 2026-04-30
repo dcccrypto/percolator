@@ -323,7 +323,9 @@ fn proof_drain_only_to_reset_progress() {
     engine.oi_eff_long_q = 0u128;
     engine.oi_eff_short_q = 0u128;
     engine.stored_pos_count_long = 0;
-    // Short side still has stored positions → §5.7.A (bilateral-empty) does NOT fire
+    // Short side still has stored positions and zero OI. Under v12.19.24 this
+    // must also schedule reset: stored current-epoch positions cannot remain
+    // live on a zero-OI side.
     engine.stored_pos_count_short = 1;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
@@ -335,8 +337,8 @@ fn proof_drain_only_to_reset_progress() {
         "DrainOnly side with OI=0 must schedule reset via §5.7.D"
     );
     assert!(
-        !ctx.pending_reset_short,
-        "opposite side must not get reset from DrainOnly path alone"
+        ctx.pending_reset_short,
+        "stored positions with zero OI must schedule reset to avoid noncanonical live state"
     );
 }
 
@@ -425,9 +427,12 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     // Short side: still has stored positions
     engine.stored_pos_count_short = 2;
 
-    // Phantom dust: OI == dust bound (should clear)
+    // Phantom dust: both side-local bounds cover their side's residual OI
+    // (§5.7.B). The empty side's bound alone is not enough to clear the
+    // non-empty side.
     let dust = 42u128;
     engine.phantom_dust_bound_long_q = dust;
+    engine.phantom_dust_bound_short_q = dust;
     engine.oi_eff_long_q = dust; // OI <= dust bound
     engine.oi_eff_short_q = dust; // balanced (required by spec)
 

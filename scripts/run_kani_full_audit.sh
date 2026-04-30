@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full Kani audit: run all proofs one-by-one with 20-minute timeout each.
+# Full Kani audit: run all proofs one-by-one with 10-minute timeout each.
 set -euo pipefail
 cd /home/anatoly/percolator
 
@@ -42,7 +42,7 @@ for proof in "${PROOFS[@]}"; do
     START=$(date +%s)
     LOGFILE=$(mktemp)
 
-    if timeout 1200 cargo kani --tests --exact --harness "$proof" --output-format terse > "$LOGFILE" 2>&1; then
+    if timeout 600 cargo kani --tests --exact --harness "$proof" --output-format terse > "$LOGFILE" 2>&1; then
         STATUS="PASS"
         PASS=$((PASS + 1))
     else

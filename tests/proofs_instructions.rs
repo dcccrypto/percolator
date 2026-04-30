@@ -913,12 +913,17 @@ fn t13_56_unilateral_empty_orphan_resolution() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
+    let dust: u128 = kani::any();
+    kani::assume(dust > 0);
+    kani::assume(dust <= 100);
+
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = 100u128;
-    engine.oi_eff_long_q = 50u128;
+    engine.phantom_dust_bound_long_q = dust;
+    engine.oi_eff_long_q = dust;
 
     engine.stored_pos_count_short = 2;
-    engine.oi_eff_short_q = 50u128;
+    engine.phantom_dust_bound_short_q = dust;
+    engine.oi_eff_short_q = dust;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
@@ -936,12 +941,17 @@ fn t13_57_unilateral_empty_corruption_guard() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
+    let dust: u128 = kani::any();
+    kani::assume(dust > 0);
+    kani::assume(dust <= 100);
+
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = 100u128;
-    engine.oi_eff_long_q = 50u128;
+    engine.phantom_dust_bound_long_q = dust;
+    engine.oi_eff_long_q = dust;
 
     engine.stored_pos_count_short = 2;
-    engine.oi_eff_short_q = 999u128;
+    engine.phantom_dust_bound_short_q = dust - 1;
+    engine.oi_eff_short_q = dust;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result == Err(RiskError::CorruptState));
@@ -954,12 +964,17 @@ fn t13_58_unilateral_empty_short_side() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
+    let dust: u128 = kani::any();
+    kani::assume(dust > 0);
+    kani::assume(dust <= 200);
+
     engine.stored_pos_count_short = 0;
-    engine.phantom_dust_bound_short_q = 200u128;
-    engine.oi_eff_short_q = 75u128;
+    engine.phantom_dust_bound_short_q = dust;
+    engine.oi_eff_short_q = dust;
 
     engine.stored_pos_count_long = 3;
-    engine.oi_eff_long_q = 75u128;
+    engine.phantom_dust_bound_long_q = dust;
+    engine.oi_eff_long_q = dust;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
@@ -968,6 +983,29 @@ fn t13_58_unilateral_empty_short_side() {
     assert!(ctx.pending_reset_short);
     assert!(engine.oi_eff_long_q == 0);
     assert!(engine.oi_eff_short_q == 0);
+}
+
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn t13_58b_unilateral_empty_short_requires_long_bound() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    let dust: u128 = kani::any();
+    kani::assume(dust > 0);
+    kani::assume(dust <= 200);
+
+    engine.stored_pos_count_short = 0;
+    engine.phantom_dust_bound_short_q = dust;
+    engine.oi_eff_short_q = dust;
+
+    engine.stored_pos_count_long = 3;
+    engine.phantom_dust_bound_long_q = dust - 1;
+    engine.oi_eff_long_q = dust;
+
+    let result = engine.schedule_end_of_instruction_resets(&mut ctx);
+    assert!(result == Err(RiskError::CorruptState));
 }
 
 #[kani::proof]
