@@ -176,7 +176,7 @@ fn test_e2e_complete_user_journey() {
         engine
             .touch_account_live_local(alice as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     // The key invariant is conservation
@@ -210,7 +210,7 @@ fn test_e2e_complete_user_journey() {
         engine
             .touch_account_live_local(alice as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     // Alice withdraws some capital

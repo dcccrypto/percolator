@@ -66,7 +66,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 
     assert!(
         engine
-            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            .enforce_side_mode_oi_gate(old_a, new_a, old_b, new_b, oi_long_after, oi_short_after)
             .is_err(),
         "ready ResetPending side must block OI increase before preflight finalization"
     );
@@ -76,7 +76,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     assert!(engine.side_mode_long == SideMode::Normal);
     assert!(
         engine
-            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            .enforce_side_mode_oi_gate(old_a, new_a, old_b, new_b, oi_long_after, oi_short_after)
             .is_ok(),
         "trade preflight must reopen a fully ready ResetPending side before OI gating"
     );
@@ -396,7 +396,9 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
         "touch alone must not finalize the reset before end-of-instruction"
     );
 
-    engine.finalize_touched_accounts_post_live(&ctx).unwrap();
+    engine
+        .finalize_touched_accounts_post_live(&mut ctx)
+        .unwrap();
     engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
     engine.finalize_end_of_instruction_resets(&ctx).unwrap();
 

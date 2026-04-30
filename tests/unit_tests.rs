@@ -42,6 +42,23 @@ fn default_params() -> RiskParams {
     }
 }
 
+fn seed_active_stress_envelope(
+    engine: &mut RiskEngine,
+    consumed_bps_e9: u128,
+    start_slot: u64,
+    remaining_indices: u64,
+) {
+    assert!(consumed_bps_e9 > 0);
+    assert!(remaining_indices <= engine.params.max_accounts);
+    if engine.current_slot < start_slot {
+        engine.current_slot = start_slot;
+    }
+    engine.stress_consumed_bps_e9_since_envelope = consumed_bps_e9;
+    engine.stress_envelope_remaining_indices = remaining_indices;
+    engine.stress_envelope_start_slot = start_slot;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+}
+
 /// Test helper: params with a high-maintenance envelope that allows
 /// large single-call price moves (up to ~25% per envelope at default dt).
 /// Semantically valid v12.19 params — just a market with 30% maintenance.
@@ -562,7 +579,7 @@ fn test_haircut_ratio_with_surplus() {
         engine
             .touch_account_live_local(b as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     let (h_num, h_den) = engine.haircut_ratio();
@@ -736,7 +753,7 @@ fn test_cohort_reserve_set_on_new_profit() {
         engine
             .touch_account_live_local(a as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     // If PnL is positive, reserved_pnl should be nonzero (cohort-based warmup with h_lock>0)
@@ -788,7 +805,9 @@ fn test_warmup_full_conversion_after_period() {
         engine
             .touch_account_live_local(a as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx).unwrap();
+        engine
+            .finalize_touched_accounts_post_live(&mut ctx)
+            .unwrap();
     }
 
     // Close position so profit conversion can happen (only for flat accounts)
@@ -824,7 +843,9 @@ fn test_warmup_full_conversion_after_period() {
         engine
             .touch_account_live_local(a as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx).unwrap();
+        engine
+            .finalize_touched_accounts_post_live(&mut ctx)
+            .unwrap();
     }
 
     let capital_final = engine.accounts[a as usize].capital.get();
@@ -2207,7 +2228,7 @@ fn test_close_account_after_trade_and_unwind() {
         engine
             .touch_account_live_local(a as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     // PnL should be zero or converted by now
@@ -3025,7 +3046,7 @@ fn accrue_market_to_rejects_price_move_exceeding_cap() {
     // State unchanged on rejection.
     assert_eq!(engine.last_oracle_price, 1000);
     assert_eq!(engine.last_market_slot, 0);
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
 }
 
 #[test]
@@ -3047,8 +3068,8 @@ fn accrue_market_to_accepts_price_move_within_cap() {
     assert_eq!(engine.last_market_slot, 100);
     // Consumption tracked: floor(29 * 10_000 * 1e9 / 1000) = 290 bps-e9.
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation,
-        290 * PRICE_MOVE_CONSUMPTION_SCALE
+        engine.stress_consumed_bps_e9_since_envelope,
+        290 * STRESS_CONSUMPTION_SCALE
     );
 }
 
@@ -3073,7 +3094,7 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
     );
     assert_eq!(engine.last_oracle_price, 2000);
     // No consumption accumulated (price_move_active false on idle).
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
 }
 
 // ============================================================================
@@ -3099,31 +3120,78 @@ fn keeper_crank_phase2_skips_unused_slots_to_touch_budget() {
 }
 
 #[test]
+fn keeper_crank_request_scan_limit_bounds_unused_slot_skips() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.deposit_not_atomic(5, 1_000, 0).unwrap();
+    assert!(!engine.is_used(0));
+    assert!(engine.is_used(5));
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 3,
+        })
+        .unwrap();
+    assert_eq!(
+        engine.rr_cursor_position, 3,
+        "bounded scan may skip unused slots without greedily scanning to the touched account"
+    );
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 2,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 3,
+        })
+        .unwrap();
+    assert_eq!(
+        engine.rr_cursor_position, 6,
+        "next bounded scan reaches and touches the used account"
+    );
+}
+
+#[test]
 fn keeper_crank_phase2_window_zero_is_noop_on_cursor() {
     // Property 98: rr_touch_limit = 0 does NOT advance cursor or generation.
     let mut engine = RiskEngine::new(default_params());
     engine.rr_cursor_position = 42;
     engine.sweep_generation = 3;
-    engine.price_move_consumed_bps_this_generation = 17;
+    let max_accounts = engine.params.max_accounts;
+    seed_active_stress_envelope(&mut engine, 17, 1, max_accounts);
     engine
         .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 0)
         .unwrap();
     assert_eq!(engine.rr_cursor_position, 42);
     assert_eq!(engine.sweep_generation, 3);
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 17);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 17);
 }
 
 #[test]
 fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
     // Property 94: at cursor wraparound, sweep_generation += 1 and
-    // price_move_consumed_bps_this_generation resets to 0 atomically.
+    // a completed post-stress sweep envelope resets stress consumption.
     // Wrap bound is params.max_accounts.
     let mut engine = RiskEngine::new(default_params());
     let wrap = engine.params.max_accounts;
     // Place cursor one below the wrap bound so a 1-window hit triggers wrap.
     engine.rr_cursor_position = wrap - 1;
     engine.sweep_generation = 7;
-    engine.price_move_consumed_bps_this_generation = 123;
+    seed_active_stress_envelope(&mut engine, 123, 0, 1);
 
     engine
         .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
@@ -3134,11 +3202,11 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
     );
     assert_eq!(engine.sweep_generation, 8, "generation +1 on wrap");
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation, 0,
-        "consumption resets to 0 on wrap"
+        engine.stress_consumed_bps_e9_since_envelope, 0,
+        "consumption resets to 0 after generation advance plus full envelope"
     );
     assert_eq!(engine.last_sweep_generation_advance_slot, 1);
-    assert_eq!(engine.stress_reset_pending, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
 }
 
 #[test]
@@ -3148,31 +3216,32 @@ fn keeper_crank_phase2_wrap_after_same_slot_stress_defers_reset() {
     engine.current_slot = 1;
     engine.rr_cursor_position = wrap - 1;
     engine.sweep_generation = 7;
-    engine.price_move_consumed_bps_this_generation = 123;
-    engine.last_stress_consumption_slot = 1;
+    seed_active_stress_envelope(&mut engine, 123, 1, 1);
 
     engine
         .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
         .unwrap();
-    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(
+        engine.rr_cursor_position,
+        wrap - 1,
+        "same-slot stress cannot wrap the generation boundary"
+    );
     assert_eq!(
         engine.sweep_generation, 7,
         "same-slot stress must not be cleared by a wrap"
     );
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 123);
-    assert_eq!(engine.stress_reset_pending, 1);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 123);
+    assert_eq!(engine.stress_envelope_remaining_indices, 1);
 }
 
 #[test]
-fn keeper_crank_phase2_pending_stress_reset_waits_for_later_wrap() {
+fn keeper_crank_phase2_stress_envelope_waits_for_later_wrap() {
     let mut engine = RiskEngine::new(default_params());
     let wrap = engine.params.max_accounts;
     engine.current_slot = 1;
     engine.rr_cursor_position = 0;
     engine.sweep_generation = 7;
-    engine.price_move_consumed_bps_this_generation = 123;
-    engine.last_stress_consumption_slot = 1;
-    engine.stress_reset_pending = 1;
+    seed_active_stress_envelope(&mut engine, 123, 1, 1);
 
     engine
         .keeper_crank_not_atomic(2, 1000, &[], 0, 0, 1, 100, None, 0)
@@ -3181,16 +3250,16 @@ fn keeper_crank_phase2_pending_stress_reset_waits_for_later_wrap() {
         engine.sweep_generation, 7,
         "later slot alone must not clear pending stress before cursor wrap"
     );
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 123);
-    assert_eq!(engine.stress_reset_pending, 1);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 123);
+    assert_eq!(engine.stress_envelope_remaining_indices, 1);
 
     engine.rr_cursor_position = wrap - 1;
     engine
         .keeper_crank_not_atomic(2, 1000, &[], 0, 0, 1, 100, None, 1)
         .unwrap();
     assert_eq!(engine.sweep_generation, 8);
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
-    assert_eq!(engine.stress_reset_pending, 0);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
     assert_eq!(engine.last_sweep_generation_advance_slot, 2);
 }
 
@@ -3392,12 +3461,9 @@ fn admit_gate_none_and_some_positive_accepted() {
     // Property 101 first clause + Some(t>0) valid.
     assert!(RiskEngine::validate_threshold_opt(None).is_ok());
     assert!(RiskEngine::validate_threshold_opt(Some(1)).is_ok());
+    assert!(RiskEngine::validate_threshold_opt(Some(u128::MAX / STRESS_CONSUMPTION_SCALE)).is_ok());
     assert!(
-        RiskEngine::validate_threshold_opt(Some(u128::MAX / PRICE_MOVE_CONSUMPTION_SCALE)).is_ok()
-    );
-    assert!(
-        RiskEngine::validate_threshold_opt(Some(u128::MAX / PRICE_MOVE_CONSUMPTION_SCALE + 1))
-            .is_err()
+        RiskEngine::validate_threshold_opt(Some(u128::MAX / STRESS_CONSUMPTION_SCALE + 1)).is_err()
     );
 }
 
@@ -3409,7 +3475,7 @@ fn admit_gate_stress_lane_forces_h_max() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 100_000, 100).unwrap();
     // Pre-load consumption = 100 bps-e9, threshold = 50 bps → gate fires.
-    engine.price_move_consumed_bps_this_generation = 100 * PRICE_MOVE_CONSUMPTION_SCALE;
+    engine.stress_consumed_bps_e9_since_envelope = 100 * STRESS_CONSUMPTION_SCALE;
     let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, Some(50));
     let h = engine
         .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
@@ -3426,7 +3492,7 @@ fn admit_gate_none_recovers_residual_lane() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     // Build residual > fresh_pnl: V=1_000_000, C_tot=0 by manual setup.
     engine.vault = U128::new(1_000_000);
-    engine.price_move_consumed_bps_this_generation = u128::MAX; // would trip any threshold
+    engine.stress_consumed_bps_e9_since_envelope = u128::MAX; // would trip any threshold
     let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, None);
     let h = engine
         .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
@@ -3445,7 +3511,7 @@ fn admit_gate_below_threshold_uses_residual_lane() {
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.vault = U128::new(1_000_000);
-    engine.price_move_consumed_bps_this_generation = 10 * PRICE_MOVE_CONSUMPTION_SCALE;
+    engine.stress_consumed_bps_e9_since_envelope = 10 * STRESS_CONSUMPTION_SCALE;
     let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 50, Some(50));
     let h = engine
         .admit_fresh_reserve_h_lock(idx as usize, 1000, &mut ctx, 0, 50)
@@ -3501,23 +3567,33 @@ fn admit_gate_generation_reset_recovers_h_min_after_saturation() {
         .settle_account_not_atomic(long_1, 1_001, 1, 0, H_MIN, H_MAX, Some(THRESHOLD_BPS))
         .unwrap();
     assert!(
-        engine.price_move_consumed_bps_this_generation
-            >= THRESHOLD_BPS * PRICE_MOVE_CONSUMPTION_SCALE
+        engine.stress_consumed_bps_e9_since_envelope >= THRESHOLD_BPS * STRESS_CONSUMPTION_SCALE
     );
     assert_eq!(
-        engine.accounts[long_1 as usize].sched_horizon, H_MAX,
-        "saturated price budget must lock fresh reserve at h_max"
+        engine.accounts[long_1 as usize].pending_horizon, H_MAX,
+        "saturated stress budget must lock fresh reserve at h_max and keep it pending"
     );
     assert!(engine.accounts[long_1 as usize].reserved_pnl > 0);
 
-    // Round-robin wrap advances the generation and clears consumption.
+    // A full post-stress round-robin envelope advances generation and clears consumption.
     let generation_before = engine.sweep_generation;
-    engine.rr_cursor_position = engine.params.max_accounts - 1;
+    engine.rr_cursor_position = 0;
+    let full_envelope = engine.params.max_accounts;
     engine
-        .keeper_crank_not_atomic(2, 1_001, &[], 0, 0, H_MIN, H_MAX, Some(THRESHOLD_BPS), 1)
+        .keeper_crank_not_atomic(
+            2,
+            1_001,
+            &[],
+            0,
+            0,
+            H_MIN,
+            H_MAX,
+            Some(THRESHOLD_BPS),
+            full_envelope,
+        )
         .unwrap();
     assert_eq!(engine.sweep_generation, generation_before + 1);
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
 
     // Open a fresh independent position at the post-reset price. The next move
     // from 1001 to 1000 is below a 10 bps threshold, so the short's positive
@@ -3540,8 +3616,7 @@ fn admit_gate_generation_reset_recovers_h_min_after_saturation() {
         .settle_account_not_atomic(short_2, 1_000, 3, 0, H_MIN, H_MAX, Some(THRESHOLD_BPS))
         .unwrap();
     assert!(
-        engine.price_move_consumed_bps_this_generation
-            < THRESHOLD_BPS * PRICE_MOVE_CONSUMPTION_SCALE,
+        engine.stress_consumed_bps_e9_since_envelope < THRESHOLD_BPS * STRESS_CONSUMPTION_SCALE,
         "post-reset move should remain below the finite threshold"
     );
     assert!(
@@ -3560,7 +3635,7 @@ fn admit_gate_generation_reset_recovers_h_min_after_saturation() {
 fn accrue_market_to_sub_bps_jitter_is_scaled_not_zero() {
     // Property 105: consumption is tracked at scaled-bps precision.
     // A sub-whole-bps move may be nonzero after multiplying by
-    // PRICE_MOVE_CONSUMPTION_SCALE.
+    // STRESS_CONSUMPTION_SCALE.
     //
     // Setup: P_last = 100_000, abs_dp = 9 (so 9 * 10_000 = 90_000 < 100_000).
     // With max_price_move_bps_per_slot = 3 and dt = 1:
@@ -3577,9 +3652,85 @@ fn accrue_market_to_sub_bps_jitter_is_scaled_not_zero() {
     let r = engine.accrue_market_to(1, 100_009, 0);
     assert!(r.is_ok());
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation, 900_000_000,
+        engine.stress_consumed_bps_e9_since_envelope, 900_000_000,
         "sub-whole-bps jitter must be tracked at scaled-bps precision"
     );
+}
+
+#[test]
+fn accrue_market_to_funding_consumes_stress_budget() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.last_oracle_price = 1000;
+    engine.fund_px_last = 1000;
+    engine.last_market_slot = 0;
+    engine.current_slot = 0;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    engine.accrue_market_to(1, 1000, 10_000).unwrap();
+
+    assert_eq!(
+        engine.stress_consumed_bps_e9_since_envelope,
+        10_000u128 * 10_000u128,
+        "funding stress is abs(rate_e9) * dt * 10_000"
+    );
+    assert_eq!(
+        engine.stress_envelope_remaining_indices,
+        engine.params.max_accounts
+    );
+}
+
+#[test]
+fn stress_gate_blocks_warmup_release_on_touch() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap() as usize;
+    engine.current_slot = 100;
+    engine.accounts[idx].pnl = 1_000;
+    engine.pnl_pos_tot = 1_000;
+    engine.accounts[idx].reserved_pnl = 1_000;
+    engine.accounts[idx].sched_present = 1;
+    engine.accounts[idx].sched_remaining_q = 1_000;
+    engine.accounts[idx].sched_anchor_q = 1_000;
+    engine.accounts[idx].sched_start_slot = 0;
+    engine.accounts[idx].sched_horizon = 10;
+    let max_accounts = engine.params.max_accounts;
+    seed_active_stress_envelope(
+        &mut engine,
+        100 * STRESS_CONSUMPTION_SCALE,
+        99,
+        max_accounts,
+    );
+
+    let mut ctx = InstructionContext::new_with_admission_and_threshold(0, 100, Some(50));
+    engine.touch_account_live_local(idx, &mut ctx).unwrap();
+
+    assert_eq!(engine.accounts[idx].reserved_pnl, 1_000);
+    assert_eq!(engine.accounts[idx].sched_release_q, 0);
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+}
+
+#[test]
+fn stress_gate_blocks_explicit_positive_pnl_conversion() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 100, 1000);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10_000, 100).unwrap();
+    engine.accounts[idx as usize].pnl = 1_000;
+    engine.pnl_pos_tot = 1_000;
+    engine.pnl_matured_pos_tot = 1_000;
+    let max_accounts = engine.params.max_accounts;
+    seed_active_stress_envelope(
+        &mut engine,
+        100 * STRESS_CONSUMPTION_SCALE,
+        99,
+        max_accounts,
+    );
+
+    let result = engine.convert_released_pnl_not_atomic(idx, 1, 1000, 100, 0, 0, 100, Some(50));
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[idx as usize].pnl, 1_000);
+    assert_eq!(engine.c_tot.get(), 10_000);
 }
 
 #[test]
@@ -4499,7 +4650,7 @@ fn test_property_50_flat_only_auto_conversion() {
         engine.accrue_market_to(slot + 1, oracle, 0).unwrap();
         engine.current_slot = slot + 1;
         engine.touch_account_live_local(idx_a, &mut ctx).unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     let pnl_after = engine.accounts[idx_a].pnl;
@@ -4549,7 +4700,7 @@ fn test_property_50_flat_only_auto_conversion() {
         engine.accrue_market_to(slot + 2, oracle, 0).unwrap();
         engine.current_slot = slot + 2;
         engine.touch_account_live_local(idx_a, &mut ctx).unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     // After flat touch, released profit should have been converted to capital
@@ -5968,7 +6119,7 @@ fn test_finalize_whole_only_conversion() {
 
     let mut ctx = InstructionContext::new_with_admission(50, 50);
     ctx.add_touched(idx);
-    engine.finalize_touched_accounts_post_live(&ctx);
+    engine.finalize_touched_accounts_post_live(&mut ctx);
 
     // Whole-only: h = min(residual, matured) / matured
     // residual = 111_000 - 100_000 - 1_000 = 10_000
@@ -6007,7 +6158,7 @@ fn test_finalize_no_conversion_under_haircut() {
 
     let mut ctx = InstructionContext::new_with_admission(50, 50);
     ctx.add_touched(idx);
-    engine.finalize_touched_accounts_post_live(&ctx);
+    engine.finalize_touched_accounts_post_live(&mut ctx);
 
     // Under haircut: NO auto-conversion
     assert_eq!(
@@ -6473,16 +6624,19 @@ fn public_postcondition_rejects_rr_cursor_out_of_range() {
 }
 
 #[test]
-fn public_postcondition_rejects_malformed_stress_reset_state() {
+fn public_postcondition_rejects_malformed_stress_envelope_state() {
     let mut pending = RiskEngine::new(default_params());
-    pending.stress_reset_pending = 2; // corrupt: canonical bool is 0/1
+    pending.stress_envelope_remaining_indices = 1; // corrupt: inactive stress has no envelope
     assert_eq!(
         pending.top_up_insurance_fund(1, 0),
         Err(RiskError::CorruptState)
     );
 
     let mut future_stress = RiskEngine::new(default_params());
-    future_stress.last_stress_consumption_slot = future_stress.current_slot + 1;
+    future_stress.stress_consumed_bps_e9_since_envelope = 1;
+    future_stress.stress_envelope_remaining_indices = 1;
+    future_stress.stress_envelope_start_slot = future_stress.current_slot + 1;
+    future_stress.stress_envelope_start_generation = future_stress.sweep_generation;
     assert_eq!(
         future_stress.top_up_insurance_fund(1, 0),
         Err(RiskError::CorruptState)
@@ -7929,7 +8083,7 @@ fn funding_basic_sign_convention() {
     engine
         .touch_account_live_local(b as usize, &mut ctx)
         .unwrap();
-    engine.finalize_touched_accounts_post_live(&ctx);
+    engine.finalize_touched_accounts_post_live(&mut ctx);
 
     engine
         .settle_account_not_atomic(b, oracle, slot + 10, 5_000i128, 0, 100, None)
@@ -8174,7 +8328,7 @@ fn test_funding_partition_invariance() {
     let mut ctx_a = InstructionContext::new_with_admission(0, 100);
     ea.touch_account_live_local(a1 as usize, &mut ctx_a)
         .unwrap();
-    ea.finalize_touched_accounts_post_live(&ctx_a);
+    ea.finalize_touched_accounts_post_live(&mut ctx_a);
     let cap_a = ea.accounts[a1 as usize].capital.get();
 
     // --- Engine B: two accrues of 1 slot each ---
@@ -8192,7 +8346,7 @@ fn test_funding_partition_invariance() {
     let mut ctx_b = InstructionContext::new_with_admission(0, 100);
     eb.touch_account_live_local(b1 as usize, &mut ctx_b)
         .unwrap();
-    eb.finalize_touched_accounts_post_live(&ctx_b);
+    eb.finalize_touched_accounts_post_live(&mut ctx_b);
     let cap_b = eb.accounts[b1 as usize].capital.get();
 
     // Check K and F state for both engines
@@ -8477,17 +8631,23 @@ fn test_fast_postconditions_reject_persistent_kf_i128_min() {
 
 #[test]
 fn test_accrue_rejects_persisting_i128_min_k() {
-    let (mut engine, a, b) =
-        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
-    engine
-        .execute_trade_not_atomic(a, b, 1000, 2, make_size_q(1), 1000, 0, 0, 100, None)
-        .unwrap();
-
+    let mut engine = RiskEngine::new(wide_price_move_params());
+    engine.last_oracle_price = 1000;
+    engine.fund_px_last = 1000;
+    engine.last_market_slot = 0;
+    engine.current_slot = 0;
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
     let pre_k = i128::MIN + ADL_ONE as i128;
     engine.adl_coeff_long = pre_k;
-    let result = engine.accrue_market_to(3, 999, 0);
+    let result = engine.accrue_market_to(1, 999, 0);
 
-    assert!(matches!(result, Err(RiskError::Overflow)));
+    assert!(
+        matches!(result, Err(RiskError::Overflow | RiskError::CorruptState)),
+        "near-boundary K state must fail closed before any i128::MIN K can persist"
+    );
     assert_eq!(engine.adl_coeff_long, pre_k);
 }
 

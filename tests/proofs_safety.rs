@@ -437,7 +437,7 @@ fn proof_flat_negative_resolves_through_insurance() {
         engine
             .touch_account_live_local(idx as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     assert!(engine.accounts[idx as usize].pnl == 0i128);
@@ -1131,7 +1131,7 @@ fn proof_trading_loss_seniority() {
         let _ = engine.accrue_market_to(touch_slot, DEFAULT_ORACLE, 0);
         engine.current_slot = touch_slot;
         let _ = engine.touch_account_live_local(a as usize, &mut ctx);
-        engine.finalize_touched_accounts_post_live(&ctx);
+        engine.finalize_touched_accounts_post_live(&mut ctx);
     }
 
     let pnl_after = engine.accounts[a as usize].pnl;
@@ -1187,6 +1187,7 @@ fn proof_risk_reducing_exemption_path() {
         buffer_pre,
         0,
         0,
+        false,
     );
     assert!(
         reduce_result.is_ok(),
@@ -1215,6 +1216,7 @@ fn proof_risk_reducing_exemption_path() {
         buffer_pre_inc,
         0,
         0,
+        false,
     );
     assert!(
         increase_result.is_err(),
@@ -1450,7 +1452,16 @@ fn proof_flat_close_shortfall_predicate() {
         .expect("I256 sub");
     assert!(
         engine
-            .enforce_one_side_margin(a as usize, DEFAULT_ORACLE, &size, &0, buffer_equal, 0, 0)
+            .enforce_one_side_margin(
+                a as usize,
+                DEFAULT_ORACLE,
+                &size,
+                &0,
+                buffer_equal,
+                0,
+                0,
+                false
+            )
             .is_ok(),
         "flat close may leave negative raw equity when shortfall is unchanged"
     );
@@ -1458,8 +1469,16 @@ fn proof_flat_close_shortfall_predicate() {
     let buffer_worse = I256::from_i128(-3999)
         .checked_sub(I256::from_u128(mm_req_pre))
         .expect("I256 sub");
-    let reject =
-        engine.enforce_one_side_margin(a as usize, DEFAULT_ORACLE, &size, &0, buffer_worse, 0, 0);
+    let reject = engine.enforce_one_side_margin(
+        a as usize,
+        DEFAULT_ORACLE,
+        &size,
+        &0,
+        buffer_worse,
+        0,
+        0,
+        false,
+    );
     assert!(
         matches!(reject, Err(RiskError::Undercollateralized)),
         "flat close must reject when negative shortfall worsens"
@@ -1542,6 +1561,7 @@ fn proof_v1126_risk_reducing_fee_neutral() {
         buffer_pre,
         fee_impact,
         0,
+        false,
     );
     assert!(
         result.is_ok(),
@@ -3214,6 +3234,7 @@ fn proof_symbolic_margin_enforcement_on_reduce() {
         buffer_pre,
         0,
         0,
+        false,
     );
 
     let maintenance_healthy = engine.is_above_maintenance_margin(
@@ -3337,6 +3358,7 @@ fn proof_execute_trade_full_margin_enforcement() {
         buffer_pre,
         0,
         candidate_trade_pnl,
+        false,
     );
     let ok = result.is_ok();
 

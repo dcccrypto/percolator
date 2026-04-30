@@ -884,8 +884,7 @@ fn ac7_outstanding_acceleration_blocked_by_active_threshold() {
     engine.accounts[idx].sched_remaining_q = r as u128;
     engine.accounts[idx].sched_anchor_q = r as u128;
     engine.accounts[idx].sched_horizon = engine.params.h_max;
-    engine.price_move_consumed_bps_this_generation =
-        (consumed as u128) * PRICE_MOVE_CONSUMPTION_SCALE;
+    engine.stress_consumed_bps_e9_since_envelope = (consumed as u128) * STRESS_CONSUMPTION_SCALE;
 
     let reserved_before = engine.accounts[idx].reserved_pnl;
     let matured_before = engine.pnl_matured_pos_tot;
@@ -1077,7 +1076,7 @@ fn k104_oi_geq_sum_of_effective() {
 #[kani::solver(cadical)]
 fn v19_admit_gate_stress_lane_forces_h_max() {
     // Property 99: when threshold_opt = Some(threshold) and
-    // price_move_consumed_bps_this_generation >= threshold,
+    // stress_consumed_bps_e9_since_envelope >= threshold,
     // admit_fresh_reserve_h_lock returns admit_h_max regardless of any
     // choice of Residual_now and matured_plus_fresh.
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1098,8 +1097,7 @@ fn v19_admit_gate_stress_lane_forces_h_max() {
     kani::assume(threshold > 0);
     let consumed: u8 = kani::any();
     kani::assume(consumed >= threshold);
-    engine.price_move_consumed_bps_this_generation =
-        (consumed as u128) * PRICE_MOVE_CONSUMPTION_SCALE;
+    engine.stress_consumed_bps_e9_since_envelope = (consumed as u128) * STRESS_CONSUMPTION_SCALE;
 
     let admit_h_max: u64 = 50;
     let mut ctx = InstructionContext::new_with_admission_and_threshold(
@@ -1136,7 +1134,7 @@ fn v19_admit_gate_none_disables_step2() {
     kani::assume(fresh > 0);
 
     // Any consumption — gate is disabled so it cannot affect the outcome.
-    engine.price_move_consumed_bps_this_generation = kani::any();
+    engine.stress_consumed_bps_e9_since_envelope = kani::any();
 
     let admit_h_max: u64 = 50;
     let mut ctx = InstructionContext::new_with_admission_and_threshold(0, admit_h_max, None);
@@ -1172,7 +1170,7 @@ fn v19_admit_gate_some_zero_rejected() {
     assert!(RiskEngine::validate_threshold_opt(None).is_ok());
     let t: u128 = kani::any();
     kani::assume(t > 0);
-    kani::assume(t <= u128::MAX / PRICE_MOVE_CONSUMPTION_SCALE);
+    kani::assume(t <= u128::MAX / STRESS_CONSUMPTION_SCALE);
     assert!(RiskEngine::validate_threshold_opt(Some(t)).is_ok());
 }
 
@@ -1195,7 +1193,7 @@ fn v19_admit_gate_sticky_early_return() {
     let fresh: u8 = kani::any();
     kani::assume(fresh > 0);
     // Symbolic consumption / threshold — irrelevant due to sticky early-return.
-    engine.price_move_consumed_bps_this_generation = kani::any();
+    engine.stress_consumed_bps_e9_since_envelope = kani::any();
 
     let h = engine
         .admit_fresh_reserve_h_lock(idx as usize, fresh as u128, &mut ctx, 0, admit_h_max)
@@ -1212,10 +1210,10 @@ fn v19_admit_gate_sticky_early_return() {
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn v19_consumption_monotone_within_generation() {
-    // Property 97: price_move_consumed_bps_this_generation is monotone
+    // Property 97: stress_consumed_bps_e9_since_envelope is monotone
     // nondecreasing within a generation. Two successive envelope-valid
     // accrue_market_to calls cannot decrement the accumulator; both
-    // contribute floor(|ΔP| * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / P_last) >= 0.
+    // contribute floor(|ΔP| * 10_000 * STRESS_CONSUMPTION_SCALE / P_last) >= 0.
     let mut engine = RiskEngine::new(zero_fee_params());
     engine.oi_eff_long_q = 1_000_000;
     engine.oi_eff_short_q = 1_000_000;
@@ -1227,7 +1225,7 @@ fn v19_consumption_monotone_within_generation() {
 
     // Symbolic starting consumption.
     let start: u8 = kani::any();
-    engine.price_move_consumed_bps_this_generation = start as u128;
+    engine.stress_consumed_bps_e9_since_envelope = start as u128;
     let gen_start = engine.sweep_generation;
 
     // Symbolic price move within cap (max_price_move=4 bps/slot * dt=1
@@ -1237,7 +1235,7 @@ fn v19_consumption_monotone_within_generation() {
     if dp1 > 0 {
         let _ = engine.accrue_market_to(1, 100_000 + dp1 as u64, 0);
     }
-    let mid = engine.price_move_consumed_bps_this_generation;
+    let mid = engine.stress_consumed_bps_e9_since_envelope;
 
     // Second envelope-valid move within same generation.
     let dp2: u8 = kani::any();
@@ -1251,7 +1249,7 @@ fn v19_consumption_monotone_within_generation() {
             .unwrap_or(u64::MAX);
         let _ = engine.accrue_market_to(2, new_p, 0);
     }
-    let after = engine.price_move_consumed_bps_this_generation;
+    let after = engine.stress_consumed_bps_e9_since_envelope;
 
     // Monotone: neither call can decrement the accumulator.
     assert!(
@@ -1283,12 +1281,42 @@ fn v19_consumption_floor_below_one_bp() {
     kani::assume(abs_dp > 0);
     kani::assume(abs_dp <= 40);
 
-    let expected = (abs_dp as u128) * 10_000 * PRICE_MOVE_CONSUMPTION_SCALE / (p_last as u128);
+    let expected = (abs_dp as u128) * 10_000 * STRESS_CONSUMPTION_SCALE / (p_last as u128);
     let r = engine.accrue_market_to(1, p_last + abs_dp as u64, 0);
     assert!(r.is_ok());
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation, expected,
+        engine.stress_consumed_bps_e9_since_envelope, expected,
         "consumption must use floor at scaled-bps precision"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_funding_consumption_accumulates_scaled_bps() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.oi_eff_long_q = 1_000_000;
+    engine.oi_eff_short_q = 1_000_000;
+    engine.last_oracle_price = DEFAULT_ORACLE;
+    engine.fund_px_last = DEFAULT_ORACLE;
+    engine.last_market_slot = 0;
+    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_short = ADL_ONE;
+
+    let rate: u8 = kani::any();
+    kani::assume(rate > 0);
+    kani::assume((rate as u64) <= engine.params.max_abs_funding_e9_per_slot);
+
+    let r = engine.accrue_market_to(1, DEFAULT_ORACLE, rate as i128);
+    assert!(r.is_ok());
+    assert_eq!(
+        engine.stress_consumed_bps_e9_since_envelope,
+        (rate as u128) * 10_000u128,
+        "funding stress must accumulate abs(rate_e9) * dt * 10_000"
+    );
+    assert_eq!(
+        engine.stress_envelope_remaining_indices,
+        engine.params.max_accounts
     );
 }
 
@@ -1309,14 +1337,17 @@ fn v19_rr_touch_zero_no_cursor_advance() {
     kani::assume((cursor as u64) < engine.params.max_accounts);
     engine.rr_cursor_position = cursor as u64;
     engine.sweep_generation = generation_before as u64;
-    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
+    if consumed_before > 0 {
+        let max_accounts = engine.params.max_accounts;
+        seed_active_stress_envelope(&mut engine, consumed_before as u128, 1, max_accounts);
+    }
 
     let r = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 0);
     assert!(r.is_ok());
     assert_eq!(engine.rr_cursor_position, cursor as u64);
     assert_eq!(engine.sweep_generation, generation_before as u64);
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation,
+        engine.stress_consumed_bps_e9_since_envelope,
         consumed_before as u128
     );
 }
@@ -1365,49 +1396,46 @@ fn v19_same_slot_stress_wrap_defers_generation_reset() {
 
     engine.rr_cursor_position = engine.params.max_accounts - 1;
     engine.sweep_generation = generation_before as u64;
-    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
-    engine.last_stress_consumption_slot = 1;
+    seed_active_stress_envelope(&mut engine, consumed_before as u128, 1, 1);
 
     let r = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
     assert!(r.is_ok());
-    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.rr_cursor_position, engine.params.max_accounts - 1);
     assert_eq!(engine.sweep_generation, generation_before as u64);
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation,
+        engine.stress_consumed_bps_e9_since_envelope,
         consumed_before as u128
     );
-    assert_eq!(engine.stress_reset_pending, 1);
+    assert_eq!(engine.stress_envelope_remaining_indices, 1);
 }
 
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_pending_stress_reset_requires_later_wrap() {
+fn v19_stress_envelope_clear_requires_later_wrap() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
     let generation_before: u8 = kani::any();
     let consumed_before: u8 = kani::any();
     kani::assume(consumed_before > 0);
 
     engine.sweep_generation = generation_before as u64;
-    engine.price_move_consumed_bps_this_generation = consumed_before as u128;
-    engine.last_stress_consumption_slot = 1;
-    engine.stress_reset_pending = 1;
+    seed_active_stress_envelope(&mut engine, consumed_before as u128, 1, 1);
 
     let no_wrap = engine.keeper_crank_not_atomic(2, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 0);
     assert!(no_wrap.is_ok());
     assert_eq!(engine.sweep_generation, generation_before as u64);
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation,
+        engine.stress_consumed_bps_e9_since_envelope,
         consumed_before as u128
     );
-    assert_eq!(engine.stress_reset_pending, 1);
+    assert_eq!(engine.stress_envelope_remaining_indices, 1);
 
     engine.rr_cursor_position = engine.params.max_accounts - 1;
     let wrap = engine.keeper_crank_not_atomic(2, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
     assert!(wrap.is_ok());
     assert_eq!(engine.sweep_generation, generation_before as u64 + 1);
-    assert_eq!(engine.price_move_consumed_bps_this_generation, 0);
-    assert_eq!(engine.stress_reset_pending, 0);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
     assert_eq!(engine.last_sweep_generation_advance_slot, 2);
 }
 
@@ -1444,7 +1472,7 @@ fn v19_generation_advances_at_most_once_per_slot() {
 #[kani::solver(cadical)]
 fn v19_accrual_consumption_only_commits_on_success() {
     // Spec §5.5 step 9a footer: if a later leg of accrue_market_to fails
-    // (e.g. K/F overflow), price_move_consumed_bps_this_generation is NOT
+    // (e.g. K/F overflow), stress_consumed_bps_e9_since_envelope is NOT
     // incremented — it is committed only after all other state commits.
     //
     // Setup: dt=1 with a move large enough that consumed_this_step > 0
@@ -1466,9 +1494,9 @@ fn v19_accrual_consumption_only_commits_on_success() {
 
     // Prime consumption to a known non-trivial value so rollback is
     // observable (no accidental "0 + 0 = 0" trivial truth).
-    engine.price_move_consumed_bps_this_generation = 17;
+    seed_active_stress_envelope(&mut engine, 17, 0, 1);
 
-    let consumed_before = engine.price_move_consumed_bps_this_generation;
+    let consumed_before = engine.stress_consumed_bps_e9_since_envelope;
     let k_long_before = engine.adl_coeff_long;
     let p_last_before = engine.last_oracle_price;
     let slot_before = engine.last_market_slot;
@@ -1478,8 +1506,8 @@ fn v19_accrual_consumption_only_commits_on_success() {
 
     // All persistent state (including consumption) must have rolled back.
     assert_eq!(
-        engine.price_move_consumed_bps_this_generation, consumed_before,
-        "price_move_consumed must roll back atomically with K/F commit"
+        engine.stress_consumed_bps_e9_since_envelope, consumed_before,
+        "stress consumption must roll back atomically with K/F commit"
     );
     assert_eq!(engine.adl_coeff_long, k_long_before);
     assert_eq!(engine.last_oracle_price, p_last_before);

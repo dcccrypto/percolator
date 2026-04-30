@@ -593,7 +593,14 @@ fn t11_50_execute_trade_atomic_oi_update_sign_flip() {
     assert!(oi_long_after == POS_SCALE);
     assert!(oi_short_after == POS_SCALE);
     engine
-        .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+        .enforce_side_mode_oi_gate(
+            old_eff_b,
+            new_eff_b,
+            old_eff_a,
+            new_eff_a,
+            oi_long_after,
+            oi_short_after,
+        )
         .unwrap();
     engine
         .attach_effective_position(b as usize, new_eff_b)
@@ -695,7 +702,9 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
         engine
             .touch_account_live_local(idx as usize, &mut ctx)
             .unwrap();
-        engine.finalize_touched_accounts_post_live(&ctx).unwrap();
+        engine
+            .finalize_touched_accounts_post_live(&mut ctx)
+            .unwrap();
     }
 
     assert!(engine.accounts[idx as usize].adl_k_snap == engine.adl_coeff_long);
@@ -1421,7 +1430,8 @@ fn proof_flat_close_shortfall_non_worsening() {
                 &0,
                 buffer_pre_equal,
                 0,
-                0
+                0,
+                false
             )
             .is_ok(),
         "flat close may leave negative raw equity when shortfall does not worsen"
@@ -1437,7 +1447,8 @@ fn proof_flat_close_shortfall_non_worsening() {
                 &0,
                 buffer_pre_equal,
                 0,
-                0
+                0,
+                false
             ),
             Err(RiskError::Undercollateralized)
         ),
@@ -1490,7 +1501,8 @@ fn proof_solvent_flat_close_succeeds() {
                 &new_eff_a,
                 buffer_pre,
                 0,
-                0
+                0,
+                false
             )
             .is_ok(),
         "solvent long flat close must pass fee-neutral shortfall check"
@@ -1504,7 +1516,8 @@ fn proof_solvent_flat_close_succeeds() {
                 &new_eff_b,
                 buffer_pre,
                 0,
-                0
+                0,
+                false
             )
             .is_ok(),
         "solvent short flat close must pass fee-neutral shortfall check"
@@ -1927,7 +1940,7 @@ fn proof_property_50_flat_only_auto_conversion() {
         "account must still have open position"
     );
     engine
-        .finalize_touched_account_post_live_with_snapshot(a as usize, true)
+        .finalize_touched_account_post_live_with_snapshot(a as usize, true, false)
         .unwrap();
     assert!(
         engine.accounts[a as usize].capital.get() == cap_before,
@@ -1955,7 +1968,7 @@ fn proof_property_50_flat_only_auto_conversion() {
         flat.accounts[a as usize].position_basis_q == 0,
         "flat branch fixture must be flat"
     );
-    flat.finalize_touched_account_post_live_with_snapshot(a as usize, true)
+    flat.finalize_touched_account_post_live_with_snapshot(a as usize, true, false)
         .unwrap();
     assert!(
         flat.accounts[a as usize].capital.get() == cap_before + released_before,

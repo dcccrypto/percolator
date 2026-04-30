@@ -566,7 +566,7 @@ impl FuzzState {
                     self.engine.current_slot = now_slot;
                     self.engine
                         .touch_account_live_local(idx as usize, &mut ctx)?;
-                    self.engine.finalize_touched_accounts_post_live(&ctx)?;
+                    self.engine.finalize_touched_accounts_post_live(&mut ctx)?;
                     Ok(())
                 })();
 

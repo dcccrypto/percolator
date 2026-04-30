@@ -577,12 +577,13 @@ fn proof_side_mode_gating() {
 
     // DrainOnly blocks OI increases on its side but permits non-increasing candidates.
     engine.side_mode_long = SideMode::DrainOnly;
-    let long_inc = engine.enforce_side_mode_oi_gate(oi + POS_SCALE, oi);
+    let long_inc = engine.enforce_side_mode_oi_gate(0, POS_SCALE as i128, 0, 0, oi + POS_SCALE, oi);
     assert!(
         long_inc == Err(RiskError::SideBlocked),
         "DrainOnly long side must block long OI increases"
     );
-    let long_same = engine.enforce_side_mode_oi_gate(oi, oi);
+    let long_same =
+        engine.enforce_side_mode_oi_gate(POS_SCALE as i128, POS_SCALE as i128, 0, 0, oi, oi);
     assert!(
         long_same.is_ok(),
         "DrainOnly long side must permit non-increasing long OI"
@@ -591,20 +592,28 @@ fn proof_side_mode_gating() {
     // ResetPending has the same OI-increase gate.
     engine.side_mode_long = SideMode::Normal;
     engine.side_mode_short = SideMode::ResetPending;
-    let short_inc = engine.enforce_side_mode_oi_gate(oi, oi + POS_SCALE);
+    let short_inc =
+        engine.enforce_side_mode_oi_gate(0, -(POS_SCALE as i128), 0, 0, oi, oi + POS_SCALE);
     assert!(
         short_inc == Err(RiskError::SideBlocked),
         "ResetPending short side must block short OI increases"
     );
-    let short_same = engine.enforce_side_mode_oi_gate(oi, oi);
+    let short_same = engine.enforce_side_mode_oi_gate(0, -(POS_SCALE as i128), 0, 0, oi, oi);
     assert!(
-        short_same.is_ok(),
-        "ResetPending short side must permit non-increasing short OI"
+        short_same == Err(RiskError::SideBlocked),
+        "ResetPending short side must block nonzero current-epoch exposure even without OI increase"
     );
 
     // Normal mode does not block side OI increases at this gate.
     engine.side_mode_short = SideMode::Normal;
-    let normal_inc = engine.enforce_side_mode_oi_gate(oi + POS_SCALE, oi + POS_SCALE);
+    let normal_inc = engine.enforce_side_mode_oi_gate(
+        0,
+        POS_SCALE as i128,
+        0,
+        -(POS_SCALE as i128),
+        oi + POS_SCALE,
+        oi + POS_SCALE,
+    );
     assert!(
         normal_inc.is_ok(),
         "Normal side mode must not block OI increases at the side-mode gate"

@@ -26,6 +26,23 @@ pub const S_ADL_ONE: u16 = 256;
 pub const DEFAULT_ORACLE: u64 = 1_000;
 pub const DEFAULT_SLOT: u64 = 100;
 
+pub fn seed_active_stress_envelope(
+    engine: &mut RiskEngine,
+    consumed_bps_e9: u128,
+    start_slot: u64,
+    remaining_indices: u64,
+) {
+    assert!(consumed_bps_e9 > 0);
+    assert!(remaining_indices <= engine.params.max_accounts);
+    if engine.current_slot < start_slot {
+        engine.current_slot = start_slot;
+    }
+    engine.stress_consumed_bps_e9_since_envelope = consumed_bps_e9;
+    engine.stress_envelope_remaining_indices = remaining_indices;
+    engine.stress_envelope_start_slot = start_slot;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+}
+
 // ============================================================================
 // Small-model helpers
 // ============================================================================
