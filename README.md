@@ -171,6 +171,16 @@ PnL admission for untrusted public flows, sync recurring fees when enabled, and
 reject extraction-sensitive actions while raw oracle target and effective engine
 price diverge.
 
+## State Layout
+
+This repository is a pure risk-engine library. It does not define an on-chain
+program id, account decoder, persisted market registry, or deployment manifest.
+There is therefore no in-repo deployed market state to migrate.
+
+Wrappers that persist raw engine state own layout versioning and migration. A
+wrapper must migrate its stored account data before linking any engine version
+whose state fields or layout have changed.
+
 ---
 
 ## Open Source

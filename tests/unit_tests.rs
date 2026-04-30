@@ -6190,8 +6190,10 @@ fn test_finalize_whole_only_conversion() {
     let cap_before = engine.accounts[idx as usize].capital.get();
 
     let mut ctx = InstructionContext::new_with_admission(50, 50);
-    ctx.add_touched(idx);
-    engine.finalize_touched_accounts_post_live(&mut ctx);
+    assert!(ctx.add_touched(idx));
+    engine
+        .finalize_touched_accounts_post_live(&mut ctx)
+        .unwrap();
 
     // Whole-only: h = min(residual, matured) / matured
     // residual = 111_000 - 100_000 - 1_000 = 10_000
@@ -6229,8 +6231,10 @@ fn test_finalize_no_conversion_under_haircut() {
     let cap_before = engine.accounts[idx as usize].capital.get();
 
     let mut ctx = InstructionContext::new_with_admission(50, 50);
-    ctx.add_touched(idx);
-    engine.finalize_touched_accounts_post_live(&mut ctx);
+    assert!(ctx.add_touched(idx));
+    engine
+        .finalize_touched_accounts_post_live(&mut ctx)
+        .unwrap();
 
     // Under haircut: NO auto-conversion
     assert_eq!(
@@ -6238,6 +6242,39 @@ fn test_finalize_no_conversion_under_haircut() {
         cap_before,
         "under haircut: must NOT auto-convert"
     );
+}
+
+#[test]
+fn add_touched_rejects_finalized_context_without_mutation() {
+    let mut ctx = InstructionContext::new();
+    assert!(ctx.add_touched(2));
+    ctx.finalized = true;
+
+    assert!(
+        !ctx.add_touched(1),
+        "finalized contexts must not accept later touches"
+    );
+    assert_eq!(ctx.touched_count, 1);
+    assert_eq!(ctx.touched_accounts[0], 2);
+}
+
+#[test]
+fn live_touch_propagates_finalized_context_failure() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 100, 1_000);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, 100).unwrap();
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    let mut ctx = InstructionContext::new_with_admission(50, 50);
+    ctx.finalized = true;
+
+    assert_eq!(
+        engine.touch_account_live_local(idx as usize, &mut ctx),
+        Err(RiskError::Overflow),
+        "engine callsites must fail closed when add_touched returns false"
+    );
+    assert_eq!(ctx.touched_count, 0);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before);
 }
 
 // ============================================================================

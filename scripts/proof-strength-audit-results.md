@@ -8,16 +8,16 @@ Execution note: `scripts/audit proof strength` is not an executable in this chec
 
 Kani version: `0.66.0`. Kani-listed standard harnesses: `312`. Parsed proof harnesses: `312`.
 
-This audit classifies harness shape, symbolic breadth, non-vacuity risk, and inductive strength. It is paired with a full per-harness CBMC timing run using `scripts/run_kani_full_audit.sh`.
+This audit classifies harness shape, symbolic breadth, non-vacuity risk, and inductive strength. It is paired with a full per-harness CBMC timing run using `scripts/run_kani_full_audit.sh`; the only later harness change in this follow-up was rerun with exact Kani selection.
 
 ## Final Tally
 
 | Classification | Count | Audit meaning |
 |---|---:|---|
 | **INDUCTIVE** | 0 | Fully symbolic initial state plus assumed decomposed invariant and loop-free modular preservation proof. |
-| **STRONG** | 180 | Symbolic proof harness with meaningful assertions and no observed vacuity risk, but not inductive. |
+| **STRONG** | 181 | Symbolic proof harness with meaningful assertions and no observed vacuity risk, but not inductive. |
 | **WEAK** | 0 | Symbolic harness with a proof-strength issue that should be tightened. |
-| **UNIT TEST** | 132 | Concrete or deterministic scenario harness with no `kani::any()` input. |
+| **UNIT TEST** | 131 | Concrete or deterministic scenario harness with no `kani::any()` input. |
 | **VACUOUS** | 0 | Confirmed contradictory assumptions or unreachable assertions. |
 
 ## Key Findings
@@ -31,7 +31,15 @@ This audit classifies harness shape, symbolic breadth, non-vacuity risk, and ind
 - Concrete regression harnesses are retained as UNIT TEST by the audit rubric. They are useful scenario coverage, but they are not counted as symbolic proofs.
 - The new sparse-sweep/stress-envelope harnesses are not weak implementation snapshots: they check spec-level properties for zero touch limits, greedy touch-budget bounds, funding and price stress accounting, no same-slot stress clearing, stress-envelope clearing only after a later eligible wrap, and at-most-once-per-slot generation advancement.
 - The unilateral-empty phantom-dust harnesses now check the current spec rule directly: both the empty side and the non-empty side must have side-local dust bounds covering their own residual OI before a dust cleanup branch can zero both sides and schedule reset.
-- Full per-harness Kani audit: `312/312` PASS, `0` failures, `0` timeouts. Slowest harness: `proof_validate_hint_preflight_oracle_shift` at `234s`, below the `600s` per-harness cap.
+- Self-audit follow-up: `proof_unilateral_empty_orphan_dust_clearance` was upgraded from one concrete dust scenario to a symbolic bounded dust proof and now also asserts that the consumed side-local dust bounds are zeroed.
+- Full per-harness Kani audit baseline: `312/312` PASS, `0` failures, `0` timeouts. Slowest harness: `proof_validate_hint_preflight_oracle_shift` at `234s`, below the `600s` per-harness cap. The only follow-up code change was `proof_unilateral_empty_orphan_dust_clearance`, rerun exactly after the symbolic strengthening.
+
+## Medium Follow-Up Items
+
+| Item | Result |
+|---|---|
+| State-field migration path for renamed stress fields | The percolator repo is a pure engine library with no runtime serialization dependency, on-chain program id, account decoder, persisted market registry, or deployment manifest. There is no in-repo deployed market state to migrate. Wrappers that persist raw engine state own layout versioning and must migrate their stored account data before linking a changed engine layout. |
+| `add_touched` false-return handling on finalized contexts | The only production engine caller is `touch_account_live_local`, and it propagates `false` as a conservative `Err(RiskError::Overflow)`. Unit coverage now checks that finalized contexts reject later touches without mutation and that the live-touch caller fails closed when `add_touched` returns false. |
 
 ## Strengthened Harnesses
 
@@ -99,7 +107,7 @@ Reported full-audit times:
 
 | Harness | Time |
 |---|---:|
-| `proof_unilateral_empty_orphan_dust_clearance` | 1s |
+| `proof_unilateral_empty_orphan_dust_clearance` | 1s full audit; 0.650s symbolic follow-up |
 | `t13_56_unilateral_empty_orphan_resolution` | 2s |
 | `t13_57_unilateral_empty_corruption_guard` | 1s |
 | `t13_58_unilateral_empty_short_side` | 1s |
@@ -171,10 +179,10 @@ The engine audit also surfaced the main spec obligations by name rather than rel
 | `tests/proofs_instructions.rs` | 52 | 20 | 0 | 32 |
 | `tests/proofs_invariants.rs` | 26 | 20 | 0 | 6 |
 | `tests/proofs_lazy_ak.rs` | 15 | 13 | 0 | 2 |
-| `tests/proofs_liveness.rs` | 11 | 0 | 0 | 11 |
+| `tests/proofs_liveness.rs` | 11 | 1 | 0 | 10 |
 | `tests/proofs_safety.rs` | 76 | 35 | 0 | 41 |
 | `tests/proofs_v1131.rs` | 24 | 17 | 0 | 7 |
 
 ## Remaining Audit Boundary
 
-This audit verifies harness strength and includes a full per-harness `scripts/run_kani_full_audit.sh` run across all 312 harnesses with a 10-minute per-harness timeout. It does not make the suite inductive under criteria 6a-6f; it records that no current harness is classified WEAK or VACUOUS by this audit.
+This audit verifies harness strength and includes a full per-harness `scripts/run_kani_full_audit.sh` baseline run across all 312 harnesses with a 10-minute per-harness timeout, plus an exact rerun of the only harness changed after that baseline. It does not make the suite inductive under criteria 6a-6f; it records that no current harness is classified WEAK or VACUOUS by this audit.

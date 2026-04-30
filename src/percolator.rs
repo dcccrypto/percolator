@@ -339,8 +339,9 @@ impl InstructionContext {
 
     /// Add account to touched set, maintaining ascending-index order.
     /// O(log n) search + O(n) shift-on-insert.
-    /// Returns true on success (including dedup hit), false on capacity
-    /// exceeded. Callers MUST propagate false as a conservative failure.
+    /// Returns true on success (including dedup hit), false if this context
+    /// has already finalized or touched-set capacity is exceeded. Callers
+    /// MUST propagate false as a conservative failure.
     pub fn add_touched(&mut self, idx: u16) -> bool {
         if self.finalized {
             return false;
@@ -5248,7 +5249,7 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live { return Err(RiskError::Unauthorized); }
         self.validate_touched_account_shape(idx)?;
         if !ctx.add_touched(idx as u16) {
-            return Err(RiskError::Overflow); // touched-set capacity exceeded
+            return Err(RiskError::Overflow); // finalized context or touched-set capacity exceeded
         }
 
         // Step 4: accelerate outstanding reserve if h=1 admits (spec §4.9)

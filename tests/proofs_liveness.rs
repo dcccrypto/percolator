@@ -417,6 +417,7 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 // ============================================================================
 
 #[kani::proof]
+#[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_unilateral_empty_orphan_dust_clearance() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -430,7 +431,9 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     // Phantom dust: both side-local bounds cover their side's residual OI
     // (§5.7.B). The empty side's bound alone is not enough to clear the
     // non-empty side.
-    let dust = 42u128;
+    let dust: u128 = kani::any();
+    kani::assume(dust > 0);
+    kani::assume(dust <= 100);
     engine.phantom_dust_bound_long_q = dust;
     engine.phantom_dust_bound_short_q = dust;
     engine.oi_eff_long_q = dust; // OI <= dust bound
@@ -456,6 +459,14 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     assert!(
         engine.oi_eff_short_q == 0,
         "OI must be zeroed after dust clearance"
+    );
+    assert_eq!(
+        engine.phantom_dust_bound_long_q, 0,
+        "dust bound used by the proof must be consumed (§5.7.B)"
+    );
+    assert_eq!(
+        engine.phantom_dust_bound_short_q, 0,
+        "dust bound used by the proof must be consumed (§5.7.B)"
     );
 }
 
