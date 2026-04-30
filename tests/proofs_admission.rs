@@ -1392,6 +1392,82 @@ fn v19_rr_scan_zero_no_stress_progress() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_equity_active_keeper_zero_progress_rejects() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine
+        .deposit_not_atomic(a, 1_000_000, DEFAULT_SLOT)
+        .unwrap();
+    engine
+        .deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT)
+        .unwrap();
+    let size = (10 * POS_SCALE) as i128;
+    assert!(engine.set_position_basis_q(a as usize, size).is_ok());
+    assert!(engine.set_position_basis_q(b as usize, -size).is_ok());
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+
+    let r = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: DEFAULT_SLOT + 3,
+        oracle_price: DEFAULT_ORACLE + 1,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+    });
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.current_slot, DEFAULT_SLOT);
+    assert_eq!(engine.last_market_slot, DEFAULT_SLOT);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_equity_active_keeper_missing_slot_progress_commits() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine
+        .deposit_not_atomic(a, 1_000_000, DEFAULT_SLOT)
+        .unwrap();
+    engine
+        .deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT)
+        .unwrap();
+    let size = (10 * POS_SCALE) as i128;
+    assert!(engine.set_position_basis_q(a as usize, size).is_ok());
+    assert!(engine.set_position_basis_q(b as usize, -size).is_ok());
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.rr_cursor_position = 2;
+
+    let r = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: DEFAULT_SLOT + 3,
+        oracle_price: DEFAULT_ORACLE + 1,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+    assert!(r.is_ok());
+    assert_eq!(engine.current_slot, DEFAULT_SLOT + 3);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE + 1);
+    assert_eq!(engine.rr_cursor_position, 3);
+    assert!(engine.stress_consumed_bps_e9_since_envelope > 0);
+}
+
+#[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn v19_greedy_phase2_model_respects_touch_budget_and_bounds() {

@@ -2683,6 +2683,63 @@ impl RiskEngine {
         }
     }
 
+    fn keeper_accrual_is_equity_active(&self, oracle_price: u64, funding_rate_e9: i128) -> bool {
+        let has_any_oi = self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0;
+        let price_move_active =
+            self.last_oracle_price > 0 && oracle_price != self.last_oracle_price && has_any_oi;
+        let funding_active = funding_rate_e9 != 0
+            && self.oi_eff_long_q != 0
+            && self.oi_eff_short_q != 0
+            && self.fund_px_last > 0;
+        price_move_active || funding_active
+    }
+
+    fn keeper_has_possible_protective_progress(
+        &self,
+        now_slot: u64,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        rr_touch_limit: u64,
+        rr_scan_limit: u64,
+    ) -> Result<bool> {
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            max_revalidations.saturating_mul(4),
+        );
+        let mut inspected: u16 = 0;
+        for &(candidate_idx, _) in ordered_candidates {
+            if inspected >= max_candidate_inspections {
+                break;
+            }
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            let cidx = candidate_idx as usize;
+            if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) {
+                continue;
+            }
+            if candidate_idx as u64 >= self.params.max_accounts {
+                continue;
+            }
+            return Ok(true);
+        }
+
+        if rr_touch_limit == 0 || rr_scan_limit == 0 {
+            return Ok(false);
+        }
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        let same_slot_as_stress_start = self.stress_consumed_bps_e9_since_envelope > 0
+            && self.stress_envelope_start_slot == now_slot;
+        let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
+            || now_slot > self.last_sweep_generation_advance_slot;
+        let wrap_eligible = wrap_allowed && !same_slot_as_stress_start;
+        if self.rr_cursor_position == wrap_bound - 1 && !wrap_eligible {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     // ========================================================================
     // effective_pos_q (spec §5.2)
     // ========================================================================
@@ -6574,6 +6631,19 @@ impl RiskEngine {
         if now_slot < self.last_market_slot {
             return Err(RiskError::Overflow);
         }
+        let equity_active_accrual =
+            self.keeper_accrual_is_equity_active(oracle_price, funding_rate_e9);
+        if equity_active_accrual
+            && !self.keeper_has_possible_protective_progress(
+                now_slot,
+                ordered_candidates,
+                max_revalidations,
+                rr_touch_limit,
+                rr_scan_limit,
+            )?
+        {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Step 5: accrue_market_to exactly once.
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
@@ -6589,6 +6659,7 @@ impl RiskEngine {
         );
         let mut inspected: u16 = 0;
         let mut num_liquidations: u32 = 0;
+        let mut protective_progress = false;
 
         for &(candidate_idx, ref hint) in ordered_candidates {
             if attempts >= max_revalidations || inspected >= max_candidate_inspections {
@@ -6609,6 +6680,7 @@ impl RiskEngine {
             let cidx = candidate_idx as usize;
 
             self.touch_account_live_local(cidx, &mut ctx)?;
+            protective_progress = true;
 
             if !ctx.pending_reset_long && !ctx.pending_reset_short {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
@@ -6676,6 +6748,7 @@ impl RiskEngine {
             }
             i = i.checked_add(1).ok_or(RiskError::Overflow)?;
             phase2_inspected = phase2_inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            protective_progress = true;
             if self.stress_consumed_bps_e9_since_envelope > 0 && !same_slot_as_stress_start {
                 stress_counted_inspected = stress_counted_inspected
                     .checked_add(1)
@@ -6696,6 +6769,9 @@ impl RiskEngine {
         }
         self.rr_cursor_position = i;
         self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
+        if equity_active_accrual && !protective_progress {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Finalize: compute fresh snapshot from post-mutation state, apply
         // whole-only conversion + fee sweep to all tracked accounts.

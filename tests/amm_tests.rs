@@ -271,12 +271,12 @@ fn test_e2e_funding_complete_cycle() {
     let alice_cap_before = engine.accounts[alice as usize].capital.get();
     let bob_cap_before = engine.accounts[bob as usize].capital.get();
 
-    // Apply a positive funding rate: longs pay shorts
-    // v12.16.4: rate passed directly to accrue_market_to via keeper_crank
+    // Apply a positive funding rate: longs pay shorts. Equity-active funding
+    // cranks must include protective progress, so the crank touches one slot.
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
     engine
-        .keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 5_000i128, 0, 100, None, 0)
+        .keeper_crank_not_atomic(slot1, oracle_price, &[], 64, 5_000i128, 0, 100, None, 1)
         .unwrap();
 
     // Advance time so next accrue_market_to applies funding.
@@ -396,11 +396,12 @@ fn test_e2e_negative_funding_rate() {
     let alice_cap_before = engine.accounts[alice as usize].capital.get();
     let bob_cap_before = engine.accounts[bob as usize].capital.get();
 
-    // Store negative rate: shorts pay longs (-500 bps/slot)
+    // Store negative rate: shorts pay longs. Equity-active funding cranks
+    // must include protective progress, so the crank touches one slot.
     engine.advance_slot(1);
     let slot1 = engine.current_slot;
     engine
-        .keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -5_000i128, 0, 100, None, 0)
+        .keeper_crank_not_atomic(slot1, oracle_price, &[], 64, -5_000i128, 0, 100, None, 1)
         .unwrap();
 
     // Advance and settle

@@ -324,7 +324,7 @@ fn test_withdraw_no_position() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank");
 
@@ -355,7 +355,7 @@ fn test_withdraw_exceeds_balance() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank");
 
@@ -744,7 +744,7 @@ fn test_cohort_reserve_set_on_new_profit() {
             h_lock,
             h_lock,
             None,
-            0,
+            1,
         )
         .expect("crank");
     {
@@ -795,7 +795,7 @@ fn test_warmup_full_conversion_after_period() {
             h_lock,
             h_lock,
             None,
-            0,
+            1,
         )
         .expect("crank");
     {
@@ -1818,7 +1818,7 @@ fn test_keeper_crank_advances_slot() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank");
     assert_eq!(outcome.num_liquidations, 0);
@@ -1855,7 +1855,7 @@ fn test_keeper_crank_same_slot_preserves_slot() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank2");
     assert_eq!(outcome.num_liquidations, 0);
@@ -2302,7 +2302,7 @@ fn test_insurance_absorbs_loss_on_liquidation() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank");
 
@@ -2549,7 +2549,7 @@ fn test_conservation_maintained_through_lifecycle() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank2");
     assert!(engine.check_conservation());
@@ -2631,7 +2631,7 @@ fn test_fee_seniority_after_restart_on_new_profit_in_trade() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .expect("crank2");
     assert!(engine.check_conservation());
@@ -3927,7 +3927,7 @@ fn test_keeper_crank_multi_slot_advance_no_fee() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -3945,6 +3945,105 @@ fn test_keeper_crank_multi_slot_advance_no_fee() {
     assert_eq!(
         capital_after, capital_before,
         "no engine-native maintenance fee across multi-slot gap"
+    );
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn keeper_crank_equity_active_requires_protective_progress() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(100),
+            oracle,
+            0i128,
+            1,
+            100,
+            Some(1),
+        )
+        .unwrap();
+
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: slot + 100,
+        oracle_price: 1050,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+    });
+
+    assert_eq!(
+        result,
+        Err(RiskError::Undercollateralized),
+        "equity-active keeper accrual must not commit as account-free catchup"
+    );
+    assert_eq!(engine.current_slot, slot);
+    assert_eq!(engine.last_market_slot, slot);
+    assert_eq!(engine.last_oracle_price, oracle);
+}
+
+#[test]
+fn keeper_crank_over_cap_candidates_advance_with_partial_progress() {
+    let mut engine = RiskEngine::new(wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 2u64;
+    let a = add_user_test(&mut engine, 1000).unwrap();
+    let b = add_user_test(&mut engine, 1000).unwrap();
+    let c = add_user_test(&mut engine, 1000).unwrap();
+    let d = add_user_test(&mut engine, 1000).unwrap();
+    for idx in [a, b, c, d] {
+        engine.deposit_not_atomic(idx, 100_000, slot).unwrap();
+    }
+
+    let size_q = make_size_q(200);
+    engine
+        .execute_trade_not_atomic(a, b, oracle, slot, size_q, oracle, 0i128, 1, 100, Some(1))
+        .unwrap();
+    engine
+        .execute_trade_not_atomic(c, d, oracle, slot, size_q, oracle, 0i128, 1, 100, Some(1))
+        .unwrap();
+
+    // Reach the crash through valid capped steps, then let the bounded crank
+    // perform the final equity-active accrual and only one liquidation.
+    engine.accrue_market_to(102, 800, 0).unwrap();
+    engine.accrue_market_to(202, 600, 0).unwrap();
+    let outcome = engine
+        .keeper_crank_not_atomic(
+            302,
+            500,
+            &[
+                (a, Some(LiquidationPolicy::FullClose)),
+                (c, Some(LiquidationPolicy::FullClose)),
+            ],
+            1,
+            0i128,
+            1,
+            100,
+            Some(1),
+            1,
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome.num_liquidations, 1,
+        "bounded crank should process only its requested liquidation budget"
+    );
+    assert_eq!(engine.current_slot, 302);
+    assert_eq!(engine.last_oracle_price, 500);
+    assert!(
+        engine.is_used(c as usize) && engine.accounts[c as usize].position_basis_q != 0,
+        "uncovered liquidatable accounts remain lazy for later cranks"
     );
     assert!(engine.check_conservation());
 }
@@ -3992,7 +4091,7 @@ fn test_liquidation_triggers_on_underwater_account() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
     assert!(
@@ -4090,7 +4189,7 @@ fn test_conservation_full_lifecycle() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
     assert!(
@@ -4119,7 +4218,7 @@ fn test_conservation_full_lifecycle() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
     assert!(
@@ -4307,7 +4406,7 @@ fn test_double_crank_same_slot_is_safe() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -4325,7 +4424,7 @@ fn test_double_crank_same_slot_is_safe() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -4592,7 +4691,7 @@ fn test_property_49_consume_released_pnl_preserves_reserve() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -4673,7 +4772,7 @@ fn test_property_50_flat_only_auto_conversion() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -4815,7 +4914,7 @@ fn test_withdraw_partial_and_full_ok() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -4872,7 +4971,7 @@ fn test_property_52_convert_released_pnl_explicit() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
 
@@ -5202,7 +5301,7 @@ fn test_force_close_resolved_with_negative_pnl() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
     engine
@@ -5492,7 +5591,7 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
             0,
             100,
             None,
-            0,
+            1,
         )
         .unwrap();
     engine
