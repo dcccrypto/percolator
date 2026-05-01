@@ -142,6 +142,13 @@ pub fn zero_fee_params() -> RiskParams {
     }
 }
 
+pub fn small_zero_fee_params(max_accounts: u64) -> RiskParams {
+    let mut params = zero_fee_params();
+    params.max_accounts = max_accounts;
+    params.max_active_positions_per_side = max_accounts;
+    params
+}
+
 /// Test helper: materialize a user account via deposit_not_atomic (spec §10.2).
 ///
 /// v12.18.1 removed add_user / add_lp / materialize_with_fee. The sole

@@ -1496,6 +1496,75 @@ fn v19_nonflat_fee_sync_anchors_at_slot_last_before_requested_future_loss_slot()
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_fee_sync_rejects_flat_negative_pnl_before_loss_settlement() {
+    // Spec loss seniority: a recurring-fee realization cannot draw account
+    // capital into insurance while realized negative PnL is still unpaid.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000, DEFAULT_SLOT).unwrap();
+
+    let loss: u16 = kani::any();
+    let fee_rate: u8 = kani::any();
+    kani::assume(loss > 0 && loss <= 1_000);
+    kani::assume(fee_rate > 0);
+    engine.set_pnl(idx as usize, -(loss as i128)).unwrap();
+    engine.accounts[idx as usize].last_fee_slot = DEFAULT_SLOT;
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    let pnl_before = engine.accounts[idx as usize].pnl;
+    let insurance_before = engine.insurance_fund.balance.get();
+    let r = engine.sync_account_fee_to_slot_not_atomic(idx, DEFAULT_SLOT + 1, fee_rate as u128);
+
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before);
+    assert_eq!(engine.accounts[idx as usize].pnl, pnl_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.accounts[idx as usize].last_fee_slot, DEFAULT_SLOT);
+    assert_eq!(engine.current_slot, DEFAULT_SLOT);
+
+    kani::cover!(
+        r == Err(RiskError::Undercollateralized),
+        "flat negative-PnL recurring fee draw is rejected before mutation"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_explicit_fee_rejects_flat_negative_pnl_before_loss_settlement() {
+    // Same loss-seniority rule for ad-hoc wrapper-owned account fees.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000, DEFAULT_SLOT).unwrap();
+
+    let loss: u16 = kani::any();
+    let fee_abs: u16 = kani::any();
+    kani::assume(loss > 0 && loss <= 1_000);
+    kani::assume(fee_abs > 0 && fee_abs <= 1_000);
+    engine.set_pnl(idx as usize, -(loss as i128)).unwrap();
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    let pnl_before = engine.accounts[idx as usize].pnl;
+    let insurance_before = engine.insurance_fund.balance.get();
+    let r = engine.charge_account_fee_not_atomic(idx, fee_abs as u128, DEFAULT_SLOT + 1);
+
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before);
+    assert_eq!(engine.accounts[idx as usize].pnl, pnl_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.current_slot, DEFAULT_SLOT);
+
+    kani::cover!(
+        r == Err(RiskError::Undercollateralized),
+        "flat negative-PnL explicit fee draw is rejected before mutation"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn v19_flat_negative_cleanup_starts_bankruptcy_hmax() {
@@ -1602,6 +1671,28 @@ fn v19_rr_scan_zero_no_stress_progress() {
 }
 
 #[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_phase2_does_not_wrap_when_generation_rate_limited() {
+    let mut engine = RiskEngine::new_with_market(small_zero_fee_params(4), 1, DEFAULT_ORACLE);
+    engine.rr_cursor_position = 3;
+
+    let outcome = engine
+        .phase2_scan_outcome(4, 1, 1, true, false, false)
+        .unwrap();
+
+    assert_eq!(outcome.next_cursor, 3);
+    assert_eq!(outcome.inspected, 0);
+    assert_eq!(outcome.touched, 0);
+    assert_eq!(outcome.stress_counted_inspected, 0);
+    assert!(!outcome.wrapped);
+    kani::cover!(
+        outcome.next_cursor == 3 && !outcome.wrapped,
+        "Phase 2 cannot cross wrap boundary when generation advance is rate-limited"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn v19_phase2_pretriggers_bankruptcy_hmax_before_positive_release() {
@@ -1669,8 +1760,9 @@ fn v19_equity_active_keeper_zero_progress_rejects() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit() {
-    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+fn v19_equity_active_keeper_empty_rr_scan_advances_cursor_and_segment() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
     engine
@@ -1699,15 +1791,15 @@ fn v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit() {
         rr_touch_limit: 1,
         rr_scan_limit: 1,
     });
-    assert_eq!(r, Err(RiskError::Undercollateralized));
-    assert_eq!(engine.current_slot, DEFAULT_SLOT);
-    assert_eq!(engine.last_market_slot, DEFAULT_SLOT);
-    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE);
-    assert_eq!(engine.rr_cursor_position, 2);
+    assert!(r.is_ok());
+    assert_eq!(engine.current_slot, DEFAULT_SLOT + 3);
+    assert_eq!(engine.last_market_slot, DEFAULT_SLOT + 3);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE + 1);
+    assert_eq!(engine.rr_cursor_position, 3);
 
     kani::cover!(
-        engine.current_slot == DEFAULT_SLOT && engine.rr_cursor_position == 2,
-        "equity-active crank with only empty-slot scan rejects without committing accrual"
+        engine.current_slot == DEFAULT_SLOT + 3 && engine.rr_cursor_position == 3,
+        "authenticated empty-slot scan advances cursor and permits bounded equity-active catchup"
     );
 }
 
@@ -1715,13 +1807,11 @@ fn v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn v19_phase2_materialized_touch_counts_as_protective_progress() {
-    // Helper-level proof paired with the runtime keeper regression: a Phase 2
-    // scan only supplies protective progress when it actually reaches a used
-    // slot. Empty-slot scans are covered by
-    // v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit.
-    let mut params = zero_fee_params();
-    params.max_accounts = 4;
-    let mut engine = RiskEngine::new_with_market(params, DEFAULT_SLOT, DEFAULT_ORACLE);
+    // Helper-level coverage for the materialized-account branch. Empty-slot
+    // progress is covered by
+    // v19_equity_active_keeper_empty_rr_scan_advances_cursor_and_segment.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
     engine.used[0] = 1u64;
     engine.rr_cursor_position = 0;
 
@@ -1734,6 +1824,83 @@ fn v19_phase2_materialized_touch_counts_as_protective_progress() {
     kani::cover!(
         outcome.touched == 1,
         "materialized Phase 2 scan contributes protective progress"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_phase2_hmax_guard_pauses_positive_release() {
+    // Spec same-instruction h-max rule: when a Phase 2 pass may discover a
+    // bankruptcy, positive-PnL usability is conservatively paused before
+    // replaying touches. The full public-crank latent-bankruptcy liveness path
+    // is covered by the runtime regression; this proof isolates the safety
+    // gate that prevents premature positive-PnL release.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let winner = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(winner, 1, DEFAULT_SLOT).unwrap();
+
+    engine.vault = U128::new(engine.vault.get() + 10);
+    engine.accounts[winner as usize].pnl = 10;
+    engine.accounts[winner as usize].reserved_pnl = 10;
+    engine.accounts[winner as usize].sched_present = 1;
+    engine.accounts[winner as usize].sched_remaining_q = 10;
+    engine.accounts[winner as usize].sched_anchor_q = 10;
+    engine.accounts[winner as usize].sched_start_slot = DEFAULT_SLOT - 1;
+    engine.accounts[winner as usize].sched_horizon = 1;
+    engine.accounts[winner as usize].sched_release_q = 0;
+    engine.pnl_pos_tot = 10;
+    engine.pnl_matured_pos_tot = 0;
+
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    ctx.speculative_hmax_guard_active = true;
+    assert!(engine
+        .admit_outstanding_reserve_on_touch(winner as usize, &mut ctx)
+        .is_ok());
+    assert_eq!(engine.accounts[winner as usize].reserved_pnl, 10);
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    assert!(!ctx.positive_pnl_usability_mutated);
+
+    kani::cover!(
+        engine.accounts[winner as usize].reserved_pnl == 10 && engine.pnl_matured_pos_tot == 0,
+        "Phase 2 h-max guard pauses positive reserve before latent bankruptcy"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_fee_sync_rejects_nonflat_unsettled_side_effects_before_fee_draw() {
+    // Spec loss seniority: recurring fees cannot draw from nonflat account
+    // capital while local K/F/A side effects are stale.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000, DEFAULT_SLOT).unwrap();
+    engine
+        .attach_effective_position(idx as usize, POS_SCALE as i128)
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.accounts[idx as usize].last_fee_slot = DEFAULT_SLOT - 1;
+    engine.adl_coeff_long = -1;
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let r = engine.sync_account_fee_to_slot_not_atomic(idx, DEFAULT_SLOT, 1);
+
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(
+        engine.accounts[idx as usize].last_fee_slot,
+        DEFAULT_SLOT - 1
+    );
+
+    kani::cover!(
+        r == Err(RiskError::Undercollateralized),
+        "nonflat stale K/F/A account cannot pay recurring fee before touch"
     );
 }
 
@@ -1834,9 +2001,16 @@ fn v19_phase2_engine_symbolic_missing_slot_progress_is_bounded() {
         assert_eq!(outcome.inspected, 0);
         assert_eq!(outcome.touched, 0);
     } else {
-        let distance_to_wrap = 4u64 - cursor as u64;
-        let inspected = core::cmp::min(rr_scan_limit as u64, distance_to_wrap);
-        let wrapped = inspected == distance_to_wrap;
+        let wrap_allowed = !same_slot_generation_already_advanced;
+        let distance_to_boundary = 3u64 - cursor as u64;
+        let inspected = if !wrap_allowed && cursor == 3 {
+            0
+        } else if !wrap_allowed {
+            core::cmp::min(rr_scan_limit as u64, distance_to_boundary)
+        } else {
+            core::cmp::min(rr_scan_limit as u64, 4u64 - cursor as u64)
+        };
+        let wrapped = wrap_allowed && inspected == 4u64 - cursor as u64;
         let expected_cursor = if wrapped {
             0
         } else {
@@ -1852,8 +2026,12 @@ fn v19_phase2_engine_symbolic_missing_slot_progress_is_bounded() {
         "engine Phase 2 advances through authenticated missing slots"
     );
     kani::cover!(
-        rr_touch_limit > 0 && rr_scan_limit > 0 && outcome.next_cursor == 0 && outcome.wrapped,
-        "engine Phase 2 may wrap cursor without same-slot generation advance"
+        rr_touch_limit > 0
+            && rr_scan_limit > 0
+            && !same_slot_generation_already_advanced
+            && outcome.next_cursor == 0
+            && outcome.wrapped,
+        "engine Phase 2 wraps cursor only when generation advance is allowed"
     );
 }
 
@@ -1946,6 +2124,9 @@ fn v19_phase2_model_inductive_transition_preserves_stress_invariants() {
     let mut stress_counted_inspected = 0u64;
     let mut wrapped = false;
     while inspected < rr_scan_limit as u64 && touched < rr_touch_limit as u64 {
+        if i == cap - 1 && !wrap_allowed {
+            break;
+        }
         let used = ((used_mask >> (i as u32)) & 1) != 0;
         if used {
             touched += 1;
@@ -1995,9 +2176,13 @@ fn v19_phase2_model_inductive_transition_preserves_stress_invariants() {
         assert_eq!(inspected, 0);
         assert_eq!(touched, 0);
         assert!(!stress_cleared);
-    } else {
+    } else if !(cursor as u64 == cap - 1 && !wrap_allowed) {
         assert!(inspected > 0);
         assert!(i != cursor as u64 || wrapped);
+    } else {
+        assert_eq!(i, cursor as u64);
+        assert_eq!(inspected, 0);
+        assert!(!wrapped);
     }
     if same_slot_as_stress_start || !wrap_allowed {
         assert!(!stress_cleared);
@@ -2115,7 +2300,7 @@ fn v19_generation_advances_at_most_once_per_slot() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_same_slot_cursor_progress_without_second_generation_advance() {
+fn v19_same_slot_cursor_does_not_wrap_without_generation_advance() {
     let mut params = zero_fee_params();
     params.max_accounts = 2;
     params.max_active_positions_per_side = 2;
@@ -2139,12 +2324,12 @@ fn v19_same_slot_cursor_progress_without_second_generation_advance() {
     });
 
     assert!(r.is_ok());
-    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.rr_cursor_position, 1);
     assert_eq!(engine.sweep_generation, 1);
     assert_eq!(engine.last_sweep_generation_advance_slot, 1);
     kani::cover!(
-        engine.rr_cursor_position == 0 && engine.sweep_generation == 1,
-        "same-slot boundary crank progresses cursor without a second generation advance"
+        engine.rr_cursor_position == 1 && engine.sweep_generation == 1,
+        "same-slot boundary crank does not wrap cursor without a generation advance"
     );
 }
 

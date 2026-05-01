@@ -624,6 +624,94 @@ fn t4_22_k_overflow_routes_to_absorb() {
     );
 }
 
+#[kani::proof]
+#[kani::unwind(520)]
+#[kani::solver(cadical)]
+fn proof_adl_k_loss_write_bounded_by_rounded_settlement_effect() {
+    // Spec ADL loss bound: any K-loss write must prove that the exact
+    // worst-case rounded settlement effect on represented accounts is <= the
+    // socialized deficit. D=1 exercises the uninsured fallback; D=2 exercises
+    // the exact K-write branch for this two-account model.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 10, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(a as usize, -1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_short_q = 2;
+    engine.oi_eff_long_q = 2;
+
+    let d: u8 = kani::any();
+    kani::assume(d == 1 || d == 2);
+    let before_cap =
+        engine.accounts[a as usize].capital.get() + engine.accounts[b as usize].capital.get();
+    let mut ctx = InstructionContext::new_with_admission(1, 100);
+    let r = engine.enqueue_adl(&mut ctx, Side::Long, 0, d as u128);
+    assert!(r.is_ok());
+    assert!(engine
+        .touch_account_live_local(a as usize, &mut ctx)
+        .is_ok());
+    assert!(engine
+        .touch_account_live_local(b as usize, &mut ctx)
+        .is_ok());
+    let after_cap =
+        engine.accounts[a as usize].capital.get() + engine.accounts[b as usize].capital.get();
+
+    assert!(before_cap >= after_cap);
+    assert!(
+        before_cap - after_cap <= d as u128,
+        "ADL K loss must not charge represented accounts above the socialized deficit"
+    );
+    kani::cover!(
+        d == 1 && engine.adl_coeff_short == 0,
+        "rounded-loss overcharge case falls back without K write"
+    );
+    kani::cover!(
+        d == 2 && engine.adl_coeff_short < 0,
+        "exactly bounded rounded-loss case can write K"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(520)]
+#[kani::solver(cadical)]
+fn proof_adl_uncertified_potential_dust_routes_deficit_without_k_write() {
+    // Spec dust rule: potential dust is diagnostic only. If potential dust is
+    // not certified, ADL cannot use the affected side as a K-loss denominator;
+    // the deficit must route to uninsured fallback.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100, DEFAULT_SLOT).unwrap();
+
+    let q: u8 = 10;
+    let dust: u8 = 1;
+    let d: u8 = 5;
+
+    engine
+        .attach_effective_position(idx as usize, -(q as i128))
+        .unwrap();
+    engine.oi_eff_short_q = q as u128;
+    engine.oi_eff_long_q = q as u128;
+    engine.phantom_dust_certified_short_q = 0;
+    engine.phantom_dust_potential_short_q = dust as u128;
+    kani::assume(engine.phantom_dust_potential_short_q > engine.phantom_dust_certified_short_q);
+    kani::assume(engine.phantom_dust_potential_short_q <= engine.oi_eff_short_q);
+    let old_k_short = engine.adl_coeff_short;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 100);
+    let r = engine.enqueue_adl(&mut ctx, Side::Long, 0, d as u128);
+    assert!(r.is_ok());
+    assert_eq!(engine.adl_coeff_short, old_k_short);
+
+    kani::cover!(
+        engine.phantom_dust_potential_short_q > engine.phantom_dust_certified_short_q,
+        "uncertified potential dust blocks ADL K-loss denominator use"
+    );
+}
+
 /// D=0 ADL: K must be unchanged, A must decrease, OI updated.
 /// Uses actual engine enqueue_adl with zero deficit.
 #[kani::proof]

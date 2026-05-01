@@ -252,6 +252,10 @@ pub struct InstructionContext {
     /// True once this instruction starts or restarts the stress/h-max envelope.
     /// Same-instruction Phase 2 inspections must not reduce the new envelope.
     pub stress_envelope_restarted: bool,
+    /// Phase 2-local conservative guard. This blocks positive-PnL usability
+    /// before replaying a cursor window that may discover a latent bankruptcy,
+    /// but it is not itself a real stress/h-max event.
+    pub speculative_hmax_guard_active: bool,
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
@@ -283,6 +287,7 @@ impl InstructionContext {
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
             admit_h_min_shared: 0,
             admit_h_max_shared: 0,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -300,6 +305,7 @@ impl InstructionContext {
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -322,6 +328,7 @@ impl InstructionContext {
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt
@@ -2779,11 +2786,15 @@ impl RiskEngine {
             && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
     }
 
-    fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+    fn real_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
         self.threshold_stress_gate_active(ctx)
             || self.bankruptcy_hmax_lock_active
             || ctx.bankruptcy_hmax_candidate_active
             || self.loss_stale_positive_pnl_lock_active()
+    }
+
+    fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+        self.real_stress_gate_active(ctx) || ctx.speculative_hmax_guard_active
     }
 
     fn ensure_loss_current_for_position_change(&self) -> Result<()> {
@@ -2794,7 +2805,7 @@ impl RiskEngine {
     }
 
     fn trigger_bankruptcy_hmax_lock(&mut self, ctx: &mut InstructionContext) -> Result<()> {
-        if ctx.positive_pnl_usability_mutated && !self.stress_gate_active(ctx) {
+        if ctx.positive_pnl_usability_mutated && !self.real_stress_gate_active(ctx) {
             return Err(RiskError::Undercollateralized);
         }
         ctx.bankruptcy_hmax_candidate_active = true;
@@ -3487,7 +3498,24 @@ impl RiskEngine {
         if self.accounts[idx].pnl < 0 {
             return Err(RiskError::Undercollateralized);
         }
+        if self.market_mode == MarketMode::Live && self.account_has_unsettled_live_effects(idx)? {
+            return Err(RiskError::Undercollateralized);
+        }
         Ok(())
+    }
+
+    fn account_has_unsettled_live_effects(&self, idx: usize) -> Result<bool> {
+        let account = &self.accounts[idx];
+        if account.position_basis_q == 0 {
+            return Ok(false);
+        }
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
+        if account.adl_epoch_snap != self.get_epoch_side(side) {
+            return Ok(true);
+        }
+        Ok(account.adl_a_basis != self.get_a_side(side)
+            || account.adl_k_snap != self.get_k_side(side)
+            || account.f_snap != self.get_f_side(side))
     }
 
     /// Internal helper that realizes wrapper-owned recurring maintenance fees
@@ -6930,6 +6958,9 @@ impl RiskEngine {
             if wrap_bound == 0 || i >= wrap_bound {
                 return Err(RiskError::CorruptState);
             }
+            if i == wrap_bound - 1 && !wrap_allowed {
+                break;
+            }
             if self.is_used(i as usize) {
                 touched = touched.checked_add(1).ok_or(RiskError::Overflow)?;
             }
@@ -7171,11 +7202,13 @@ impl RiskEngine {
         )?;
         self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
 
-        let phase2_guard_prev = ctx.bankruptcy_hmax_candidate_active;
-        let phase2_guard_enabled =
-            phase2.touched > 0 && !phase2_guard_prev && !self.bankruptcy_hmax_lock_active;
+        let phase2_guard_prev = ctx.speculative_hmax_guard_active;
+        let phase2_guard_enabled = phase2.touched > 0
+            && !phase2_guard_prev
+            && !ctx.bankruptcy_hmax_candidate_active
+            && !self.bankruptcy_hmax_lock_active;
         if phase2_guard_enabled {
-            ctx.bankruptcy_hmax_candidate_active = true;
+            ctx.speculative_hmax_guard_active = true;
         }
 
         let mut touch_i = self.rr_cursor_position;
@@ -7203,7 +7236,7 @@ impl RiskEngine {
             && !ctx.stress_envelope_restarted
             && !self.bankruptcy_hmax_lock_active
         {
-            ctx.bankruptcy_hmax_candidate_active = phase2_guard_prev;
+            ctx.speculative_hmax_guard_active = phase2_guard_prev;
         }
         if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
             return Err(RiskError::CorruptState);

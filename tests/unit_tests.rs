@@ -3516,6 +3516,56 @@ fn phase2_latent_bankruptcy_after_positive_release_does_not_cursor_deadlock() {
 }
 
 #[test]
+fn phase2_bankruptcy_must_not_commit_prior_phase1_positive_release() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 100);
+    mat_regression_account(&mut engine, 0, 1, 0);
+    mat_regression_account(&mut engine, 1, 10, 0);
+    mat_regression_account(&mut engine, 2, 1_000, 0);
+
+    engine.vault = U128::new(engine.vault.get() + 20);
+    engine.accounts[0].pnl = 20;
+    engine.accounts[0].reserved_pnl = 20;
+    engine.accounts[0].sched_present = 1;
+    engine.accounts[0].sched_remaining_q = 20;
+    engine.accounts[0].sched_anchor_q = 20;
+    engine.accounts[0].sched_start_slot = 0;
+    engine.accounts[0].sched_horizon = 1;
+    engine.accounts[0].sched_release_q = 0;
+    engine.pnl_pos_tot = 20;
+
+    engine
+        .attach_effective_position(1, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(2, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.rr_cursor_position = 1;
+
+    let candidates = [(0u16, None)];
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: 50,
+        ordered_candidates: &candidates,
+        max_revalidations: 1,
+        max_candidate_inspections: 1,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 5,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+
+    assert_eq!(
+        result,
+        Err(RiskError::Undercollateralized),
+        "Phase 2 speculative h-max guard must not mask prior Phase 1 positive-PnL usability"
+    );
+}
+
+#[test]
 fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
     let mut engine = RiskEngine::new(default_params());
     let wrap = engine.params.max_accounts;
@@ -3538,8 +3588,6 @@ fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
         .unwrap();
     assert_eq!(engine.sweep_generation, 1);
 
-    // Greedy sparse scanning can wrap again in the same slot. The generation
-    // counter must not advance again.
     engine
         .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
         .unwrap();
@@ -3606,11 +3654,34 @@ fn keeper_crank_phase2_same_slot_wrap_progress_without_second_generation() {
             rr_scan_limit: 1,
         })
         .unwrap();
-    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.rr_cursor_position, 1);
     assert_eq!(
         engine.sweep_generation, 1,
-        "same-slot boundary progress must not advance generation twice"
+        "same-slot boundary progress must not wrap without a generation advance"
     );
+}
+
+#[test]
+fn phase2_must_not_wrap_cursor_without_slot_rate_generation() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 100);
+    engine.current_slot = 7;
+    engine.stress_consumed_bps_e9_since_envelope = 1;
+    engine.stress_envelope_remaining_indices = 1;
+    engine.stress_envelope_start_slot = 0;
+    engine.stress_envelope_start_generation = 0;
+    engine.sweep_generation = 1;
+    engine.last_sweep_generation_advance_slot = 7;
+    engine.rr_cursor_position = engine.params.max_accounts - 1;
+
+    let out = engine
+        .phase2_scan_outcome(engine.params.max_accounts, 1, 1, true, false, false)
+        .unwrap();
+
+    assert!(!out.wrapped);
+    assert_eq!(out.next_cursor, engine.params.max_accounts - 1);
+    assert_eq!(out.inspected, 0);
+    assert_eq!(out.touched, 0);
+    assert_eq!(out.stress_counted_inspected, 0);
 }
 
 #[test]
@@ -4556,6 +4627,31 @@ fn explicit_account_fee_rejects_flat_negative_pnl_before_loss_settlement() {
     assert_eq!(res, Err(RiskError::Undercollateralized));
     assert_eq!(engine.accounts[0].capital.get(), 100);
     assert_eq!(engine.accounts[0].pnl, -100);
+    assert_eq!(engine.insurance_fund.balance.get(), 0);
+}
+
+#[test]
+fn recurring_fee_sync_rejects_nonflat_account_with_unsettled_k_loss() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 100);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    mat_regression_account(&mut engine, 1, 1_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    engine.accrue_market_to(1, 50, 0).unwrap();
+    assert_eq!(engine.accounts[0].pnl, 0);
+
+    let res = engine.sync_account_fee_to_slot_not_atomic(0, 1, 100);
+
+    assert_eq!(res, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[0].capital.get(), 100);
+    assert_eq!(engine.accounts[0].pnl, 0);
     assert_eq!(engine.insurance_fund.balance.get(), 0);
 }
 
