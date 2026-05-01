@@ -104,6 +104,32 @@ fn wide_envelope_params() -> RiskParams {
     p
 }
 
+fn regression_safe_params() -> RiskParams {
+    RiskParams {
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        trading_fee_bps: 0,
+        max_accounts: 16,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: U128::new(0),
+        min_liquidation_abs: U128::new(0),
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        h_min: 1,
+        h_max: 10,
+        resolve_price_deviation_bps: 10_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        max_active_positions_per_side: 16,
+        max_price_move_bps_per_slot: 10_000,
+    }
+}
+
+fn mat_regression_account(engine: &mut RiskEngine, idx: u16, capital: u128, slot: u64) {
+    engine.deposit_not_atomic(idx, capital, slot).unwrap();
+}
+
 /// Helper: allocate a user slot without moving capital (back-door via
 /// materialize_at). The spec-strict deposit path is exercised in
 /// test_deposit_materialize_user.
@@ -3440,6 +3466,56 @@ fn phase2_pretriggers_bankruptcy_hmax_before_winner_release() {
 }
 
 #[test]
+fn phase2_latent_bankruptcy_after_positive_release_does_not_cursor_deadlock() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 1, 1_000_000);
+    mat_regression_account(&mut engine, 0, 1, 1);
+    mat_regression_account(&mut engine, 1, 1, 1);
+    engine.vault = U128::new(engine.vault.get() + 10);
+
+    engine.accounts[0].pnl = 10;
+    engine.accounts[0].reserved_pnl = 10;
+    engine.accounts[0].sched_present = 1;
+    engine.accounts[0].sched_remaining_q = 10;
+    engine.accounts[0].sched_anchor_q = 10;
+    engine.accounts[0].sched_start_slot = 0;
+    engine.accounts[0].sched_horizon = 1;
+    engine.accounts[0].sched_release_q = 0;
+    engine.pnl_pos_tot = 10;
+    engine.pnl_matured_pos_tot = 0;
+
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.adl_coeff_short = -(2 * ADL_ONE as i128 * POS_SCALE as i128);
+    engine.rr_cursor_position = 0;
+
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: 1_000_000,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 0,
+        admit_h_max: 10,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 2,
+        rr_scan_limit: 2,
+    });
+
+    assert!(
+        result.is_ok(),
+        "Phase 2 must not roll back permanently when a latent bankruptcy follows a releasable reserve"
+    );
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(
+        engine.accounts[0].reserved_pnl, 10,
+        "same-window positive reserve release must be paused before latent bankruptcy settlement"
+    );
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+}
+
+#[test]
 fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
     let mut engine = RiskEngine::new(default_params());
     let wrap = engine.params.max_accounts;
@@ -4177,7 +4253,7 @@ fn keeper_crank_equity_active_requires_protective_progress() {
 }
 
 #[test]
-fn equity_active_keeper_crank_rejects_empty_rr_scan_without_committing_accrual() {
+fn equity_active_keeper_crank_advances_cursor_over_authenticated_empty_rr_scan() {
     let (mut engine, a, b) =
         setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
     let oracle = 1000u64;
@@ -4198,7 +4274,6 @@ fn equity_active_keeper_crank_rejects_empty_rr_scan_without_committing_accrual()
         .unwrap();
     engine.rr_cursor_position = 2;
     let before_last_market_slot = engine.last_market_slot;
-    let before_price = engine.last_oracle_price;
 
     let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
         now_slot: slot + 1,
@@ -4214,12 +4289,13 @@ fn equity_active_keeper_crank_rejects_empty_rr_scan_without_committing_accrual()
         rr_scan_limit: 8,
     });
 
-    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert!(result.is_ok());
     assert_eq!(
-        engine.last_market_slot, before_last_market_slot,
-        "failed protective-progress precheck must not commit accrual"
+        engine.last_market_slot,
+        before_last_market_slot + 1,
+        "authenticated missing-slot progress permits one bounded equity-active segment"
     );
-    assert_eq!(engine.last_oracle_price, before_price);
+    assert_eq!(engine.rr_cursor_position, 10);
 }
 
 #[test]
@@ -4448,6 +4524,39 @@ fn fee_sync_requested_future_slot_nonflat_anchors_at_slot_last_before_loss_stale
         insurance_before,
         "fees must not become senior to unaccrued mark/funding losses"
     );
+}
+
+#[test]
+fn fee_sync_rejects_flat_negative_pnl_before_loss_settlement() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    engine.set_pnl(0, -100).unwrap();
+    engine.current_slot = 10;
+    engine.last_market_slot = 10;
+    engine.accounts[0].last_fee_slot = 0;
+
+    let res = engine.sync_account_fee_to_slot_not_atomic(0, 10, 10);
+
+    assert_eq!(res, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[0].capital.get(), 100);
+    assert_eq!(engine.accounts[0].pnl, -100);
+    assert_eq!(engine.insurance_fund.balance.get(), 0);
+}
+
+#[test]
+fn explicit_account_fee_rejects_flat_negative_pnl_before_loss_settlement() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    engine.set_pnl(0, -100).unwrap();
+    engine.current_slot = 1;
+    engine.last_market_slot = 1;
+
+    let res = engine.charge_account_fee_not_atomic(0, 100, 1);
+
+    assert_eq!(res, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[0].capital.get(), 100);
+    assert_eq!(engine.accounts[0].pnl, -100);
+    assert_eq!(engine.insurance_fund.balance.get(), 0);
 }
 
 #[test]
@@ -7794,6 +7903,50 @@ fn public_postcondition_rejects_resolved_with_zero_resolved_price() {
 // prior impl only set liq_side's flag if its OI was already 0, which
 // diverged under corrupt-imbalance states.
 // ============================================================================
+
+#[test]
+fn adl_k_loss_must_not_overcharge_floor_rounded_opposing_accounts() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    mat_regression_account(&mut engine, 1, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 2;
+    engine.oi_eff_long_q = 2;
+
+    let before_cap = engine.accounts[0].capital.get() + engine.accounts[1].capital.get();
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    engine.enqueue_adl(&mut ctx, Side::Long, 0, 1).unwrap();
+    engine.touch_account_live_local(0, &mut ctx).unwrap();
+    engine.touch_account_live_local(1, &mut ctx).unwrap();
+    let after_cap = engine.accounts[0].capital.get() + engine.accounts[1].capital.get();
+
+    assert!(
+        before_cap - after_cap <= 1,
+        "ADL K loss charged {} units for a 1-unit deficit",
+        before_cap - after_cap
+    );
+}
+
+#[test]
+fn adl_must_not_apply_k_loss_when_uncertified_potential_dust_remains() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    engine.attach_effective_position(0, -10).unwrap();
+    engine.oi_eff_short_q = 10;
+    engine.oi_eff_long_q = 10;
+    engine.phantom_dust_certified_short_q = 0;
+    engine.phantom_dust_potential_short_q = 1;
+    let old_k_short = engine.adl_coeff_short;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    engine.enqueue_adl(&mut ctx, Side::Long, 0, 5).unwrap();
+
+    assert_eq!(
+        engine.adl_coeff_short, old_k_short,
+        "uncertified potential dust must force uninsured fallback, not a K-loss write"
+    );
+}
 
 #[test]
 fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_symmetric() {

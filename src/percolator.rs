@@ -2719,6 +2719,53 @@ impl RiskEngine {
         }
     }
 
+    fn exact_adl_k_loss_upper_bound(
+        &self,
+        side: Side,
+        delta_k_abs: u128,
+        budget: u128,
+    ) -> Result<u128> {
+        if delta_k_abs == 0 {
+            return Ok(0);
+        }
+        if self.params.max_accounts > MAX_ACCOUNTS as u64 {
+            return Err(RiskError::CorruptState);
+        }
+
+        let epoch = self.get_epoch_side(side);
+        let mut total = 0u128;
+        let max_accounts = self.params.max_accounts as usize;
+        for idx in 0..max_accounts {
+            if !self.is_used(idx) {
+                continue;
+            }
+            self.validate_touched_account_shape(idx)?;
+            let account = &self.accounts[idx];
+            if side_of_i128(account.position_basis_q) != Some(side) {
+                continue;
+            }
+            if account.adl_epoch_snap != epoch {
+                continue;
+            }
+            let den = account
+                .adl_a_basis
+                .checked_mul(POS_SCALE)
+                .ok_or(RiskError::Overflow)?;
+            let loss = mul_div_ceil_u256(
+                U256::from_u128(account.position_basis_q.unsigned_abs()),
+                U256::from_u128(delta_k_abs),
+                U256::from_u128(den),
+            )
+            .try_into_u128()
+            .ok_or(RiskError::Overflow)?;
+            total = total.checked_add(loss).ok_or(RiskError::Overflow)?;
+            if total > budget {
+                return Ok(total);
+            }
+        }
+        Ok(total)
+    }
+
     fn threshold_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
         match ctx.admit_h_max_consumption_threshold_bps_opt_shared {
             Some(threshold) => self.stress_consumed_bps_e9_since_envelope >= threshold,
@@ -2815,20 +2862,7 @@ impl RiskEngine {
         if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
             return Err(RiskError::CorruptState);
         }
-        let scan_cap = core::cmp::min(rr_scan_limit, wrap_bound);
-        let mut i = self.rr_cursor_position;
-        let mut scanned = 0u64;
-        while scanned < scan_cap {
-            if self.is_used(i as usize) {
-                return Ok(true);
-            }
-            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
-            scanned = scanned.checked_add(1).ok_or(RiskError::Overflow)?;
-            if i == wrap_bound {
-                break;
-            }
-        }
-        Ok(false)
+        Ok(core::cmp::min(rr_scan_limit, wrap_bound) > 0)
     }
 
     fn account_has_existing_bankruptcy_tail(&self, idx: usize) -> Result<bool> {
@@ -3449,6 +3483,13 @@ impl RiskEngine {
     // sync_account_fee_to_slot (spec §4.6.1)
     // ========================================================================
 
+    fn ensure_fee_draw_does_not_precede_loss(&self, idx: usize) -> Result<()> {
+        if self.accounts[idx].pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
     /// Internal helper that realizes wrapper-owned recurring maintenance fees
     /// for account `idx` over `[last_fee_slot, fee_slot_anchor]` at the given
     /// per-slot rate, then advances `last_fee_slot`.
@@ -3511,6 +3552,7 @@ impl RiskEngine {
         let fee_abs_u256 = if raw > cap { cap } else { raw };
         let fee_abs: u128 = fee_abs_u256.try_into_u128().ok_or(RiskError::Overflow)?;
         if fee_abs > 0 {
+            self.ensure_fee_draw_does_not_precede_loss(idx)?;
             self.charge_fee_to_insurance(idx, fee_abs)?;
         }
         self.accounts[idx].last_fee_slot = fee_slot_anchor;
@@ -3590,6 +3632,7 @@ impl RiskEngine {
         let loss_bearing_oi = oi
             .checked_sub(old_certified)
             .ok_or(RiskError::CorruptState)?;
+        let uncertified_potential = old_potential.saturating_sub(old_certified);
 
         // Step 7: phantom-adjusted K-loss allocation. Phantom OI is not a
         // valid loss-bearing denominator, so its pro-rata loss share is
@@ -3617,22 +3660,37 @@ impl RiskEngine {
                 d_rem - d_phantom
             };
             if d_social != 0 {
-                let a_ps = a_old.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-                match wide_mul_div_ceil_u128_or_over_i128max(d_social, a_ps, loss_bearing_oi) {
-                    Ok(delta_k_abs) => {
-                        let delta_k = -(delta_k_abs as i128);
-                        let k_opp = self.get_k_side(opp);
-                        match k_opp.checked_add(delta_k) {
-                            Some(new_k) if Self::validate_k_future_headroom(a_old, new_k).is_ok() => {
-                                self.set_k_side(opp, new_k)?;
-                            }
-                            _ => {
-                                self.record_uninsured_protocol_loss(d_social);
+                if uncertified_potential != 0 {
+                    self.record_uninsured_protocol_loss(d_social);
+                } else {
+                    let a_ps = a_old.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+                    match wide_mul_div_ceil_u128_or_over_i128max(d_social, a_ps, loss_bearing_oi) {
+                        Ok(delta_k_abs) => {
+                            match self.exact_adl_k_loss_upper_bound(opp, delta_k_abs, d_social) {
+                                Ok(loss_upper) if loss_upper <= d_social => {
+                                    let delta_k = -(delta_k_abs as i128);
+                                    let k_opp = self.get_k_side(opp);
+                                    match k_opp.checked_add(delta_k) {
+                                        Some(new_k)
+                                            if Self::validate_k_future_headroom(a_old, new_k)
+                                                .is_ok() =>
+                                        {
+                                            self.set_k_side(opp, new_k)?;
+                                        }
+                                        _ => {
+                                            self.record_uninsured_protocol_loss(d_social);
+                                        }
+                                    }
+                                }
+                                Ok(_) | Err(RiskError::Overflow) => {
+                                    self.record_uninsured_protocol_loss(d_social);
+                                }
+                                Err(e) => return Err(e),
                             }
                         }
-                    }
-                    Err(OverI128Magnitude) => {
-                        self.record_uninsured_protocol_loss(d_social);
+                        Err(OverI128Magnitude) => {
+                            self.record_uninsured_protocol_loss(d_social);
+                        }
                     }
                 }
             }
@@ -7113,6 +7171,13 @@ impl RiskEngine {
         )?;
         self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
 
+        let phase2_guard_prev = ctx.bankruptcy_hmax_candidate_active;
+        let phase2_guard_enabled =
+            phase2.touched > 0 && !phase2_guard_prev && !self.bankruptcy_hmax_lock_active;
+        if phase2_guard_enabled {
+            ctx.bankruptcy_hmax_candidate_active = true;
+        }
+
         let mut touch_i = self.rr_cursor_position;
         let mut replayed_inspected = 0u64;
         let mut replayed_touched = 0u64;
@@ -7134,10 +7199,16 @@ impl RiskEngine {
                 break;
             }
         }
+        if phase2_guard_enabled
+            && !ctx.stress_envelope_restarted
+            && !self.bankruptcy_hmax_lock_active
+        {
+            ctx.bankruptcy_hmax_candidate_active = phase2_guard_prev;
+        }
         if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
             return Err(RiskError::CorruptState);
         }
-        if phase2.touched > 0 {
+        if phase2.inspected > 0 {
             protective_progress = true;
         }
 
@@ -8188,6 +8259,9 @@ impl RiskEngine {
         if fee_abs > MAX_PROTOCOL_FEE_ABS {
             return Err(RiskError::Overflow);
         }
+        if fee_abs > 0 {
+            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
+        }
 
         self.current_slot = now_slot;
 
@@ -8302,6 +8376,9 @@ impl RiskEngine {
             MarketMode::Resolved => self.resolved_slot,
         };
         self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
+        if fee_rate_per_slot > 0 && shape_anchor > self.accounts[idx as usize].last_fee_slot {
+            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
+        }
         // Reject time jumps that would brick subsequent accrue_market_to.
         // Only meaningful on Live; on Resolved the envelope is moot because
         // accrue_market_to is no longer reachable, but the check is safe
