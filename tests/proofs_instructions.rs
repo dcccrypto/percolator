@@ -361,7 +361,7 @@ fn t10_38_accrue_funding_payer_driven() {
     let k_long_after = engine.adl_coeff_long;
     let k_short_after = engine.adl_coeff_short;
 
-    // v12.15: K gets truncation-divided integer part, F gets remainder.
+    // v12.19.53: K gets truncation-divided integer part, F gets remainder.
     // fund_num = 100 * rate. fund_term = fund_num / 1e9 (truncation toward zero).
     // For |fund_num| < 1e9, fund_term = 0 and all funding goes to F.
     let fund_num = 100i128 * (rate as i128);
@@ -1372,7 +1372,7 @@ fn t14_65_dust_bound_end_to_end_clearance() {
 // SPEC PROPERTY #17: fee shortfall routes to fee_credits, NOT PnL
 // ############################################################################
 //
-// Spec v12.14.0 §4.10: "Unpaid explicit fees are account-local fee debt.
+// Spec v12.19.53 §4.10: "Unpaid explicit fees are account-local fee debt.
 // They MUST NOT be written into PNL_i."
 // Spec property #17: "trading-fee or liquidation-fee shortfall becomes
 // negative fee_credits_i, does not touch PNL_i."
@@ -2290,7 +2290,7 @@ fn proof_audit4_add_user_atomic_on_failure() {
 }
 
 /// Proof: deposit_not_atomic (the sole materialization path since
-/// v12.18.1) enforces MAX_VAULT_TVL atomically — the first deposit
+/// v12.19.53) enforces MAX_VAULT_TVL atomically — the first deposit
 /// that would push vault over the cap is rejected without mutating
 /// vault, insurance, or the slot count. Prior spec drafts had an
 /// `add_user` opening fee that could push vault past the cap; that
@@ -2359,7 +2359,7 @@ fn proof_audit4_deposit_fee_credits_max_tvl() {
 }
 
 // ============================================================================
-// v12.19 reclaim_empty_account dt envelope (§9.10 step 3a, property 104)
+// v12.19.53 reclaim_empty_account dt envelope (§9.10 step 3a, property 104)
 // Priority #2 from rev6 plan: envelope bound + atomicity on rejection.
 // ============================================================================
 
@@ -2460,7 +2460,7 @@ fn v19_reclaim_envelope_accept_within_bound() {
 }
 
 // ============================================================================
-// v12.19 init-time solvency envelope (§1.4, property 90)
+// v12.19.53 init-time solvency envelope (§1.4, property 90)
 // ============================================================================
 
 #[kani::proof]

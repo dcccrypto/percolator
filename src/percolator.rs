@@ -1,6 +1,6 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v12.19.24
+//! Formally Verified Risk Engine for Perpetual DEX — v12.19.53
 //!
-//! Implements the v12.19.24 spec.
+//! Implements the v12.19.53 spec.
 //!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. Protected principal for flat accounts
@@ -259,7 +259,7 @@ pub struct InstructionContext {
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
-    /// Optional scaled consumption-threshold gate (spec §4.7, v12.19).
+    /// Optional scaled consumption-threshold gate (spec §4.7, v12.19.53).
     /// `None` disables step 2 of `admit_fresh_reserve_h_lock`.
     /// Public entrypoints accept whole-bps thresholds; the context stores
     /// `threshold * STRESS_CONSUMPTION_SCALE`.
@@ -599,7 +599,7 @@ pub struct RiskParams {
     /// Per-market active-positions cap per side (spec §1.4).
     /// Invariant: max_active_positions_per_side <= max_accounts <= MAX_ACCOUNTS.
     pub max_active_positions_per_side: u64,
-    /// Per-slot price-move cap in bps (spec §1.4, v12.19).
+    /// Per-slot price-move cap in bps (spec §1.4, v12.19.53).
     ///
     /// Bounds the magnitude of `|oracle_price - P_last| / P_last` per
     /// accrual envelope: `accrue_market_to` rejects any call on a
@@ -675,13 +675,13 @@ pub struct RiskEngine {
     /// Count of accounts with PNL < 0 (spec §4.7).
     pub neg_pnl_account_count: u64,
 
-    /// Round-robin sweep cursor (spec §2.2, v12.19).
+    /// Round-robin sweep cursor (spec §2.2, v12.19.53).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
     /// `0 <= rr_cursor_position < params.max_accounts`. Greedy Phase 2
     /// skips unused slots and touches up to the supplied account budget before
     /// stopping or wrapping at the deployment's physical slab size.
     pub rr_cursor_position: u64,
-    /// Sweep generation counter (spec §2.2, v12.19).
+    /// Sweep generation counter (spec §2.2, v12.19.53).
     /// Incremented at most once per slot after a full wraparound of
     /// `rr_cursor_position`.
     /// Read-only from the wrapper perspective; can only advance by running
@@ -3210,7 +3210,7 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Spec §5.5 step 6-8 (v12.19): enforce per-call dt envelope whenever
+        // Spec §5.5 step 6-8 (v12.19.53): enforce per-call dt envelope whenever
         // funding OR price movement would actually drain equity.
         //
         // - funding_active: funding_rate != 0 AND both sides have OI AND fund_px_last > 0
@@ -3232,7 +3232,7 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Spec §5.5 step 9 (v12.19): per-accrual price-move cap.
+        // Spec §5.5 step 9 (v12.19.53): per-accrual price-move cap.
         //
         //   require abs(oracle_price - P_last) * 10_000
         //           <= cfg_max_price_move_bps_per_slot * dt * P_last
@@ -3428,7 +3428,7 @@ impl RiskEngine {
     }
 
     /// Validate the optional consumption-threshold (spec §4.7, §9.0 step 1,
-    /// v12.19). `None` disables the gate; `Some(threshold)` requires
+    /// v12.19.53). `None` disables the gate; `Some(threshold)` requires
     /// `threshold > 0`. `Some(0)` is invalid and must be rejected
     /// conservatively before any state mutation.
     pub fn validate_threshold_opt(threshold_opt: Option<u128>) -> Result<()> {
@@ -4540,7 +4540,7 @@ impl RiskEngine {
         }
     }
 
-    /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.19).
+    /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.19.53).
     ///
     /// When the last account closes, signed-floor rounding on PnL can
     /// leave `vault > c_tot + insurance_fund.balance` with no junior
@@ -6135,7 +6135,7 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.ensure_loss_current_for_position_change()?;
 
-        // Steps 11-12 (spec §9.4 v12.19): live local touch both counterparties
+        // Steps 11-12 (spec §9.4 v12.19.53): live local touch both counterparties
         // in deterministic ascending storage-index order. One touch may change
         // PNL_matured_pos_tot and therefore the second account's admission
         // outcome; cross-client order differences are forbidden.

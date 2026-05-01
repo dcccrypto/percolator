@@ -8,7 +8,7 @@ use percolator::*;
 // ============================================================================
 
 fn default_params() -> RiskParams {
-    // v12.19 envelope (spec §1.4): max_price_move * max_dt + funding_budget
+    // v12.19.53 envelope (spec §1.4): max_price_move * max_dt + funding_budget
     //   + liq_fee <= maint_bps. Tight production-shape defaults:
     //   maint=500, liq=100, max_rate=10_000, max_dt=100, max_price_move=3
     //   funding_budget = 10_000*100*10_000/1e9 = 10 bps
@@ -18,7 +18,7 @@ fn default_params() -> RiskParams {
     //   (3% max cumulative move over envelope).
     //
     // Tests that simulate scenarios requiring larger price moves use
-    // `wide_price_move_params()` below. This keeps the v12.19 safety
+    // `wide_price_move_params()` below. This keeps the v12.19.53 safety
     // boundary intact in default cases while documenting each wider-envelope
     // use site explicitly.
     RiskParams {
@@ -61,7 +61,7 @@ fn seed_active_stress_envelope(
 
 /// Test helper: params with a high-maintenance envelope that allows
 /// large single-call price moves (up to ~25% per envelope at default dt).
-/// Semantically valid v12.19 params — just a market with 30% maintenance.
+/// Semantically valid v12.19.53 params — just a market with 30% maintenance.
 /// Use in tests that simulate PnL/liquidation scenarios via big moves.
 #[allow(dead_code)]
 fn wide_price_move_params() -> RiskParams {
@@ -87,7 +87,7 @@ fn wide_price_move_params() -> RiskParams {
 }
 
 /// Test helper: params with a wide per-call envelope for tests that use
-/// slot values in [0, ~1000]. Keeps the v12.19 solvency envelope tight by
+/// slot values in [0, ~1000]. Keeps the v12.19.53 solvency envelope tight by
 /// trading off price-move cap against accrual dt.
 /// price=1, dt=400, rate=0, liq=80 and exact small-notional floors remain
 /// inside the 5% maintenance envelope.
@@ -256,7 +256,7 @@ fn test_params_require_mm_le_im() {
 }
 
 // ============================================================================
-// 2. Materialization via deposit (spec §10.2, v12.18.1)
+// 2. Materialization via deposit (spec §10.2, v12.19.53)
 // ============================================================================
 
 #[test]
@@ -301,7 +301,7 @@ fn test_add_lp() {
     assert!(engine.accounts[idx as usize].is_lp());
     assert_eq!(engine.accounts[idx as usize].matcher_program, program);
     assert_eq!(engine.accounts[idx as usize].matcher_context, context);
-    // v12.18.1: no engine-native opening fee. Capital starts at 0 until deposit.
+    // v12.19.53: no engine-native opening fee. Capital starts at 0 until deposit.
     assert_eq!(engine.accounts[idx as usize].capital.get(), 0);
 }
 
@@ -622,7 +622,7 @@ fn test_haircut_ratio_with_surplus() {
 
 #[test]
 fn test_liquidation_eligible_account() {
-    // v12.19: use wide_price_move_params (maint=30%, IM=35%) so a 20% adverse
+    // v12.19.53: use wide_price_move_params (maint=30%, IM=35%) so a 20% adverse
     // price move can fit in one envelope (cap = 25*100*1000 = 2_500_000
     // abs_dp units; 20% = 2_000_000). Adjust sizes to the new leverage:
     // 50_000 capital at IM=35% → max notional ≈ 142_857. Use size=100 →
@@ -653,7 +653,7 @@ fn test_liquidation_eligible_account() {
     // The envelope constraint forces slower liquidations. Use capital=20_000 +
     // size=50 so PnL loss exceeds margin buffer.
     // Actually the prior setup_two_users already used capital=50_000; the
-    // issue is that v12.19 envelope fundamentally prevents one-envelope
+    // issue is that v12.19.53 envelope fundamentally prevents one-envelope
     // liquidation-triggering moves at these leverages. Rework the test to
     // use multiple envelope-sized moves, or test "liquidation after the
     // market moves" rather than "one-call liquidation trigger".
@@ -844,7 +844,7 @@ fn test_warmup_full_conversion_after_period() {
         )
         .expect("close");
 
-    // Wait beyond cohort horizon and touch — under v12.18 acceleration, profit may
+    // Wait beyond cohort horizon and touch — under v12.19.53 acceleration, profit may
     // already have been converted during the close trade's finalize (when b's loss
     // made residual grow to admit h=1). Either way, after the full horizon passes,
     // capital must reflect the profit relative to the initial capital.
@@ -1104,7 +1104,7 @@ fn rounding_surplus_must_not_strand_vault_after_close() {
     // Expected: terminal close paths must sweep the residual into the
     // insurance fund so the wrapper can withdraw it via the normal
     // insurance path.
-    // v12.19: corner-case test with oracle=1 and price move to 2 (100% move
+    // v12.19.53: corner-case test with oracle=1 and price move to 2 (100% move
     // in 1 slot). Satisfies envelope only at maint=10_000 (max), liq=0,
     // max_price_move=10_000, max_dt=1, funding=0.
     //   envelope: 10_000 * 1 + 0 + 0 = 10_000 <= 10_000 ✓
@@ -1284,7 +1284,7 @@ fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
     // and F_side after snapshotting them into the epoch-start fields.
     // Stale accounts still settle correctly because they read the
     // epoch-start snapshots, not the live indices.
-    // v12.19: use default params (maint=500, max_price_move=3) and pick
+    // v12.19.53: use default params (maint=500, max_price_move=3) and pick
     // a base price that leaves headroom for a small envelope-compliant move.
     let mut params = default_params();
     params.max_abs_funding_e9_per_slot = 0;
@@ -1338,7 +1338,7 @@ fn adl_k_write_preserves_future_mark_headroom() {
     // If the ADL K write would violate this, the deficit MUST route
     // through record_uninsured_protocol_loss instead, matching the
     // existing "overflow → implicit haircut" policy.
-    // v12.19: start at a high P_last so a small envelope-compliant move
+    // v12.19.53: start at a high P_last so a small envelope-compliant move
     // can be applied post-ADL to test mark-to-market headroom.
     let mut params = default_params();
     params.trading_fee_bps = 0;
@@ -1367,7 +1367,7 @@ fn adl_k_write_preserves_future_mark_headroom() {
     // record_uninsured_protocol_loss (adl_coeff_short unchanged near 0),
     // OR it was written to K but with enough headroom that mark-to-market
     // at next-slot envelope-compliant move still works.
-    // v12.19: move by (cap = 3 bps/slot * 1 slot * init_px = 30 units).
+    // v12.19.53: move by (cap = 3 bps/slot * 1 slot * init_px = 30 units).
     // Use delta of 30 (30/100000 = 3 bps) exactly at cap.
     let next_px = init_px + 30;
     let r = engine.accrue_market_to(1, next_px, 0);
@@ -1494,7 +1494,7 @@ fn validate_params_rejects_lifetime_below_max_dt() {
 }
 
 // ============================================================================
-// v12.19 §1.4: init-time solvency-envelope validation (property 90)
+// v12.19.53 §1.4: init-time solvency-envelope validation (property 90)
 // ============================================================================
 
 #[test]
@@ -1704,7 +1704,7 @@ fn test_deposit_fee_credits() {
     // Give the account fee debt first (spec §2.1: fee_credits <= 0)
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
-    // Pay off 3000 of the 5000 debt. v12.19 spec §9.2.1 step 5:
+    // Pay off 3000 of the 5000 debt. v12.19.53 spec §9.2.1 step 5:
     // `pay = min(amount, FeeDebt_i)` — returns `pay`.
     let paid = engine
         .deposit_fee_credits(idx, 3000, slot)
@@ -1727,7 +1727,7 @@ fn test_deposit_fee_credits() {
         "fee_credits must be zero after full payoff"
     );
 
-    // v12.19 spec: pay = min(amount, FeeDebt_i). When amount > debt=0,
+    // v12.19.53 spec: pay = min(amount, FeeDebt_i). When amount > debt=0,
     // pay = 0, no mutation except current_slot.
     let paid = engine
         .deposit_fee_credits(idx, 9999, slot)
@@ -1890,7 +1890,7 @@ fn test_keeper_crank_same_slot_preserves_slot() {
 
 #[test]
 fn test_keeper_crank_no_engine_native_maintenance_fee() {
-    // Spec v12.14.0 §8: no engine-native recurring maintenance fee.
+    // Spec v12.19.53 §8: no engine-native recurring maintenance fee.
     // Keeper crank must NOT reduce capital from maintenance fees.
     let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
@@ -1914,7 +1914,7 @@ fn test_keeper_crank_no_engine_native_maintenance_fee() {
     let capital_after = engine.accounts[caller as usize].capital.get();
     assert_eq!(
         capital_after, capital_before,
-        "no engine-native maintenance fee in v12.14.0"
+        "no engine-native maintenance fee in v12.19.53"
     );
     assert!(engine.check_conservation());
 }
@@ -1998,7 +1998,7 @@ fn test_reset_pending_blocks_new_trades() {
 
 #[test]
 fn test_adl_triggered_by_liquidation() {
-    // v12.19: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
+    // v12.19.53: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
     // Use size=100 for notional 100k, IM=35k. To trigger liquidation via
     // big adverse move, crash 1000 → 700 (30%) over 100 slots (cap at
     // dt=100 P=1000 = 25*100*1000 = 2_500_000; abs_dp*10_000 = 3_000_000 →
@@ -2271,7 +2271,7 @@ fn test_close_account_after_trade_and_unwind() {
 
 #[test]
 fn test_insurance_absorbs_loss_on_liquidation() {
-    // v12.19: wide_price_move_params (IM=35%). 20k capital → max notional ~57k.
+    // v12.19.53: wide_price_move_params (IM=35%). 20k capital → max notional ~57k.
     // Use size=50 (notional=50k, IM=17.5k). Crash by 30% via two envelope
     // steps (1000 → 800 → 600) to make `a` deeply underwater.
     let mut engine = RiskEngine::new(wide_price_move_params());
@@ -2349,7 +2349,7 @@ fn test_insurance_absorbs_loss_on_liquidation() {
 
 #[test]
 fn test_keeper_crank_liquidates_underwater_accounts() {
-    // v12.19: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
+    // v12.19.53: wide_price_move_params (IM=35%). 50k cap → max notional 142k.
     // Size 100 → notional 100k. Two-step crash 1000 → 800 → 600 to push
     // `a` underwater (total 40% drop via envelope-compliant steps).
     let (mut engine, a, b) = setup_two_users_with_params(50_000, 50_000, wide_price_move_params());
@@ -2406,7 +2406,7 @@ fn test_i128_size_q_construction() {
 
 #[test]
 fn test_deposit_fee_credits_caps_at_outstanding_debt() {
-    // v12.19 spec §9.2.1 step 5: pay = min(amount, FeeDebt_i). When
+    // v12.19.53 spec §9.2.1 step 5: pay = min(amount, FeeDebt_i). When
     // amount > debt, engine applies `debt` and returns `debt`. The wrapper
     // is responsible for refunding `amount - pay` back to the caller.
     let mut engine = RiskEngine::new(default_params());
@@ -2426,7 +2426,7 @@ fn test_deposit_fee_credits_caps_at_outstanding_debt() {
 
 #[test]
 fn test_deposit_fee_credits_zero_pay_when_no_debt() {
-    // v12.19 spec §9.2.1: when FeeDebt_i = 0, pay = min(amount, 0) = 0,
+    // v12.19.53 spec §9.2.1: when FeeDebt_i = 0, pay = min(amount, 0) = 0,
     // no mutation except current_slot advances.
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();
@@ -2643,7 +2643,7 @@ fn test_fee_seniority_after_restart_on_new_profit_in_trade() {
     assert!(engine.check_conservation());
 
     // Price rises: a now has positive PnL (profit).
-    // v12.19: at default_params (max_price_move=3, max_dt=100), max move
+    // v12.19.53: at default_params (max_price_move=3, max_dt=100), max move
     // over 100 slots is 3*100=300 bps = 3%. Use 1030 (3% up) with dt=100.
     let slot2 = 101u64;
     let oracle2 = 1030u64;
@@ -2835,7 +2835,7 @@ fn test_self_trade_rejected() {
 
 #[test]
 fn test_same_slot_price_change_on_live_exposure_rejects() {
-    // v12.19 §5.5 step 9: with live exposure and dt = 0, any nonzero price
+    // v12.19.53 §5.5 step 9: with live exposure and dt = 0, any nonzero price
     // move must REJECT. The cap is `abs_dp * 10_000 <= cap * dt * P_last`;
     // at dt=0 the RHS is 0, so any nonzero LHS fails the check.
     //
@@ -3076,7 +3076,7 @@ fn test_mul_div_ceil_u256_rounding() {
 
 #[test]
 fn test_accrue_market_to_rejects_dt_over_envelope() {
-    // Spec §5.5 clause 6 (v12.18): dt > cfg_max_accrual_dt_slots must be rejected.
+    // Spec §5.5 clause 6 (v12.19.53): dt > cfg_max_accrual_dt_slots must be rejected.
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
@@ -3092,7 +3092,7 @@ fn test_accrue_market_to_rejects_dt_over_envelope() {
 }
 
 // ============================================================================
-// v12.19 §5.5 step 9: per-accrual price-move cap (property 89, 90)
+// v12.19.53 §5.5 step 9: per-accrual price-move cap (property 89, 90)
 // ============================================================================
 
 #[test]
@@ -3171,7 +3171,7 @@ fn accrue_market_to_zero_oi_fast_forwards_price_without_cap() {
 }
 
 // ============================================================================
-// v12.19 §9.7 Phase 2: round-robin sweep (properties 92, 93, 94, 95, 98)
+// v12.19.53 §9.7 Phase 2: round-robin sweep (properties 92, 93, 94, 95, 98)
 // ============================================================================
 
 #[test]
@@ -3704,7 +3704,7 @@ fn keeper_crank_phase2_rejects_some_zero_threshold() {
 }
 
 // ============================================================================
-// v12.19 §9.4 step 12: deterministic ascending storage-index touch (property 108)
+// v12.19.53 §9.4 step 12: deterministic ascending storage-index touch (property 108)
 // ============================================================================
 
 #[test]
@@ -3751,7 +3751,7 @@ fn execute_trade_touches_in_ascending_storage_order() {
 }
 
 // ============================================================================
-// v12.19 §9.10 step 3a: reclaim_empty_account envelope bound (property 104)
+// v12.19.53 §9.10 step 3a: reclaim_empty_account envelope bound (property 104)
 // ============================================================================
 
 #[test]
@@ -3846,7 +3846,7 @@ fn reclaim_envelope_accepts_now_slot_within_envelope() {
 }
 
 // ============================================================================
-// v12.19 §4.7 step 2: consumption-threshold admission gate
+// v12.19.53 §4.7 step 2: consumption-threshold admission gate
 //   (properties 99, 100, 101)
 // ============================================================================
 
@@ -4157,7 +4157,7 @@ fn test_accrue_market_funding_rate_zero_no_funding_applied() {
 
 #[test]
 fn test_accrue_market_applies_funding_transfer() {
-    // Spec v12.16.5 §5.5: funding goes to F indices, not K.
+    // Spec v12.19.53 §5.5: funding goes to F indices, not K.
     // fund_num_total = fund_px_0 * rate * dt (one exact delta, no substeps)
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
@@ -4237,7 +4237,7 @@ fn test_keeper_crank_processes_candidates() {
 
 #[test]
 fn test_keeper_crank_multi_slot_advance_no_fee() {
-    // Spec v12.14.0 §8: no engine-native recurring maintenance fee.
+    // Spec v12.19.53 §8: no engine-native recurring maintenance fee.
     // Verify crank processes correctly across large slot gaps without fee charging.
     let mut engine = RiskEngine::new(default_params());
     let oracle = 1000u64;
@@ -4854,7 +4854,7 @@ fn keeper_crank_over_cap_candidates_advance_with_partial_progress() {
 
 #[test]
 fn test_liquidation_triggers_on_underwater_account() {
-    // v12.19: wide_price_move_params (IM=35%, MM=30%). 100k capital → max
+    // v12.19.53: wide_price_move_params (IM=35%, MM=30%). 100k capital → max
     // notional ~285k. Use size=200 (notional=200k, IM=70k, MM=60k).
     // Crash 1000 → 800 → 600 → 500 (50% total) via three envelope-compliant
     // steps (cap at dt=100 P=X is 25*100*X units of abs_dp*10_000).
@@ -4902,7 +4902,7 @@ fn test_liquidation_triggers_on_underwater_account() {
 
 #[test]
 fn test_direct_liquidation_returns_to_insurance() {
-    // v12.19: 90% price drop must be reached across multiple envelope
+    // v12.19.53: 90% price drop must be reached across multiple envelope
     // windows. Use 1000 → 800 → 600 → 400 → 200 → 100 (5 steps, each
     // within cap at dt=100 and appropriate P_last).
     let (mut engine, a, b) =
@@ -4953,7 +4953,7 @@ fn test_direct_liquidation_returns_to_insurance() {
 
 #[test]
 fn test_conservation_full_lifecycle() {
-    // v12.19: wide_price_move_params allows 25 bps/slot moves.
+    // v12.19.53: wide_price_move_params allows 25 bps/slot moves.
     // 1000 → 1200 = 2000 bps; needs dt>=80. Use slot2=102 (dt=100 from
     // setup's last_market_slot=1). Similarly for 1200 → 800 (1667 bps,
     // cap at dt=100 P=1200 = 25*100*1200 = 3_000_000 >= 1_666_667 ✓).
@@ -5405,7 +5405,7 @@ fn test_min_liquidation_fee_enforced() {
 #[test]
 fn test_min_liquidation_fee_does_not_exceed_cap() {
     // Verify: min(max(bps_fee, min_abs), cap) → cap wins when min > cap.
-    // v12.19: use wide_price_move_params so a 90% crash fits via multi-step.
+    // v12.19.53: use wide_price_move_params so a 90% crash fits via multi-step.
     let mut params = wide_price_move_params();
     params.liquidation_fee_cap = U128::new(200); // low cap
     params.min_liquidation_abs = U128::new(150); // below cap (valid per §1.4)
@@ -5867,7 +5867,7 @@ fn test_property_52_convert_released_pnl_explicit() {
 
 #[test]
 fn test_property_53_phantom_dust_adl_ordering() {
-    // v12.19: use wide_price_move_params so a multi-step crash can fully
+    // v12.19.53: use wide_price_move_params so a multi-step crash can fully
     // bankrupt account 'a'. Size sized for IM=35% with 50k capital.
     let oracle = 1_000u64;
     let slot = 1u64;
@@ -5953,7 +5953,7 @@ fn test_property_53_phantom_dust_adl_ordering() {
 
 #[test]
 fn test_property_54_unilateral_exact_drain_reset() {
-    // v12.19: 90% price drop via envelope-compliant multi-step accrual.
+    // v12.19.53: 90% price drop via envelope-compliant multi-step accrual.
     let oracle = 1_000u64;
     let slot = 1u64;
     let mut params = wide_price_move_params();
@@ -6091,7 +6091,7 @@ fn test_force_close_resolved_with_negative_pnl() {
         .unwrap();
 
     // Move price down so account a (long) has loss, then resolve at that price.
-    // v12.19: 10% move (1000→900) at dt=100 fits 2500_000 cap vs 1_000_000 needed.
+    // v12.19.53: 10% move (1000→900) at dt=100 fits 2500_000 cap vs 1_000_000 needed.
     engine
         .keeper_crank_not_atomic(
             200,
@@ -6323,7 +6323,7 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
 
     // Advance K via price movement (mark-to-market) in envelope-sized steps
     // — NOT touching a or b as candidates so K-pair PnL remains unrealized.
-    // v12.19: 50% move (1000→1500) via multi-step accruals.
+    // v12.19.53: 50% move (1000→1500) via multi-step accruals.
     engine.accrue_market_to(200, 1200, 0).unwrap(); // +20% over 100 slots
     engine.accrue_market_to(300, 1440, 0).unwrap(); // +20% more
     engine.accrue_market_to(400, 1500, 0).unwrap(); // +4% to reach 1500
@@ -6379,7 +6379,7 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
         )
         .unwrap();
 
-    // Price drops, then resolve at that price. v12.19: 50% drop via steps.
+    // Price drops, then resolve at that price. v12.19.53: 50% drop via steps.
     engine.accrue_market_to(200, 800, 0).unwrap(); // -20%
     engine.accrue_market_to(300, 640, 0).unwrap(); // -20% more
     engine
@@ -6701,7 +6701,7 @@ fn test_property_31_fullclose_liquidation_zeros_position() {
     engine.deposit_not_atomic(a, 50_000, 100).unwrap();
     engine.deposit_not_atomic(b, 500_000, 100).unwrap();
 
-    // v12.19: use size 100 so position fits IM=35% at 50k capital.
+    // v12.19.53: use size 100 so position fits IM=35% at 50k capital.
     let size = (100 * POS_SCALE) as i128;
     engine
         .execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i128, 0, 100, None)
@@ -6739,7 +6739,7 @@ fn test_property_31_fullclose_liquidation_zeros_position() {
 }
 
 // ============================================================================
-// Reserve cohort queue tests (spec §4.4, v12.14.0)
+// Reserve cohort queue tests (spec §4.4, v12.19.53)
 // ============================================================================
 
 #[test]
@@ -7030,7 +7030,7 @@ fn test_set_pnl_with_reserve_h_lock_zero_immediate() {
 }
 
 // ============================================================================
-// Touch/finalize v12.14.0 tests
+// Touch/finalize v12.19.53 tests
 // ============================================================================
 
 #[test]
@@ -7178,7 +7178,7 @@ fn live_touch_propagates_finalized_context_failure() {
 }
 
 // ============================================================================
-// resolve_market (spec §10.7, v12.14.0)
+// resolve_market (spec §10.7, v12.19.53)
 // ============================================================================
 
 #[test]
@@ -7203,7 +7203,7 @@ fn test_resolve_market_basic() {
         )
         .unwrap();
 
-    // Accrue to resolution slot first (v12.16.4 requirement)
+    // Accrue to resolution slot first (v12.19.53 requirement)
     engine.accrue_market_to(200, 1000, 0).unwrap();
     // Resolve at the same price
     let result = engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1000, 1000, 200, 0);
@@ -7238,7 +7238,7 @@ fn test_resolve_market_accepts_in_band_price() {
     engine.deposit_not_atomic(idx_tmp, 100_000, 100).unwrap();
     engine.last_oracle_price = 1000;
 
-    // Accrue to resolution slot first (v12.16.4 requirement)
+    // Accrue to resolution slot first (v12.19.53 requirement)
     engine.accrue_market_to(200, 1000, 0).unwrap();
     let result = engine.resolve_market_not_atomic(ResolveMode::Ordinary, 1050, 1050, 200, 0); // 5% deviation, within 10% band
     assert!(result.is_ok());
@@ -7266,7 +7266,7 @@ fn test_blocker1_trade_open_must_not_use_unreleased_pnl() {
         .unwrap();
 
     // Price moves up — a gains unreleased profit.
-    // v12.19: 10% move over 100 slots fits cap=3*100*1000=300_000 ≥ 1_000_000?
+    // v12.19.53: 10% move over 100 slots fits cap=3*100*1000=300_000 ≥ 1_000_000?
     // No: default_params max_price_move=3 → cap=300_000. 10% move = 1_000_000
     // → exceeds. Use a smaller move (1003 = 0.3%) to fit envelope and still
     // create positive PnL.
@@ -7454,7 +7454,7 @@ fn audit_5_invalid_h_lock_rejected_at_entry() {
 
 #[test]
 fn audit_6_deposit_materialize_needs_live_gate() {
-    // deposit_not_atomic (sole materialization path in v12.18.1) must
+    // deposit_not_atomic (sole materialization path in v12.19.53) must
     // reject on resolved markets — including for missing accounts.
     let mut engine = RiskEngine::new(default_params());
     let _a = add_user_test(&mut engine, 0).unwrap();
@@ -7590,14 +7590,14 @@ fn init_in_place_fully_canonicalizes_nonzero_memory() {
 }
 
 // ============================================================================
-// v12.18.4 §4.6.1: per-account recurring-fee checkpoint
+// v12.19.53 §4.6.1: per-account recurring-fee checkpoint
 // ============================================================================
 
 #[test]
 fn materialize_anchors_last_fee_slot_at_materialize_slot() {
-    // Goal 47 (v12.18.4): new accounts MUST NOT inherit earlier recurring fees.
+    // Goal 47 (v12.19.53): new accounts MUST NOT inherit earlier recurring fees.
     // Anchor is the actual materialization slot.
-    // v12.19: uses wide_envelope_params so now_slot=300 stays within envelope.
+    // v12.19.53: uses wide_envelope_params so now_slot=300 stays within envelope.
     let mut engine = RiskEngine::new(wide_envelope_params());
     let unused_idx = engine.free_head;
     let anchor = 300u64;
@@ -7993,7 +7993,7 @@ fn public_postcondition_rejects_resolved_with_zero_resolved_price() {
 }
 
 // ============================================================================
-// v12.19 rev6 follow-up: enqueue_adl OI_post==0 reset fidelity
+// v12.19.53 follow-up: enqueue_adl OI_post==0 reset fidelity
 // (reviewer finding #5). Spec §5.6 step 8 says both pending-reset flags
 // MUST be set unconditionally when OI_post == 0 on the opp side. The
 // prior impl only set liq_side's flag if its OI was already 0, which
@@ -8100,7 +8100,7 @@ fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_asymmetric() {
 }
 
 // ============================================================================
-// v12.19 rev6 follow-up: free_slot head validation (reviewer finding #1)
+// v12.19.53 follow-up: free_slot head validation (reviewer finding #1)
 // Corrupt free_head in-range but pointing at a used slot or non-head node
 // must return CorruptState instead of grafting the used slot into the free
 // list or overwriting a non-head's prev_free pointer.
@@ -8181,7 +8181,7 @@ fn free_slot_rejects_when_free_head_is_not_head_of_list() {
 
 #[test]
 fn free_slot_resets_last_fee_slot_to_zero() {
-    // v12.19: wide_envelope_params so now_slot=300 fits.
+    // v12.19.53: wide_envelope_params so now_slot=300 fits.
     let mut engine = RiskEngine::new(wide_envelope_params());
     let idx = engine.free_head;
     engine.deposit_not_atomic(idx, 10_000, 300).unwrap();
@@ -8194,7 +8194,7 @@ fn free_slot_resets_last_fee_slot_to_zero() {
 
 #[test]
 fn sync_account_fee_to_slot_charges_rate_times_dt() {
-    // v12.19: wide_envelope_params keeps slot arithmetic inside envelope.
+    // v12.19.53: wide_envelope_params keeps slot arithmetic inside envelope.
     let mut engine = RiskEngine::new(wide_envelope_params());
     let idx = engine.free_head;
     engine.deposit_not_atomic(idx, 1_000_000, 100).unwrap();
@@ -8414,7 +8414,7 @@ fn sync_account_fee_to_slot_resolved_anchored_at_resolved_slot() {
 
 #[test]
 fn reconcile_resolved_uses_stored_resolved_slot_not_caller_input() {
-    // v12.18.5 reviewer fix: reconcile_resolved_not_atomic NO LONGER takes
+    // v12.19.53 reviewer fix: reconcile_resolved_not_atomic NO LONGER takes
     // a caller-supplied slot. The engine uses self.resolved_slot directly,
     // eliminating the earlier ratchet-past-resolved_slot footgun and the
     // wrapper-integration hazard of caller-supplied now_slot.
@@ -8593,7 +8593,7 @@ fn recurring_fee_api_docs_warn_against_double_charge() {
 
 #[test]
 fn resolve_market_ordinary_stays_ordinary_even_when_values_match_degenerate() {
-    // v12.18.5 test 85 / Goal 51: explicit resolve_mode controls branch
+    // v12.19.53 test 85 / Goal 51: explicit resolve_mode controls branch
     // selection. Ordinary with values that match degenerate preconditions
     // (live == P_last, rate == 0) MUST take the ordinary path (accrue +
     // band check), not fall into degenerate.
@@ -8653,7 +8653,7 @@ fn resolve_market_degenerate_rejects_now_slot_before_last_market_slot() {
 
 #[test]
 fn resolve_market_degenerate_rejects_mismatched_live_oracle() {
-    // v12.18.5 §9.8 step 5: Degenerate requires live_oracle_price == P_last.
+    // v12.19.53 §9.8 step 5: Degenerate requires live_oracle_price == P_last.
     let mut engine = RiskEngine::new(default_params());
     let _a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(_a, 100_000, 100).unwrap();
@@ -8668,7 +8668,7 @@ fn resolve_market_degenerate_rejects_mismatched_live_oracle() {
 
 #[test]
 fn resolve_market_degenerate_rejects_nonzero_funding_rate() {
-    // v12.18.5 §9.8 step 5: Degenerate requires funding_rate_e9 == 0.
+    // v12.19.53 §9.8 step 5: Degenerate requires funding_rate_e9 == 0.
     let mut engine = RiskEngine::new(default_params());
     let _a = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(_a, 100_000, 100).unwrap();
@@ -8841,7 +8841,7 @@ fn audit_8_resolve_must_enforce_band_before_first_accrue() {
     engine.deposit_not_atomic(_a, 100_000, 100).unwrap();
     // engine.last_oracle_price = 1000 from init
     // resolve_price_deviation_bps = 1000 (10%)
-    // v12.16.6: self-synchronizing — resolve accrues with live oracle first
+    // v12.19.53: self-synchronizing — resolve accrues with live oracle first
     // Price 2000 is 100% deviation from live oracle 1000, well outside 10% band
     let result = engine.resolve_market_not_atomic(ResolveMode::Ordinary, 2000, 1000, 200, 0);
     assert!(
@@ -9016,7 +9016,7 @@ fn blocker3_materialize_at_is_stack_safe() {
     assert!(engine.is_used(idx as usize));
 }
 
-// blocker6: materialize_with_fee removed in v12.18.1 — deposit path has no
+// blocker6: materialize_with_fee removed in v12.19.53 — deposit path has no
 // kind parameter, so invalid-kind rejection no longer applies at that surface.
 
 #[test]
@@ -9043,7 +9043,7 @@ fn blocker5_set_owner_requires_caller_proof() {
 }
 
 // ============================================================================
-// v12.15 Funding architecture tests (TDD)
+// v12.19.53 Funding architecture tests (TDD)
 // ============================================================================
 
 #[test]
@@ -9116,7 +9116,7 @@ fn funding_basic_sign_convention() {
         .execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 5_000i128, 0, 100, None)
         .unwrap();
 
-    // Manually accrue to verify funding changes F (v12.16.5: funding goes to F, not K)
+    // Manually accrue to verify funding changes F (v12.19.53: funding goes to F, not K)
     let f_long_before = engine.f_long_num;
     engine.accrue_market_to(slot + 10, oracle, 5_000).unwrap();
     assert!(
@@ -9162,7 +9162,7 @@ fn funding_basic_sign_convention() {
 }
 
 // ============================================================================
-// v12.15 KF combined floor tests (TDD — must fail before fix)
+// v12.19.53 KF combined floor tests (TDD — must fail before fix)
 // ============================================================================
 
 #[test]
@@ -9265,7 +9265,7 @@ fn test_h_lock_zero_always_legal() {
 }
 
 // test_materialize_then_dust_deposit_bypass removed: materialize_with_fee gone
-// in v12.18.1. Dust-deposit-bypass no longer reachable because deposit into a
+// in v12.19.53. Dust-deposit-bypass no longer reachable because deposit into a
 // missing account requires amount >= min_initial_deposit (see
 // fix5_deposit_materialize_requires_min_deposit).
 
@@ -9290,7 +9290,7 @@ fn test_reclaim_requires_zero_capital() {
     // Residual capital must be drained before reclaim can run.
     engine.set_capital(idx, 1);
 
-    // v12.19: reclaim's envelope check fires before the precondition check,
+    // v12.19.53: reclaim's envelope check fires before the precondition check,
     // so now_slot must be within the envelope. Envelope = 0 + 100 = 100.
     let result = engine.reclaim_empty_account_not_atomic(a, 100);
     assert_eq!(
@@ -9542,7 +9542,7 @@ fn test_force_close_returns_enum_deferred() {
         .execute_trade_not_atomic(a, b, oracle, slot, size, oracle, 0i128, 0, 100, None)
         .unwrap();
 
-    // Price up — a (long) has positive PnL. v12.19: 5% move (1000→1050)
+    // Price up — a (long) has positive PnL. v12.19.53: 5% move (1000→1050)
     // fits 100-slot envelope at max_price_move=25 (cap=2.5M, needed=500k).
     engine.accrue_market_to(slot + 100, 1050, 0).unwrap();
     engine

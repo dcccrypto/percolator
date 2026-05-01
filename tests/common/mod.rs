@@ -116,7 +116,7 @@ pub fn a_after_adl(a_old: u16, oi_post: u16, oi: u16) -> u16 {
 // ============================================================================
 
 pub fn zero_fee_params() -> RiskParams {
-    // v12.19 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
+    // v12.19.53 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
     // With maint=500, liq=0, max_rate=10_000, max_dt=100:
     //   funding_budget = 10_000 * 100 * 10_000 / 1e9 = 10 bps
     //   available for price = 490 bps
@@ -151,7 +151,7 @@ pub fn small_zero_fee_params(max_accounts: u64) -> RiskParams {
 
 /// Test helper: materialize a user account via deposit_not_atomic (spec §10.2).
 ///
-/// v12.18.1 removed add_user / add_lp / materialize_with_fee. The sole
+/// v12.19.53 removed add_user / add_lp / materialize_with_fee. The sole
 /// materialization path is deposit with amount >= cfg_min_initial_deposit.
 /// This helper picks the head of the free list and deposits the minimum.
 ///
@@ -171,7 +171,7 @@ pub fn add_user_test(engine: &mut RiskEngine, _fee_payment: u128) -> Result<u16>
 }
 
 /// Test helper: materialize an LP account. The engine has no LP-specific
-/// materialization path under v12.18.1, so this helper materializes via
+/// materialization path under v12.19.53, so this helper materializes via
 /// deposit then rewrites `kind` + matcher fields post-hoc.
 pub fn add_lp_test(
     engine: &mut RiskEngine,
@@ -213,7 +213,7 @@ pub fn set_pnl_test(engine: &mut RiskEngine, idx: usize, new_pnl: i128) -> Resul
 }
 
 pub fn default_params() -> RiskParams {
-    // v12.19 envelope: with maint=500, liq=100, max_rate=10_000, max_dt=100:
+    // v12.19.53 envelope: with maint=500, liq=100, max_rate=10_000, max_dt=100:
     //   funding_budget = 10_000 * 100 * 10_000 / 1e9 = 10 bps
     //   available for price = 500 - 100 - 10 = 390 bps
     //   max_price_move_bps_per_slot = 3 → price_budget = 300 <= 390 ✓

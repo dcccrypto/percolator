@@ -489,7 +489,7 @@ fn proof_haircut_ratio_no_division_by_zero() {
     assert!(num == 1u128);
     assert!(den == 1u128);
 
-    // Set pnl_matured_pos_tot (v12.14.0 uses this as denominator, not pnl_pos_tot)
+    // Set pnl_matured_pos_tot (v12.19.53 uses this as denominator, not pnl_pos_tot)
     engine.pnl_pos_tot = 1000u128;
     engine.pnl_matured_pos_tot = 1000u128;
     engine.vault = U128::new(2000);
@@ -650,7 +650,7 @@ fn proof_account_equity_net_nonnegative() {
     kani::assume(pnl_val as i32 > i16::MIN as i32);
     engine.set_pnl(a as usize, pnl_val as i128);
 
-    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.14.0)
+    // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.19.53)
     let matured: u16 = kani::any();
     kani::assume(matured <= 20_000);
     engine.pnl_matured_pos_tot = core::cmp::min(matured as u128, engine.pnl_pos_tot);

@@ -8,7 +8,7 @@ use percolator::*;
 
 #[cfg(feature = "test")]
 fn default_params() -> RiskParams {
-    // v12.19 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
+    // v12.19.53 envelope: max_price_move * max_dt + funding_budget + liq_fee <= maint_bps.
     // E2E demos: allow dt up to 200 slots (for test_e2e_complete_user_journey's
     // slot advancement pattern) and per-slot cap of 14 bps:
     //   price_budget   = 14 * 200 = 2800
@@ -140,7 +140,7 @@ fn test_e2e_complete_user_journey() {
 
     // === Phase 2: Price Movement ===
 
-    // v12.19: price cap = 14 bps/slot × 10 slots × P=100 → abs_dp <= 1 (1%).
+    // v12.19.53: price cap = 14 bps/slot × 10 slots × P=100 → abs_dp <= 1 (1%).
     let new_price: u64 = 101;
 
     // Accrue market to new price

@@ -348,7 +348,7 @@ fn proof_b5_matured_leq_pos_tot() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_g4_drain_only_blocks_oi_increase() {
-    // v12.19: DrainOnly is only reachable when the side has nonzero
+    // v12.19.53: DrainOnly is only reachable when the side has nonzero
     // residual OI (spec §5.6 — A_side below MIN_A_SIDE). With OI=0
     // execute_trade's pre-open flush transitions DrainOnly → Normal
     // via §5.7.D. Build a valid balanced residual-OI state directly,

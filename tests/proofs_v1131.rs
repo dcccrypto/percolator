@@ -1,4 +1,4 @@
-//! Section 7 — v12.14.0 Spec Compliance Proofs
+//! Section 7 — v12.19.53 Spec Compliance Proofs
 //!
 //! Properties 46, 59-75: live funding, configuration immutability,
 //! bilateral OI decomposition, partial liquidation, deposit guards, profit conversion.
@@ -13,7 +13,7 @@ use common::*;
 // ############################################################################
 
 /// accrue_market_to accepts funding_rate_e9 when |rate| <= MAX_ABS_FUNDING_E9_PER_SLOT.
-/// v12.16.4: rate is passed directly to accrue, no stored field.
+/// v12.19.53: rate is passed directly to accrue, no stored field.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -36,7 +36,7 @@ fn proof_funding_rate_accepted_in_accrue() {
 // ############################################################################
 
 /// accrue_market_to returns Err for |rate| > MAX_ABS_FUNDING_E9_PER_SLOT.
-/// v12.16.4: validation folded into accrue_market_to.
+/// v12.19.53: validation folded into accrue_market_to.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -66,7 +66,7 @@ fn proof_funding_sign_and_floor() {
     engine.oi_eff_long_q = POS_SCALE;
     engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.16.5)
+    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.19.53)
     engine.last_market_slot = 0;
 
     // Symbolic rate bounded by params cap (zero_fee_params: 10^8 < 10^9 const).
@@ -77,7 +77,7 @@ fn proof_funding_sign_and_floor() {
     let f_long_before = engine.f_long_num;
     let f_short_before = engine.f_short_num;
 
-    // dt=1, same price → only funding changes F (v12.16.5: F-only, no K)
+    // dt=1, same price → only funding changes F (v12.19.53: F-only, no K)
     let result = engine.accrue_market_to(1, DEFAULT_ORACLE, rate as i128);
     assert!(result.is_ok());
 
@@ -117,13 +117,13 @@ fn proof_funding_floor_not_truncation() {
     engine.oi_eff_long_q = POS_SCALE;
     engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.16.5)
+    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.19.53)
     engine.last_market_slot = 0;
 
     let f_long_before = engine.f_long_num;
     let f_short_before = engine.f_short_num;
 
-    // tiny negative rate passed directly (v12.16.5: F-only, no K)
+    // tiny negative rate passed directly (v12.19.53: F-only, no K)
     let result = engine.accrue_market_to(1, DEFAULT_ORACLE, -1);
     assert!(result.is_ok());
 
@@ -282,7 +282,7 @@ fn proof_funding_skip_zero_oi_both() {
 // ############################################################################
 
 /// accrue_market_to applies one exact funding delta for any dt up to
-/// `max_accrual_dt_slots` (no internal sub-stepping in v12.16.5+).
+/// `max_accrual_dt_slots` (no internal sub-stepping in v12.19.53+).
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -293,10 +293,10 @@ fn proof_funding_substep_large_dt() {
     engine.oi_eff_long_q = POS_SCALE;
     engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.16.5)
+    engine.fund_px_last = DEFAULT_ORACLE; // funding basis (v12.19.53)
     engine.last_market_slot = 0;
 
-    // v12.16.5: one exact total delta, no substeps. Bounded by
+    // v12.19.53: one exact total delta, no substeps. Bounded by
     // max_accrual_dt_slots (zero_fee_params = 1000).
     let dt = engine.params.max_accrual_dt_slots;
     let result = engine.accrue_market_to(dt, DEFAULT_ORACLE, 100);
@@ -331,17 +331,17 @@ fn proof_funding_price_basis_timing() {
     engine.oi_eff_long_q = POS_SCALE;
     engine.oi_eff_short_q = POS_SCALE;
     engine.last_oracle_price = 500; // old price for mark basis
-    engine.fund_px_last = 500; // old price for funding basis (v12.16.5)
+    engine.fund_px_last = 500; // old price for funding basis (v12.19.53)
     engine.last_market_slot = 0;
 
     // Move one price tick over five slots: at P_last=500 and cap=4 bps/slot,
-    // abs_dp * 10_000 == cap * dt * P_last == 10_000, so the v12.19
+    // abs_dp * 10_000 == cap * dt * P_last == 10_000, so the v12.19.53
     // price-move envelope is tight but valid.
     let rate: i128 = 10_000;
     let result = engine.accrue_market_to(5, 501, rate);
     assert!(result.is_ok());
 
-    // v12.16.5: Funding goes to F, mark goes to K.
+    // v12.19.53: Funding goes to F, mark goes to K.
     // fund_px_0 = 500 (fund_px_last before this call)
     // fund_num_total = 500 * 10_000 * 5 = 25_000_000
     // F_long -= ADL_ONE * 25_000_000
@@ -369,7 +369,7 @@ fn proof_funding_price_basis_timing() {
 }
 
 // ############################################################################
-// Funding: zero rate produces no K change (regression from v11.31)
+// Funding: zero rate produces no K change (regression from v12.19.53)
 // ############################################################################
 
 /// When r_last = 0, no funding transfer occurs regardless of dt or OI.
@@ -1095,7 +1095,7 @@ fn proof_partial_liq_health_check_mandatory() {
 // ############################################################################
 
 /// keeper_crank_not_atomic passes the supplied funding_rate directly to accrue_market_to.
-/// v12.16.4: no stored rate field; rate is consumed directly per call.
+/// v12.19.53: no stored rate field; rate is consumed directly per call.
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
@@ -1113,7 +1113,7 @@ fn proof_keeper_crank_r_last_stores_supplied_rate() {
     let supplied_rate: i32 = kani::any();
     kani::assume(supplied_rate.unsigned_abs() as u64 <= engine.params.max_abs_funding_e9_per_slot);
 
-    // v12.16.4: rate passed directly to accrue_market_to via keeper_crank_not_atomic
+    // v12.19.53: rate passed directly to accrue_market_to via keeper_crank_not_atomic
     let result = engine.keeper_crank_not_atomic(
         DEFAULT_SLOT + 1,
         DEFAULT_ORACLE,

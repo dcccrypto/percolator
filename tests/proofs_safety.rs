@@ -137,7 +137,7 @@ fn bounded_haircut_ratio_bounded() {
     engine.c_tot = U128::new(c_tot_val as u128);
     engine.insurance_fund.balance = U128::new(ins_val as u128);
     engine.pnl_pos_tot = ppt_val as u128;
-    engine.pnl_matured_pos_tot = matured_val as u128; // v12.14.0: haircut denominator
+    engine.pnl_matured_pos_tot = matured_val as u128; // v12.19.53: haircut denominator
 
     let (h_num, h_den) = engine.haircut_ratio();
 
@@ -1060,7 +1060,7 @@ fn proof_funding_rate_validated_before_storage() {
     engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
 
     // Pass an invalid funding rate (> MAX_ABS_FUNDING_E9_PER_SLOT) directly
-    // v12.16.4: rate is validated inside accrue_market_to
+    // v12.19.53: rate is validated inside accrue_market_to
     let bad_rate: i128 = MAX_ABS_FUNDING_E9_PER_SLOT + 1;
     let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, bad_rate, 0, 100, None, 0);
     assert!(
@@ -1495,7 +1495,7 @@ fn proof_fee_debt_sweep_consumes_released_pnl() {
 // ############################################################################
 // settle_maintenance_fee_internal rejects fee_credits == i128::MIN (spec §2.1)
 // ############################################################################
-// REMOVED in v12.14.0: engine-native maintenance_fee_per_slot was removed.
+// REMOVED in v12.19.53: engine-native maintenance_fee_per_slot was removed.
 // proof_touch_drops_excess_at_fee_credits_limit deleted — tested removed feature.
 
 // ############################################################################
@@ -1660,7 +1660,7 @@ fn proof_v1126_risk_reducing_fee_neutral() {
 }
 
 // ############################################################################
-// v12.14.0 compliance: MIN_NONZERO_MM_REQ floor (TODO: implement params first)
+// v12.19.53 compliance: MIN_NONZERO_MM_REQ floor (TODO: implement params first)
 // ############################################################################
 
 // Uncommented: RiskParams now has min_nonzero_mm_req / min_nonzero_im_req
@@ -1749,7 +1749,7 @@ fn proof_v1126_min_nonzero_margin_floor() {
 }
 
 // ############################################################################
-// v12.14.0 §2.6: flat-dust reclamation (GC sweeps 0 < C_i < MIN_INITIAL_DEPOSIT)
+// v12.19.53 §2.6: flat-dust reclamation (GC sweeps 0 < C_i < MIN_INITIAL_DEPOSIT)
 // ############################################################################
 
 #[kani::proof]
@@ -3614,7 +3614,7 @@ fn proof_convert_released_pnl_exercises_conversion() {
 }
 
 // ============================================================================
-// v12.19 composition-safety proofs (spec §0.52, property 107)
+// v12.19.53 composition-safety proofs (spec §0.52, property 107)
 // Priority #7 from rev6 plan: engine-safety under wrapper-non-compliant
 // (admit_h_min=0, threshold_opt=None) combination.
 // ============================================================================

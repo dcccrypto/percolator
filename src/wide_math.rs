@@ -1587,7 +1587,7 @@ impl I256 {
 }
 
 // ============================================================================
-// §4.8 v11.31 Native 128-bit Arithmetic Helpers
+// Current spec §1.1 arithmetic helpers.
 // ============================================================================
 
 /// Native multiply-divide floor. Product a*b must not overflow u128. Panics on d==0.

@@ -538,7 +538,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let now_slot = self.engine.current_slot.saturating_add(*dt);
 
-                // v12.16.4: pass funding rate directly to accrue_market_to
+                // v12.19.53: pass funding rate directly to accrue_market_to
                 let result =
                     self.engine
                         .accrue_market_to(now_slot, *oracle_price, *rate_bps as i128);

@@ -323,7 +323,7 @@ fn proof_drain_only_to_reset_progress() {
     engine.oi_eff_long_q = 0u128;
     engine.oi_eff_short_q = 0u128;
     engine.stored_pos_count_long = 0;
-    // Short side still has stored positions and zero OI. Under v12.19.24 this
+    // Short side still has stored positions and zero OI. Under v12.19.53 this
     // must also schedule reset: stored current-epoch positions cannot remain
     // live on a zero-OI side.
     engine.stored_pos_count_short = 1;

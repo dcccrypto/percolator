@@ -1,9 +1,9 @@
-//! v12.18 admission-pair + sticky h_max + touch acceleration proofs (§4.7, §4.9)
+//! v12.19.53 admission-pair + sticky h_max + touch acceleration proofs (§4.7, §4.9)
 //!
 //! Proof groups:
 //!   AH: Admission with pair + sticky rule (§4.7)
 //!   AC: Acceleration on touch (§4.9)
-//!   IN: Instruction-level invariants specific to v12.18
+//!   IN: Instruction-level invariants specific to v12.19.53
 
 #![cfg(kani)]
 
@@ -100,7 +100,7 @@ fn ah2_sticky_is_absorbing() {
 }
 
 // ============================================================================
-// AH-3: No under-admission (v12.18 core fix).
+// AH-3: No under-admission (v12.19.53 core fix).
 // After first admission forces h_max, second call on same account cannot
 // return h_min even if current state would suggest it.
 // ============================================================================
@@ -378,7 +378,7 @@ fn ac2_acceleration_fires_iff_admits() {
     // Set up an account whose positive PnL is fully accounted for:
     //   pnl_pos_tot = matured + r (reserved portion)
     // This matches the normative admission precondition: after firing,
-    // new_matured = matured + r must not exceed pnl_pos_tot (v12.18.1
+    // new_matured = matured + r must not exceed pnl_pos_tot (v12.19.53
     // added this check to admit_outstanding_reserve_on_touch).
     let pos_tot = (matured as u128).checked_add(r as u128);
     kani::assume(pos_tot.is_some());
@@ -513,7 +513,7 @@ fn in1_no_live_immediate_release() {
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn ah7_sticky_bitmap_is_idempotent_and_never_capacity_bound() {
-    // v12.19 rev6: sticky set is now a bitmap indexed by storage slot,
+    // v12.19.53: sticky set is now a bitmap indexed by storage slot,
     // so capacity equals MAX_ACCOUNTS and cannot be exhausted by
     // marking distinct slots. Property: mark_h_max_sticky is idempotent
     // and returns true for any in-bounds idx regardless of pre-state.
@@ -595,7 +595,7 @@ fn k9_admission_pair_rejects_zero_max() {
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn k1_accrue_rejects_dt_over_envelope() {
-    // v12.19: the dt envelope only applies when funding is actually
+    // v12.19.53: the dt envelope only applies when funding is actually
     // active (rate != 0 AND both sides have OI AND fund_px_last > 0).
     // Idle / zero-rate / unilateral-OI markets can fast-forward past
     // the envelope — see `idle_market_can_fast_forward_beyond_max
@@ -645,7 +645,7 @@ fn k2_resolve_degenerate_bypasses_dt_cap() {
     let resolved_price = live_price;
     let rate = 0i128;
 
-    // v12.18.5: degenerate branch is explicitly selected, not value-detected.
+    // v12.19.53: degenerate branch is explicitly selected, not value-detected.
     let r = engine.resolve_market_not_atomic(
         ResolveMode::Degenerate,
         resolved_price,
@@ -1057,7 +1057,7 @@ fn k104_oi_geq_sum_of_effective() {
 }
 
 // ============================================================================
-// v12.19 admission-gate proofs (spec §4.7 step 2)
+// v12.19.53 admission-gate proofs (spec §4.7 step 2)
 // Priority #3 from rev6 plan:
 //   - gate_stress_lane: Some(t) + consumption>=t forces admit_h_max
 //   - gate_none_recovers: None disables step 2 entirely
@@ -1191,7 +1191,7 @@ fn v19_admit_gate_sticky_early_return() {
 }
 
 // ============================================================================
-// v12.19 consumption-accumulator proofs (spec §5.5 step 9a)
+// v12.19.53 consumption-accumulator proofs (spec §5.5 step 9a)
 // Property 105: consumption is floor-rounded at scaled-bps precision.
 // ============================================================================
 
@@ -1601,7 +1601,7 @@ fn v19_flat_negative_cleanup_starts_bankruptcy_hmax() {
 }
 
 // ============================================================================
-// v12.19 cursor / generation state-machine proofs (spec §9.7 Phase 2)
+// v12.19.53 cursor / generation state-machine proofs (spec §9.7 Phase 2)
 // ============================================================================
 
 #[kani::proof]
@@ -2378,7 +2378,7 @@ fn v19_bounded_stale_catchup_advances_one_segment() {
 }
 
 // ============================================================================
-// v12.19 atomicity rollback proofs (spec §5.5 and §9.7 footer notes)
+// v12.19.53 atomicity rollback proofs (spec §5.5 and §9.7 footer notes)
 // Priority #6 from rev6 plan.
 // ============================================================================
 
