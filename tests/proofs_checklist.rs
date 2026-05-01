@@ -634,12 +634,14 @@ fn proof_goal27_finalize_path_independent() {
         ctx1.touched_accounts[0] as usize,
         is_whole,
         false,
+        &mut ctx1,
     );
     assert!(finalized_a.is_ok());
     let finalized_b = engine.finalize_touched_account_post_live_with_snapshot(
         ctx1.touched_accounts[1] as usize,
         is_whole,
         false,
+        &mut ctx1,
     );
     assert!(finalized_b.is_ok());
 

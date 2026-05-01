@@ -4146,6 +4146,184 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
 }
 
 #[test]
+fn loss_stale_catchup_blocks_trade_until_loss_current() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            None,
+        )
+        .unwrap();
+
+    let now_slot = slot + engine.params.max_accrual_dt_slots + 50;
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: 990,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+    assert!(
+        engine.last_market_slot < engine.current_slot,
+        "bounded catchup should leave a loss-stale remaining interval"
+    );
+
+    let blocked = engine.execute_trade_not_atomic(
+        a,
+        b,
+        990,
+        now_slot,
+        POS_SCALE as i128,
+        990,
+        0,
+        1,
+        100,
+        None,
+    );
+    assert_eq!(
+        blocked,
+        Err(RiskError::Undercollateralized),
+        "loss-stale historical-exposure lock must block user-directed trades"
+    );
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: 990,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+    assert_eq!(engine.last_market_slot, engine.current_slot);
+
+    engine
+        .execute_trade_not_atomic(a, b, 990, now_slot, POS_SCALE as i128, 990, 0, 1, 100, None)
+        .expect("loss-current h-max sweep must not blanket-halt valid trades");
+}
+
+#[test]
+fn loss_stale_fee_sync_anchors_nonflat_account_at_slot_last() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            None,
+        )
+        .unwrap();
+
+    let now_slot = slot + engine.params.max_accrual_dt_slots + 50;
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: 990,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+
+    let loss_safe_anchor = engine.last_market_slot;
+    assert!(loss_safe_anchor < engine.current_slot);
+    engine
+        .sync_account_fee_to_slot_not_atomic(a, now_slot, 1)
+        .unwrap();
+    assert_eq!(
+        engine.accounts[a as usize].last_fee_slot, loss_safe_anchor,
+        "nonflat stale-account fees must not anchor past loss-accrued slot_last"
+    );
+}
+
+#[test]
+fn floor_to_zero_live_touch_preserves_oi_and_tracks_potential_dust() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.adl_mult_long = 1;
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.stored_pos_count_long = 1;
+    engine.accounts[idx as usize].position_basis_q = 1;
+    engine.accounts[idx as usize].adl_a_basis = 2;
+    engine.accounts[idx as usize].adl_epoch_snap = engine.adl_epoch_long;
+    engine.accounts[idx as usize].adl_k_snap = engine.adl_coeff_long;
+    engine.accounts[idx as usize].f_snap = engine.f_long_num;
+
+    let oi_before = engine.oi_eff_long_q;
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    engine
+        .settle_side_effects_live(idx as usize, &mut ctx)
+        .unwrap();
+
+    assert_eq!(engine.oi_eff_long_q, oi_before);
+    assert_eq!(engine.accounts[idx as usize].position_basis_q, 0);
+    assert_eq!(engine.stored_pos_count_long, 0);
+    assert_eq!(engine.phantom_dust_bound_long_q, 1);
+}
+
+#[test]
+fn flat_negative_cleanup_starts_bankruptcy_hmax_lock() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].pnl = -1;
+    engine.neg_pnl_account_count = 1;
+
+    engine.settle_flat_negative_pnl_not_atomic(idx, 1).unwrap();
+
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(
+        engine.stress_envelope_remaining_indices,
+        engine.params.max_accounts
+    );
+    assert_eq!(engine.stress_envelope_start_slot, 1);
+
+    engine.vault = U128::new(1);
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    let h = engine
+        .admit_fresh_reserve_h_lock(idx as usize, 1, &mut ctx, 0, 100)
+        .unwrap();
+    assert_eq!(h, 100);
+}
+
+#[test]
 fn keeper_crank_over_cap_candidates_advance_with_partial_progress() {
     let mut engine = RiskEngine::new(wide_price_move_params());
     let oracle = 1000u64;
@@ -5151,6 +5329,7 @@ fn test_property_52_convert_released_pnl_explicit() {
     );
     // Advance past horizon to mature all reserve
     engine.current_slot = slot + 20; // well past h_lock=10
+    engine.last_market_slot = engine.current_slot;
     engine.advance_profit_warmup(idx).unwrap();
     // All 10000 is now matured and released (reserved_pnl = 0)
     assert_eq!(

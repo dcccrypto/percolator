@@ -242,6 +242,13 @@ pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 256;
 pub struct InstructionContext {
     pub pending_reset_long: bool,
     pub pending_reset_short: bool,
+    /// Instruction-local bankruptcy h-max candidate. This is set before
+    /// commit when the instruction discovers a live post-principal loss tail.
+    pub bankruptcy_hmax_candidate_active: bool,
+    /// True once this instruction has used ordinary positive-PnL lanes. If a
+    /// later bankruptcy candidate appears, the instruction must fail rather
+    /// than commit stale h-min/release/conversion decisions.
+    pub positive_pnl_usability_mutated: bool,
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
@@ -270,6 +277,8 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
             admit_h_min_shared: 0,
             admit_h_max_shared: 0,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -284,6 +293,8 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -303,6 +314,8 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt
@@ -335,6 +348,10 @@ impl InstructionContext {
         let bit = i % 64;
         self.h_max_sticky_bitmap[word] |= 1u64 << bit;
         true
+    }
+
+    pub fn mark_positive_pnl_usability(&mut self) {
+        self.positive_pnl_usability_mutated = true;
     }
 
     /// Add account to touched set, maintaining ascending-index order.
@@ -666,6 +683,10 @@ pub struct RiskEngine {
     pub stress_envelope_start_generation: u64,
     /// Last slot where `sweep_generation` advanced. `NO_SLOT` means never.
     pub last_sweep_generation_advance_slot: u64,
+    /// Persistent bankruptcy h-max source. Uses the same reconciliation
+    /// envelope fields as threshold stress, but can be active with zero
+    /// consumption when the lock came from a post-principal loss tail.
+    pub bankruptcy_hmax_lock_active: bool,
 
     /// Last oracle price used in accrue_market_to (P_last, spec §5.5)
     pub last_oracle_price: u64,
@@ -757,6 +778,17 @@ pub enum LiquidationPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CrankOutcome {
     pub num_liquidations: u32,
+}
+
+/// Pure Phase 2 cursor-scan outcome. The keeper path computes this before
+/// mutating cursor/generation state, then performs the materialized touches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phase2ScanOutcome {
+    pub next_cursor: u64,
+    pub inspected: u64,
+    pub touched: u64,
+    pub stress_counted_inspected: u64,
+    pub wrapped: bool,
 }
 
 /// Stable keeper-crank request object. New crank policy fields should be added
@@ -1422,6 +1454,7 @@ impl RiskEngine {
             stress_envelope_start_slot: NO_SLOT,
             stress_envelope_start_generation: NO_SLOT,
             last_sweep_generation_advance_slot: NO_SLOT,
+            bankruptcy_hmax_lock_active: false,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
@@ -1519,6 +1552,7 @@ impl RiskEngine {
         self.stress_envelope_start_slot = NO_SLOT;
         self.stress_envelope_start_generation = NO_SLOT;
         self.last_sweep_generation_advance_slot = NO_SLOT;
+        self.bankruptcy_hmax_lock_active = false;
         self.last_oracle_price = init_oracle_price;
         self.fund_px_last = init_oracle_price;
         self.last_market_slot = init_slot;
@@ -1869,7 +1903,7 @@ impl RiskEngine {
     /// bypass it (returning admit_h_max unconditionally) or delegate to it.
     fn admission_residual_lane(
         &self,
-        fresh_positive_pnl: u128,
+        _fresh_positive_pnl: u128,
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<u64> {
@@ -1883,11 +1917,7 @@ impl RiskEngine {
             .get()
             .checked_sub(senior)
             .ok_or(RiskError::CorruptState)?;
-        let matured_plus_fresh = self
-            .pnl_matured_pos_tot
-            .checked_add(fresh_positive_pnl)
-            .ok_or(RiskError::Overflow)?;
-        Ok(if matured_plus_fresh <= residual {
+        Ok(if residual > 0 {
             admit_h_min
         } else {
             admit_h_max
@@ -1902,7 +1932,7 @@ impl RiskEngine {
     fn admit_outstanding_reserve_on_touch(
         &mut self,
         idx: usize,
-        ctx: &InstructionContext,
+        ctx: &mut InstructionContext,
     ) -> Result<()> {
         if self.market_mode != MarketMode::Live { return Ok(()); }
 
@@ -1932,7 +1962,7 @@ impl RiskEngine {
             .checked_add(reserve_total)
             .ok_or(RiskError::Overflow)?;
 
-        if new_matured > residual {
+        if residual == 0 {
             // Does not admit — no mutation.
             return Ok(());
         }
@@ -1943,6 +1973,7 @@ impl RiskEngine {
         }
 
         // Phase 2: all checks passed — commit.
+        ctx.mark_positive_pnl_usability();
         self.pnl_matured_pos_tot = new_matured;
         let a = &mut self.accounts[idx];
         a.sched_present = 0;
@@ -2062,6 +2093,9 @@ impl RiskEngine {
                     let stress_active = self.stress_gate_active(ctx);
                     let admitted_h_eff = self.admit_fresh_reserve_h_lock(
                         idx, reserve_add, ctx, admit_h_min, admit_h_max)?;
+                    if admitted_h_eff != admit_h_max {
+                        ctx.mark_positive_pnl_usability();
+                    }
                     if admitted_h_eff == 0 {
                         self.pnl_matured_pos_tot = self.pnl_matured_pos_tot.checked_add(reserve_add)
                             .ok_or(RiskError::Overflow)?;
@@ -2676,11 +2710,43 @@ impl RiskEngine {
         }
     }
 
-    fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+    fn threshold_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
         match ctx.admit_h_max_consumption_threshold_bps_opt_shared {
             Some(threshold) => self.stress_consumed_bps_e9_since_envelope >= threshold,
             None => false,
         }
+    }
+
+    fn loss_stale_positive_pnl_lock_active(&self) -> bool {
+        self.market_mode == MarketMode::Live
+            && self.last_market_slot < self.current_slot
+            && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
+    }
+
+    fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+        self.threshold_stress_gate_active(ctx)
+            || self.bankruptcy_hmax_lock_active
+            || ctx.bankruptcy_hmax_candidate_active
+            || self.loss_stale_positive_pnl_lock_active()
+    }
+
+    fn ensure_loss_current_for_position_change(&self) -> Result<()> {
+        if self.loss_stale_positive_pnl_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
+    fn trigger_bankruptcy_hmax_lock(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+        if ctx.positive_pnl_usability_mutated && !self.stress_gate_active(ctx) {
+            return Err(RiskError::Undercollateralized);
+        }
+        ctx.bankruptcy_hmax_candidate_active = true;
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+        Ok(())
     }
 
     fn keeper_accrual_is_equity_active(
@@ -3359,6 +3425,9 @@ impl RiskEngine {
         }
 
         // Step 2 (§5.6 step 2): insurance-first deficit coverage
+        if d > 0 {
+            self.trigger_bankruptcy_hmax_lock(ctx)?;
+        }
         let d_rem = if d > 0 { self.use_insurance_buffer(d) } else { 0u128 };
 
         // Step 3: read opposing OI
@@ -4396,7 +4465,9 @@ impl RiskEngine {
         {
             return Err(RiskError::CorruptState);
         }
-        if self.stress_consumed_bps_e9_since_envelope == 0 {
+        let reconciliation_envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        if !reconciliation_envelope_active {
             if self.stress_envelope_remaining_indices != 0
                 || self.stress_envelope_start_slot != NO_SLOT
                 || self.stress_envelope_start_generation != NO_SLOT
@@ -4485,6 +4556,9 @@ impl RiskEngine {
                 }
             }
             MarketMode::Resolved => {
+                if self.bankruptcy_hmax_lock_active {
+                    return Err(RiskError::CorruptState);
+                }
                 // resolved_price and resolved_live_price MUST be strictly positive.
                 if self.resolved_price == 0 || self.resolved_live_price == 0 {
                     return Err(RiskError::CorruptState);
@@ -4512,6 +4586,7 @@ impl RiskEngine {
         self.stress_envelope_remaining_indices = 0;
         self.stress_envelope_start_slot = NO_SLOT;
         self.stress_envelope_start_generation = NO_SLOT;
+        self.bankruptcy_hmax_lock_active = false;
     }
 
     fn apply_stress_envelope_progress(
@@ -4519,7 +4594,9 @@ impl RiskEngine {
         now_slot: u64,
         counted_indices: u64,
     ) -> Result<()> {
-        if self.stress_consumed_bps_e9_since_envelope == 0 || counted_indices == 0 {
+        let envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        if !envelope_active || counted_indices == 0 {
             return Ok(());
         }
         let dec = core::cmp::min(self.stress_envelope_remaining_indices, counted_indices);
@@ -5121,7 +5198,7 @@ impl RiskEngine {
     fn advance_profit_warmup_with_context(
         &mut self,
         idx: usize,
-        ctx: &InstructionContext,
+        ctx: &mut InstructionContext,
     ) -> Result<()> {
         // Validate reserve integrity before the pending-to-scheduled promotion.
         self.validate_reserve_shape(idx)?;
@@ -5136,6 +5213,7 @@ impl RiskEngine {
 
         // Step 2: if sched absent and pending present → promote
         if self.accounts[idx].sched_present == 0 && self.accounts[idx].pending_present != 0 {
+            ctx.mark_positive_pnl_usability();
             let a = &mut self.accounts[idx];
             a.sched_present = 1;
             a.sched_remaining_q = a.pending_remaining_q;
@@ -5184,6 +5262,7 @@ impl RiskEngine {
 
         // Step 9: if release > 0
         if release > 0 {
+            ctx.mark_positive_pnl_usability();
             a.sched_remaining_q = a
                 .sched_remaining_q
                 .checked_sub(release)
@@ -5240,7 +5319,8 @@ impl RiskEngine {
 
     test_visible! {
     fn advance_profit_warmup(&mut self, idx: usize) -> Result<()> {
-        self.advance_profit_warmup_with_context(idx, &InstructionContext::new())
+        let mut ctx = InstructionContext::new();
+        self.advance_profit_warmup_with_context(idx, &mut ctx)
     }
     }
 
@@ -5249,7 +5329,18 @@ impl RiskEngine {
     // ========================================================================
 
     /// settle_losses (spec §7.1): settle negative PnL from principal
-    fn settle_losses(&mut self, idx: usize) -> Result<()> {
+    fn trigger_bankruptcy_hmax_lock_without_context(&mut self) {
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+    }
+
+    fn settle_losses_with_context(
+        &mut self,
+        idx: usize,
+        ctx: Option<&mut InstructionContext>,
+    ) -> Result<()> {
         let pnl = self.accounts[idx].pnl;
         if pnl >= 0 {
             return Ok(());
@@ -5269,11 +5360,29 @@ impl RiskEngine {
             }
             self.set_pnl(idx, new_pnl)?;
         }
+        if self.market_mode == MarketMode::Live
+            && self.accounts[idx].pnl < 0
+            && self.accounts[idx].capital.get() == 0
+        {
+            if let Some(ctx) = ctx {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+            } else {
+                self.trigger_bankruptcy_hmax_lock_without_context();
+            }
+        }
         Ok(())
     }
 
+    fn settle_losses(&mut self, idx: usize) -> Result<()> {
+        self.settle_losses_with_context(idx, None)
+    }
+
     /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL
-    fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
+    fn resolve_flat_negative_with_context(
+        &mut self,
+        idx: usize,
+        ctx: Option<&mut InstructionContext>,
+    ) -> Result<()> {
         let eff = self.effective_pos_q_checked(idx, false)?;
         if eff != 0 {
             return Ok(()); // Not flat
@@ -5284,10 +5393,21 @@ impl RiskEngine {
                 return Err(RiskError::CorruptState);
             }
             let loss = pnl.unsigned_abs();
+            if self.market_mode == MarketMode::Live {
+                if let Some(ctx) = ctx {
+                    self.trigger_bankruptcy_hmax_lock(ctx)?;
+                } else {
+                    self.trigger_bankruptcy_hmax_lock_without_context();
+                }
+            }
             self.absorb_protocol_loss(loss);
-            self.set_pnl(idx, 0i128)?;
+            self.set_pnl_with_reserve(idx, 0i128, ReserveMode::NoPositiveIncreaseAllowed, None)?;
         }
         Ok(())
+    }
+
+    fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
+        self.resolve_flat_negative_with_context(idx, None)
     }
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
@@ -5342,11 +5462,11 @@ impl RiskEngine {
         self.settle_side_effects_live(idx, ctx)?;
 
         // Step 6: settle losses from principal
-        self.settle_losses(idx)?;
+        self.settle_losses_with_context(idx, Some(ctx))?;
 
         // Step 7: resolve flat negative
         if self.effective_pos_q_checked(idx, false)? == 0 && self.accounts[idx].pnl < 0 {
-            self.resolve_flat_negative(idx)?;
+            self.resolve_flat_negative_with_context(idx, Some(ctx))?;
         }
 
         // Steps 8-9: MUST NOT auto-convert, MUST NOT fee-sweep
@@ -5363,6 +5483,7 @@ impl RiskEngine {
         idx: usize,
         is_whole: bool,
         stress_active: bool,
+        ctx: &mut InstructionContext,
     ) -> Result<()> {
         // Whole-only flat auto-conversion
         if !stress_active
@@ -5372,6 +5493,7 @@ impl RiskEngine {
         {
             let released = self.released_pos_checked(idx, false)?;
             if released > 0 {
+                ctx.mark_positive_pnl_usability();
                 self.consume_released_pnl(idx, released)?;
                 let new_cap = self.accounts[idx].capital.get()
                     .checked_add(released).ok_or(RiskError::Overflow)?;
@@ -5409,7 +5531,7 @@ impl RiskEngine {
         let count = ctx.touched_count as usize;
         for ti in 0..count {
             let idx = ctx.touched_accounts[ti] as usize;
-            self.finalize_touched_account_post_live_with_snapshot(idx, is_whole, stress_active)?;
+            self.finalize_touched_account_post_live_with_snapshot(idx, is_whole, stress_active, ctx)?;
         }
         Ok(())
     }
@@ -5571,9 +5693,20 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
@@ -5783,9 +5916,12 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        self.ensure_loss_current_for_position_change()?;
+
         // Step 10: accrue market once
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
+        self.ensure_loss_current_for_position_change()?;
 
         // Steps 11-12 (spec §9.4 v12.19): live local touch both counterparties
         // in deterministic ascending storage-index order. One touch may change
@@ -6372,9 +6508,12 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        self.ensure_loss_current_for_position_change()?;
+
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
+        self.ensure_loss_current_for_position_change()?;
 
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
@@ -6460,7 +6599,7 @@ impl RiskEngine {
                 self.attach_effective_position(idx as usize, new_eff)?;
 
                 // Step 9: settle realized losses from principal
-                self.settle_losses(idx as usize)?;
+                self.settle_losses_with_context(idx as usize, Some(ctx))?;
 
                 // Step 10-11: charge liquidation fee on quantity closed
                 let liq_fee = {
@@ -6498,7 +6637,7 @@ impl RiskEngine {
                 self.attach_effective_position(idx as usize, 0i128)?;
 
                 // Settle losses from principal
-                self.settle_losses(idx as usize)?;
+                self.settle_losses_with_context(idx as usize, Some(ctx))?;
 
                 // Charge liquidation fee (spec §8.3)
                 let liq_fee = if q_close_q == 0 {
@@ -6573,6 +6712,67 @@ impl RiskEngine {
     /// It performs a full authenticated scan window and touches up to
     /// `rr_touch_limit` materialized accounts. Use
     /// `keeper_crank_with_request_not_atomic` for explicit scan limits.
+    test_visible! {
+    fn phase2_scan_outcome(
+        &self,
+        wrap_bound: u64,
+        rr_touch_limit: u64,
+        rr_scan_limit: u64,
+        stress_active: bool,
+        wrap_allowed: bool,
+        same_slot_as_stress_start: bool,
+    ) -> Result<Phase2ScanOutcome> {
+        let mut i = self.rr_cursor_position;
+        let scan_cap = core::cmp::min(rr_scan_limit, wrap_bound);
+        let mut touched = 0u64;
+        let mut inspected = 0u64;
+        let mut stress_counted_inspected = 0u64;
+        let mut wrapped = false;
+
+        if rr_touch_limit == 0 || rr_scan_limit == 0 {
+            if wrap_bound == 0 || i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            return Ok(Phase2ScanOutcome {
+                next_cursor: i,
+                inspected,
+                touched,
+                stress_counted_inspected,
+                wrapped,
+            });
+        }
+
+        while inspected < scan_cap && touched < rr_touch_limit {
+            if wrap_bound == 0 || i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            if self.is_used(i as usize) {
+                touched = touched.checked_add(1).ok_or(RiskError::Overflow)?;
+            }
+            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            if stress_active && wrap_allowed && !same_slot_as_stress_start {
+                stress_counted_inspected = stress_counted_inspected
+                    .checked_add(1)
+                    .ok_or(RiskError::Overflow)?;
+            }
+            if i == wrap_bound {
+                i = 0;
+                wrapped = true;
+                break;
+            }
+        }
+
+        Ok(Phase2ScanOutcome {
+            next_cursor: i,
+            inspected,
+            touched,
+            stress_counted_inspected,
+            wrapped,
+        })
+    }
+    }
+
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -6689,6 +6889,7 @@ impl RiskEngine {
             oracle_price,
             funding_rate_e9,
         )?;
+        let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
 
         // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
         let mut attempts: u16 = 0;
@@ -6721,7 +6922,7 @@ impl RiskEngine {
             self.touch_account_live_local(cidx, &mut ctx)?;
             protective_progress = true;
 
-            if !ctx.pending_reset_long && !ctx.pending_reset_short {
+            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
@@ -6761,49 +6962,55 @@ impl RiskEngine {
         // value so compact shards do not spend most of a generation
         // walking non-existent index space.
         let wrap_bound = self.params.max_accounts;
-        let mut i = self.rr_cursor_position;
-        let scan_cap = core::cmp::min(rr_scan_limit, wrap_bound);
-        let mut phase2_touched = 0u64;
-        let mut phase2_inspected = 0u64;
-        let mut stress_counted_inspected = 0u64;
-        let same_slot_as_stress_start = self.stress_consumed_bps_e9_since_envelope > 0
-            && self.stress_envelope_start_slot == now_slot;
+        let reconciliation_envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        let same_slot_as_stress_start =
+            reconciliation_envelope_active && self.stress_envelope_start_slot == now_slot;
         let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
             || now_slot > self.last_sweep_generation_advance_slot;
-        let mut wrapped = false;
 
-        while phase2_inspected < scan_cap && phase2_touched < rr_touch_limit {
-            if wrap_bound == 0 || i >= wrap_bound {
+        let phase2 = self.phase2_scan_outcome(
+            wrap_bound,
+            rr_touch_limit,
+            rr_scan_limit,
+            reconciliation_envelope_active,
+            wrap_allowed,
+            same_slot_as_stress_start,
+        )?;
+
+        let mut touch_i = self.rr_cursor_position;
+        let mut replayed_inspected = 0u64;
+        let mut replayed_touched = 0u64;
+        while replayed_inspected < phase2.inspected {
+            if wrap_bound == 0 || touch_i >= wrap_bound {
                 return Err(RiskError::CorruptState);
             }
-            let iu = i as usize;
+            let iu = touch_i as usize;
             if self.is_used(iu) {
                 self.touch_account_live_local(iu, &mut ctx)?;
-                phase2_touched = phase2_touched.checked_add(1).ok_or(RiskError::Overflow)?;
+                replayed_touched = replayed_touched.checked_add(1).ok_or(RiskError::Overflow)?;
             }
-            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
-            phase2_inspected = phase2_inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            protective_progress = true;
-            if self.stress_consumed_bps_e9_since_envelope > 0
-                && wrap_allowed
-                && !same_slot_as_stress_start
-            {
-                stress_counted_inspected = stress_counted_inspected
-                    .checked_add(1)
-                    .ok_or(RiskError::Overflow)?;
-            }
-            if i == wrap_bound {
-                i = 0;
-                wrapped = true;
+            touch_i = touch_i.checked_add(1).ok_or(RiskError::Overflow)?;
+            replayed_inspected = replayed_inspected
+                .checked_add(1)
+                .ok_or(RiskError::Overflow)?;
+            if touch_i == wrap_bound {
+                touch_i = 0;
                 break;
             }
         }
+        if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
+            return Err(RiskError::CorruptState);
+        }
+        if phase2.inspected > 0 {
+            protective_progress = true;
+        }
 
-        if wrapped && wrap_allowed {
+        if phase2.wrapped && wrap_allowed {
             self.advance_sweep_generation(now_slot)?;
         }
-        self.rr_cursor_position = i;
-        self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
+        self.rr_cursor_position = phase2.next_cursor;
+        self.apply_stress_envelope_progress(now_slot, phase2.stress_counted_inspected)?;
         if equity_active_accrual && !protective_progress {
             return Err(RiskError::Undercollateralized);
         }
@@ -6998,6 +7205,10 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        if self.loss_stale_positive_pnl_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
@@ -7052,9 +7263,20 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Accrue market + live local touch + finalize
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
         self.touch_account_live_local(idx as usize, &mut ctx)?;
         self.finalize_touched_accounts_post_live(&mut ctx)?;
 
@@ -7922,8 +8144,17 @@ impl RiskEngine {
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
+        let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
+            && self.last_market_slot < self.current_slot
+            && (idx as usize) < MAX_ACCOUNTS
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            self.last_market_slot
+        } else {
+            now_slot
+        };
         let shape_anchor = match self.market_mode {
-            MarketMode::Live => now_slot,
+            MarketMode::Live => live_loss_safe_anchor,
             MarketMode::Resolved => self.resolved_slot,
         };
         self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
@@ -7931,13 +8162,13 @@ impl RiskEngine {
         // Only meaningful on Live; on Resolved the envelope is moot because
         // accrue_market_to is no longer reachable, but the check is safe
         // (last_market_slot is frozen to resolved_slot).
-        if self.market_mode == MarketMode::Live {
+        if self.market_mode == MarketMode::Live && now_slot > self.current_slot {
             self.check_live_accrual_envelope(now_slot)?;
         }
         let anchor = match self.market_mode {
             MarketMode::Live => {
                 self.current_slot = now_slot;
-                self.current_slot
+                live_loss_safe_anchor
             }
             MarketMode::Resolved => {
                 // Resolved fee sync is anchored at resolution.
