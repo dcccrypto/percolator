@@ -1442,7 +1442,7 @@ fn v19_floor_to_zero_cleanup_preserves_oi_and_adds_potential_dust() {
 
     let oi_before = engine.oi_eff_long_q;
     let stored_before = engine.stored_pos_count_long;
-    let dust_before = engine.phantom_dust_bound_long_q;
+    let dust_before = engine.phantom_dust_potential_long_q;
     let mut ctx = InstructionContext::new_with_admission(0, 100);
 
     let r = engine.settle_side_effects_live(idx as usize, &mut ctx);
@@ -1450,11 +1450,48 @@ fn v19_floor_to_zero_cleanup_preserves_oi_and_adds_potential_dust() {
     assert_eq!(engine.oi_eff_long_q, oi_before);
     assert_eq!(engine.stored_pos_count_long, stored_before - 1);
     assert_eq!(engine.accounts[idx as usize].position_basis_q, 0);
-    assert_eq!(engine.phantom_dust_bound_long_q, dust_before + 1);
+    assert_eq!(engine.phantom_dust_potential_long_q, dust_before + 1);
+    assert_eq!(
+        engine.phantom_dust_certified_long_q, 0,
+        "floor-to-zero cleanup must not certify phantom dust without an exact side proof"
+    );
 
     kani::cover!(
         engine.accounts[idx as usize].position_basis_q == 0,
         "floor-to-zero cleanup clears local basis"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn v19_nonflat_fee_sync_anchors_at_slot_last_before_requested_future_loss_slot() {
+    // Spec §4.5/§10.6: recurring fees on nonflat live accounts cannot be
+    // charged past the loss-accrued slot. This prevents fees from becoming
+    // senior to still-unapplied mark/funding losses when a caller requests a
+    // future now_slot before keeper catchup has run.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 1_000_000).unwrap();
+    let b = add_user_test(&mut engine, 1_000_000).unwrap();
+    let size = POS_SCALE as i128;
+
+    assert!(engine.set_position_basis_q(a as usize, size).is_ok());
+    assert!(engine.set_position_basis_q(b as usize, -size).is_ok());
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.accounts[a as usize].last_fee_slot = DEFAULT_SLOT;
+
+    let insurance_before = engine.insurance_fund.balance.get();
+    let r = engine.sync_account_fee_to_slot_not_atomic(a, DEFAULT_SLOT + 1, 10);
+    assert!(r.is_ok());
+    assert_eq!(engine.accounts[a as usize].last_fee_slot, DEFAULT_SLOT);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.current_slot, DEFAULT_SLOT + 1);
+
+    kani::cover!(
+        engine.current_slot == DEFAULT_SLOT + 1
+            && engine.accounts[a as usize].last_fee_slot == DEFAULT_SLOT,
+        "nonflat fee sync can advance public time without charging past slot_last"
     );
 }
 
@@ -1567,6 +1604,33 @@ fn v19_rr_scan_zero_no_stress_progress() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn v19_phase2_pretriggers_bankruptcy_hmax_before_positive_release() {
+    // Helper-level proof paired with the runtime keeper regression: if a Phase
+    // 2 window contains an existing post-principal negative tail, the engine
+    // starts h-max before replaying touches.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), 1, DEFAULT_ORACLE);
+    let loser = add_user_test(&mut engine, 0).unwrap();
+
+    engine.accounts[loser as usize].pnl = -100;
+    engine.neg_pnl_account_count = 1;
+    engine.rr_cursor_position = loser as u64;
+
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    let r = engine.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, 1);
+    assert!(r.is_ok());
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert!(ctx.bankruptcy_hmax_candidate_active);
+    assert!(ctx.stress_envelope_restarted);
+
+    kani::cover!(
+        engine.bankruptcy_hmax_lock_active && ctx.stress_envelope_restarted,
+        "Phase 2 bankruptcy tail pretrigger starts same-instruction h-max"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn v19_equity_active_keeper_zero_progress_rejects() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -1588,6 +1652,7 @@ fn v19_equity_active_keeper_zero_progress_rejects() {
         oracle_price: DEFAULT_ORACLE + 1,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -1604,7 +1669,7 @@ fn v19_equity_active_keeper_zero_progress_rejects() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_equity_active_keeper_missing_slot_progress_commits() {
+fn v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
@@ -1626,6 +1691,7 @@ fn v19_equity_active_keeper_missing_slot_progress_commits() {
         oracle_price: DEFAULT_ORACLE + 1,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -1633,11 +1699,42 @@ fn v19_equity_active_keeper_missing_slot_progress_commits() {
         rr_touch_limit: 1,
         rr_scan_limit: 1,
     });
-    assert!(r.is_ok());
-    assert_eq!(engine.current_slot, DEFAULT_SLOT + 3);
-    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE + 1);
-    assert_eq!(engine.rr_cursor_position, 3);
-    assert!(engine.stress_consumed_bps_e9_since_envelope > 0);
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.current_slot, DEFAULT_SLOT);
+    assert_eq!(engine.last_market_slot, DEFAULT_SLOT);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE);
+    assert_eq!(engine.rr_cursor_position, 2);
+
+    kani::cover!(
+        engine.current_slot == DEFAULT_SLOT && engine.rr_cursor_position == 2,
+        "equity-active crank with only empty-slot scan rejects without committing accrual"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_phase2_materialized_touch_counts_as_protective_progress() {
+    // Helper-level proof paired with the runtime keeper regression: a Phase 2
+    // scan only supplies protective progress when it actually reaches a used
+    // slot. Empty-slot scans are covered by
+    // v19_equity_active_keeper_empty_rr_scan_rejects_without_accrual_commit.
+    let mut params = zero_fee_params();
+    params.max_accounts = 4;
+    let mut engine = RiskEngine::new_with_market(params, DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.used[0] = 1u64;
+    engine.rr_cursor_position = 0;
+
+    let outcome = engine
+        .phase2_scan_outcome(4, 1, 1, false, true, false)
+        .unwrap();
+    assert_eq!(outcome.touched, 1);
+    assert_eq!(outcome.inspected, 1);
+    assert_eq!(outcome.next_cursor, 1);
+    kani::cover!(
+        outcome.touched == 1,
+        "materialized Phase 2 scan contributes protective progress"
+    );
 }
 
 #[kani::proof]
@@ -1985,6 +2082,7 @@ fn v19_generation_advances_at_most_once_per_slot() {
         oracle_price: DEFAULT_ORACLE,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -2001,6 +2099,7 @@ fn v19_generation_advances_at_most_once_per_slot() {
         oracle_price: DEFAULT_ORACLE,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -2030,6 +2129,7 @@ fn v19_same_slot_cursor_progress_without_second_generation_advance() {
         oracle_price: DEFAULT_ORACLE,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -2071,6 +2171,7 @@ fn v19_bounded_stale_catchup_advances_one_segment() {
         oracle_price: DEFAULT_ORACLE - 1,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,

@@ -249,6 +249,9 @@ pub struct InstructionContext {
     /// later bankruptcy candidate appears, the instruction must fail rather
     /// than commit stale h-min/release/conversion decisions.
     pub positive_pnl_usability_mutated: bool,
+    /// True once this instruction starts or restarts the stress/h-max envelope.
+    /// Same-instruction Phase 2 inspections must not reduce the new envelope.
+    pub stress_envelope_restarted: bool,
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
@@ -279,6 +282,7 @@ impl InstructionContext {
             pending_reset_short: false,
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
             admit_h_min_shared: 0,
             admit_h_max_shared: 0,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -295,6 +299,7 @@ impl InstructionContext {
             pending_reset_short: false,
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -316,6 +321,7 @@ impl InstructionContext {
             pending_reset_short: false,
             bankruptcy_hmax_candidate_active: false,
             positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt
@@ -650,9 +656,11 @@ pub struct RiskEngine {
     pub stale_account_count_long: u64,
     pub stale_account_count_short: u64,
 
-    /// Dynamic phantom dust bounds (spec §4.6, §5.7)
-    pub phantom_dust_bound_long_q: u128,
-    pub phantom_dust_bound_short_q: u128,
+    /// Certified phantom dust can clear residual OI; potential dust cannot.
+    pub phantom_dust_certified_long_q: u128,
+    pub phantom_dust_certified_short_q: u128,
+    pub phantom_dust_potential_long_q: u128,
+    pub phantom_dust_potential_short_q: u128,
 
     /// Materialized account count (spec §2.2)
     pub materialized_account_count: u64,
@@ -798,6 +806,7 @@ pub struct KeeperCrankRequest<'a> {
     pub oracle_price: u64,
     pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
     pub max_revalidations: u16,
+    pub max_candidate_inspections: u16,
     pub funding_rate_e9: i128,
     pub admit_h_min: u64,
     pub admit_h_max: u64,
@@ -823,6 +832,7 @@ impl<'a> KeeperCrankRequest<'a> {
             oracle_price,
             ordered_candidates,
             max_revalidations,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9,
             admit_h_min,
             admit_h_max,
@@ -1443,8 +1453,10 @@ impl RiskEngine {
             stored_pos_count_short: 0,
             stale_account_count_long: 0,
             stale_account_count_short: 0,
-            phantom_dust_bound_long_q: 0u128,
-            phantom_dust_bound_short_q: 0u128,
+            phantom_dust_certified_long_q: 0u128,
+            phantom_dust_certified_short_q: 0u128,
+            phantom_dust_potential_long_q: 0u128,
+            phantom_dust_potential_short_q: 0u128,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
             rr_cursor_position: 0,
@@ -1541,8 +1553,10 @@ impl RiskEngine {
         self.stored_pos_count_short = 0;
         self.stale_account_count_long = 0;
         self.stale_account_count_short = 0;
-        self.phantom_dust_bound_long_q = 0;
-        self.phantom_dust_bound_short_q = 0;
+        self.phantom_dust_certified_long_q = 0;
+        self.phantom_dust_certified_short_q = 0;
+        self.phantom_dust_potential_long_q = 0;
+        self.phantom_dust_potential_short_q = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
         self.rr_cursor_position = 0;
@@ -2343,7 +2357,7 @@ impl RiskEngine {
                             let rem = p.checked_rem(U256::from_u128(a_basis));
                             if let Some(r) = rem {
                                 if !r.is_zero() {
-                                    self.inc_phantom_dust_bound(old_side)?;
+                                    self.inc_phantom_dust_potential(old_side)?;
                                 }
                             }
                         }
@@ -2658,18 +2672,18 @@ impl RiskEngine {
         }
     }
 
-    /// Spec §4.6: increment phantom dust bound by 1 q-unit (checked).
-    fn inc_phantom_dust_bound(&mut self, s: Side) -> Result<()> {
+    /// Spec §4.6: account-local floor slack adds potential dust only.
+    fn inc_phantom_dust_potential(&mut self, s: Side) -> Result<()> {
         match s {
             Side::Long => {
-                self.phantom_dust_bound_long_q = self
-                    .phantom_dust_bound_long_q
+                self.phantom_dust_potential_long_q = self
+                    .phantom_dust_potential_long_q
                     .checked_add(1u128)
                     .ok_or(RiskError::Overflow)?;
             }
             Side::Short => {
-                self.phantom_dust_bound_short_q = self
-                    .phantom_dust_bound_short_q
+                self.phantom_dust_potential_short_q = self
+                    .phantom_dust_potential_short_q
                     .checked_add(1u128)
                     .ok_or(RiskError::Overflow)?;
             }
@@ -2677,36 +2691,31 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Spec §4.6.1: increment phantom dust bound by amount_q (checked).
-    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
+    fn get_phantom_dust_certified(&self, s: Side) -> u128 {
         match s {
-            Side::Long => {
-                self.phantom_dust_bound_long_q = self
-                    .phantom_dust_bound_long_q
-                    .checked_add(amount_q)
-                    .ok_or(RiskError::Overflow)?;
-            }
-            Side::Short => {
-                self.phantom_dust_bound_short_q = self
-                    .phantom_dust_bound_short_q
-                    .checked_add(amount_q)
-                    .ok_or(RiskError::Overflow)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn get_phantom_dust_bound(&self, s: Side) -> u128 {
-        match s {
-            Side::Long => self.phantom_dust_bound_long_q,
-            Side::Short => self.phantom_dust_bound_short_q,
+            Side::Long => self.phantom_dust_certified_long_q,
+            Side::Short => self.phantom_dust_certified_short_q,
         }
     }
 
-    fn set_phantom_dust_bound(&mut self, s: Side, v: u128) {
+    fn set_phantom_dust_certified(&mut self, s: Side, v: u128) {
         match s {
-            Side::Long => self.phantom_dust_bound_long_q = v,
-            Side::Short => self.phantom_dust_bound_short_q = v,
+            Side::Long => self.phantom_dust_certified_long_q = v,
+            Side::Short => self.phantom_dust_certified_short_q = v,
+        }
+    }
+
+    fn get_phantom_dust_potential(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.phantom_dust_potential_long_q,
+            Side::Short => self.phantom_dust_potential_short_q,
+        }
+    }
+
+    fn set_phantom_dust_potential(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.phantom_dust_potential_long_q = v,
+            Side::Short => self.phantom_dust_potential_short_q = v,
         }
     }
 
@@ -2742,6 +2751,7 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized);
         }
         ctx.bankruptcy_hmax_candidate_active = true;
+        ctx.stress_envelope_restarted = true;
         self.bankruptcy_hmax_lock_active = true;
         self.stress_envelope_remaining_indices = self.params.max_accounts;
         self.stress_envelope_start_slot = self.current_slot;
@@ -2772,27 +2782,30 @@ impl RiskEngine {
         _now_slot: u64,
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
+        max_candidate_inspections: u16,
         rr_touch_limit: u64,
         rr_scan_limit: u64,
     ) -> Result<bool> {
         let max_candidate_inspections = core::cmp::min(
             MAX_TOUCHED_PER_INSTRUCTION as u16,
-            max_revalidations.saturating_mul(4),
+            max_candidate_inspections,
         );
         let mut inspected: u16 = 0;
-        for &(candidate_idx, _) in ordered_candidates {
-            if inspected >= max_candidate_inspections {
-                break;
+        if max_revalidations > 0 && max_candidate_inspections > 0 {
+            for &(candidate_idx, _) in ordered_candidates {
+                if inspected >= max_candidate_inspections {
+                    break;
+                }
+                inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+                let cidx = candidate_idx as usize;
+                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) {
+                    continue;
+                }
+                if candidate_idx as u64 >= self.params.max_accounts {
+                    continue;
+                }
+                return Ok(true);
             }
-            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            let cidx = candidate_idx as usize;
-            if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) {
-                continue;
-            }
-            if candidate_idx as u64 >= self.params.max_accounts {
-                continue;
-            }
-            return Ok(true);
         }
 
         if rr_touch_limit == 0 || rr_scan_limit == 0 {
@@ -2802,7 +2815,103 @@ impl RiskEngine {
         if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
             return Err(RiskError::CorruptState);
         }
-        Ok(true)
+        let scan_cap = core::cmp::min(rr_scan_limit, wrap_bound);
+        let mut i = self.rr_cursor_position;
+        let mut scanned = 0u64;
+        while scanned < scan_cap {
+            if self.is_used(i as usize) {
+                return Ok(true);
+            }
+            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
+            scanned = scanned.checked_add(1).ok_or(RiskError::Overflow)?;
+            if i == wrap_bound {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
+    fn account_has_existing_bankruptcy_tail(&self, idx: usize) -> Result<bool> {
+        self.validate_touched_account_shape(idx)?;
+        let pnl = self.accounts[idx].pnl;
+        if pnl >= 0 {
+            return Ok(false);
+        }
+        if pnl == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(self.accounts[idx].capital.get() < pnl.unsigned_abs())
+    }
+
+    fn pretrigger_bankruptcy_hmax_for_candidates(
+        &mut self,
+        ctx: &mut InstructionContext,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        max_candidate_inspections: u16,
+    ) -> Result<()> {
+        if self.bankruptcy_hmax_lock_active || max_revalidations == 0 {
+            return Ok(());
+        }
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            max_candidate_inspections,
+        );
+        let mut inspected = 0u16;
+        let mut attempts = 0u16;
+        for &(candidate_idx, _) in ordered_candidates {
+            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
+                break;
+            }
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            let idx = candidate_idx as usize;
+            if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
+                continue;
+            }
+            if candidate_idx as u64 >= self.params.max_accounts {
+                continue;
+            }
+            attempts = attempts.checked_add(1).ok_or(RiskError::Overflow)?;
+            if self.account_has_existing_bankruptcy_tail(idx)? {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    test_visible! {
+    fn pretrigger_bankruptcy_hmax_for_phase2(
+        &mut self,
+        ctx: &mut InstructionContext,
+        inspected: u64,
+    ) -> Result<()> {
+        if self.bankruptcy_hmax_lock_active || inspected == 0 {
+            return Ok(());
+        }
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        let mut i = self.rr_cursor_position;
+        let mut replayed = 0u64;
+        while replayed < inspected {
+            if i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let idx = i as usize;
+            if self.is_used(idx) && self.account_has_existing_bankruptcy_tail(idx)? {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                break;
+            }
+            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
+            replayed = replayed.checked_add(1).ok_or(RiskError::Overflow)?;
+            if i == wrap_bound {
+                break;
+            }
+        }
+        Ok(())
+    }
     }
 
     // ========================================================================
@@ -2906,7 +3015,7 @@ impl RiskEngine {
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared), Some(ctx))?;
 
             if q_eff_new == 0 {
-                self.inc_phantom_dust_bound(side)?;
+                self.inc_phantom_dust_potential(side)?;
                 self.clear_position_basis_q(idx)?;
             } else {
                 self.accounts[idx].adl_k_snap = k_side;
@@ -3457,7 +3566,8 @@ impl RiskEngine {
             }
             self.set_oi_eff(opp, oi_post);
             if oi_post == 0 {
-                self.set_phantom_dust_bound(opp, 0);
+                self.set_phantom_dust_certified(opp, 0);
+                self.set_phantom_dust_potential(opp, 0);
                 // Unconditionally reset the drained opp side (fixes phantom dust revert).
                 set_pending_reset(ctx, opp);
                 // Also reset liq_side only if it too has zero OI
@@ -3475,9 +3585,10 @@ impl RiskEngine {
 
         let a_old = self.get_a_side(opp);
         let oi_post = oi.checked_sub(q_close_q).ok_or(RiskError::Overflow)?;
-        let old_phantom_bound = core::cmp::min(self.get_phantom_dust_bound(opp), oi);
+        let old_certified = core::cmp::min(self.get_phantom_dust_certified(opp), oi);
+        let old_potential = core::cmp::min(self.get_phantom_dust_potential(opp), oi);
         let loss_bearing_oi = oi
-            .checked_sub(old_phantom_bound)
+            .checked_sub(old_certified)
             .ok_or(RiskError::CorruptState)?;
 
         // Step 7: phantom-adjusted K-loss allocation. Phantom OI is not a
@@ -3488,12 +3599,12 @@ impl RiskEngine {
                 self.record_uninsured_protocol_loss(d_rem);
                 0
             } else {
-                let d_phantom = if old_phantom_bound == 0 {
+                let d_phantom = if old_certified == 0 {
                     0
                 } else {
                     mul_div_ceil_u256(
                         U256::from_u128(d_rem),
-                        U256::from_u128(old_phantom_bound),
+                        U256::from_u128(old_certified),
                         U256::from_u128(oi),
                     )
                     .try_into_u128()
@@ -3530,7 +3641,8 @@ impl RiskEngine {
         // Step 8 (§5.6 step 8): if OI_post == 0, both flags are set.
         if oi_post == 0 {
             self.set_oi_eff(opp, 0u128);
-            self.set_phantom_dust_bound(opp, 0);
+            self.set_phantom_dust_certified(opp, 0);
+            self.set_phantom_dust_potential(opp, 0);
             set_pending_reset(ctx, opp);
             set_pending_reset(ctx, liq_side);
             return Ok(());
@@ -3551,7 +3663,10 @@ impl RiskEngine {
             let a_new = a_candidate_u256.try_into_u128().ok_or(RiskError::Overflow)?;
             self.set_a_side(opp, a_new);
             self.set_oi_eff(opp, oi_post);
-            let represented_after = U256::from_u128(loss_bearing_oi)
+            let represented_source_lower = oi
+                .checked_sub(old_potential)
+                .ok_or(RiskError::CorruptState)?;
+            let represented_after = U256::from_u128(represented_source_lower)
                 .checked_mul(U256::from_u128(a_new))
                 .ok_or(RiskError::Overflow)?
                 .checked_div(U256::from_u128(a_old))
@@ -3563,13 +3678,15 @@ impl RiskEngine {
                 .checked_sub(represented_after)
                 .ok_or(RiskError::CorruptState)?;
             let account_floor_bound = self.get_stored_pos_count(opp) as u128;
-            let post_bound = core::cmp::min(
+            let post_potential = core::cmp::min(
                 oi_post,
                 aggregate_gap
                     .checked_add(account_floor_bound)
                     .ok_or(RiskError::Overflow)?,
             );
-            self.set_phantom_dust_bound(opp, post_bound);
+            let post_certified = core::cmp::min(oi_post, old_certified.saturating_sub(q_close_q));
+            self.set_phantom_dust_certified(opp, post_certified);
+            self.set_phantom_dust_potential(opp, post_potential);
             if a_new < MIN_A_SIDE {
                 self.set_side_mode(opp, SideMode::DrainOnly);
             }
@@ -3579,8 +3696,10 @@ impl RiskEngine {
         // Step 11: precision exhaustion terminal drain
         self.set_oi_eff(opp, 0u128);
         self.set_oi_eff(liq_side, 0u128);
-        self.set_phantom_dust_bound(opp, 0);
-        self.set_phantom_dust_bound(liq_side, 0);
+        self.set_phantom_dust_certified(opp, 0);
+        self.set_phantom_dust_potential(opp, 0);
+        self.set_phantom_dust_certified(liq_side, 0);
+        self.set_phantom_dust_potential(liq_side, 0);
         set_pending_reset(ctx, opp);
         set_pending_reset(ctx, liq_side);
 
@@ -3659,10 +3778,17 @@ impl RiskEngine {
         let spc = self.get_stored_pos_count(side);
         self.set_stale_count(side, spc);
 
-        // phantom_dust_bound_side_q = 0 (spec §2.5 step 6)
+        // Reset starts a new side epoch; stale accounts settle against the
+        // snapshotted epoch and no old dust proof carries forward.
         match side {
-            Side::Long => self.phantom_dust_bound_long_q = 0u128,
-            Side::Short => self.phantom_dust_bound_short_q = 0u128,
+            Side::Long => {
+                self.phantom_dust_certified_long_q = 0u128;
+                self.phantom_dust_potential_long_q = 0u128;
+            }
+            Side::Short => {
+                self.phantom_dust_certified_short_q = 0u128;
+                self.phantom_dust_potential_short_q = 0u128;
+            }
         }
 
         // mode = ResetPending
@@ -3696,77 +3822,73 @@ impl RiskEngine {
 
     test_visible! {
     fn schedule_end_of_instruction_resets(&mut self, ctx: &mut InstructionContext) -> Result<()> {
-        // §5.7.A: Bilateral-empty dust clearance
+        // §5.5.A: if both sides are aggregate-flat, residual symmetric OI is
+        // certified orphan OI because no current-epoch account can represent it.
         if self.stored_pos_count_long == 0 && self.stored_pos_count_short == 0 {
-            let clear_bound_q = self.phantom_dust_bound_long_q
-                .checked_add(self.phantom_dust_bound_short_q)
-                .ok_or(RiskError::CorruptState)?;
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_long_q != 0
-                || self.phantom_dust_bound_short_q != 0;
+                || self.phantom_dust_certified_long_q != 0
+                || self.phantom_dust_certified_short_q != 0
+                || self.phantom_dust_potential_long_q != 0
+                || self.phantom_dust_potential_short_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
                 }
-                if self.oi_eff_long_q <= clear_bound_q && self.oi_eff_short_q <= clear_bound_q {
-                    self.oi_eff_long_q = 0u128;
-                    self.oi_eff_short_q = 0u128;
-                    self.phantom_dust_bound_long_q = 0;
-                    self.phantom_dust_bound_short_q = 0;
-                    ctx.pending_reset_long = true;
-                    ctx.pending_reset_short = true;
-                } else {
-                    return Err(RiskError::CorruptState);
-                }
+                self.oi_eff_long_q = 0u128;
+                self.oi_eff_short_q = 0u128;
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+                ctx.pending_reset_long = true;
+                ctx.pending_reset_short = true;
             }
         }
-        // §5.7.B: Unilateral-empty long (long empty, short has positions)
+        // §5.5.B: one empty side. Certified dust can clear the non-empty
+        // side; otherwise the non-empty side enters explicit orphan-exposure
+        // drain reset so future mark/funding cannot run against an orphan.
         else if self.stored_pos_count_long == 0 && self.stored_pos_count_short > 0 {
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_long_q != 0
-                || self.phantom_dust_bound_short_q != 0;
+                || self.phantom_dust_certified_long_q != 0
+                || self.phantom_dust_certified_short_q != 0
+                || self.phantom_dust_potential_long_q != 0
+                || self.phantom_dust_potential_short_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
                 }
-                if self.oi_eff_long_q <= self.phantom_dust_bound_long_q
-                    && self.oi_eff_short_q <= self.phantom_dust_bound_short_q
-                {
-                    self.oi_eff_long_q = 0u128;
-                    self.oi_eff_short_q = 0u128;
-                    self.phantom_dust_bound_long_q = 0;
-                    self.phantom_dust_bound_short_q = 0;
-                    ctx.pending_reset_long = true;
-                    ctx.pending_reset_short = true;
-                } else {
-                    return Err(RiskError::CorruptState);
-                }
+                self.oi_eff_long_q = 0u128;
+                self.oi_eff_short_q = 0u128;
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+                ctx.pending_reset_long = true;
+                ctx.pending_reset_short = true;
             }
         }
-        // §5.7.C: Unilateral-empty short (short empty, long has positions)
+        // §5.5.C: symmetric case with short empty and long non-empty.
         else if self.stored_pos_count_short == 0 && self.stored_pos_count_long > 0 {
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_long_q != 0
-                || self.phantom_dust_bound_short_q != 0;
+                || self.phantom_dust_certified_long_q != 0
+                || self.phantom_dust_certified_short_q != 0
+                || self.phantom_dust_potential_long_q != 0
+                || self.phantom_dust_potential_short_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
                 }
-                if self.oi_eff_short_q <= self.phantom_dust_bound_short_q
-                    && self.oi_eff_long_q <= self.phantom_dust_bound_long_q
-                {
-                    self.oi_eff_long_q = 0u128;
-                    self.oi_eff_short_q = 0u128;
-                    self.phantom_dust_bound_long_q = 0;
-                    self.phantom_dust_bound_short_q = 0;
-                    ctx.pending_reset_long = true;
-                    ctx.pending_reset_short = true;
-                } else {
-                    return Err(RiskError::CorruptState);
-                }
+                self.oi_eff_long_q = 0u128;
+                self.oi_eff_short_q = 0u128;
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+                ctx.pending_reset_long = true;
+                ctx.pending_reset_short = true;
             }
         }
 
@@ -3778,10 +3900,12 @@ impl RiskEngine {
             ctx.pending_reset_short = true;
         }
         if self.stored_pos_count_long == 0 && self.oi_eff_long_q == 0 {
-            self.phantom_dust_bound_long_q = 0;
+            self.phantom_dust_certified_long_q = 0;
+            self.phantom_dust_potential_long_q = 0;
         }
         if self.stored_pos_count_short == 0 && self.oi_eff_short_q == 0 {
-            self.phantom_dust_bound_short_q = 0;
+            self.phantom_dust_certified_short_q = 0;
+            self.phantom_dust_potential_short_q = 0;
         }
         if self.stored_pos_count_long > 0
             && self.oi_eff_long_q == 0
@@ -4544,13 +4668,15 @@ impl RiskEngine {
                 }
                 if self.stored_pos_count_long == 0
                     && self.oi_eff_long_q == 0
-                    && self.phantom_dust_bound_long_q != 0
+                    && (self.phantom_dust_certified_long_q != 0
+                        || self.phantom_dust_potential_long_q != 0)
                 {
                     return Err(RiskError::CorruptState);
                 }
                 if self.stored_pos_count_short == 0
                     && self.oi_eff_short_q == 0
-                    && self.phantom_dust_bound_short_q != 0
+                    && (self.phantom_dust_certified_short_q != 0
+                        || self.phantom_dust_potential_short_q != 0)
                 {
                     return Err(RiskError::CorruptState);
                 }
@@ -6107,8 +6233,8 @@ impl RiskEngine {
 
         // Step 10: settle post-trade losses from principal for both accounts (spec §10.4 step 18)
         // Loss seniority: losses MUST be settled before explicit fees (spec §0 item 14)
-        self.settle_losses(a as usize)?;
-        self.settle_losses(b as usize)?;
+        self.settle_losses_with_context(a as usize, Some(&mut ctx))?;
+        self.settle_losses_with_context(b as usize, Some(&mut ctx))?;
 
         // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
         let trade_notional =
@@ -6807,6 +6933,7 @@ impl RiskEngine {
             oracle_price,
             ordered_candidates,
             max_revalidations,
+            max_candidate_inspections,
             funding_rate_e9,
             admit_h_min,
             admit_h_max,
@@ -6872,6 +6999,7 @@ impl RiskEngine {
                 now_slot,
                 ordered_candidates,
                 max_revalidations,
+                max_candidate_inspections,
                 rr_touch_limit,
                 rr_scan_limit,
             )?
@@ -6895,8 +7023,14 @@ impl RiskEngine {
         let mut attempts: u16 = 0;
         let max_candidate_inspections = core::cmp::min(
             MAX_TOUCHED_PER_INSTRUCTION as u16,
-            max_revalidations.saturating_mul(4),
+            max_candidate_inspections,
         );
+        self.pretrigger_bankruptcy_hmax_for_candidates(
+            &mut ctx,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+        )?;
         let mut inspected: u16 = 0;
         let mut num_liquidations: u32 = 0;
         let mut protective_progress = false;
@@ -6977,6 +7111,7 @@ impl RiskEngine {
             wrap_allowed,
             same_slot_as_stress_start,
         )?;
+        self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
 
         let mut touch_i = self.rr_cursor_position;
         let mut replayed_inspected = 0u64;
@@ -7002,7 +7137,7 @@ impl RiskEngine {
         if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
             return Err(RiskError::CorruptState);
         }
-        if phase2.inspected > 0 {
+        if phase2.touched > 0 {
             protective_progress = true;
         }
 
@@ -7010,7 +7145,12 @@ impl RiskEngine {
             self.advance_sweep_generation(now_slot)?;
         }
         self.rr_cursor_position = phase2.next_cursor;
-        self.apply_stress_envelope_progress(now_slot, phase2.stress_counted_inspected)?;
+        let stress_counted_inspected = if ctx.stress_envelope_restarted {
+            0
+        } else {
+            phase2.stress_counted_inspected
+        };
+        self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
         if equity_active_accrual && !protective_progress {
             return Err(RiskError::Undercollateralized);
         }
@@ -7466,10 +7606,12 @@ impl RiskEngine {
         self.oi_eff_long_q = 0;
         self.oi_eff_short_q = 0;
         if pre_stored_long == 0 {
-            self.phantom_dust_bound_long_q = 0;
+            self.phantom_dust_certified_long_q = 0;
+            self.phantom_dust_potential_long_q = 0;
         }
         if pre_stored_short == 0 {
-            self.phantom_dust_bound_short_q = 0;
+            self.phantom_dust_certified_short_q = 0;
+            self.phantom_dust_potential_short_q = 0;
         }
 
         // Steps 17-20: drain/finalize sides
@@ -8123,8 +8265,10 @@ impl RiskEngine {
     /// The public entrypoint does NOT accept an arbitrary `fee_slot_anchor`.
     /// The engine picks the anchor deterministically:
     ///
-    /// - On Live:     `fee_slot_anchor = current_slot` (after advancing
-    ///   `current_slot` to `now_slot`).
+    /// - On Live nonflat accounts: `fee_slot_anchor <= last_market_slot`
+    ///   whenever `now_slot` is ahead of loss accrual, so recurring fees
+    ///   cannot become senior to unapplied mark/funding losses.
+    /// - On Live flat/current accounts: `fee_slot_anchor = now_slot`.
     /// - On Resolved: `fee_slot_anchor = resolved_slot`.
     ///
     /// Charges exactly once over `[last_fee_slot, fee_slot_anchor]`. A
@@ -8145,7 +8289,7 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
-            && self.last_market_slot < self.current_slot
+            && now_slot > self.last_market_slot
             && (idx as usize) < MAX_ACCOUNTS
             && self.accounts[idx as usize].position_basis_q != 0
         {

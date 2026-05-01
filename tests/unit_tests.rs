@@ -2870,33 +2870,36 @@ fn test_same_slot_price_change_no_oi_accepted() {
 // ============================================================================
 
 #[test]
-fn unilateral_empty_dust_requires_both_side_local_bounds() {
+fn unilateral_empty_potential_dust_routes_orphan_exposure_reset() {
     let mut engine = RiskEngine::new(default_params());
     let mut ctx = InstructionContext::new();
 
     engine.stored_pos_count_long = 0;
     engine.stored_pos_count_short = 2;
-    engine.phantom_dust_bound_long_q = 50;
-    engine.phantom_dust_bound_short_q = 49;
+    engine.phantom_dust_potential_long_q = 50;
+    engine.phantom_dust_potential_short_q = 49;
     engine.oi_eff_long_q = 50;
     engine.oi_eff_short_q = 50;
 
-    assert_eq!(
-        engine.schedule_end_of_instruction_resets(&mut ctx),
-        Err(RiskError::CorruptState),
-        "empty-side dust bound alone must not clear non-empty-side OI"
-    );
+    engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
+    engine.finalize_end_of_instruction_resets(&ctx).unwrap();
+
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(engine.side_mode_short, SideMode::ResetPending);
+    assert_eq!(engine.stale_account_count_short, 2);
 }
 
 #[test]
-fn unilateral_empty_dust_clears_when_both_bounds_cover_residual() {
+fn unilateral_empty_certified_dust_clears_when_nonempty_bound_covers_residual() {
     let mut engine = RiskEngine::new(default_params());
     let mut ctx = InstructionContext::new();
 
     engine.stored_pos_count_long = 0;
     engine.stored_pos_count_short = 2;
-    engine.phantom_dust_bound_long_q = 50;
-    engine.phantom_dust_bound_short_q = 50;
+    engine.phantom_dust_certified_short_q = 50;
+    engine.phantom_dust_potential_long_q = 50;
+    engine.phantom_dust_potential_short_q = 50;
     engine.oi_eff_long_q = 50;
     engine.oi_eff_short_q = 50;
 
@@ -2908,8 +2911,9 @@ fn unilateral_empty_dust_clears_when_both_bounds_cover_residual() {
     assert!(ctx.pending_reset_short);
     assert_eq!(engine.oi_eff_long_q, 0);
     assert_eq!(engine.oi_eff_short_q, 0);
-    assert_eq!(engine.phantom_dust_bound_long_q, 0);
-    assert_eq!(engine.phantom_dust_bound_short_q, 0);
+    assert_eq!(engine.phantom_dust_certified_short_q, 0);
+    assert_eq!(engine.phantom_dust_potential_long_q, 0);
+    assert_eq!(engine.phantom_dust_potential_short_q, 0);
 }
 
 #[test]
@@ -3175,6 +3179,7 @@ fn keeper_crank_request_scan_limit_bounds_unused_slot_skips() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3194,6 +3199,7 @@ fn keeper_crank_request_scan_limit_bounds_unused_slot_skips() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3222,6 +3228,7 @@ fn keeper_crank_request_scan_limit_zero_makes_no_stress_progress() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3271,6 +3278,7 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3307,6 +3315,7 @@ fn keeper_crank_phase2_wrap_after_same_slot_stress_defers_reset() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3358,6 +3367,79 @@ fn keeper_crank_phase2_stress_envelope_waits_for_later_wrap() {
 }
 
 #[test]
+fn phase2_bankruptcy_restart_does_not_count_same_instruction_scan_against_new_envelope() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 100, 1_000);
+    let loser = add_user_test(&mut engine, 0).unwrap();
+    engine.set_pnl(loser as usize, -100).unwrap();
+    engine.rr_cursor_position = loser as u64;
+    seed_active_stress_envelope(&mut engine, 1, 50, 7);
+
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 101,
+        oracle_price: engine.last_oracle_price,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+
+    assert!(result.is_ok());
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(
+        engine.stress_envelope_remaining_indices, engine.params.max_accounts,
+        "new h-max envelope must not be decremented by same-instruction Phase 2 inspections"
+    );
+}
+
+#[test]
+fn phase2_pretriggers_bankruptcy_hmax_before_winner_release() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 1, 1_000);
+    let winner = add_user_test(&mut engine, 0).unwrap();
+    let loser = add_user_test(&mut engine, 0).unwrap();
+
+    engine.accounts[winner as usize].pnl = 10;
+    engine.accounts[winner as usize].reserved_pnl = 10;
+    engine.accounts[winner as usize].sched_present = 1;
+    engine.accounts[winner as usize].sched_remaining_q = 10;
+    engine.accounts[winner as usize].sched_anchor_q = 10;
+    engine.accounts[winner as usize].sched_start_slot = 0;
+    engine.accounts[winner as usize].sched_horizon = 1;
+    engine.pnl_pos_tot = 10;
+
+    engine.accounts[loser as usize].pnl = -100;
+    engine.neg_pnl_account_count = 1;
+    engine.rr_cursor_position = winner as u64;
+
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: 1_000,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+        funding_rate_e9: 0,
+        admit_h_min: 0,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 2,
+        rr_scan_limit: 2,
+    });
+
+    assert!(result.is_ok());
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(
+        engine.accounts[winner as usize].reserved_pnl, 10,
+        "winner reserve release must be paused once the same Phase 2 window contains a bankruptcy tail"
+    );
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    assert_eq!(engine.accounts[loser as usize].pnl, 0);
+}
+
+#[test]
 fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
     let mut engine = RiskEngine::new(default_params());
     let wrap = engine.params.max_accounts;
@@ -3369,6 +3451,7 @@ fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3402,6 +3485,7 @@ fn keeper_crank_phase2_same_slot_wrap_progress_without_second_generation() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3419,6 +3503,7 @@ fn keeper_crank_phase2_same_slot_wrap_progress_without_second_generation() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -3436,6 +3521,7 @@ fn keeper_crank_phase2_same_slot_wrap_progress_without_second_generation() {
             oracle_price: 1000,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -4071,6 +4157,7 @@ fn keeper_crank_equity_active_requires_protective_progress() {
         oracle_price: 1050,
         ordered_candidates: &[],
         max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
         funding_rate_e9: 0,
         admit_h_min: 1,
         admit_h_max: 100,
@@ -4087,6 +4174,52 @@ fn keeper_crank_equity_active_requires_protective_progress() {
     assert_eq!(engine.current_slot, slot);
     assert_eq!(engine.last_market_slot, slot);
     assert_eq!(engine.last_oracle_price, oracle);
+}
+
+#[test]
+fn equity_active_keeper_crank_rejects_empty_rr_scan_without_committing_accrual() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            None,
+        )
+        .unwrap();
+    engine.rr_cursor_position = 2;
+    let before_last_market_slot = engine.last_market_slot;
+    let before_price = engine.last_oracle_price;
+
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: slot + 1,
+        oracle_price: oracle - 1,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 8,
+    });
+
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert_eq!(
+        engine.last_market_slot, before_last_market_slot,
+        "failed protective-progress precheck must not commit accrual"
+    );
+    assert_eq!(engine.last_oracle_price, before_price);
 }
 
 #[test]
@@ -4112,7 +4245,7 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
 
     let now_slot = slot + engine.params.max_accrual_dt_slots + 50;
     let segment_slot = slot + engine.params.max_accrual_dt_slots;
-    engine.rr_cursor_position = 2;
+    engine.rr_cursor_position = a as u64;
 
     engine
         .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
@@ -4120,6 +4253,7 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
             oracle_price: 990,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -4142,7 +4276,7 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
         engine.stress_envelope_start_slot, now_slot,
         "segment stress is timestamped with authenticated instruction slot"
     );
-    assert_eq!(engine.rr_cursor_position, 3);
+    assert_eq!(engine.rr_cursor_position, a as u64 + 1);
 }
 
 #[test]
@@ -4173,6 +4307,7 @@ fn loss_stale_catchup_blocks_trade_until_loss_current() {
             oracle_price: 990,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -4210,6 +4345,7 @@ fn loss_stale_catchup_blocks_trade_until_loss_current() {
             oracle_price: 990,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -4253,6 +4389,7 @@ fn loss_stale_fee_sync_anchors_nonflat_account_at_slot_last() {
             oracle_price: 990,
             ordered_candidates: &[],
             max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
             funding_rate_e9: 0,
             admit_h_min: 1,
             admit_h_max: 100,
@@ -4270,6 +4407,46 @@ fn loss_stale_fee_sync_anchors_nonflat_account_at_slot_last() {
     assert_eq!(
         engine.accounts[a as usize].last_fee_slot, loss_safe_anchor,
         "nonflat stale-account fees must not anchor past loss-accrued slot_last"
+    );
+}
+
+#[test]
+fn fee_sync_requested_future_slot_nonflat_anchors_at_slot_last_before_loss_stale() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 10u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            None,
+        )
+        .unwrap();
+    assert_eq!(engine.current_slot, engine.last_market_slot);
+    assert_ne!(engine.accounts[a as usize].position_basis_q, 0);
+    engine.accounts[a as usize].last_fee_slot = engine.last_market_slot;
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    engine
+        .sync_account_fee_to_slot_not_atomic(a, slot + 1, 10)
+        .unwrap();
+
+    assert_eq!(
+        engine.accounts[a as usize].last_fee_slot, slot,
+        "nonflat live fee sync must not charge past the loss-accrued slot_last"
+    );
+    assert_eq!(
+        engine.insurance_fund.balance.get(),
+        insurance_before,
+        "fees must not become senior to unaccrued mark/funding losses"
     );
 }
 
@@ -4296,7 +4473,55 @@ fn floor_to_zero_live_touch_preserves_oi_and_tracks_potential_dust() {
     assert_eq!(engine.oi_eff_long_q, oi_before);
     assert_eq!(engine.accounts[idx as usize].position_basis_q, 0);
     assert_eq!(engine.stored_pos_count_long, 0);
-    assert_eq!(engine.phantom_dust_bound_long_q, 1);
+    assert_eq!(engine.phantom_dust_potential_long_q, 1);
+    assert_eq!(engine.phantom_dust_certified_long_q, 0);
+}
+
+#[test]
+fn aggregate_flat_residual_oi_clears_as_certified_orphan() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    engine.stored_pos_count_long = 0;
+    engine.stored_pos_count_short = 0;
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.phantom_dust_certified_long_q = 0;
+    engine.phantom_dust_certified_short_q = 0;
+    engine.phantom_dust_potential_long_q = 1;
+    engine.phantom_dust_potential_short_q = 0;
+
+    let mut ctx = InstructionContext::new();
+    engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
+
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(engine.phantom_dust_certified_long_q, 0);
+    assert_eq!(engine.phantom_dust_certified_short_q, 0);
+    assert_eq!(engine.phantom_dust_potential_long_q, 0);
+    assert_eq!(engine.phantom_dust_potential_short_q, 0);
+}
+
+#[test]
+fn one_empty_side_potential_dust_routes_to_orphan_exposure_reset() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.accounts[idx as usize].position_basis_q = 1;
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_epoch_snap = engine.adl_epoch_long;
+    engine.stored_pos_count_long = 1;
+    engine.stored_pos_count_short = 0;
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.phantom_dust_certified_long_q = 0;
+    engine.phantom_dust_potential_long_q = 1;
+
+    let mut ctx = InstructionContext::new();
+    engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
+    engine.finalize_end_of_instruction_resets(&ctx).unwrap();
+
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(engine.side_mode_long, SideMode::ResetPending);
+    assert_eq!(engine.stale_account_count_long, 1);
 }
 
 #[test]
@@ -4321,6 +4546,46 @@ fn flat_negative_cleanup_starts_bankruptcy_hmax_lock() {
         .admit_fresh_reserve_h_lock(idx as usize, 1, &mut ctx, 0, 100)
         .unwrap();
     assert_eq!(h, 100);
+}
+
+#[test]
+fn trade_winner_pnl_before_counterparty_bankruptcy_fails_same_instruction() {
+    let mut params = wide_price_move_params();
+    params.trading_fee_bps = 0;
+    let oracle = 1_000u64;
+    let slot = 1u64;
+    let mut engine = RiskEngine::new_with_market(params, slot, oracle);
+    let winner = add_user_test(&mut engine, 0).unwrap();
+    let loser = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(winner, 1, slot).unwrap();
+    engine.deposit_not_atomic(loser, 1, slot).unwrap();
+    engine
+        .attach_effective_position(winner as usize, -(POS_SCALE as i128))
+        .unwrap();
+    engine
+        .attach_effective_position(loser as usize, POS_SCALE as i128)
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let result = engine.execute_trade_not_atomic(
+        winner,
+        loser,
+        oracle,
+        slot,
+        POS_SCALE as i128,
+        900,
+        0,
+        0,
+        100,
+        None,
+    );
+
+    assert_eq!(
+        result,
+        Err(RiskError::Undercollateralized),
+        "same-instruction bankruptcy must not commit earlier h_min positive-PnL usability"
+    );
 }
 
 #[test]

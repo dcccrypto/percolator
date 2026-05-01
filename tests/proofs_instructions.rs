@@ -114,8 +114,10 @@ fn t3_17_clean_empty_engine_no_retrigger() {
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.oi_eff_long_q == 0);
     assert!(engine.oi_eff_short_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 0);
-    assert!(engine.phantom_dust_bound_short_q == 0);
+    assert!(engine.phantom_dust_certified_long_q == 0);
+    assert!(engine.phantom_dust_certified_short_q == 0);
+    assert!(engine.phantom_dust_potential_long_q == 0);
+    assert!(engine.phantom_dust_potential_short_q == 0);
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
@@ -127,17 +129,22 @@ fn t3_17_clean_empty_engine_no_retrigger() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn t3_18_dust_bound_reset_in_begin_full_drain() {
+fn t3_18_phantom_dust_reset_in_begin_full_drain() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.phantom_dust_bound_long_q = 5u128;
+    engine.phantom_dust_certified_long_q = 3u128;
+    engine.phantom_dust_potential_long_q = 5u128;
     engine.oi_eff_long_q = 0u128;
 
     engine.begin_full_drain_reset(Side::Long);
 
     assert!(
-        engine.phantom_dust_bound_long_q == 0,
-        "phantom_dust_bound must be zeroed by begin_full_drain_reset"
+        engine.phantom_dust_certified_long_q == 0,
+        "certified phantom dust must be zeroed by begin_full_drain_reset"
+    );
+    assert!(
+        engine.phantom_dust_potential_long_q == 0,
+        "potential phantom dust must be zeroed by begin_full_drain_reset"
     );
 }
 
@@ -493,13 +500,13 @@ fn t11_41_attach_effective_position_remainder_accounting() {
     engine.adl_mult_long = 6;
     engine.stored_pos_count_long = 1;
 
-    let dust_before = engine.phantom_dust_bound_long_q;
+    let dust_before = engine.phantom_dust_potential_long_q;
 
     let new_pos = (2 * POS_SCALE) as i128;
     engine.attach_effective_position(idx as usize, new_pos);
 
     assert!(
-        engine.phantom_dust_bound_long_q > dust_before,
+        engine.phantom_dust_potential_long_q > dust_before,
         "dust bound must increment on nonzero remainder"
     );
 
@@ -508,11 +515,11 @@ fn t11_41_attach_effective_position_remainder_accounting() {
     engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     engine.adl_mult_long = ADL_ONE;
 
-    let dust_before2 = engine.phantom_dust_bound_long_q;
+    let dust_before2 = engine.phantom_dust_potential_long_q;
     engine.attach_effective_position(idx as usize, (3 * POS_SCALE) as i128);
 
     assert!(
-        engine.phantom_dust_bound_long_q == dust_before2,
+        engine.phantom_dust_potential_long_q == dust_before2,
         "dust bound must not increment on zero remainder"
     );
 }
@@ -546,14 +553,14 @@ fn t11_42_dynamic_dust_bound_inductive() {
         engine.settle_side_effects_live(a as usize, &mut _ctx)
     };
     assert!(engine.accounts[a as usize].position_basis_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 1u128);
+    assert!(engine.phantom_dust_potential_long_q == 1u128);
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
         engine.settle_side_effects_live(b as usize, &mut _ctx)
     };
     assert!(engine.accounts[b as usize].position_basis_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 2u128);
+    assert!(engine.phantom_dust_potential_long_q == 2u128);
 }
 
 #[kani::proof]
@@ -809,13 +816,13 @@ fn t5_24_dynamic_dust_bound_sufficient() {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
         engine.settle_side_effects_live(a as usize, &mut _ctx)
     };
-    assert!(engine.phantom_dust_bound_long_q == 1u128);
+    assert!(engine.phantom_dust_potential_long_q == 1u128);
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
         engine.settle_side_effects_live(b as usize, &mut _ctx)
     };
-    assert!(engine.phantom_dust_bound_long_q == 2u128);
+    assert!(engine.phantom_dust_potential_long_q == 2u128);
 }
 
 // ############################################################################
@@ -918,11 +925,14 @@ fn t13_56_unilateral_empty_orphan_resolution() {
     kani::assume(dust <= 100);
 
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = dust;
+    // Potential dust may identify the recovery condition, but it is not a
+    // clearance certificate. The one-empty-side branch must route through an
+    // explicit orphan-exposure reset and consume the diagnostic dust.
+    engine.phantom_dust_potential_long_q = dust;
     engine.oi_eff_long_q = dust;
 
     engine.stored_pos_count_short = 2;
-    engine.phantom_dust_bound_short_q = dust;
+    engine.phantom_dust_potential_short_q = dust;
     engine.oi_eff_short_q = dust;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
@@ -946,12 +956,12 @@ fn t13_57_unilateral_empty_corruption_guard() {
     kani::assume(dust <= 100);
 
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = dust;
+    engine.phantom_dust_potential_long_q = dust;
     engine.oi_eff_long_q = dust;
 
     engine.stored_pos_count_short = 2;
-    engine.phantom_dust_bound_short_q = dust - 1;
-    engine.oi_eff_short_q = dust;
+    engine.phantom_dust_potential_short_q = dust - 1;
+    engine.oi_eff_short_q = dust + 1;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result == Err(RiskError::CorruptState));
@@ -969,11 +979,13 @@ fn t13_58_unilateral_empty_short_side() {
     kani::assume(dust <= 200);
 
     engine.stored_pos_count_short = 0;
-    engine.phantom_dust_bound_short_q = dust;
+    // Symmetric one-empty-side case: potential dust routes to explicit orphan
+    // reset; it does not certify OI deletion by itself.
+    engine.phantom_dust_potential_short_q = dust;
     engine.oi_eff_short_q = dust;
 
     engine.stored_pos_count_long = 3;
-    engine.phantom_dust_bound_long_q = dust;
+    engine.phantom_dust_potential_long_q = dust;
     engine.oi_eff_long_q = dust;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
@@ -988,7 +1000,7 @@ fn t13_58_unilateral_empty_short_side() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn t13_58b_unilateral_empty_short_requires_long_bound() {
+fn t13_58b_unilateral_empty_short_corruption_guard() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
@@ -997,12 +1009,12 @@ fn t13_58b_unilateral_empty_short_requires_long_bound() {
     kani::assume(dust <= 200);
 
     engine.stored_pos_count_short = 0;
-    engine.phantom_dust_bound_short_q = dust;
+    engine.phantom_dust_potential_short_q = dust;
     engine.oi_eff_short_q = dust;
 
     engine.stored_pos_count_long = 3;
-    engine.phantom_dust_bound_long_q = dust - 1;
-    engine.oi_eff_long_q = dust;
+    engine.phantom_dust_potential_long_q = dust - 1;
+    engine.oi_eff_long_q = dust + 1;
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result == Err(RiskError::CorruptState));
@@ -1012,8 +1024,9 @@ fn t13_58b_unilateral_empty_short_requires_long_bound() {
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn t13_60_unconditional_dust_bound_on_any_a_decay() {
-    // v12.15+: phantom dust bound increments unconditionally on ANY A_side decay,
-    // even when the truncation remainder is exactly zero.
+    // Potential phantom dust increments conservatively on ANY A_side decay,
+    // even when the truncation remainder is exactly zero. It is diagnostic
+    // state, not a certified OI-clearance allowance.
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
@@ -1023,7 +1036,7 @@ fn t13_60_unconditional_dust_bound_on_any_a_decay() {
     engine.oi_eff_short_q = 4 * POS_SCALE;
     engine.stored_pos_count_long = 1;
 
-    let dust_before = engine.phantom_dust_bound_long_q;
+    let dust_before = engine.phantom_dust_potential_long_q;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, 2 * POS_SCALE, 0u128);
     assert!(result.is_ok());
@@ -1031,7 +1044,7 @@ fn t13_60_unconditional_dust_bound_on_any_a_decay() {
 
     // Unconditional: dust ALWAYS increments by at least 1 on A decay
     assert!(
-        engine.phantom_dust_bound_long_q >= dust_before + 1,
+        engine.phantom_dust_potential_long_q >= dust_before + 1,
         "dust must increment unconditionally on any A_side decay"
     );
 }
@@ -1093,9 +1106,9 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
         .checked_sub(eff_a.unsigned_abs())
         .unwrap_or(0);
 
-    // Verify phantom_dust_bound covers the A-truncation dust
+    // Verify potential phantom dust covers the A-truncation slack.
     assert!(
-        engine.phantom_dust_bound_long_q >= dust,
+        engine.phantom_dust_potential_long_q >= dust,
         "dust bound must cover A-truncation phantom OI"
     );
 
@@ -1165,7 +1178,7 @@ fn t14_61_dust_bound_adl_a_truncation_sufficient() {
 }
 
 /// Same-epoch zeroing: when settle_side_effects zeros a position (q_eff_new == 0),
-/// the engine must increment phantom_dust_bound by 1.
+/// the engine must increment potential phantom dust by 1.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t14_62_dust_bound_same_epoch_zeroing() {
@@ -1185,7 +1198,7 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     // A_side=1 so floor(1 * 1 / 3) = 0
     engine.adl_mult_long = 1;
 
-    let dust_before = engine.phantom_dust_bound_long_q;
+    let dust_before = engine.phantom_dust_potential_long_q;
 
     let result = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
@@ -1196,10 +1209,10 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     // Position must be zeroed
     assert!(engine.accounts[idx as usize].position_basis_q == 0);
     // Dust bound must have incremented by 1
-    let dust_after = engine.phantom_dust_bound_long_q;
+    let dust_after = engine.phantom_dust_potential_long_q;
     assert!(
         dust_after == dust_before + 1u128,
-        "same-epoch zeroing must increment phantom_dust_bound by 1"
+        "same-epoch zeroing must increment potential phantom dust by 1"
     );
 }
 
@@ -1245,17 +1258,19 @@ fn t14_63_dust_bound_position_reattach_remainder() {
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn t14_64_dust_bound_full_drain_reset_zeroes() {
+fn t14_64_phantom_dust_full_drain_reset_zeroes() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.phantom_dust_bound_long_q = 42u128;
+    engine.phantom_dust_certified_long_q = 7u128;
+    engine.phantom_dust_potential_long_q = 42u128;
     engine.oi_eff_long_q = 0u128;
     engine.stored_pos_count_long = 0;
     engine.adl_epoch_long = 0;
 
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.phantom_dust_bound_long_q == 0u128);
+    assert!(engine.phantom_dust_certified_long_q == 0u128);
+    assert!(engine.phantom_dust_potential_long_q == 0u128);
     assert!(engine.oi_eff_long_q == 0u128);
 }
 
@@ -1310,7 +1325,7 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     assert!(engine.adl_mult_long == 9);
     assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
     assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
-    assert!(engine.phantom_dust_bound_long_q != 0);
+    assert!(engine.phantom_dust_potential_long_q != 0);
 
     // Settle long accounts to get actual effective positions under new A
     let sa = {
@@ -1332,9 +1347,9 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     // Dust = tracked OI - actual sum of effective positions
     let dust = engine.oi_eff_long_q.checked_sub(sum_eff).unwrap_or(0);
 
-    // Verify phantom_dust_bound covers the multi-account A-truncation dust
+    // Verify potential phantom dust covers the multi-account A-truncation slack.
     assert!(
-        engine.phantom_dust_bound_long_q >= dust,
+        engine.phantom_dust_potential_long_q >= dust,
         "dust bound must cover A-truncation phantom OI for multiple accounts"
     );
 

@@ -413,43 +413,43 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 }
 
 // ============================================================================
-// proof_unilateral_empty_orphan_dust_clearance
+// proof_unilateral_empty_orphan_reset
 // ============================================================================
 
 #[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
-fn proof_unilateral_empty_orphan_dust_clearance() {
+fn proof_unilateral_empty_orphan_reset() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    // Long side: no stored positions, but has phantom dust OI
+    // Long side: no stored positions, but has orphan residual OI.
     engine.stored_pos_count_long = 0;
     // Short side: still has stored positions
     engine.stored_pos_count_short = 2;
 
-    // Phantom dust: both side-local bounds cover their side's residual OI
-    // (§5.7.B). The empty side's bound alone is not enough to clear the
-    // non-empty side.
+    // Potential dust records uncertain floor slack; it is not a certified
+    // OI-clearance allowance. One-empty-side residual OI must still make
+    // progress through explicit orphan-exposure reset.
     let dust: u128 = kani::any();
     kani::assume(dust > 0);
     kani::assume(dust <= 100);
-    engine.phantom_dust_bound_long_q = dust;
-    engine.phantom_dust_bound_short_q = dust;
-    engine.oi_eff_long_q = dust; // OI <= dust bound
+    engine.phantom_dust_potential_long_q = dust;
+    engine.phantom_dust_potential_short_q = dust;
+    engine.oi_eff_long_q = dust;
     engine.oi_eff_short_q = dust; // balanced (required by spec)
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
 
-    // §5.7.B: long side is empty, OI within dust bound → both sides get reset
+    // One-empty-side residual OI schedules reset on both sides.
     assert!(
         ctx.pending_reset_long,
-        "unilateral-empty side with OI within dust bound must schedule reset (§5.7.B)"
+        "unilateral-empty side with residual OI must schedule reset"
     );
     assert!(
         ctx.pending_reset_short,
-        "opposite side must also get reset for bilateral consistency (§5.7.B)"
+        "opposite side must also get reset for bilateral consistency"
     );
     // OI must be zeroed
     assert!(
@@ -461,12 +461,12 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
         "OI must be zeroed after dust clearance"
     );
     assert_eq!(
-        engine.phantom_dust_bound_long_q, 0,
-        "dust bound used by the proof must be consumed (§5.7.B)"
+        engine.phantom_dust_potential_long_q, 0,
+        "potential dust must be consumed by orphan reset"
     );
     assert_eq!(
-        engine.phantom_dust_bound_short_q, 0,
-        "dust bound used by the proof must be consumed (§5.7.B)"
+        engine.phantom_dust_potential_short_q, 0,
+        "potential dust must be consumed by orphan reset"
     );
 }
 
