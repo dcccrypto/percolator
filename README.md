@@ -5,6 +5,8 @@
 A predictable perpetual-futures risk engine built around backed exits, lazy
 overhang clearing, and bounded cranks.
 
+Current normative spec: [`spec.md`](spec.md), **v12.19.53**.
+
 If you want the `xy = k` of perpetual futures risk engines -- something you can reason about, audit, and run without human intervention -- the cleanest move is simple: stop treating profit like money. Treat it like what it really is in a stressed exchange: a junior claim on a shared balance sheet.
 
 > No user can ever withdraw more value than actually exists on the exchange balance sheet.
@@ -91,6 +93,12 @@ accounts settle against their snapshots when touched.
 
 No account is singled out. Settlement is O(1) per account and order-independent.
 
+v12.19.53 makes the dust and ADL accounting explicit: residual OI that is
+*certified* as unrepresented may be cleared, while merely *potential* dust is
+only diagnostic until an exact proof or scan certifies it. ADL deficit written
+through `K` must also be bounded by worst-case rounded settlement loss, not by a
+floor-rounded aggregate denominator.
+
 ### Markets Return to Healthy
 
 A/K/F guarantees forward progress through a deterministic cycle:
@@ -135,6 +143,11 @@ Active price or funding accrual also has a maximum elapsed-slot window; beyond
 that, ordinary live catch-up fails closed and the wrapper must use recovery or
 resolution.
 
+For public CrankForward markets, v12.19.53 requires permissionless bounded
+catchup or canonical permissionless recovery: stale exposed markets must be able
+to advance in safe segments, and price-scale dead zones must route to recovery
+instead of silently advancing `slot_last` with no effective price progress.
+
 Initialization proves a per-risk-notional envelope for the worst allowed
 price/funding step plus liquidation fees. At runtime, before any K/F/price/slot
 mutation, the engine checks that the next effective step stays inside that
@@ -160,6 +173,9 @@ Together:
 - Markets recover through deterministic side resets.
 - Exposed cranks are bounded to the configured price/funding budget.
 - Raw oracle targets are wrapper-owned; the engine only sees capped effective prices.
+- H-max locks and loss-stale catchup restrict positive-PnL usability, not all
+  loss-current trading. Once `slot_last == current_slot`, valid conservative
+  trades can continue while the h-max sweep finishes.
 
 A/K/F fairness is exact for open-position economics. H fairness is exact for the
 currently stored realized claim set, not for the economically "true" claim set
