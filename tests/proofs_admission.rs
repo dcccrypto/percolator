@@ -1472,32 +1472,55 @@ fn v19_equity_active_keeper_missing_slot_progress_commits() {
 #[kani::solver(cadical)]
 fn v19_greedy_phase2_model_respects_touch_budget_and_bounds() {
     // Small spec model for greedy Phase 2. It skips unused slots, touches at
-    // most rr_touch_limit used slots, and never scans outside the sweep limit.
+    // most rr_touch_limit used slots, scans at most rr_scan_limit slots, and
+    // makes bounded progress whenever both limits are nonzero.
     let cursor: u8 = kani::any();
     let rr_touch_limit: u8 = kani::any();
+    let rr_scan_limit: u8 = kani::any();
     let used_mask: u8 = kani::any();
     let sweep_limit = 8u64;
     kani::assume((cursor as u64) < sweep_limit);
     kani::assume(rr_touch_limit <= 4);
+    kani::assume(rr_scan_limit <= sweep_limit as u8);
 
     let mut i = cursor as u64;
     let mut touched = 0u64;
-    while i < sweep_limit && touched < rr_touch_limit as u64 {
+    let mut inspected = 0u64;
+    let mut wrapped = false;
+    while inspected < rr_scan_limit as u64 && touched < rr_touch_limit as u64 {
         let used = ((used_mask >> (i as u32)) & 1) != 0;
         if used {
             touched += 1;
         }
         i += 1;
+        inspected += 1;
+        if i == sweep_limit {
+            i = 0;
+            wrapped = true;
+            break;
+        }
     }
-    let cursor_after = if i >= sweep_limit { 0 } else { i };
+    let cursor_after = i;
 
     assert!(touched <= rr_touch_limit as u64);
-    assert!(i <= sweep_limit);
+    assert!(inspected <= rr_scan_limit as u64);
     assert!(cursor_after < sweep_limit);
-    if rr_touch_limit == 0 {
+    if rr_touch_limit == 0 || rr_scan_limit == 0 {
         assert_eq!(cursor_after, cursor as u64);
         assert_eq!(touched, 0);
+        assert_eq!(inspected, 0);
+    } else {
+        assert!(inspected > 0);
+        assert!(cursor_after != cursor as u64 || wrapped);
     }
+    kani::cover!(
+        rr_touch_limit > 0 && rr_scan_limit > 0 && inspected > 0 && touched == 0,
+        "phase2 can skip unused slots without spending touch budget"
+    );
+    kani::cover!(
+        rr_touch_limit > 0 && rr_scan_limit > 0 && inspected > 0 && touched > 0,
+        "phase2 can touch used slots while respecting touch budget"
+    );
 }
 
 #[kani::proof]
@@ -1515,13 +1538,14 @@ fn v19_same_slot_stress_wrap_defers_generation_reset() {
 
     let r = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
     assert!(r.is_ok());
-    assert_eq!(engine.rr_cursor_position, engine.params.max_accounts - 1);
-    assert_eq!(engine.sweep_generation, generation_before as u64);
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.sweep_generation, generation_before as u64 + 1);
     assert_eq!(
         engine.stress_consumed_bps_e9_since_envelope,
         consumed_before as u128
     );
     assert_eq!(engine.stress_envelope_remaining_indices, 1);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
 }
 
 #[kani::proof]
@@ -1566,15 +1590,115 @@ fn v19_generation_advances_at_most_once_per_slot() {
     engine.sweep_generation = generation_before as u64;
     engine.rr_cursor_position = 1;
 
-    let first = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    let first = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
     assert!(first.is_ok());
     let after_first = engine.sweep_generation;
     assert_eq!(after_first, generation_before as u64 + 1);
 
-    let second = engine.keeper_crank_not_atomic(1, DEFAULT_ORACLE, &[], 0, 0, 1, 100, None, 1);
+    let second = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
     assert!(second.is_ok());
     assert_eq!(engine.sweep_generation, after_first);
     assert_eq!(engine.last_sweep_generation_advance_slot, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_same_slot_cursor_progress_without_second_generation_advance() {
+    let mut params = zero_fee_params();
+    params.max_accounts = 2;
+    params.max_active_positions_per_side = 2;
+    let mut engine = RiskEngine::new_with_market(params, 1, DEFAULT_ORACLE);
+    engine.rr_cursor_position = 1;
+    engine.sweep_generation = 1;
+    engine.last_sweep_generation_advance_slot = 1;
+
+    let r = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot: 1,
+        oracle_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+
+    assert!(r.is_ok());
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.sweep_generation, 1);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
+    kani::cover!(
+        engine.rr_cursor_position == 0 && engine.sweep_generation == 1,
+        "same-slot boundary crank progresses cursor without a second generation advance"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn v19_bounded_stale_catchup_advances_one_segment() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    let size = POS_SCALE as i128;
+    engine.set_position_basis_q(a as usize, size).unwrap();
+    engine.set_position_basis_q(b as usize, -size).unwrap();
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.rr_cursor_position = 2;
+
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots + 1;
+    let segment_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots;
+    let r = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE - 1,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+
+    assert!(r.is_ok());
+    assert_eq!(engine.last_market_slot, segment_slot);
+    assert_eq!(engine.current_slot, now_slot);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE - 1);
+    assert_eq!(engine.stress_envelope_start_slot, now_slot);
+    assert_eq!(engine.rr_cursor_position, 3);
+    kani::cover!(
+        engine.last_market_slot == segment_slot && engine.current_slot == now_slot,
+        "bounded stale catchup advances slot_last by one segment while current_slot uses authenticated time"
+    );
 }
 
 // ============================================================================

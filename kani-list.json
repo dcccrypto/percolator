@@ -34,6 +34,7 @@
       "v19_admit_gate_some_zero_rejected",
       "v19_admit_gate_sticky_early_return",
       "v19_admit_gate_stress_lane_forces_h_max",
+      "v19_bounded_stale_catchup_advances_one_segment",
       "v19_consumption_floor_below_one_bp",
       "v19_consumption_monotone_within_generation",
       "v19_funding_consumption_accumulates_scaled_bps",
@@ -41,6 +42,7 @@
       "v19_greedy_phase2_model_respects_touch_budget_and_bounds",
       "v19_rr_scan_zero_no_stress_progress",
       "v19_rr_touch_zero_no_cursor_advance",
+      "v19_same_slot_cursor_progress_without_second_generation_advance",
       "v19_same_slot_stress_wrap_defers_generation_reset",
       "v19_stress_envelope_clear_requires_later_wrap"
     ],

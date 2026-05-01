@@ -2683,11 +2683,18 @@ impl RiskEngine {
         }
     }
 
-    fn keeper_accrual_is_equity_active(&self, oracle_price: u64, funding_rate_e9: i128) -> bool {
+    fn keeper_accrual_is_equity_active(
+        &self,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> bool {
+        let total_dt = now_slot.saturating_sub(self.last_market_slot);
         let has_any_oi = self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0;
         let price_move_active =
             self.last_oracle_price > 0 && oracle_price != self.last_oracle_price && has_any_oi;
-        let funding_active = funding_rate_e9 != 0
+        let funding_active = total_dt > 0
+            && funding_rate_e9 != 0
             && self.oi_eff_long_q != 0
             && self.oi_eff_short_q != 0
             && self.fund_px_last > 0;
@@ -2696,7 +2703,7 @@ impl RiskEngine {
 
     fn keeper_has_possible_protective_progress(
         &self,
-        now_slot: u64,
+        _now_slot: u64,
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
         rr_touch_limit: u64,
@@ -2728,14 +2735,6 @@ impl RiskEngine {
         let wrap_bound = self.params.max_accounts;
         if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
             return Err(RiskError::CorruptState);
-        }
-        let same_slot_as_stress_start = self.stress_consumed_bps_e9_since_envelope > 0
-            && self.stress_envelope_start_slot == now_slot;
-        let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
-            || now_slot > self.last_sweep_generation_advance_slot;
-        let wrap_eligible = wrap_allowed && !same_slot_as_stress_start;
-        if self.rr_cursor_position == wrap_bound - 1 && !wrap_eligible {
-            return Ok(false);
         }
         Ok(true)
     }
@@ -2938,6 +2937,23 @@ impl RiskEngine {
         // surfaces BEFORE any mutation. Same validate-then-mutate contract
         // as top_up_insurance_fund and deposit_fee_credits.
         self.assert_public_postconditions()?;
+        self.accrue_market_segment_to_internal(
+            now_slot,
+            now_slot,
+            now_slot,
+            oracle_price,
+            funding_rate_e9,
+        )
+    }
+
+    fn accrue_market_segment_to_internal(
+        &mut self,
+        accrual_slot: u64,
+        current_slot_after: u64,
+        stress_start_slot_after: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -2951,10 +2967,13 @@ impl RiskEngine {
         }
 
         // Time monotonicity (spec §5.4 preconditions)
-        if now_slot < self.current_slot {
+        if current_slot_after < self.current_slot {
             return Err(RiskError::Overflow);
         }
-        if now_slot < self.last_market_slot {
+        if accrual_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if accrual_slot > current_slot_after || stress_start_slot_after > current_slot_after {
             return Err(RiskError::Overflow);
         }
 
@@ -2962,10 +2981,12 @@ impl RiskEngine {
         let long_live = self.oi_eff_long_q != 0;
         let short_live = self.oi_eff_short_q != 0;
 
-        let total_dt = now_slot.saturating_sub(self.last_market_slot);
+        let total_dt = accrual_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
         if total_dt == 0 && self.last_oracle_price == oracle_price {
             // Step 5: no change — set current_slot and return (spec §5.4)
-            self.current_slot = now_slot;
+            self.current_slot = current_slot_after;
             return Ok(());
         }
 
@@ -3131,7 +3152,7 @@ impl RiskEngine {
         let mut stress_start_generation = self.stress_envelope_start_generation;
         if consumed_this_step > 0 {
             stress_remaining = self.params.max_accounts;
-            stress_start_slot = now_slot;
+            stress_start_slot = stress_start_slot_after;
             stress_start_generation = self.sweep_generation;
         }
 
@@ -3140,8 +3161,8 @@ impl RiskEngine {
         self.adl_coeff_short = k_short;
         self.f_long_num = f_long;
         self.f_short_num = f_short;
-        self.current_slot = now_slot;
-        self.last_market_slot = now_slot;
+        self.current_slot = current_slot_after;
+        self.last_market_slot = accrual_slot;
         self.last_oracle_price = oracle_price;
         self.fund_px_last = oracle_price;
         self.stress_consumed_bps_e9_since_envelope = new_stress_consumed;
@@ -4507,7 +4528,9 @@ impl RiskEngine {
             .checked_sub(dec)
             .ok_or(RiskError::CorruptState)?;
         let generation_after_stress = self.stress_envelope_start_generation != NO_SLOT
-            && self.sweep_generation > self.stress_envelope_start_generation;
+            && self.sweep_generation > self.stress_envelope_start_generation
+            && self.last_sweep_generation_advance_slot != NO_SLOT
+            && self.last_sweep_generation_advance_slot > self.stress_envelope_start_slot;
         if self.stress_envelope_remaining_indices == 0
             && self.stress_envelope_start_slot != now_slot
             && generation_after_stress
@@ -6632,7 +6655,18 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         let equity_active_accrual =
-            self.keeper_accrual_is_equity_active(oracle_price, funding_rate_e9);
+            self.keeper_accrual_is_equity_active(now_slot, oracle_price, funding_rate_e9);
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let accrual_slot =
+            if equity_active_accrual && remaining_dt > self.params.max_accrual_dt_slots {
+                self.last_market_slot
+                    .checked_add(self.params.max_accrual_dt_slots)
+                    .ok_or(RiskError::Overflow)?
+            } else {
+                now_slot
+            };
         if equity_active_accrual
             && !self.keeper_has_possible_protective_progress(
                 now_slot,
@@ -6645,11 +6679,16 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized);
         }
 
-        // Step 5: accrue_market_to exactly once.
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-
-        // Step 6: current_slot = now_slot.
-        self.current_slot = now_slot;
+        // Step 5: accrue once. If the authenticated slot is too stale for a
+        // single equity-active accrual, advance exactly one bounded segment and
+        // keep public time owned by `now_slot`.
+        self.accrue_market_segment_to_internal(
+            accrual_slot,
+            now_slot,
+            now_slot,
+            oracle_price,
+            funding_rate_e9,
+        )?;
 
         // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
         let mut attempts: u16 = 0;
@@ -6731,15 +6770,11 @@ impl RiskEngine {
             && self.stress_envelope_start_slot == now_slot;
         let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
             || now_slot > self.last_sweep_generation_advance_slot;
-        let wrap_eligible = wrap_allowed && !same_slot_as_stress_start;
         let mut wrapped = false;
 
         while phase2_inspected < scan_cap && phase2_touched < rr_touch_limit {
             if wrap_bound == 0 || i >= wrap_bound {
                 return Err(RiskError::CorruptState);
-            }
-            if i == wrap_bound - 1 && !wrap_eligible {
-                break;
             }
             let iu = i as usize;
             if self.is_used(iu) {
@@ -6749,22 +6784,22 @@ impl RiskEngine {
             i = i.checked_add(1).ok_or(RiskError::Overflow)?;
             phase2_inspected = phase2_inspected.checked_add(1).ok_or(RiskError::Overflow)?;
             protective_progress = true;
-            if self.stress_consumed_bps_e9_since_envelope > 0 && !same_slot_as_stress_start {
+            if self.stress_consumed_bps_e9_since_envelope > 0
+                && wrap_allowed
+                && !same_slot_as_stress_start
+            {
                 stress_counted_inspected = stress_counted_inspected
                     .checked_add(1)
                     .ok_or(RiskError::Overflow)?;
             }
             if i == wrap_bound {
-                if !wrap_eligible {
-                    return Err(RiskError::CorruptState);
-                }
                 i = 0;
                 wrapped = true;
                 break;
             }
         }
 
-        if wrapped {
+        if wrapped && wrap_allowed {
             self.advance_sweep_generation(now_slot)?;
         }
         self.rr_cursor_position = i;

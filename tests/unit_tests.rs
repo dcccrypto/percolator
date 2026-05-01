@@ -3266,7 +3266,18 @@ fn keeper_crank_phase2_wraparound_advances_generation_and_resets_consumption() {
     seed_active_stress_envelope(&mut engine, 123, 0, 1);
 
     engine
-        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
         .unwrap();
     assert_eq!(
         engine.rr_cursor_position, 0,
@@ -3291,19 +3302,30 @@ fn keeper_crank_phase2_wrap_after_same_slot_stress_defers_reset() {
     seed_active_stress_envelope(&mut engine, 123, 1, 1);
 
     engine
-        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
         .unwrap();
     assert_eq!(
-        engine.rr_cursor_position,
-        wrap - 1,
-        "same-slot stress cannot wrap the generation boundary"
+        engine.rr_cursor_position, 0,
+        "same-slot stress may still advance the cursor boundary"
     );
     assert_eq!(
-        engine.sweep_generation, 7,
-        "same-slot stress must not be cleared by a wrap"
+        engine.sweep_generation, 8,
+        "same-slot stress may advance generation, but it is not eligible for clearing"
     );
     assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 123);
     assert_eq!(engine.stress_envelope_remaining_indices, 1);
+    assert_eq!(engine.last_sweep_generation_advance_slot, 1);
 }
 
 #[test]
@@ -3342,7 +3364,18 @@ fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
     engine.rr_cursor_position = wrap - 1;
 
     engine
-        .keeper_crank_not_atomic(1, 1000, &[], 0, 0, 1, 100, None, 1)
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
         .unwrap();
     assert_eq!(engine.sweep_generation, 1);
 
@@ -3353,6 +3386,69 @@ fn keeper_crank_phase2_generation_advances_at_most_once_per_slot() {
         .unwrap();
     assert_eq!(engine.sweep_generation, 1);
     assert_eq!(engine.last_sweep_generation_advance_slot, 1);
+}
+
+#[test]
+fn keeper_crank_phase2_same_slot_wrap_progress_without_second_generation() {
+    let mut params = default_params();
+    params.max_accounts = 2;
+    params.max_active_positions_per_side = 2;
+    let mut engine = RiskEngine::new_with_market(params, 1, 1000);
+    engine.rr_cursor_position = 1;
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.sweep_generation, 1);
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 1);
+    assert_eq!(engine.sweep_generation, 1);
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(
+        engine.sweep_generation, 1,
+        "same-slot boundary progress must not advance generation twice"
+    );
 }
 
 #[test]
@@ -3991,6 +4087,62 @@ fn keeper_crank_equity_active_requires_protective_progress() {
     assert_eq!(engine.current_slot, slot);
     assert_eq!(engine.last_market_slot, slot);
     assert_eq!(engine.last_oracle_price, oracle);
+}
+
+#[test]
+fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            Some(1),
+        )
+        .unwrap();
+
+    let now_slot = slot + engine.params.max_accrual_dt_slots + 50;
+    let segment_slot = slot + engine.params.max_accrual_dt_slots;
+    engine.rr_cursor_position = 2;
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: 990,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: Some(1),
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+
+    assert_eq!(
+        engine.last_market_slot, segment_slot,
+        "stale exposed crank advances exactly one bounded accrual segment"
+    );
+    assert_eq!(
+        engine.current_slot, now_slot,
+        "authenticated instruction slot owns public current_slot"
+    );
+    assert_eq!(engine.last_oracle_price, 990);
+    assert_eq!(
+        engine.stress_envelope_start_slot, now_slot,
+        "segment stress is timestamped with authenticated instruction slot"
+    );
+    assert_eq!(engine.rr_cursor_position, 3);
 }
 
 #[test]
