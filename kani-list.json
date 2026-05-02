@@ -122,6 +122,7 @@
     "tests/proofs_b_index.rs": [
       "proof_account_b_chunk_commit_requires_combined_pnl_candidate_fits",
       "proof_account_b_partial_settlement_blocks_user_value_until_current",
+      "proof_account_b_positive_public_budget_never_deadlocks_stale_account",
       "proof_account_b_settlement_chunk_respects_loss_limit_and_advances_locally",
       "proof_account_b_zero_delta_routes_to_progress_required_or_recovery",
       "proof_active_bankrupt_close_chunk_caps_force_recovery_not_infinite_progress",

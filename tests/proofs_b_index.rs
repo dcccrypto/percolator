@@ -495,6 +495,51 @@ fn proof_account_b_settlement_chunk_respects_loss_limit_and_advances_locally() {
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]
+fn proof_account_b_positive_public_budget_never_deadlocks_stale_account() {
+    let state = AccountBModel {
+        b_snap: kani::any(),
+        b_target: kani::any(),
+        weight: kani::any(),
+        b_rem: kani::any(),
+    };
+    let loss_limit: u8 = kani::any();
+    let delta_budget: u8 = kani::any();
+
+    kani::assume((state.b_target as u32) <= MODEL_MAX_B);
+    kani::assume(state.b_snap < state.b_target);
+    kani::assume(state.weight > 0 && (state.weight as u32) <= MODEL_DEN);
+    kani::assume((state.b_rem as u32) < MODEL_DEN);
+    kani::assume(loss_limit > 0 && (loss_limit as u32) <= MODEL_MAX_ACCOUNT_B_LOSS);
+    kani::assume(delta_budget > 0);
+
+    let Some((next, loss, delta)) = settle_account_b_chunk(state, loss_limit, delta_budget) else {
+        panic!("positive public B settlement budget must advance a stale account");
+    };
+
+    assert!(delta > 0);
+    assert!(next.b_snap > state.b_snap);
+    assert!(next.b_snap <= state.b_target);
+    assert!((loss as u32) <= loss_limit as u32);
+
+    kani::cover!(
+        settle_account_b_chunk(
+            AccountBModel {
+                b_snap: 0,
+                b_target: 6,
+                weight: 16,
+                b_rem: 15,
+            },
+            1,
+            6,
+        )
+        .is_some(),
+        "worst-remainder positive public B chunk remains live"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(1)]
+#[kani::solver(cadical)]
 fn proof_account_b_chunk_commit_requires_combined_pnl_candidate_fits() {
     let state = AccountBModel {
         b_snap: kani::any(),
