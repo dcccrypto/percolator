@@ -233,6 +233,10 @@ pub enum RecoveryReason {
     /// Explicit non-claim audit state saturated; public progress must not
     /// depend on widening that audit bucket in-place.
     ExplicitLossOrDustAuditOverflow = 2,
+    /// The next deterministic bounded price segment is within the configured
+    /// movement cap, but the resulting K/F state cannot satisfy persistent
+    /// representability or future-headroom checks.
+    BlockedSegmentHeadroomOrRepresentability = 3,
 }
 
 /// Reserve mode for set_pnl (spec §4.8)
@@ -869,6 +873,15 @@ pub struct Phase2ScanOutcome {
     pub touched: u64,
     pub stress_counted_inspected: u64,
     pub wrapped: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccrualSegmentPlan {
+    k_long: i128,
+    k_short: i128,
+    f_long: i128,
+    f_short: i128,
+    consumed_this_step: u128,
 }
 
 /// Stable keeper-crank request object. New crank policy fields should be added
@@ -3372,6 +3385,52 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)
     }
 
+    fn bounded_accrual_slot_for_now(&self, now_slot: u64) -> Result<u64> {
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let segment_dt = core::cmp::min(remaining_dt, self.params.max_accrual_dt_slots);
+        self.last_market_slot
+            .checked_add(segment_dt)
+            .ok_or(RiskError::Overflow)
+    }
+
+    fn bounded_price_step_toward_raw_target(
+        &self,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<u64> {
+        if authenticated_raw_target_price == 0
+            || authenticated_raw_target_price > MAX_ORACLE_PRICE
+            || self.last_oracle_price == 0
+            || self.last_oracle_price > MAX_ORACLE_PRICE
+        {
+            return Err(RiskError::Overflow);
+        }
+        let cap_abs = self.bounded_price_step_cap_abs(now_slot)?;
+        let p_last = self.last_oracle_price;
+        if authenticated_raw_target_price > p_last {
+            let raw_delta = authenticated_raw_target_price
+                .checked_sub(p_last)
+                .ok_or(RiskError::Overflow)? as u128;
+            let step = core::cmp::min(raw_delta, cap_abs);
+            p_last
+                .checked_add(step.try_into().map_err(|_| RiskError::Overflow)?)
+                .ok_or(RiskError::Overflow)
+        } else {
+            let raw_delta = p_last
+                .checked_sub(authenticated_raw_target_price)
+                .ok_or(RiskError::Overflow)? as u128;
+            let step = core::cmp::min(raw_delta, cap_abs);
+            p_last
+                .checked_sub(step.try_into().map_err(|_| RiskError::Overflow)?)
+                .ok_or(RiskError::Overflow)
+        }
+    }
+
     test_visible! {
     fn validate_permissionless_p_last_recovery_reason(
         &self,
@@ -3407,6 +3466,28 @@ impl RiskEngine {
                     Ok(())
                 } else {
                     Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::BlockedSegmentHeadroomOrRepresentability => {
+                if authenticated_raw_target_price == 0
+                    || authenticated_raw_target_price == self.last_oracle_price
+                    || !self.exposed_market_has_oi()
+                    || self.bounded_price_step_cap_abs(now_slot)? == 0
+                {
+                    return Err(RiskError::Unauthorized);
+                }
+
+                let accrual_slot = self.bounded_accrual_slot_for_now(now_slot)?;
+                let effective_price =
+                    self.bounded_price_step_toward_raw_target(now_slot, authenticated_raw_target_price)?;
+                if effective_price == self.last_oracle_price {
+                    return Err(RiskError::Unauthorized);
+                }
+
+                match self.plan_accrual_segment(accrual_slot, effective_price, 0) {
+                    Err(RiskError::Overflow) => Ok(()),
+                    Err(e) => Err(e),
+                    Ok(_) => Err(RiskError::Unauthorized),
                 }
             }
             RecoveryReason::ExplicitLossOrDustAuditOverflow => {
@@ -3765,6 +3846,130 @@ impl RiskEngine {
         Ok(())
     }
 
+    fn plan_accrual_segment(
+        &self,
+        accrual_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<AccrualSegmentPlan> {
+        let long_live = self.oi_eff_long_q != 0;
+        let short_live = self.oi_eff_short_q != 0;
+
+        let total_dt = accrual_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+
+        // Spec §5.5 step 6-8 (v12.20.6): enforce the per-call dt envelope
+        // whenever funding or price movement would actually drain equity.
+        let funding_active =
+            funding_rate_e9 != 0 && long_live && short_live && self.fund_px_last > 0;
+        let price_move_active = self.last_oracle_price > 0
+            && oracle_price != self.last_oracle_price
+            && (long_live || short_live);
+        if (funding_active || price_move_active) && total_dt > self.params.max_accrual_dt_slots {
+            return Err(RiskError::Overflow);
+        }
+
+        // Spec §5.5 step 9: per-accrual price-move cap. This fires even for
+        // dt == 0, where any nonzero movement has RHS 0 and must reject.
+        let mut price_consumed_bps_e9: u128 = 0;
+        if price_move_active {
+            let abs_dp = (oracle_price as i128 - self.last_oracle_price as i128).unsigned_abs();
+            let lhs = abs_dp.checked_mul(10_000u128).ok_or(RiskError::Overflow)?;
+            let rhs = U256::from_u128(self.params.max_price_move_bps_per_slot as u128)
+                .checked_mul(U256::from_u128(total_dt as u128))
+                .and_then(|v| v.checked_mul(U256::from_u128(self.last_oracle_price as u128)))
+                .ok_or(RiskError::Overflow)?;
+            if U256::from_u128(lhs) > rhs {
+                return Err(RiskError::Overflow);
+            }
+
+            let consumed_wide = U256::from_u128(lhs)
+                .checked_mul(U256::from_u128(STRESS_CONSUMPTION_SCALE))
+                .ok_or(RiskError::Overflow)?
+                .checked_div(U256::from_u128(self.last_oracle_price as u128))
+                .ok_or(RiskError::Overflow)?;
+            price_consumed_bps_e9 = consumed_wide.try_into_u128().unwrap_or(u128::MAX);
+        }
+        let mut funding_consumed_bps_e9: u128 = 0;
+        if funding_active && total_dt > 0 {
+            let funding_wide = U256::from_u128(funding_rate_e9.unsigned_abs())
+                .checked_mul(U256::from_u128(total_dt as u128))
+                .and_then(|v| v.checked_mul(U256::from_u128(10_000u128)))
+                .unwrap_or(U256::MAX);
+            funding_consumed_bps_e9 = funding_wide.try_into_u128().unwrap_or(u128::MAX);
+        }
+        let consumed_this_step = price_consumed_bps_e9.saturating_add(funding_consumed_bps_e9);
+
+        let mut k_long = self.adl_coeff_long;
+        let mut k_short = self.adl_coeff_short;
+
+        let current_price = self.last_oracle_price;
+        let delta_p = (oracle_price as i128)
+            .checked_sub(current_price as i128)
+            .ok_or(RiskError::Overflow)?;
+        if delta_p != 0 {
+            let delta_p_wide = I256::from_i128(delta_p);
+            if long_live {
+                let dk_wide = I256::from_u128(self.adl_mult_long)
+                    .checked_mul_i256(delta_p_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let k_long_wide = I256::from_i128(k_long)
+                    .checked_add(dk_wide)
+                    .ok_or(RiskError::Overflow)?;
+                k_long = Self::try_into_non_min_i128(k_long_wide)?;
+            }
+            if short_live {
+                let dk_wide = I256::from_u128(self.adl_mult_short)
+                    .checked_mul_i256(delta_p_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let k_short_wide = I256::from_i128(k_short)
+                    .checked_sub(dk_wide)
+                    .ok_or(RiskError::Overflow)?;
+                k_short = Self::try_into_non_min_i128(k_short_wide)?;
+            }
+        }
+
+        let mut f_long = self.f_long_num;
+        let mut f_short = self.f_short_num;
+        if funding_rate_e9 != 0 && total_dt > 0 && long_live && short_live {
+            let fund_px_0 = self.fund_px_last;
+            if fund_px_0 > 0 {
+                let fund_num_total_wide = I256::from_u128(fund_px_0 as u128)
+                    .checked_mul_i256(I256::from_i128(funding_rate_e9))
+                    .ok_or(RiskError::Overflow)?
+                    .checked_mul_i256(I256::from_u128(total_dt as u128))
+                    .ok_or(RiskError::Overflow)?;
+
+                let df_long_wide = I256::from_u128(self.adl_mult_long)
+                    .checked_mul_i256(fund_num_total_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let f_long_wide = I256::from_i128(f_long)
+                    .checked_sub(df_long_wide)
+                    .ok_or(RiskError::Overflow)?;
+                f_long = Self::try_into_non_min_i128(f_long_wide)?;
+
+                let df_short_wide = I256::from_u128(self.adl_mult_short)
+                    .checked_mul_i256(fund_num_total_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let f_short_wide = I256::from_i128(f_short)
+                    .checked_add(df_short_wide)
+                    .ok_or(RiskError::Overflow)?;
+                f_short = Self::try_into_non_min_i128(f_short_wide)?;
+            }
+        }
+
+        self.validate_live_kf_future_headroom(k_long, k_short, f_long, f_short)?;
+
+        Ok(AccrualSegmentPlan {
+            k_long,
+            k_short,
+            f_long,
+            f_short,
+            consumed_this_step,
+        })
+    }
+
     // ========================================================================
     // accrue_market_to (spec §5.4)
     // ========================================================================
@@ -3820,190 +4025,25 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Step 4: snapshot OI at start (fixed for all sub-steps per spec §5.4)
-        let long_live = self.oi_eff_long_q != 0;
-        let short_live = self.oi_eff_short_q != 0;
-
-        let total_dt = accrual_slot
-            .checked_sub(self.last_market_slot)
-            .ok_or(RiskError::Overflow)?;
-        if total_dt == 0 && self.last_oracle_price == oracle_price {
-            // Step 5: no change — set current_slot and return (spec §5.4)
-            self.current_slot = current_slot_after;
-            return Ok(());
-        }
-
-        // Spec §5.5 step 6-8 (v12.20.6): enforce per-call dt envelope whenever
-        // funding OR price movement would actually drain equity.
-        //
-        // - funding_active: funding_rate != 0 AND both sides have OI AND fund_px_last > 0
-        // - price_move_active: P_last > 0 AND oracle_price != P_last AND OI nonzero on some side
-        //
-        // If either is true, dt <= cfg_max_accrual_dt_slots MUST hold. This
-        // is load-bearing for goal 52: bounded dt + bounded per-slot price
-        // move + init-time solvency envelope together prevent the A1-class
-        // self-neutral insurance siphon.
-        //
-        // Zero-OI idle markets and zero-funding-no-price-move cases remain
-        // fast-forwardable; that's required for idle heartbeat cranks.
-        let funding_active =
-            funding_rate_e9 != 0 && long_live && short_live && self.fund_px_last > 0;
-        let price_move_active = self.last_oracle_price > 0
-            && oracle_price != self.last_oracle_price
-            && (long_live || short_live);
-        if (funding_active || price_move_active) && total_dt > self.params.max_accrual_dt_slots {
-            return Err(RiskError::Overflow);
-        }
-
-        // Spec §5.5 step 9 (v12.20.6): per-accrual price-move cap.
-        //
-        //   require abs(oracle_price - P_last) * 10_000
-        //           <= cfg_max_price_move_bps_per_slot * dt * P_last
-        //
-        // The check fires whenever price_move_active is true, INCLUDING
-        // dt == 0. With dt == 0 and any nonzero price move, RHS = 0 and
-        // LHS > 0 → rejects correctly. This closes the same-slot bypass
-        // that would otherwise let live OI be marked through an arbitrary
-        // price jump with zero elapsed time, weakening goal 52.
-        //
-        // Check fires BEFORE any K/F/P_last/slot_last/consumption mutation.
-        let mut price_consumed_bps_e9: u128 = 0;
-        if price_move_active {
-            let abs_dp = (oracle_price as i128 - self.last_oracle_price as i128).unsigned_abs();
-            // LHS = abs_dp * 10_000. abs_dp <= 2 * MAX_ORACLE_PRICE (2e12),
-            // so LHS <= 2e16 — fits u128 trivially.
-            let lhs = abs_dp.checked_mul(10_000u128).ok_or(RiskError::Overflow)?;
-            // RHS = cap * dt * P_last. cap <= MAX_MARGIN_BPS (1e4, validated
-            // in validate_params), dt <= u64::MAX (1.8e19), P_last <= 1e12,
-            // product can exceed u128 (1.8e35), so compute in U256.
-            let rhs = U256::from_u128(self.params.max_price_move_bps_per_slot as u128)
-                .checked_mul(U256::from_u128(total_dt as u128))
-                .and_then(|v| v.checked_mul(U256::from_u128(self.last_oracle_price as u128)))
-                .ok_or(RiskError::Overflow)?;
-            let lhs_wide = U256::from_u128(lhs);
-            if lhs_wide > rhs {
-                return Err(RiskError::Overflow);
-            }
-
-            // Spec §5.3: consumption is floor scaled-bps, not whole bps.
-            // Sub-scaled-bps jitter floors to 0, and finite thresholds compare
-            // in this same scaled domain.
-            let consumed_wide = U256::from_u128(lhs)
-                .checked_mul(U256::from_u128(STRESS_CONSUMPTION_SCALE))
-                .ok_or(RiskError::Overflow)?
-                .checked_div(U256::from_u128(self.last_oracle_price as u128))
-                .ok_or(RiskError::Overflow)?;
-            price_consumed_bps_e9 = consumed_wide.try_into_u128().unwrap_or(u128::MAX);
-        }
-        let mut funding_consumed_bps_e9: u128 = 0;
-        if funding_active && total_dt > 0 {
-            let funding_wide = U256::from_u128(funding_rate_e9.unsigned_abs())
-                .checked_mul(U256::from_u128(total_dt as u128))
-                .and_then(|v| v.checked_mul(U256::from_u128(10_000u128)))
-                .unwrap_or(U256::MAX);
-            funding_consumed_bps_e9 = funding_wide.try_into_u128().unwrap_or(u128::MAX);
-        }
-        let consumed_this_step = price_consumed_bps_e9.saturating_add(funding_consumed_bps_e9);
-
-        // Use scratch K values for the entire mark + funding computation.
-        // Only commit to engine state after ALL computations succeed.
-        // This prevents partial K advancement on mid-function errors.
-        let mut k_long = self.adl_coeff_long;
-        let mut k_short = self.adl_coeff_short;
-
-        // Step 5: Mark-to-market (once, spec §1.5 item 21)
-        let current_price = self.last_oracle_price;
-        let delta_p = (oracle_price as i128)
-            .checked_sub(current_price as i128)
-            .ok_or(RiskError::Overflow)?;
-        if delta_p != 0 {
-            // Compute mark deltas in I256, only fail when final K doesn't fit i128.
-            // This avoids false overflow when delta magnitude > i128::MAX but
-            // current K has opposite sign so the sum still fits.
-            let delta_p_wide = I256::from_i128(delta_p);
-            if long_live {
-                let a_long_wide = I256::from_u128(self.adl_mult_long);
-                let dk_wide = a_long_wide
-                    .checked_mul_i256(delta_p_wide)
-                    .ok_or(RiskError::Overflow)?;
-                let k_long_wide = I256::from_i128(k_long)
-                    .checked_add(dk_wide)
-                    .ok_or(RiskError::Overflow)?;
-                k_long = Self::try_into_non_min_i128(k_long_wide)?;
-            }
-            if short_live {
-                let a_short_wide = I256::from_u128(self.adl_mult_short);
-                let dk_wide = a_short_wide
-                    .checked_mul_i256(delta_p_wide)
-                    .ok_or(RiskError::Overflow)?;
-                let k_short_wide = I256::from_i128(k_short)
-                    .checked_sub(dk_wide)
-                    .ok_or(RiskError::Overflow)?;
-                k_short = Self::try_into_non_min_i128(k_short_wide)?;
-            }
-        }
-
-        // Step 8: Funding transfer: one exact total delta (spec §5.5).
-        // fund_num_total = fund_px_0 * funding_rate_e9_per_slot * dt
-        // computed in exact wide signed domain. No substep loop.
-        let mut f_long = self.f_long_num;
-        let mut f_short = self.f_short_num;
-        if funding_rate_e9 != 0 && total_dt > 0 && long_live && short_live {
-            let fund_px_0 = self.fund_px_last;
-
-            if fund_px_0 > 0 {
-                // Exact computation in I256: fund_num_total = fund_px_0 * rate * dt
-                // Only fail when final persisted F doesn't fit i128.
-                let px_wide = I256::from_u128(fund_px_0 as u128);
-                let rate_wide = I256::from_i128(funding_rate_e9);
-                let dt_wide = I256::from_u128(total_dt as u128);
-                let fund_num_total_wide = px_wide
-                    .checked_mul_i256(rate_wide)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_mul_i256(dt_wide)
-                    .ok_or(RiskError::Overflow)?;
-
-                // F_long -= A_long * fund_num_total
-                let a_long_wide = I256::from_u128(self.adl_mult_long);
-                let df_long_wide = a_long_wide
-                    .checked_mul_i256(fund_num_total_wide)
-                    .ok_or(RiskError::Overflow)?;
-                let f_long_wide = I256::from_i128(f_long)
-                    .checked_sub(df_long_wide)
-                    .ok_or(RiskError::Overflow)?;
-                f_long = Self::try_into_non_min_i128(f_long_wide)?;
-
-                // F_short += A_short * fund_num_total
-                let a_short_wide = I256::from_u128(self.adl_mult_short);
-                let df_short_wide = a_short_wide
-                    .checked_mul_i256(fund_num_total_wide)
-                    .ok_or(RiskError::Overflow)?;
-                let f_short_wide = I256::from_i128(f_short)
-                    .checked_add(df_short_wide)
-                    .ok_or(RiskError::Overflow)?;
-                f_short = Self::try_into_non_min_i128(f_short_wide)?;
-            }
-        }
-
-        self.validate_live_kf_future_headroom(k_long, k_short, f_long, f_short)?;
+        let plan = self.plan_accrual_segment(accrual_slot, oracle_price, funding_rate_e9)?;
 
         let new_stress_consumed = self
             .stress_consumed_bps_e9_since_envelope
-            .saturating_add(consumed_this_step);
+            .saturating_add(plan.consumed_this_step);
         let mut stress_remaining = self.stress_envelope_remaining_indices;
         let mut stress_start_slot = self.stress_envelope_start_slot;
         let mut stress_start_generation = self.stress_envelope_start_generation;
-        if consumed_this_step > 0 {
+        if plan.consumed_this_step > 0 {
             stress_remaining = self.params.max_accounts;
             stress_start_slot = stress_start_slot_after;
             stress_start_generation = self.sweep_generation;
         }
 
         // ALL computations succeeded — commit all state atomically.
-        self.adl_coeff_long = k_long;
-        self.adl_coeff_short = k_short;
-        self.f_long_num = f_long;
-        self.f_short_num = f_short;
+        self.adl_coeff_long = plan.k_long;
+        self.adl_coeff_short = plan.k_short;
+        self.f_long_num = plan.f_long;
+        self.f_short_num = plan.f_short;
         self.current_slot = current_slot_after;
         self.last_market_slot = accrual_slot;
         self.last_oracle_price = oracle_price;

@@ -9202,6 +9202,60 @@ fn permissionless_recovery_b_headroom_exhaustion_resolves_at_p_last() {
 }
 
 #[test]
+fn permissionless_recovery_blocked_segment_headroom_resolves_at_p_last() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let max_future_mark = ADL_ONE * MAX_ORACLE_PRICE as u128;
+    engine.adl_coeff_long = (i128::MAX as u128 - max_future_mark) as i128;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BlockedSegmentHeadroomOrRepresentability,
+        1,
+        1001,
+    );
+    assert!(r.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(
+        engine.resolved_price, 1000,
+        "blocked-segment recovery must use engine P_last, not raw target"
+    );
+    assert_eq!(engine.resolved_live_price, 1000);
+}
+
+#[test]
+fn permissionless_recovery_rejects_blocked_segment_when_accrual_can_progress() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BlockedSegmentHeadroomOrRepresentability,
+        1,
+        1001,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
 fn permissionless_recovery_rejects_inactive_explicit_loss_reason() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
