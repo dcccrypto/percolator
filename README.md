@@ -5,7 +5,7 @@
 A predictable perpetual-futures risk engine built around backed exits, lazy
 overhang clearing, and bounded cranks.
 
-Current normative spec: [`spec.md`](spec.md), **v12.19.53**.
+Current normative spec: [`spec.md`](spec.md), **v12.20.6**.
 
 If you want the `xy = k` of perpetual futures risk engines -- something you can reason about, audit, and run without human intervention -- the cleanest move is simple: stop treating profit like money. Treat it like what it really is in a stressed exchange: a junior claim on a shared balance sheet.
 
@@ -22,7 +22,7 @@ A stressed perp exchange has three jobs:
 Percolator composes three mechanisms:
 
 - **H** (the haircut ratio) makes positive PnL a junior claim on residual value.
-- **A/K/F** (lazy side indices) settles mark moves, funding, and ADL overhang without selecting individual losers.
+- **A/K/F/B** (lazy side indices) settles mark moves, funding, quantity ADL, and bankruptcy residuals without selecting individual losers.
 - **The price/funding envelope** bounds every exposed accrual step before K/F/price/slot state can mutate.
 
 ---
@@ -68,7 +68,7 @@ Flat accounts are always protected — `h` only gates profit extraction, never t
 
 ---
 
-## A/K/F: Fair Overhang Clearing
+## A/K/F/B: Fair Overhang Clearing
 
 When a leveraged account goes bankrupt, two things need to happen: remove the position quantity from open interest, and distribute any uncovered deficit across the opposing side.
 
@@ -76,8 +76,9 @@ Traditional ADL queues pick specific counterparties and force-close them.
 Percolator replaces the queue with lazy side indices:
 
 - **A** scales everyone's effective position equally.
-- **K** accumulates mark and ADL overhang effects.
+- **K** accumulates mark effects.
 - **F** accumulates funding effects.
+- **B** books bankruptcy residual loss through an exact scaled-loss index.
 
 ```
 effective_pos(i) = floor(basis_i * A / a_basis_i)
@@ -87,21 +88,22 @@ pnl_delta(i)     =
 ```
 
 When a liquidation reduces OI, `A` decreases -- every account on that side
-shrinks by the same ratio. When a deficit is socialized, `K` shifts -- every
-account absorbs the same per-unit loss. Funding moves through `F` the same way:
-accounts settle against their snapshots when touched.
+shrinks by the same ratio. Mark moves through `K`, funding moves through `F`,
+and bankruptcy residuals move through `B`. Accounts settle against their
+snapshots when touched.
 
 No account is singled out. Settlement is O(1) per account and order-independent.
 
-v12.19.53 makes the dust and ADL accounting explicit: residual OI that is
+v12.20.6 makes the dust and ADL accounting explicit: residual OI that is
 *certified* as unrepresented may be cleared, while merely *potential* dust is
-only diagnostic until an exact proof or scan certifies it. ADL deficit written
-through `K` must also be bounded by worst-case rounded settlement loss, not by a
-floor-rounded aggregate denominator.
+only diagnostic until an exact proof or scan certifies it. Bankruptcy residuals
+are not written through `K`; they are booked through `B` with an exact scaled
+identity, or routed to explicit non-claim audit loss if the represented set is
+not certified.
 
 ### Markets Return to Healthy
 
-A/K/F guarantees forward progress through a deterministic cycle:
+A/K/F/B guarantees forward progress through a deterministic cycle:
 
 **DrainOnly** — when `A` drops below a precision threshold, no new OI can be added. Positions can only close.
 
@@ -143,7 +145,7 @@ Active price or funding accrual also has a maximum elapsed-slot window; beyond
 that, ordinary live catch-up fails closed and the wrapper must use recovery or
 resolution.
 
-For public CrankForward markets, v12.19.53 requires permissionless bounded
+For public CrankForward markets, v12.20.6 requires permissionless bounded
 catchup or canonical permissionless recovery: stale exposed markets must be able
 to advance in safe segments, and price-scale dead zones must route to recovery
 instead of silently advancing `slot_last` with no effective price progress.
@@ -158,10 +160,10 @@ market into an unbudgeted state.
 
 ## How They Compose
 
-| | H | A/K/F | Price/funding envelope |
+| | H | A/K/F/B | Price/funding envelope |
 |---|---|---|---|
 | **Solves** | Backed exits | Bankrupt overhang clearing | Bounded live repricing |
-| **Math** | Pro-rata profit scaling | Pro-rata position, mark, funding, and deficit scaling | Exact per-risk-notional loss budget |
+| **Math** | Pro-rata profit scaling | Pro-rata position, mark, funding, and bankruptcy-loss scaling | Exact per-risk-notional loss budget |
 | **Triggered by** | Withdrawal, conversion, settlement | Mark, funding, liquidation, reset | Live accrual/crank |
 | **Failure mode** | Less profit is released | Side drains and resets | Crank fails closed or wrapper stair-steps |
 
@@ -177,7 +179,7 @@ Together:
   loss-current trading. Once `slot_last == current_slot`, valid conservative
   trades can continue while the h-max sweep finishes.
 
-A/K/F fairness is exact for open-position economics. H fairness is exact for the
+A/K/F/B fairness is exact for open-position economics. H fairness is exact for the
 currently stored realized claim set, not for the economically "true" claim set
 you would get after globally touching every account.
 

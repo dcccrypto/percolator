@@ -93,7 +93,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 // (Test removed — function no longer exists in the public API)
 
 // ============================================================================
-// T11.46: enqueue_adl_k_add_overflow_still_routes_quantity
+// T11.46: enqueue_adl_residual_booking_still_routes_quantity
 // ============================================================================
 
 #[kani::proof]
@@ -119,10 +119,11 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    // K_opp must be UNCHANGED when K_opp + delta_K overflows
+    // v12.20.6: bankruptcy residuals do not write K. Even near a K boundary,
+    // quantity routing remains live and insurance is consumed first.
     assert!(
         engine.adl_coeff_long == k_before,
-        "K_opp must not be modified on K-space overflow (spec §5.6 step 6)"
+        "K_opp must not be modified by bankruptcy residual booking"
     );
     // A must shrink (quantity was still routed)
     assert!(
@@ -131,10 +132,10 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     );
     // OI must decrease by q_close
     assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
-    // Insurance fund must decrease by D (absorb_protocol_loss was invoked)
+    // Insurance fund must decrease by D's insurance-covered prefix.
     assert!(
         engine.insurance_fund.balance.get() < ins_before,
-        "insurance fund must decrease — absorb_protocol_loss must be invoked"
+        "insurance fund must decrease through insurance-first deficit coverage"
     );
 }
 
@@ -217,6 +218,7 @@ fn t11_49_pure_pnl_bankruptcy_path() {
 
     let a_before = engine.adl_mult_long;
     let k_before = engine.adl_coeff_long;
+    let audit_before = engine.explicit_unallocated_loss_long.get();
 
     let d = 1_000u128;
     let q_close = 0u128;
@@ -229,8 +231,12 @@ fn t11_49_pure_pnl_bankruptcy_path() {
         "A must be unchanged for pure PnL bankruptcy"
     );
     assert!(
-        engine.adl_coeff_long != k_before,
-        "K must change when D > 0"
+        engine.adl_coeff_long == k_before,
+        "pure residual bankruptcy must not mutate K"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() > audit_before,
+        "with no certified B weight, pure residual bankruptcy is durably audited"
     );
     assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
 }
@@ -508,6 +514,7 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
 
     let mut ctx = InstructionContext::new();
     let k_short_before = engine.adl_coeff_short;
+    let b_short_before = engine.b_short_num;
     let result = engine.enqueue_adl(&mut ctx, Side::Long, size, 1_000u128);
     assert!(result.is_ok(), "ADL enqueue must succeed for balanced OI");
     assert!(
@@ -525,8 +532,12 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
         "ADL full drain must schedule short reset"
     );
     assert!(
-        engine.adl_coeff_short < k_short_before,
-        "deficit must be socialized to the opposing short side K"
+        engine.adl_coeff_short == k_short_before,
+        "bankruptcy residual must not mutate opposing short side K"
+    );
+    assert!(
+        engine.b_short_num > b_short_before,
+        "deficit must be booked to the opposing short side B"
     );
     assert!(engine.check_conservation());
 

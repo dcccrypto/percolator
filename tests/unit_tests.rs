@@ -130,6 +130,16 @@ fn mat_regression_account(engine: &mut RiskEngine, idx: u16, capital: u128, slot
     engine.deposit_not_atomic(idx, capital, slot).unwrap();
 }
 
+fn loss_weight_for_test(abs_basis: u128, a_basis: u128) -> u128 {
+    percolator::wide_math::mul_div_ceil_u256(
+        U256::from_u128(abs_basis),
+        U256::from_u128(SOCIAL_WEIGHT_SCALE),
+        U256::from_u128(a_basis),
+    )
+    .try_into_u128()
+    .unwrap()
+}
+
 /// Helper: allocate a user slot without moving capital (back-door via
 /// materialize_at). The spec-strict deposit path is exercised in
 /// test_deposit_materialize_user.
@@ -1241,15 +1251,25 @@ fn execute_trade_clears_dust_before_opening_fresh_oi() {
     e.accounts[0].adl_epoch_snap = e.adl_epoch_long;
     e.accounts[0].adl_k_snap = 0;
     e.accounts[0].f_snap = 0;
+    e.accounts[0].loss_weight = loss_weight_for_test(1, 2);
+    e.accounts[0].b_snap = e.b_long_num;
+    e.accounts[0].b_rem = 0;
+    e.accounts[0].b_epoch_snap = e.adl_epoch_long;
     e.accounts[1].position_basis_q = -1;
     e.accounts[1].adl_a_basis = 2;
     e.accounts[1].adl_epoch_snap = e.adl_epoch_short;
     e.accounts[1].adl_k_snap = 0;
     e.accounts[1].f_snap = 0;
+    e.accounts[1].loss_weight = loss_weight_for_test(1, 2);
+    e.accounts[1].b_snap = e.b_short_num;
+    e.accounts[1].b_rem = 0;
+    e.accounts[1].b_epoch_snap = e.adl_epoch_short;
     e.oi_eff_long_q = 1;
     e.oi_eff_short_q = 1;
     e.stored_pos_count_long = 1;
     e.stored_pos_count_short = 1;
+    e.loss_weight_sum_long = e.accounts[0].loss_weight;
+    e.loss_weight_sum_short = e.accounts[1].loss_weight;
 
     let q = POS_SCALE as i128;
     e.execute_trade_not_atomic(0, 1, px, 1, q, px, 0, 1, 10, None)
@@ -1323,23 +1343,9 @@ fn reset_leaves_future_mark_headroom_after_a_restored_to_adl_one() {
 }
 
 #[test]
-fn adl_k_write_preserves_future_mark_headroom() {
-    // Regression (reviewer pass 8): enqueue_adl's K-overflow fallback
-    // only catches the moment where the ADL K add itself overflows i128.
-    // A K value CAN still fit i128 yet land close enough to the boundary
-    // that the next valid oracle move makes accrue_market_to overflow K.
-    //
-    // After an ADL write, for any valid future oracle step
-    // |delta_p| <= MAX_ORACLE_PRICE, the resulting K (side s) MUST fit
-    // i128. The invariant is:
-    //     |K_s| + A_s * MAX_ORACLE_PRICE <= i128::MAX
-    // (A_s cannot increase; new A_s <= old A_s.)
-    //
-    // If the ADL K write would violate this, the deficit MUST route
-    // through record_uninsured_protocol_loss instead, matching the
-    // existing "overflow → implicit haircut" policy.
-    // v12.19.53: start at a high P_last so a small envelope-compliant move
-    // can be applied post-ADL to test mark-to-market headroom.
+fn bankruptcy_b_write_preserves_future_mark_headroom() {
+    // v12.20.6: bankruptcy residual is booked through B, not K. A residual
+    // booking must not push K/F headroom toward a later accrue overflow.
     let mut params = default_params();
     params.trading_fee_bps = 0;
     params.liquidation_fee_bps = 0;
@@ -1356,26 +1362,22 @@ fn adl_k_write_preserves_future_mark_headroom() {
     engine.oi_eff_long_q = 2;
     engine.oi_eff_short_q = 2;
     let mut ctx = percolator::InstructionContext::new();
-    let a_ps = ADL_ONE.checked_mul(POS_SCALE).unwrap();
-    // Pick d so delta_k_abs ~ i128::MAX: ADL pushes K_short near the edge.
-    let d = ((i128::MAX as u128) / a_ps) * 2;
+    let old_k_short = engine.adl_coeff_short;
+    let d = 1;
     engine
         .enqueue_adl(&mut ctx, percolator::Side::Long, 1, d)
         .expect("enqueue_adl");
+    assert_eq!(engine.adl_coeff_short, old_k_short);
+    assert!(engine.b_short_num > 0);
 
-    // Post-ADL: either the deficit was routed through
-    // record_uninsured_protocol_loss (adl_coeff_short unchanged near 0),
-    // OR it was written to K but with enough headroom that mark-to-market
-    // at next-slot envelope-compliant move still works.
-    // v12.19.53: move by (cap = 3 bps/slot * 1 slot * init_px = 30 units).
+    // Move by (cap = 3 bps/slot * 1 slot * init_px = 30 units).
     // Use delta of 30 (30/100000 = 3 bps) exactly at cap.
     let next_px = init_px + 30;
     let r = engine.accrue_market_to(1, next_px, 0);
     assert!(
         r.is_ok(),
-        "after enqueue_adl, a subsequent envelope-compliant accrue_market_to \
-         must not overflow K — either ADL must leave enough headroom or route \
-         the deficit through uninsured loss (got {:?})",
+        "after B residual booking, a subsequent envelope-compliant accrue_market_to \
+         must not overflow K (got {:?})",
         r
     );
 }
@@ -1981,9 +1983,7 @@ fn test_reset_pending_blocks_new_trades() {
     engine
         .attach_effective_position(stale as usize, -make_size_q(1))
         .unwrap();
-    engine.adl_epoch_short = 1;
-    engine.side_mode_short = SideMode::ResetPending;
-    engine.stale_account_count_short = 1;
+    engine.begin_full_drain_reset(Side::Short).unwrap();
 
     // b would go long (opposite of short blocked), a goes short — short increase blocked
     let size_q = make_size_q(50); // b goes long, a goes short (swapped)
@@ -4668,6 +4668,11 @@ fn floor_to_zero_live_touch_preserves_oi_and_tracks_potential_dust() {
     engine.accounts[idx as usize].adl_epoch_snap = engine.adl_epoch_long;
     engine.accounts[idx as usize].adl_k_snap = engine.adl_coeff_long;
     engine.accounts[idx as usize].f_snap = engine.f_long_num;
+    engine.accounts[idx as usize].loss_weight = loss_weight_for_test(1, 2);
+    engine.accounts[idx as usize].b_snap = engine.b_long_num;
+    engine.accounts[idx as usize].b_rem = 0;
+    engine.accounts[idx as usize].b_epoch_snap = engine.adl_epoch_long;
+    engine.loss_weight_sum_long = engine.accounts[idx as usize].loss_weight;
 
     let oi_before = engine.oi_eff_long_q;
     let mut ctx = InstructionContext::new_with_admission(0, 100);
@@ -8045,6 +8050,106 @@ fn adl_must_not_apply_k_loss_when_uncertified_potential_dust_remains() {
 }
 
 #[test]
+fn bankruptcy_residual_books_to_b_not_k_and_settles_once() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    mat_regression_account(&mut engine, 1, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 2;
+    engine.oi_eff_long_q = 2;
+    let old_k_short = engine.adl_coeff_short;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    engine.enqueue_adl(&mut ctx, Side::Long, 0, 2).unwrap();
+
+    assert_eq!(engine.adl_coeff_short, old_k_short);
+    assert!(engine.b_short_num > 0);
+    let before_cap = engine.accounts[0].capital.get() + engine.accounts[1].capital.get();
+    engine.touch_account_live_local(0, &mut ctx).unwrap();
+    engine.touch_account_live_local(1, &mut ctx).unwrap();
+    let after_first = engine.accounts[0].capital.get() + engine.accounts[1].capital.get();
+    assert_eq!(before_cap - after_first, 2);
+
+    engine.touch_account_live_local(0, &mut ctx).unwrap();
+    engine.touch_account_live_local(1, &mut ctx).unwrap();
+    let after_second = engine.accounts[0].capital.get() + engine.accounts[1].capital.get();
+    assert_eq!(
+        after_second, after_first,
+        "B delta must settle at most once"
+    );
+}
+
+#[test]
+fn b_residual_chunk_booking_satisfies_exact_scaled_identity() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    mat_regression_account(&mut engine, 1, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.social_loss_remainder_short_num = SOCIAL_LOSS_DEN - 1;
+
+    let old_b = engine.b_short_num;
+    let old_rem = engine.social_loss_remainder_short_num;
+    let w = engine.loss_weight_sum_short;
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    let chunk = engine
+        .book_bankruptcy_residual_chunk_to_side(&mut ctx, Side::Short, 3, PUBLIC_B_CHUNK_ATOMS)
+        .unwrap();
+    assert_eq!(chunk, 3);
+
+    let delta_b = engine.b_short_num - old_b;
+    let lhs = U256::from_u128(delta_b)
+        .checked_mul(U256::from_u128(w))
+        .unwrap()
+        .checked_add(U256::from_u128(engine.social_loss_remainder_short_num))
+        .unwrap()
+        .checked_sub(U256::from_u128(old_rem))
+        .unwrap();
+    let rhs = U256::from_u128(chunk)
+        .checked_mul(U256::from_u128(SOCIAL_LOSS_DEN))
+        .unwrap();
+    assert_eq!(lhs, rhs);
+}
+
+#[test]
+fn weight_change_quarantines_b_remainder_to_scaled_dust() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    let weight_before = engine.loss_weight_sum_long;
+    assert!(weight_before > 0);
+    engine.social_loss_remainder_long_num = SOCIAL_LOSS_DEN - 1;
+    engine.accounts[0].b_rem = 1;
+
+    engine.attach_effective_position(0, 0).unwrap();
+
+    assert_eq!(engine.loss_weight_sum_long, 0);
+    assert_eq!(engine.social_loss_remainder_long_num, 0);
+    assert_eq!(engine.social_loss_dust_long_num, 0);
+    assert_eq!(engine.explicit_unallocated_loss_long.get(), 1);
+}
+
+#[test]
+fn b_settlement_can_trigger_bankruptcy_hmax() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 1, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    engine.enqueue_adl(&mut ctx, Side::Long, 0, 2).unwrap();
+    engine.touch_account_live_local(0, &mut ctx).unwrap();
+
+    assert_eq!(engine.accounts[0].capital.get(), 0);
+    assert!(engine.accounts[0].pnl < 0);
+    assert!(engine.bankruptcy_hmax_lock_active);
+}
+
+#[test]
 fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_symmetric() {
     // Valid bilateral symmetry. Setup:
     //   liq_side = Short, OI_eff_short = POS_SCALE  (gets decremented)
@@ -9733,15 +9838,7 @@ fn test_direct_resolved_reconcile_finalizes_ready_reset_side() {
     let basis = make_size_q(1);
 
     engine.set_position_basis_q(idx, basis).unwrap();
-    engine.accounts[idx].adl_a_basis = ADL_ONE;
-    engine.accounts[idx].adl_k_snap = 0;
-    engine.accounts[idx].f_snap = 0;
-    engine.accounts[idx].adl_epoch_snap = 0;
-    engine.adl_epoch_long = 1;
-    engine.adl_epoch_start_k_long = 0;
-    engine.f_epoch_start_long_num = 0;
-    engine.side_mode_long = SideMode::ResetPending;
-    engine.stale_account_count_long = 1;
+    engine.begin_full_drain_reset(Side::Long).unwrap();
     engine.market_mode = MarketMode::Resolved;
     engine.resolved_price = 1000;
     engine.resolved_live_price = 1000;

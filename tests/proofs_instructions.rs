@@ -750,18 +750,12 @@ fn t11_54_worked_example_regression() {
         .unwrap();
 
     let size_q = (2 * POS_SCALE) as i128;
-    engine.accounts[a as usize].position_basis_q = size_q;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = -size_q;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-    engine.stored_pos_count_short = 1;
-    engine.adl_epoch_long = 0;
-    engine.adl_epoch_short = 0;
+    engine
+        .attach_effective_position(a as usize, size_q)
+        .unwrap();
+    engine
+        .attach_effective_position(b as usize, -size_q)
+        .unwrap();
     engine.oi_eff_long_q = 2 * POS_SCALE;
     engine.oi_eff_short_q = 2 * POS_SCALE;
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
@@ -769,12 +763,15 @@ fn t11_54_worked_example_regression() {
     let mut ctx = InstructionContext::new();
     let d = 500u128;
     let q_close = POS_SCALE;
+    let k_long_before = engine.adl_coeff_long;
+    let b_long_before = engine.b_long_num;
     let r2 = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(r2.is_ok());
 
     assert!(engine.adl_mult_long < ADL_ONE);
     assert!(engine.oi_eff_long_q == POS_SCALE);
-    assert!(engine.adl_coeff_long != 0i128);
+    assert!(engine.adl_coeff_long == k_long_before);
+    assert!(engine.b_long_num > b_long_before);
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);

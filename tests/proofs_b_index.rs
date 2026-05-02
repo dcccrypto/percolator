@@ -1,8 +1,8 @@
 //! B-index bankruptcy socialization spec-model proofs.
 //!
 //! These proofs are small symbolic models for the v12.20.6 B-index rules.
-//! They are intentionally independent from the current v12.19 engine structs:
-//! the production engine has not yet implemented B-index state.
+//! They complement the production-engine B-index regression tests/proofs by
+//! keeping the arithmetic and liveness contracts explicit and tractable.
 
 #![cfg(kani)]
 

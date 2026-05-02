@@ -1,16 +1,14 @@
-//! Formally Verified Risk Engine for Perpetual DEX — v12.19.53
+//! Formally Verified Risk Engine for Perpetual DEX — v12.20.6
 //!
-//! Implements the v12.19.53 spec.
+//! Implements the v12.20.6 spec.
 //!
 //! This module implements a formally verified risk engine that guarantees:
 //! 1. Protected principal for flat accounts
 //! 2. PNL warmup prevents instant withdrawal of manipulated profits
-//! 3. ADL via lazy A/K side indices on the opposing OI side
+//! 3. ADL via lazy A/K/F indices plus B-index bankruptcy loss booking
 //! 4. Conservation of funds across all operations (V >= C_tot + I)
-//! 5. Bankruptcy socialization primarily through explicit A/K state. In the rare
-//!    case of K-space i128 overflow during ADL, the remaining deficit falls to
-//!    implicit global haircut (h) rather than panicking — preserving liquidation
-//!    liveness at the cost of reducing the opposing side's junior PnL claims.
+//! 5. Bankruptcy residuals are durably booked through B-side indices or
+//!    explicit non-claim audit buckets before the bankrupt account is cleared.
 //!
 //! # Atomicity Model
 //!
@@ -114,6 +112,16 @@ pub const FUNDING_DEN: u128 = 1_000_000_000;
 /// STRESS_CONSUMPTION_SCALE = 1e9 (spec §1.4 / §5.3)
 pub const STRESS_CONSUMPTION_SCALE: u128 = 1_000_000_000;
 
+/// SOCIAL_WEIGHT_SCALE = ADL_ONE (spec §1.2, v12.20.6).
+pub const SOCIAL_WEIGHT_SCALE: u128 = ADL_ONE;
+
+/// SOCIAL_LOSS_DEN = 1e21 (spec §1.2, v12.20.6).
+pub const SOCIAL_LOSS_DEN: u128 = 1_000_000_000_000_000_000_000;
+
+/// Public residual B booking chunk budget. This conservative deployment
+/// constant satisfies spec §1.4: cfg_public_b_chunk_atoms >= MAX_VAULT_TVL.
+pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -158,8 +166,7 @@ pub use i128::{I128, U128};
 pub mod wide_math;
 use wide_math::{
     ceil_div_positive_checked, fee_debt_u128_checked, mul_div_ceil_u128, mul_div_ceil_u256,
-    mul_div_floor_u128, mul_div_floor_u256_with_rem, wide_mul_div_ceil_u128_or_over_i128max,
-    wide_mul_div_floor_u128, OverI128Magnitude, I256, U256,
+    mul_div_floor_u128, mul_div_floor_u256_with_rem, wide_mul_div_floor_u128, I256, U256,
 };
 
 // ============================================================================
@@ -259,7 +266,7 @@ pub struct InstructionContext {
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
-    /// Optional scaled consumption-threshold gate (spec §4.7, v12.19.53).
+    /// Optional scaled consumption-threshold gate (spec §4.7, v12.20.6).
     /// `None` disables step 2 of `admit_fresh_reserve_h_lock`.
     /// Public entrypoints accept whole-bps thresholds; the context stores
     /// `threshold * STRESS_CONSUMPTION_SCALE`.
@@ -441,6 +448,13 @@ pub struct Account {
     /// Side epoch snapshot
     pub adl_epoch_snap: u64,
 
+    /// Account-local B-index loss weight and snapshot state (spec §2.1, v12.20.6).
+    /// Nonzero only while `position_basis_q != 0`.
+    pub loss_weight: u128,
+    pub b_snap: u128,
+    pub b_rem: u128,
+    pub b_epoch_snap: u64,
+
     /// Wrapper-owned matching-engine bindings (spec §2.1.1, non-normative).
     /// Opaque payload stored by the engine but never read for any
     /// spec-normative decision. Typical use: CPI routing by the wrapper's
@@ -506,6 +520,10 @@ fn empty_account() -> Account {
         adl_k_snap: 0i128,
         f_snap: 0i128,
         adl_epoch_snap: 0,
+        loss_weight: 0,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
         owner: [0; 32],
@@ -599,7 +617,7 @@ pub struct RiskParams {
     /// Per-market active-positions cap per side (spec §1.4).
     /// Invariant: max_active_positions_per_side <= max_accounts <= MAX_ACCOUNTS.
     pub max_active_positions_per_side: u64,
-    /// Per-slot price-move cap in bps (spec §1.4, v12.19.53).
+    /// Per-slot price-move cap in bps (spec §1.4, v12.20.6).
     ///
     /// Bounds the magnitude of `|oracle_price - P_last| / P_last` per
     /// accrual envelope: `accrue_market_to` rejects any call on a
@@ -669,19 +687,35 @@ pub struct RiskEngine {
     pub phantom_dust_potential_long_q: u128,
     pub phantom_dust_potential_short_q: u128,
 
+    /// B-index bankruptcy residual state (spec §2.2, v12.20.6).
+    pub b_long_num: u128,
+    pub b_short_num: u128,
+    pub b_epoch_start_long_num: u128,
+    pub b_epoch_start_short_num: u128,
+    pub loss_weight_sum_long: u128,
+    pub loss_weight_sum_short: u128,
+    pub social_loss_remainder_long_num: u128,
+    pub social_loss_remainder_short_num: u128,
+    pub social_loss_dust_long_num: u128,
+    pub social_loss_dust_short_num: u128,
+    pub explicit_unallocated_loss_long: U128,
+    pub explicit_unallocated_loss_short: U128,
+    pub explicit_unallocated_protocol_loss: U128,
+    pub explicit_unallocated_loss_saturated: u8,
+
     /// Materialized account count (spec §2.2)
     pub materialized_account_count: u64,
 
     /// Count of accounts with PNL < 0 (spec §4.7).
     pub neg_pnl_account_count: u64,
 
-    /// Round-robin sweep cursor (spec §2.2, v12.19.53).
+    /// Round-robin sweep cursor (spec §2.2, v12.20.6).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
     /// `0 <= rr_cursor_position < params.max_accounts`. Greedy Phase 2
     /// skips unused slots and touches up to the supplied account budget before
     /// stopping or wrapping at the deployment's physical slab size.
     pub rr_cursor_position: u64,
-    /// Sweep generation counter (spec §2.2, v12.19.53).
+    /// Sweep generation counter (spec §2.2, v12.20.6).
     /// Incremented at most once per slot after a full wraparound of
     /// `rr_cursor_position`.
     /// Read-only from the wrapper perspective; can only advance by running
@@ -1464,6 +1498,20 @@ impl RiskEngine {
             phantom_dust_certified_short_q: 0u128,
             phantom_dust_potential_long_q: 0u128,
             phantom_dust_potential_short_q: 0u128,
+            b_long_num: 0,
+            b_short_num: 0,
+            b_epoch_start_long_num: 0,
+            b_epoch_start_short_num: 0,
+            loss_weight_sum_long: 0,
+            loss_weight_sum_short: 0,
+            social_loss_remainder_long_num: 0,
+            social_loss_remainder_short_num: 0,
+            social_loss_dust_long_num: 0,
+            social_loss_dust_short_num: 0,
+            explicit_unallocated_loss_long: U128::ZERO,
+            explicit_unallocated_loss_short: U128::ZERO,
+            explicit_unallocated_protocol_loss: U128::ZERO,
+            explicit_unallocated_loss_saturated: 0,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
             rr_cursor_position: 0,
@@ -1564,6 +1612,20 @@ impl RiskEngine {
         self.phantom_dust_certified_short_q = 0;
         self.phantom_dust_potential_long_q = 0;
         self.phantom_dust_potential_short_q = 0;
+        self.b_long_num = 0;
+        self.b_short_num = 0;
+        self.b_epoch_start_long_num = 0;
+        self.b_epoch_start_short_num = 0;
+        self.loss_weight_sum_long = 0;
+        self.loss_weight_sum_short = 0;
+        self.social_loss_remainder_long_num = 0;
+        self.social_loss_remainder_short_num = 0;
+        self.social_loss_dust_long_num = 0;
+        self.social_loss_dust_short_num = 0;
+        self.explicit_unallocated_loss_long = U128::ZERO;
+        self.explicit_unallocated_loss_short = U128::ZERO;
+        self.explicit_unallocated_protocol_loss = U128::ZERO;
+        self.explicit_unallocated_loss_saturated = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
         self.rr_cursor_position = 0;
@@ -1597,6 +1659,10 @@ impl RiskEngine {
             a.adl_k_snap = 0;
             a.f_snap = 0;
             a.adl_epoch_snap = 0;
+            a.loss_weight = 0;
+            a.b_snap = 0;
+            a.b_rem = 0;
+            a.b_epoch_snap = 0;
             a.matcher_program = [0; 32];
             a.matcher_context = [0; 32];
             a.owner = [0; 32];
@@ -1677,6 +1743,13 @@ impl RiskEngine {
         if self.accounts[i].pnl != 0 { return Err(RiskError::CorruptState); }
         if self.accounts[i].reserved_pnl != 0 { return Err(RiskError::CorruptState); }
         if self.accounts[i].position_basis_q != 0 { return Err(RiskError::CorruptState); }
+        if self.accounts[i].loss_weight != 0
+            || self.accounts[i].b_snap != 0
+            || self.accounts[i].b_rem != 0
+            || self.accounts[i].b_epoch_snap != 0
+        {
+            return Err(RiskError::CorruptState);
+        }
         if self.accounts[i].sched_present != 0 || self.accounts[i].pending_present != 0 {
             return Err(RiskError::CorruptState);
         }
@@ -1708,6 +1781,10 @@ impl RiskEngine {
         a.adl_k_snap = 0;
         a.f_snap = 0;
         a.adl_epoch_snap = 0;
+        a.loss_weight = 0;
+        a.b_snap = 0;
+        a.b_rem = 0;
+        a.b_epoch_snap = 0;
         a.matcher_program = [0; 32];
         a.matcher_context = [0; 32];
         a.owner = [0; 32];
@@ -1860,6 +1937,10 @@ impl RiskEngine {
             a.adl_k_snap = 0i128;
             a.f_snap = 0i128;
             a.adl_epoch_snap = 0;
+            a.loss_weight = 0;
+            a.b_snap = 0;
+            a.b_rem = 0;
+            a.b_epoch_snap = 0;
             a.matcher_program = [0; 32];
             a.matcher_context = [0; 32];
             a.owner = [0; 32];
@@ -2285,25 +2366,47 @@ impl RiskEngine {
         let new_side = side_of_i128(new_basis);
         let mut next_long = self.stored_pos_count_long;
         let mut next_short = self.stored_pos_count_short;
+        let mut next_weight_long = self.loss_weight_sum_long;
+        let mut next_weight_short = self.loss_weight_sum_short;
+        let old_weight = self.accounts[idx].loss_weight;
+        let mut new_weight = 0u128;
 
         if let Some(s) = old_side {
             match s {
                 Side::Long => {
                     next_long = next_long.checked_sub(1).ok_or(RiskError::CorruptState)?;
+                    if self.accounts[idx].b_epoch_snap == self.adl_epoch_long {
+                        next_weight_long = next_weight_long
+                            .checked_sub(old_weight)
+                            .ok_or(RiskError::CorruptState)?;
+                    }
                 }
                 Side::Short => {
                     next_short = next_short.checked_sub(1).ok_or(RiskError::CorruptState)?;
+                    if self.accounts[idx].b_epoch_snap == self.adl_epoch_short {
+                        next_weight_short = next_weight_short
+                            .checked_sub(old_weight)
+                            .ok_or(RiskError::CorruptState)?;
+                    }
                 }
             }
         }
 
         if let Some(s) = new_side {
+            let a_side = self.get_a_side(s);
+            new_weight = Self::loss_weight_for_basis(new_basis.unsigned_abs(), a_side)?;
             match s {
                 Side::Long => {
                     next_long = next_long.checked_add(1).ok_or(RiskError::CorruptState)?;
+                    next_weight_long = next_weight_long
+                        .checked_add(new_weight)
+                        .ok_or(RiskError::Overflow)?;
                 }
                 Side::Short => {
                     next_short = next_short.checked_add(1).ok_or(RiskError::CorruptState)?;
+                    next_weight_short = next_weight_short
+                        .checked_add(new_weight)
+                        .ok_or(RiskError::Overflow)?;
                 }
             }
         }
@@ -2311,10 +2414,40 @@ impl RiskEngine {
         if !allow_transient_spike && (next_long > cap || next_short > cap) {
             return Err(RiskError::Overflow);
         }
+        if next_weight_long > SOCIAL_LOSS_DEN || next_weight_short > SOCIAL_LOSS_DEN {
+            return Err(RiskError::Overflow);
+        }
 
+        if let Some(s) = old_side {
+            self.quarantine_social_remainder_before_weight_change(s)?;
+            let old_rem = self.accounts[idx].b_rem;
+            if old_rem != 0 {
+                self.transfer_scaled_dust_side(s, old_rem)?;
+            }
+        }
+        if let Some(s) = new_side {
+            self.quarantine_social_remainder_before_weight_change(s)?;
+        }
         self.stored_pos_count_long = next_long;
         self.stored_pos_count_short = next_short;
+        self.loss_weight_sum_long = next_weight_long;
+        self.loss_weight_sum_short = next_weight_short;
         self.accounts[idx].position_basis_q = new_basis;
+        if let Some(s) = new_side {
+            self.accounts[idx].loss_weight = new_weight;
+            self.accounts[idx].b_snap = self.get_b_side(s);
+            self.accounts[idx].b_rem = 0;
+            self.accounts[idx].b_epoch_snap = self.get_epoch_side(s);
+            self.accounts[idx].adl_a_basis = self.get_a_side(s);
+            self.accounts[idx].adl_k_snap = self.get_k_side(s);
+            self.accounts[idx].f_snap = self.get_f_side(s);
+            self.accounts[idx].adl_epoch_snap = self.get_epoch_side(s);
+        } else {
+            self.accounts[idx].loss_weight = 0;
+            self.accounts[idx].b_snap = 0;
+            self.accounts[idx].b_rem = 0;
+            self.accounts[idx].b_epoch_snap = 0;
+        }
         Ok(())
     }
 
@@ -2453,6 +2586,121 @@ impl RiskEngine {
         }
     }
 
+    fn get_b_side(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.b_long_num,
+            Side::Short => self.b_short_num,
+        }
+    }
+
+    fn set_b_side(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.b_long_num = v,
+            Side::Short => self.b_short_num = v,
+        }
+    }
+
+    fn get_b_epoch_start(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.b_epoch_start_long_num,
+            Side::Short => self.b_epoch_start_short_num,
+        }
+    }
+
+    fn set_b_epoch_start(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.b_epoch_start_long_num = v,
+            Side::Short => self.b_epoch_start_short_num = v,
+        }
+    }
+
+    fn get_loss_weight_sum(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.loss_weight_sum_long,
+            Side::Short => self.loss_weight_sum_short,
+        }
+    }
+
+    fn set_loss_weight_sum(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.loss_weight_sum_long = v,
+            Side::Short => self.loss_weight_sum_short = v,
+        }
+    }
+
+    fn get_social_remainder(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.social_loss_remainder_long_num,
+            Side::Short => self.social_loss_remainder_short_num,
+        }
+    }
+
+    fn set_social_remainder(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.social_loss_remainder_long_num = v,
+            Side::Short => self.social_loss_remainder_short_num = v,
+        }
+    }
+
+    fn get_social_dust(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.social_loss_dust_long_num,
+            Side::Short => self.social_loss_dust_short_num,
+        }
+    }
+
+    fn set_social_dust(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.social_loss_dust_long_num = v,
+            Side::Short => self.social_loss_dust_short_num = v,
+        }
+    }
+
+    fn add_explicit_unallocated_loss_side(&mut self, s: Side, atoms: u128) {
+        if atoms == 0 {
+            return;
+        }
+        let bucket = match s {
+            Side::Long => &mut self.explicit_unallocated_loss_long,
+            Side::Short => &mut self.explicit_unallocated_loss_short,
+        };
+        match bucket.get().checked_add(atoms) {
+            Some(v) => *bucket = U128::new(v),
+            None => {
+                *bucket = U128::new(u128::MAX);
+                self.explicit_unallocated_loss_saturated = 1;
+            }
+        }
+    }
+
+    fn transfer_scaled_dust_side(&mut self, s: Side, rem_to_transfer: u128) -> Result<()> {
+        if rem_to_transfer == 0 {
+            return Ok(());
+        }
+        if rem_to_transfer >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let total = self
+            .get_social_dust(s)
+            .checked_add(rem_to_transfer)
+            .ok_or(RiskError::Overflow)?;
+        let atoms = total / SOCIAL_LOSS_DEN;
+        let dust = total % SOCIAL_LOSS_DEN;
+        self.set_social_dust(s, dust);
+        self.add_explicit_unallocated_loss_side(s, atoms);
+        Ok(())
+    }
+
+    fn quarantine_social_remainder_before_weight_change(&mut self, s: Side) -> Result<()> {
+        let rem = self.get_social_remainder(s);
+        if rem == 0 {
+            return Ok(());
+        }
+        self.transfer_scaled_dust_side(s, rem)?;
+        self.set_social_remainder(s, 0);
+        Ok(())
+    }
+
     fn get_side_mode(&self, s: Side) -> SideMode {
         match s {
             Side::Long => self.side_mode_long,
@@ -2486,17 +2734,6 @@ impl RiskEngine {
             Side::Long => self.adl_mult_long = v,
             Side::Short => self.adl_mult_short = v,
         }
-    }
-
-    fn set_k_side(&mut self, s: Side, v: i128) -> Result<()> {
-        if v == i128::MIN {
-            return Err(RiskError::Overflow);
-        }
-        match s {
-            Side::Long => self.adl_coeff_long = v,
-            Side::Short => self.adl_coeff_short = v,
-        }
-        Ok(())
     }
 
     /// Compute per-account F-delta PnL.
@@ -2726,51 +2963,199 @@ impl RiskEngine {
         }
     }
 
-    fn exact_adl_k_loss_upper_bound(
-        &self,
-        side: Side,
-        delta_k_abs: u128,
-        budget: u128,
-    ) -> Result<u128> {
-        if delta_k_abs == 0 {
-            return Ok(0);
-        }
-        if self.params.max_accounts > MAX_ACCOUNTS as u64 {
+    fn loss_weight_for_basis(abs_basis: u128, a_basis: u128) -> Result<u128> {
+        if abs_basis == 0 || a_basis == 0 {
             return Err(RiskError::CorruptState);
         }
-
-        let epoch = self.get_epoch_side(side);
-        let mut total = 0u128;
-        let max_accounts = self.params.max_accounts as usize;
-        for idx in 0..max_accounts {
-            if !self.is_used(idx) {
-                continue;
-            }
-            self.validate_touched_account_shape(idx)?;
-            let account = &self.accounts[idx];
-            if side_of_i128(account.position_basis_q) != Some(side) {
-                continue;
-            }
-            if account.adl_epoch_snap != epoch {
-                continue;
-            }
-            let den = account
-                .adl_a_basis
-                .checked_mul(POS_SCALE)
-                .ok_or(RiskError::Overflow)?;
-            let loss = mul_div_ceil_u256(
-                U256::from_u128(account.position_basis_q.unsigned_abs()),
-                U256::from_u128(delta_k_abs),
-                U256::from_u128(den),
-            )
-            .try_into_u128()
-            .ok_or(RiskError::Overflow)?;
-            total = total.checked_add(loss).ok_or(RiskError::Overflow)?;
-            if total > budget {
-                return Ok(total);
-            }
+        let w = mul_div_ceil_u256(
+            U256::from_u128(abs_basis),
+            U256::from_u128(SOCIAL_WEIGHT_SCALE),
+            U256::from_u128(a_basis),
+        )
+        .try_into_u128()
+        .ok_or(RiskError::Overflow)?;
+        if w == 0 || w > SOCIAL_LOSS_DEN {
+            return Err(RiskError::Overflow);
         }
-        Ok(total)
+        Ok(w)
+    }
+
+    fn ceil_mul_div_u128_or_wide(a: u128, b: u128, d: u128) -> Result<u128> {
+        if d == 0 {
+            return Err(RiskError::Overflow);
+        }
+        if a == 0 || b == 0 {
+            return Ok(0);
+        }
+        if let Some(prod) = a.checked_mul(b) {
+            let q = prod / d;
+            let r = prod % d;
+            return if r == 0 {
+                Ok(q)
+            } else {
+                q.checked_add(1).ok_or(RiskError::Overflow)
+            };
+        }
+        #[cfg(kani)]
+        {
+            Err(RiskError::Overflow)
+        }
+        #[cfg(not(kani))]
+        {
+            mul_div_ceil_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d))
+                .try_into_u128()
+                .ok_or(RiskError::Overflow)
+        }
+    }
+
+    fn b_target_for_account(&self, idx: usize, side: Side) -> Result<u128> {
+        let account = &self.accounts[idx];
+        if account.b_epoch_snap != account.adl_epoch_snap {
+            return Err(RiskError::CorruptState);
+        }
+        let epoch_side = self.get_epoch_side(side);
+        if account.adl_epoch_snap == epoch_side {
+            Ok(self.get_b_side(side))
+        } else {
+            if self.get_side_mode(side) != SideMode::ResetPending
+                || account.adl_epoch_snap.checked_add(1) != Some(epoch_side)
+            {
+                return Err(RiskError::CorruptState);
+            }
+            Ok(self.get_b_epoch_start(side))
+        }
+    }
+
+    fn compute_b_loss_and_rem(weight: u128, b_rem: u128, delta_b: u128) -> Result<(u128, u128)> {
+        if weight == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let num = U256::from_u128(weight)
+            .checked_mul(U256::from_u128(delta_b))
+            .and_then(|v| v.checked_add(U256::from_u128(b_rem)))
+            .ok_or(RiskError::Overflow)?;
+        let (loss, rem) = wide_math::div_rem_u256(num, U256::from_u128(SOCIAL_LOSS_DEN));
+        Ok((
+            loss.try_into_u128().ok_or(RiskError::Overflow)?,
+            rem.try_into_u128().ok_or(RiskError::Overflow)?,
+        ))
+    }
+
+    fn settle_account_b_to_target(
+        &mut self,
+        idx: usize,
+        _side: Side,
+        target: u128,
+    ) -> Result<u128> {
+        let account = &self.accounts[idx];
+        if account.loss_weight == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if account.b_snap > target || account.b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let delta_b = target - account.b_snap;
+        let (loss, rem) =
+            Self::compute_b_loss_and_rem(account.loss_weight, account.b_rem, delta_b)?;
+        self.accounts[idx].b_snap = target;
+        self.accounts[idx].b_rem = rem;
+        Ok(loss)
+    }
+
+    test_visible! {
+    fn book_bankruptcy_residual_chunk_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<u128> {
+        if residual_remaining == 0 {
+            return Ok(0);
+        }
+        self.trigger_bankruptcy_hmax_lock(ctx)?;
+        let w = self.get_loss_weight_sum(side);
+        if w == 0 {
+            self.add_explicit_unallocated_loss_side(side, residual_remaining);
+            return Ok(residual_remaining);
+        }
+        if w > SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let rem_old = self.get_social_remainder(side);
+        if rem_old >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let b = self.get_b_side(side);
+        let headroom = u128::MAX.checked_sub(b).ok_or(RiskError::CorruptState)?;
+        let chunk_cap = core::cmp::max(1, core::cmp::min(chunk_budget, PUBLIC_B_CHUNK_ATOMS));
+        let fast_chunk = core::cmp::min(residual_remaining, chunk_cap);
+        let fast_scaled = fast_chunk
+            .checked_mul(SOCIAL_LOSS_DEN)
+            .and_then(|v| v.checked_add(rem_old))
+            .ok_or(RiskError::Overflow)?;
+        let fast_delta_b = fast_scaled / w;
+        let fast_rem_new = fast_scaled % w;
+        if fast_delta_b != 0 && fast_delta_b <= headroom && fast_rem_new < SOCIAL_LOSS_DEN {
+            let new_b = b.checked_add(fast_delta_b).ok_or(RiskError::Overflow)?;
+            self.set_b_side(side, new_b);
+            self.set_social_remainder(side, fast_rem_new);
+            return Ok(fast_chunk);
+        }
+
+        // Boundary fallback: when B is near u128 headroom exhaustion, select a
+        // smaller representable chunk if one exists. The public fast path above
+        // is the normal deployment path because PUBLIC_B_CHUNK_ATOMS *
+        // SOCIAL_LOSS_DEN fits in u128.
+        #[cfg(kani)]
+        {
+            return Err(RiskError::Overflow);
+        }
+        #[cfg(not(kani))]
+        {
+        let max_scaled = U256::from_u128(headroom)
+            .checked_mul(U256::from_u128(w))
+            .ok_or(RiskError::Overflow)?;
+        let rem_old_u = U256::from_u128(rem_old);
+        if max_scaled < rem_old_u {
+            return Err(RiskError::Overflow);
+        }
+        let available_scaled = max_scaled
+            .checked_sub(rem_old_u)
+            .ok_or(RiskError::Overflow)?;
+        let max_chunk_by_b = available_scaled
+            .checked_div(U256::from_u128(SOCIAL_LOSS_DEN))
+            .ok_or(RiskError::Overflow)?
+            .try_into_u128()
+            .unwrap_or(u128::MAX);
+        let engine_chunk = core::cmp::min(residual_remaining, max_chunk_by_b);
+        if engine_chunk == 0 {
+            return Err(RiskError::Overflow);
+        }
+        let chunk = if engine_chunk > chunk_cap {
+            chunk_cap
+        } else {
+            engine_chunk
+        };
+        let scaled = U256::from_u128(chunk)
+            .checked_mul(U256::from_u128(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_add(U256::from_u128(rem_old)))
+            .ok_or(RiskError::Overflow)?;
+        let (delta_b_u, rem_new_u) = wide_math::div_rem_u256(scaled, U256::from_u128(w));
+        let delta_b = delta_b_u.try_into_u128().ok_or(RiskError::Overflow)?;
+        let rem_new = rem_new_u.try_into_u128().ok_or(RiskError::Overflow)?;
+        if delta_b == 0 || rem_new >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::Overflow);
+        }
+        let new_b = b.checked_add(delta_b).ok_or(RiskError::Overflow)?;
+        self.set_b_side(side, new_b);
+        self.set_social_remainder(side, rem_new);
+        Ok(chunk)
+        }
+    }
     }
 
     fn threshold_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
@@ -3051,7 +3436,15 @@ impl RiskEngine {
             // Combined K/F settlement: single floor (spec §1.6).
             let f_side = self.get_f_side(side);
             let f_snap = self.accounts[idx].f_snap;
-            let pnl_delta = Self::compute_kf_pnl_delta(abs_basis, k_snap, k_side, f_snap, f_side, den)?;
+            let kf_delta =
+                Self::compute_kf_pnl_delta(abs_basis, k_snap, k_side, f_snap, f_side, den)?;
+            let b_target = self.b_target_for_account(idx, side)?;
+            let b_loss = self.settle_account_b_to_target(idx, side, b_target)?;
+            let pnl_delta = Self::try_into_non_min_i128(
+                I256::from_i128(kf_delta)
+                    .checked_sub(I256::from_u128(b_loss))
+                    .ok_or(RiskError::Overflow)?,
+            )?;
 
             let new_pnl = self.accounts[idx].pnl.checked_add(pnl_delta)
                 .ok_or(RiskError::Overflow)?;
@@ -3066,6 +3459,7 @@ impl RiskEngine {
                 self.accounts[idx].adl_k_snap = k_side;
                 self.accounts[idx].f_snap = f_side;
                 self.accounts[idx].adl_epoch_snap = epoch_side;
+                self.accounts[idx].b_epoch_snap = epoch_side;
             }
         } else {
             // Epoch mismatch — validate then mutate
@@ -3079,7 +3473,15 @@ impl RiskEngine {
             // Combined K/F settlement for epoch mismatch (spec §1.6).
             let f_end = self.get_f_epoch_start(side);
             let f_snap = self.accounts[idx].f_snap;
-            let pnl_delta = Self::compute_kf_pnl_delta(abs_basis, k_snap, k_epoch_start, f_snap, f_end, den)?;
+            let kf_delta =
+                Self::compute_kf_pnl_delta(abs_basis, k_snap, k_epoch_start, f_snap, f_end, den)?;
+            let b_target = self.b_target_for_account(idx, side)?;
+            let b_loss = self.settle_account_b_to_target(idx, side, b_target)?;
+            let pnl_delta = Self::try_into_non_min_i128(
+                I256::from_i128(kf_delta)
+                    .checked_sub(I256::from_u128(b_loss))
+                    .ok_or(RiskError::Overflow)?,
+            )?;
 
             let new_pnl = self.accounts[idx].pnl.checked_add(pnl_delta)
                 .ok_or(RiskError::Overflow)?;
@@ -3210,7 +3612,7 @@ impl RiskEngine {
             return Ok(());
         }
 
-        // Spec §5.5 step 6-8 (v12.19.53): enforce per-call dt envelope whenever
+        // Spec §5.5 step 6-8 (v12.20.6): enforce per-call dt envelope whenever
         // funding OR price movement would actually drain equity.
         //
         // - funding_active: funding_rate != 0 AND both sides have OI AND fund_px_last > 0
@@ -3232,7 +3634,7 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Spec §5.5 step 9 (v12.19.53): per-accrual price-move cap.
+        // Spec §5.5 step 9 (v12.20.6): per-accrual price-move cap.
         //
         //   require abs(oracle_price - P_last) * 10_000
         //           <= cfg_max_price_move_bps_per_slot * dt * P_last
@@ -3428,7 +3830,7 @@ impl RiskEngine {
     }
 
     /// Validate the optional consumption-threshold (spec §4.7, §9.0 step 1,
-    /// v12.19.53). `None` disables the gate; `Some(threshold)` requires
+    /// v12.20.6). `None` disables the gate; `Some(threshold)` requires
     /// `threshold > 0`. `Some(0)` is invalid and must be rejected
     /// conservatively before any state mutation.
     pub fn validate_threshold_opt(threshold_opt: Option<u128>) -> Result<()> {
@@ -3458,24 +3860,23 @@ impl RiskEngine {
         loss - pay
     }
 
-    /// record_uninsured_protocol_loss (spec §4.17): bookkeeping no-op.
-    ///
-    /// After insurance is drained, any remaining uninsured loss is already
-    /// implicitly represented by the junior haircut mechanism: the forgiven
-    /// negative PnL leaves the matched positive PnL (matured_pos_tot) as an
-    /// unchanged claim against Residual = V - C_tot - I. When
-    /// matured_pos_tot > Residual, payouts scale by h = Residual/matured.
-    ///
-    /// MUST NOT drain V here — doing so would shrink Residual below its
-    /// natural post-forgiveness value and double-penalize junior holders
-    /// (first via h < 1, again via V reduction).
-    ///
-    /// Intuition: Alice +100, Bob -100, V = 50, insurance = 0. Forgiving Bob
-    /// leaves matured = 100, residual = 50 → h = 0.5, Alice gets 50. If we
-    /// also drained V by 50, residual would drop to 0 → Alice gets 0.
-    #[allow(unused_variables)]
+    /// record_uninsured_protocol_loss (spec §2.3 / §4.3): durable non-claim
+    /// audit state. This MUST NOT mutate V/C/I/PNL or create liabilities.
     fn record_uninsured_protocol_loss(&mut self, loss: u128) {
-        // Intentional no-op. See doc comment.
+        if loss == 0 {
+            return;
+        }
+        match self
+            .explicit_unallocated_protocol_loss
+            .get()
+            .checked_add(loss)
+        {
+            Some(v) => self.explicit_unallocated_protocol_loss = U128::new(v),
+            None => {
+                self.explicit_unallocated_protocol_loss = U128::new(u128::MAX);
+                self.explicit_unallocated_loss_saturated = 1;
+            }
+        }
     }
 
     /// absorb_protocol_loss (spec §4.17): use_insurance_buffer then
@@ -3515,7 +3916,9 @@ impl RiskEngine {
         }
         Ok(account.adl_a_basis != self.get_a_side(side)
             || account.adl_k_snap != self.get_k_side(side)
-            || account.f_snap != self.get_f_side(side))
+            || account.f_snap != self.get_f_side(side)
+            || account.b_snap != self.get_b_side(side)
+            || account.b_epoch_snap != account.adl_epoch_snap)
     }
 
     /// Internal helper that realizes wrapper-owned recurring maintenance fees
@@ -3653,33 +4056,23 @@ impl RiskEngine {
             return Err(RiskError::CorruptState);
         }
 
-        let a_old = self.get_a_side(opp);
         let oi_post = oi.checked_sub(q_close_q).ok_or(RiskError::Overflow)?;
         let old_certified = core::cmp::min(self.get_phantom_dust_certified(opp), oi);
         let old_potential = core::cmp::min(self.get_phantom_dust_potential(opp), oi);
-        let loss_bearing_oi = oi
-            .checked_sub(old_certified)
-            .ok_or(RiskError::CorruptState)?;
         let uncertified_potential = old_potential.saturating_sub(old_certified);
 
-        // Step 7: phantom-adjusted K-loss allocation. Phantom OI is not a
-        // valid loss-bearing denominator, so its pro-rata loss share is
-        // recorded as uninsured unless an exact scan proves tighter state.
+        // Step 7: B-index residual booking. K is not used for bankruptcy
+        // residual in v12.20.6; any unrepresented/uncertified share routes to
+        // non-claim audit loss instead of using a stale denominator.
         if d_rem != 0 {
-            let d_social = if loss_bearing_oi == 0 {
+            let d_social = if old_certified >= oi {
                 self.record_uninsured_protocol_loss(d_rem);
                 0
             } else {
                 let d_phantom = if old_certified == 0 {
                     0
                 } else {
-                    mul_div_ceil_u256(
-                        U256::from_u128(d_rem),
-                        U256::from_u128(old_certified),
-                        U256::from_u128(oi),
-                    )
-                    .try_into_u128()
-                    .unwrap_or(u128::MAX)
+                    Self::ceil_mul_div_u128_or_wide(d_rem, old_certified, oi)?
                 };
                 let d_phantom = core::cmp::min(d_phantom, d_rem);
                 if d_phantom > 0 {
@@ -3691,34 +4084,14 @@ impl RiskEngine {
                 if uncertified_potential != 0 {
                     self.record_uninsured_protocol_loss(d_social);
                 } else {
-                    let a_ps = a_old.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-                    match wide_mul_div_ceil_u128_or_over_i128max(d_social, a_ps, loss_bearing_oi) {
-                        Ok(delta_k_abs) => {
-                            match self.exact_adl_k_loss_upper_bound(opp, delta_k_abs, d_social) {
-                                Ok(loss_upper) if loss_upper <= d_social => {
-                                    let delta_k = -(delta_k_abs as i128);
-                                    let k_opp = self.get_k_side(opp);
-                                    match k_opp.checked_add(delta_k) {
-                                        Some(new_k)
-                                            if Self::validate_k_future_headroom(a_old, new_k)
-                                                .is_ok() =>
-                                        {
-                                            self.set_k_side(opp, new_k)?;
-                                        }
-                                        _ => {
-                                            self.record_uninsured_protocol_loss(d_social);
-                                        }
-                                    }
-                                }
-                                Ok(_) | Err(RiskError::Overflow) => {
-                                    self.record_uninsured_protocol_loss(d_social);
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        }
-                        Err(OverI128Magnitude) => {
-                            self.record_uninsured_protocol_loss(d_social);
-                        }
+                    let booked = self.book_bankruptcy_residual_chunk_to_side(
+                        ctx,
+                        opp,
+                        d_social,
+                        PUBLIC_B_CHUNK_ATOMS,
+                    )?;
+                    if booked != d_social {
+                        return Err(RiskError::Overflow);
                     }
                 }
             }
@@ -3735,6 +4108,7 @@ impl RiskEngine {
         }
 
         // Steps 8-9: compute A_candidate and A_trunc_rem using U256 intermediates
+        let a_old = self.get_a_side(opp);
         let a_old_u256 = U256::from_u128(a_old);
         let oi_post_u256 = U256::from_u128(oi_post);
         let oi_u256 = U256::from_u128(oi);
@@ -3823,6 +4197,14 @@ impl RiskEngine {
             Side::Short => self.f_epoch_start_short_num = self.f_short_num,
         }
 
+        // B_epoch_start_side = B_side, then reset live B/weight state for
+        // the new epoch. Stale accounts settle against this snapshot.
+        self.quarantine_social_remainder_before_weight_change(side)?;
+        self.set_b_epoch_start(side, self.get_b_side(side));
+        self.set_b_side(side, 0);
+        self.set_social_remainder(side, 0);
+        self.set_loss_weight_sum(side, 0);
+
         // Reset live K_side and F_side to 0 for the new epoch (spec §2.10).
         //
         // Without this, a side that was ADL-shrunk far (small A_side) and
@@ -3832,7 +4214,7 @@ impl RiskEngine {
         // then overflow K because
         //     |K_old_epoch| + ADL_ONE * delta_p
         // exceeds i128, even though the enqueue_adl headroom check (which
-        // reserves only A_old * MAX_ORACLE_PRICE) accepted the K write.
+        // reserves only A_old * MAX_ORACLE_PRICE) accepted the old K write.
         //
         // The zeroing is economically correct: stale accounts settle
         // against K_epoch_start_side / F_epoch_start_side_num (just
@@ -4540,7 +4922,7 @@ impl RiskEngine {
         }
     }
 
-    /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.19.53).
+    /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.20.6).
     ///
     /// When the last account closes, signed-floor rounding on PnL can
     /// leave `vault > c_tot + insurance_fund.balance` with no junior
@@ -4629,6 +5011,16 @@ impl RiskEngine {
             return Err(RiskError::CorruptState);
         }
         if self.oi_eff_short_q != 0 && self.adl_mult_short == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.loss_weight_sum_long > SOCIAL_LOSS_DEN
+            || self.loss_weight_sum_short > SOCIAL_LOSS_DEN
+            || self.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
+            || self.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
+            || self.social_loss_dust_long_num >= SOCIAL_LOSS_DEN
+            || self.social_loss_dust_short_num >= SOCIAL_LOSS_DEN
+            || self.explicit_unallocated_loss_saturated > 1
+        {
             return Err(RiskError::CorruptState);
         }
         if self.market_mode == MarketMode::Live {
@@ -4840,6 +5232,8 @@ impl RiskEngine {
         let mut stored_short = 0u64;
         let mut stale_long = 0u64;
         let mut stale_short = 0u64;
+        let mut weight_long = 0u128;
+        let mut weight_short = 0u128;
 
         for idx in 0..MAX_ACCOUNTS {
             let used = self.is_used(idx);
@@ -4854,6 +5248,10 @@ impl RiskEngine {
                     || account.adl_k_snap != 0
                     || account.f_snap != 0
                     || account.adl_epoch_snap != 0
+                    || account.loss_weight != 0
+                    || account.b_snap != 0
+                    || account.b_rem != 0
+                    || account.b_epoch_snap != 0
                     || account.fee_credits.get() != 0
                     || account.last_fee_slot != 0
                     || account.sched_present != 0
@@ -4888,6 +5286,9 @@ impl RiskEngine {
             Self::validate_non_min_i128(account.pnl)?;
             Self::validate_non_min_i128(account.adl_k_snap)?;
             Self::validate_non_min_i128(account.f_snap)?;
+            if account.b_rem >= SOCIAL_LOSS_DEN {
+                return Err(RiskError::CorruptState);
+            }
             match self.market_mode {
                 MarketMode::Live => {
                     if account.last_fee_slot > self.current_slot {
@@ -4913,6 +5314,9 @@ impl RiskEngine {
                 if account.adl_a_basis == 0 {
                     return Err(RiskError::CorruptState);
                 }
+                if account.loss_weight == 0 || account.b_epoch_snap != account.adl_epoch_snap {
+                    return Err(RiskError::CorruptState);
+                }
                 match side_of_i128(account.position_basis_q) {
                     Some(Side::Long) => {
                         stored_long = stored_long.checked_add(1).ok_or(RiskError::CorruptState)?;
@@ -4925,10 +5329,23 @@ impl RiskEngine {
                             }
                             stale_long =
                                 stale_long.checked_add(1).ok_or(RiskError::CorruptState)?;
-                        } else if self.notional_checked(idx, self.last_oracle_price, false)?
-                            > MAX_ACCOUNT_NOTIONAL
-                        {
-                            return Err(RiskError::CorruptState);
+                        } else {
+                            if self.notional_checked(idx, self.last_oracle_price, false)?
+                                > MAX_ACCOUNT_NOTIONAL
+                            {
+                                return Err(RiskError::CorruptState);
+                            }
+                            if account.loss_weight
+                                != Self::loss_weight_for_basis(
+                                    account.position_basis_q.unsigned_abs(),
+                                    account.adl_a_basis,
+                                )?
+                            {
+                                return Err(RiskError::CorruptState);
+                            }
+                            weight_long = weight_long
+                                .checked_add(account.loss_weight)
+                                .ok_or(RiskError::CorruptState)?;
                         }
                     }
                     Some(Side::Short) => {
@@ -4943,14 +5360,33 @@ impl RiskEngine {
                             }
                             stale_short =
                                 stale_short.checked_add(1).ok_or(RiskError::CorruptState)?;
-                        } else if self.notional_checked(idx, self.last_oracle_price, false)?
-                            > MAX_ACCOUNT_NOTIONAL
-                        {
-                            return Err(RiskError::CorruptState);
+                        } else {
+                            if self.notional_checked(idx, self.last_oracle_price, false)?
+                                > MAX_ACCOUNT_NOTIONAL
+                            {
+                                return Err(RiskError::CorruptState);
+                            }
+                            if account.loss_weight
+                                != Self::loss_weight_for_basis(
+                                    account.position_basis_q.unsigned_abs(),
+                                    account.adl_a_basis,
+                                )?
+                            {
+                                return Err(RiskError::CorruptState);
+                            }
+                            weight_short = weight_short
+                                .checked_add(account.loss_weight)
+                                .ok_or(RiskError::CorruptState)?;
                         }
                     }
                     None => return Err(RiskError::CorruptState),
                 }
+            } else if account.loss_weight != 0
+                || account.b_snap != 0
+                || account.b_rem != 0
+                || account.b_epoch_snap != 0
+            {
+                return Err(RiskError::CorruptState);
             }
         }
 
@@ -4961,6 +5397,8 @@ impl RiskEngine {
             || stored_short != self.stored_pos_count_short
             || stale_long != self.stale_account_count_long
             || stale_short != self.stale_account_count_short
+            || weight_long != self.loss_weight_sum_long
+            || weight_short != self.loss_weight_sum_short
         {
             return Err(RiskError::CorruptState);
         }
@@ -5291,6 +5729,9 @@ impl RiskEngine {
         Self::validate_non_min_i128(account.pnl)?;
         Self::validate_non_min_i128(account.adl_k_snap)?;
         Self::validate_non_min_i128(account.f_snap)?;
+        if account.b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
         self.validate_fee_credits_shape(idx)?;
         self.validate_reserve_shape(idx)?;
 
@@ -5299,6 +5740,17 @@ impl RiskEngine {
                 return Err(RiskError::CorruptState);
             }
             if account.adl_a_basis == 0 {
+                return Err(RiskError::CorruptState);
+            }
+            if account.loss_weight == 0 || account.b_epoch_snap != account.adl_epoch_snap {
+                return Err(RiskError::CorruptState);
+            }
+            if account.loss_weight
+                != Self::loss_weight_for_basis(
+                    account.position_basis_q.unsigned_abs(),
+                    account.adl_a_basis,
+                )?
+            {
                 return Err(RiskError::CorruptState);
             }
             let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
@@ -5311,6 +5763,12 @@ impl RiskEngine {
                     return Err(RiskError::CorruptState);
                 }
             }
+        } else if account.loss_weight != 0
+            || account.b_snap != 0
+            || account.b_rem != 0
+            || account.b_epoch_snap != 0
+        {
+            return Err(RiskError::CorruptState);
         }
         Ok(())
     }
@@ -6135,7 +6593,7 @@ impl RiskEngine {
         self.current_slot = now_slot;
         self.ensure_loss_current_for_position_change()?;
 
-        // Steps 11-12 (spec §9.4 v12.19.53): live local touch both counterparties
+        // Steps 11-12 (spec §9.4 v12.20.6): live local touch both counterparties
         // in deterministic ascending storage-index order. One touch may change
         // PNL_matured_pos_tot and therefore the second account's admission
         // outcome; cross-client order differences are forbidden.
@@ -7838,7 +8296,7 @@ impl RiskEngine {
                 Side::Short => self.resolved_k_short_terminal_delta,
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-            let pnl_delta = if epoch_snap == epoch_side {
+            let kf_delta = if epoch_snap == epoch_side {
                 // Same-epoch with nonzero basis in resolved mode is corrupt state.
                 // After resolution, all nonzero-basis accounts must be stale.
                 return Err(RiskError::CorruptState);
@@ -7865,6 +8323,13 @@ impl RiskEngine {
                     den,
                 )?
             };
+            let b_target = self.b_target_for_account(i, side)?;
+            let b_loss = self.settle_account_b_to_target(i, side, b_target)?;
+            let pnl_delta = Self::try_into_non_min_i128(
+                I256::from_i128(kf_delta)
+                    .checked_sub(I256::from_u128(b_loss))
+                    .ok_or(RiskError::Overflow)?,
+            )?;
             let new_pnl = self.accounts[i]
                 .pnl
                 .checked_add(pnl_delta)

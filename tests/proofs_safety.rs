@@ -516,24 +516,24 @@ fn t4_18_precision_exhaustion_both_sides_reset() {
 #[kani::proof]
 #[kani::unwind(1)]
 #[kani::solver(cadical)]
-fn t4_19_full_drain_terminal_k_includes_deficit() {
-    let oi: u8 = kani::any();
-    kani::assume(oi > 0 && oi <= 10);
+fn t4_19_full_drain_terminal_b_books_deficit_identity() {
     let d: u8 = kani::any();
-    kani::assume(d > 0 && d <= 100);
+    kani::assume(d > 0 && d <= 10);
+    let w: u8 = kani::any();
+    kani::assume(w > 0 && (w as u32) <= S_ADL_ONE as u32);
+    let rem_old: u8 = kani::any();
+    kani::assume((rem_old as u32) < S_ADL_ONE as u32);
 
-    let a_opp = S_ADL_ONE;
-    let k_before: i32 = 0;
+    // v12.20.6: bankruptcy residual is represented by B, not K. The exact
+    // scaled identity is:
+    //     delta_B * W + rem_new = D * DEN + rem_old
+    let scaled = (d as u32) * (S_ADL_ONE as u32) + (rem_old as u32);
+    let delta_b = scaled / (w as u32);
+    let rem_new = scaled % (w as u32);
 
-    let delta_k_abs = ((d as u16) * (a_opp as u16) + (oi as u16) - 1) / (oi as u16);
-    let delta_k = -(delta_k_abs as i32);
-    let k_after = k_before + delta_k;
-
-    assert!(k_after < k_before);
-
-    let k_epoch_start = k_after;
-    assert!(k_epoch_start == k_before + delta_k);
-    assert!(k_epoch_start < k_before);
+    assert!(delta_b > 0);
+    assert!(rem_new < w as u32);
+    assert!(delta_b * (w as u32) + rem_new == scaled);
 }
 
 #[kani::proof]
@@ -581,15 +581,16 @@ fn t4_21_precision_exhaustion_zeroes_both_sides() {
     assert!(ctx.pending_reset_short);
 }
 
-/// K-space overflow routes deficit to absorb_protocol_loss, preserving K.
-/// Uses actual engine enqueue_adl with K near i128::MIN to trigger overflow.
+/// Bankruptcy residual booking never uses K, so near-boundary K state is
+/// preserved while quantity routing still makes progress.
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t4_22_k_overflow_routes_to_absorb() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    // Set K near i128::MIN so delta_K addition underflows
+    // Set K near i128::MIN. v12.20.6 no longer writes bankruptcy residuals
+    // through K, so this state must not affect residual liveness.
     engine.adl_coeff_long = i128::MIN + 1;
     engine.adl_mult_long = POS_SCALE; // Use POS_SCALE (not ADL_ONE) to keep computation manageable
     engine.oi_eff_long_q = 4 * POS_SCALE;
@@ -600,22 +601,23 @@ fn t4_22_k_overflow_routes_to_absorb() {
     let k_before = engine.adl_coeff_long;
     let ins_before = engine.insurance_fund.balance.get();
 
-    // ADL with deficit — delta_K will be large negative, K_opp + delta_K underflows
+    // ADL with deficit. Insurance-first coverage consumes the available buffer;
+    // any remainder routes to non-claim audit state, not K.
     let q_close = POS_SCALE;
     let d = 1_000_000u128;
 
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    // K must be unchanged (overflow routed to absorb)
+    // K must be unchanged because residual loss is not booked through K.
     assert!(
         engine.adl_coeff_long == k_before,
-        "K must be unchanged when overflow routes to absorb"
+        "K must be unchanged when bankruptcy residual is booked outside K"
     );
-    // Insurance must have decreased (absorb_protocol_loss was called)
+    // Insurance must have decreased before any residual audit/B booking.
     assert!(
         engine.insurance_fund.balance.get() < ins_before,
-        "insurance must decrease when absorbing overflow deficit"
+        "insurance must decrease through insurance-first deficit coverage"
     );
     // A must still shrink (quantity routing is independent of K overflow)
     assert!(
@@ -627,11 +629,12 @@ fn t4_22_k_overflow_routes_to_absorb() {
 #[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
-fn proof_adl_k_loss_write_bounded_by_rounded_settlement_effect() {
-    // Spec ADL loss bound: any K-loss write must prove that the exact
-    // worst-case rounded settlement effect on represented accounts is <= the
-    // socialized deficit. D=1 exercises the uninsured fallback; D=2 exercises
-    // the exact K-write branch for this two-account model.
+fn proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect() {
+    // Spec residual-loss bound: B-index booking must not settle more
+    // represented account loss than the socialized deficit, even under
+    // per-account floor/remainder rounding. This uses the production
+    // enqueue_adl -> B-booking path and checks the settlement formula directly
+    // instead of running a full account touch, keeping the proof O(1).
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -645,42 +648,51 @@ fn proof_adl_k_loss_write_bounded_by_rounded_settlement_effect() {
 
     let d: u8 = kani::any();
     kani::assume(d == 1 || d == 2);
-    let before_cap =
-        engine.accounts[a as usize].capital.get() + engine.accounts[b as usize].capital.get();
+    let old_b_short = engine.b_short_num;
+    let old_rem_short = engine.social_loss_remainder_short_num;
+    let old_k_short = engine.adl_coeff_short;
+    let w_a = engine.accounts[a as usize].loss_weight;
+    let w_b = engine.accounts[b as usize].loss_weight;
+    let rem_a = engine.accounts[a as usize].b_rem;
+    let rem_b = engine.accounts[b as usize].b_rem;
     let mut ctx = InstructionContext::new_with_admission(1, 100);
     let r = engine.enqueue_adl(&mut ctx, Side::Long, 0, d as u128);
     assert!(r.is_ok());
-    assert!(engine
-        .touch_account_live_local(a as usize, &mut ctx)
-        .is_ok());
-    assert!(engine
-        .touch_account_live_local(b as usize, &mut ctx)
-        .is_ok());
-    let after_cap =
-        engine.accounts[a as usize].capital.get() + engine.accounts[b as usize].capital.get();
 
-    assert!(before_cap >= after_cap);
+    let delta_b = engine.b_short_num - old_b_short;
+    let loss_a = (w_a * delta_b + rem_a) / SOCIAL_LOSS_DEN;
+    let loss_b = (w_b * delta_b + rem_b) / SOCIAL_LOSS_DEN;
+    let represented_loss = loss_a + loss_b;
     assert!(
-        before_cap - after_cap <= d as u128,
-        "ADL K loss must not charge represented accounts above the socialized deficit"
+        represented_loss <= d as u128,
+        "B-booked ADL loss must not charge represented accounts above the socialized deficit"
+    );
+    assert!(
+        engine.adl_coeff_short == old_k_short,
+        "bankruptcy residual must not mutate K"
+    );
+    assert!(
+        delta_b * (w_a + w_b) + engine.social_loss_remainder_short_num
+            == (d as u128) * SOCIAL_LOSS_DEN + old_rem_short,
+        "B booking must satisfy the scaled residual identity"
     );
     kani::cover!(
-        d == 1 && engine.adl_coeff_short == 0,
-        "rounded-loss overcharge case falls back without K write"
+        d == 1 && represented_loss <= 1,
+        "one atom of B-booked residual is bounded"
     );
     kani::cover!(
-        d == 2 && engine.adl_coeff_short < 0,
-        "exactly bounded rounded-loss case can write K"
+        d == 2 && represented_loss == 2,
+        "two atoms of B-booked residual settle exactly"
     );
 }
 
 #[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
-fn proof_adl_uncertified_potential_dust_routes_deficit_without_k_write() {
+fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {
     // Spec dust rule: potential dust is diagnostic only. If potential dust is
-    // not certified, ADL cannot use the affected side as a K-loss denominator;
-    // the deficit must route to uninsured fallback.
+    // not certified, ADL cannot use the affected side as a B-loss denominator;
+    // the deficit must route to durable non-claim audit fallback.
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
     let idx = add_user_test(&mut engine, 0).unwrap();
@@ -690,9 +702,12 @@ fn proof_adl_uncertified_potential_dust_routes_deficit_without_k_write() {
     let dust: u8 = 1;
     let d: u8 = 5;
 
-    engine
-        .attach_effective_position(idx as usize, -(q as i128))
-        .unwrap();
+    engine.accounts[idx as usize].position_basis_q = -(q as i128);
+    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].adl_k_snap = engine.adl_coeff_short;
+    engine.accounts[idx as usize].f_snap = engine.f_short_num;
+    engine.accounts[idx as usize].adl_epoch_snap = engine.adl_epoch_short;
+    engine.stored_pos_count_short = 1;
     engine.oi_eff_short_q = q as u128;
     engine.oi_eff_long_q = q as u128;
     engine.phantom_dust_certified_short_q = 0;
@@ -700,15 +715,18 @@ fn proof_adl_uncertified_potential_dust_routes_deficit_without_k_write() {
     kani::assume(engine.phantom_dust_potential_short_q > engine.phantom_dust_certified_short_q);
     kani::assume(engine.phantom_dust_potential_short_q <= engine.oi_eff_short_q);
     let old_k_short = engine.adl_coeff_short;
+    let old_b_short = engine.b_short_num;
 
     let mut ctx = InstructionContext::new_with_admission(1, 100);
     let r = engine.enqueue_adl(&mut ctx, Side::Long, 0, d as u128);
     assert!(r.is_ok());
     assert_eq!(engine.adl_coeff_short, old_k_short);
+    assert_eq!(engine.b_short_num, old_b_short);
+    assert!(engine.explicit_unallocated_protocol_loss.get() >= d as u128);
 
     kani::cover!(
         engine.phantom_dust_potential_short_q > engine.phantom_dust_certified_short_q,
-        "uncertified potential dust blocks ADL K-loss denominator use"
+        "uncertified potential dust blocks ADL B-loss denominator use"
     );
 }
 
