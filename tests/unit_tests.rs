@@ -4427,6 +4427,83 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
 }
 
 #[test]
+fn honest_cranker_repeatedly_reduces_stale_gap_while_scanning_empty_slots() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            Some(1),
+        )
+        .unwrap();
+
+    let max_dt = engine.params.max_accrual_dt_slots;
+    let now_slot = slot + (2 * max_dt) + 1;
+    engine.rr_cursor_position = 2;
+    let lag_before = now_slot - engine.last_market_slot;
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: oracle - 1,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            max_candidate_inspections: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: Some(1),
+            rr_touch_limit: 1,
+            rr_scan_limit: 3,
+        })
+        .unwrap();
+    let lag_after_first = now_slot - engine.last_market_slot;
+    assert!(
+        lag_after_first < lag_before,
+        "first honest crank must reduce loss-stale catchup work"
+    );
+    assert_eq!(
+        engine.rr_cursor_position, 5,
+        "empty authenticated slots are cursor progress, not a dead zone"
+    );
+
+    engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: oracle - 2,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            max_candidate_inspections: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: Some(1),
+            rr_touch_limit: 1,
+            rr_scan_limit: 3,
+        })
+        .unwrap();
+    let lag_after_second = now_slot - engine.last_market_slot;
+    assert!(
+        lag_after_second < lag_after_first,
+        "second honest crank must keep reducing loss-stale catchup work"
+    );
+    assert_eq!(
+        engine.rr_cursor_position, 8,
+        "candidate-free cranks must keep advancing the structural sweep"
+    );
+}
+
+#[test]
 fn loss_stale_catchup_blocks_trade_until_loss_current() {
     let (mut engine, a, b) =
         setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());

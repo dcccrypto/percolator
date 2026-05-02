@@ -263,6 +263,7 @@
       "proof_adl_pipeline_trade_liquidate_reopen",
       "proof_drain_only_to_reset_progress",
       "proof_keeper_reset_lifecycle_last_stale_triggers_finalize",
+      "proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary",
       "proof_unilateral_empty_orphan_reset",
       "t11_43_end_instruction_auto_finalizes_ready_side",
       "t11_44_trade_path_reopens_ready_reset_side",

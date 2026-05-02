@@ -419,6 +419,78 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 }
 
 // ============================================================================
+// proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary() {
+    let max_accounts: u8 = kani::any();
+    let cursor: u8 = kani::any();
+    let rr_scan_limit: u8 = kani::any();
+    let rr_touch_limit: u8 = kani::any();
+    let wrap_allowed: bool = kani::any();
+
+    kani::assume((1..=4).contains(&max_accounts));
+    kani::assume(cursor < max_accounts);
+    kani::assume((1..=4).contains(&rr_scan_limit));
+    kani::assume((1..=4).contains(&rr_touch_limit));
+
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(max_accounts as u64), 0, 100);
+    engine.rr_cursor_position = cursor as u64;
+
+    let out = engine
+        .phase2_scan_outcome(
+            max_accounts as u64,
+            rr_touch_limit as u64,
+            rr_scan_limit as u64,
+            false,
+            wrap_allowed,
+            false,
+        )
+        .unwrap();
+
+    let blocked_by_slot_rate = !wrap_allowed && cursor == max_accounts - 1;
+    if blocked_by_slot_rate {
+        assert_eq!(
+            out.inspected, 0,
+            "same-slot generation boundary must not pretend to scan progress"
+        );
+        assert_eq!(
+            out.next_cursor, cursor as u64,
+            "same-slot generation boundary must leave cursor unchanged"
+        );
+        assert!(!out.wrapped);
+    } else {
+        assert!(
+            out.inspected > 0,
+            "permissionless Phase 2 must authenticate at least one missing slot when not boundary-limited"
+        );
+        assert!(
+            out.next_cursor != cursor as u64 || out.wrapped,
+            "authenticated missing-slot scan must advance cursor state"
+        );
+    }
+
+    assert_eq!(
+        out.touched, 0,
+        "empty-slot progress must not consume touched-account capacity"
+    );
+    assert!(out.inspected <= rr_scan_limit as u64);
+    assert!(out.inspected <= max_accounts as u64);
+    kani::cover!(
+        !blocked_by_slot_rate && out.inspected > 0 && out.touched == 0,
+        "missing-slot cursor progress branch is reachable"
+    );
+    kani::cover!(
+        blocked_by_slot_rate && out.inspected == 0 && out.next_cursor == cursor as u64,
+        "slot-rate boundary branch is reachable"
+    );
+}
+
+// ============================================================================
 // proof_unilateral_empty_orphan_reset
 // ============================================================================
 
