@@ -119,6 +119,16 @@
       "proof_validate_hint_preflight_oracle_shift",
       "proof_withdraw_no_crank_gate"
     ],
+    "tests/proofs_b_index.rs": [
+      "proof_active_bankrupt_close_uses_frozen_economics",
+      "proof_b_booking_chunk_conserves_scaled_loss_and_bounds_b",
+      "proof_crankforward_requires_recovery_or_impossibility_proof",
+      "proof_explicit_unallocated_loss_is_durable_before_clear_and_not_payout_capacity",
+      "proof_loose_b_chunk_formula_has_overflow_counterexample",
+      "proof_position_closed_phase_preserves_public_exposure_invariants",
+      "proof_weight_change_flushes_global_b_remainder",
+      "proof_zero_effective_member_blocks_future_b_booking"
+    ],
     "tests/proofs_checklist.rs": [
       "proof_a2_reserve_bounds_after_set_pnl",
       "proof_a7_fee_credits_bounds_after_trade",
@@ -359,7 +369,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 333,
+    "standard-harnesses": 341,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
