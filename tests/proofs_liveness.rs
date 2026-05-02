@@ -8,6 +8,181 @@
 mod common;
 use common::*;
 
+#[derive(Clone, Copy)]
+struct HonestCrankWorkModel {
+    catchup_lag: u8,
+    cursor_remaining: u8,
+    stress_remaining: u8,
+    reset_stale_remaining: u8,
+    b_remaining: u8,
+    close_chunk_remaining: u8,
+    resolved_blockers: u8,
+    segment_blocked: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HonestCrankProfileModel {
+    scan_budget: u8,
+    touch_budget: u8,
+    b_budget: u8,
+    close_budget: u8,
+    resolved_budget: u8,
+    recovery_enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct HonestCrankStepModel {
+    outcome: u8,
+    next: HonestCrankWorkModel,
+}
+
+const MODEL_OUTCOME_STUCK: u8 = 0;
+const MODEL_OUTCOME_QUIESCENT: u8 = 1;
+const MODEL_OUTCOME_PROGRESS: u8 = 2;
+const MODEL_OUTCOME_RECOVERY: u8 = 3;
+
+fn honest_crank_valid_public_profile(profile: HonestCrankProfileModel) -> bool {
+    profile.scan_budget > 0
+        && profile.touch_budget > 0
+        && profile.b_budget > 0
+        && profile.close_budget > 0
+        && profile.resolved_budget > 0
+        && profile.recovery_enabled
+}
+
+fn honest_crank_work_sum(work: HonestCrankWorkModel) -> u16 {
+    work.catchup_lag as u16
+        + work.cursor_remaining as u16
+        + work.stress_remaining as u16
+        + work.reset_stale_remaining as u16
+        + work.b_remaining as u16
+        + work.close_chunk_remaining as u16
+        + work.resolved_blockers as u16
+}
+
+fn honest_crank_step_model(
+    work: HonestCrankWorkModel,
+    profile: HonestCrankProfileModel,
+) -> HonestCrankStepModel {
+    let mut next = work;
+    if work.segment_blocked {
+        return HonestCrankStepModel {
+            outcome: if profile.recovery_enabled {
+                MODEL_OUTCOME_RECOVERY
+            } else {
+                MODEL_OUTCOME_STUCK
+            },
+            next,
+        };
+    }
+
+    if work.catchup_lag > 0 {
+        if profile.scan_budget == 0 || profile.touch_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.catchup_lag -= 1;
+        if next.cursor_remaining > 0 {
+            next.cursor_remaining = next.cursor_remaining.saturating_sub(profile.scan_budget);
+        }
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.cursor_remaining > 0 {
+        if profile.scan_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.cursor_remaining = next.cursor_remaining.saturating_sub(profile.scan_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.stress_remaining > 0 {
+        if profile.scan_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.stress_remaining = next.stress_remaining.saturating_sub(profile.scan_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.reset_stale_remaining > 0 {
+        if profile.touch_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.reset_stale_remaining = next
+            .reset_stale_remaining
+            .saturating_sub(profile.touch_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.b_remaining > 0 {
+        if profile.b_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.b_remaining = next.b_remaining.saturating_sub(profile.b_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.close_chunk_remaining > 0 {
+        if profile.close_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.close_chunk_remaining = next
+            .close_chunk_remaining
+            .saturating_sub(profile.close_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+    if work.resolved_blockers > 0 {
+        if profile.resolved_budget == 0 {
+            return HonestCrankStepModel {
+                outcome: MODEL_OUTCOME_STUCK,
+                next,
+            };
+        }
+        next.resolved_blockers = next
+            .resolved_blockers
+            .saturating_sub(profile.resolved_budget);
+        return HonestCrankStepModel {
+            outcome: MODEL_OUTCOME_PROGRESS,
+            next,
+        };
+    }
+
+    HonestCrankStepModel {
+        outcome: MODEL_OUTCOME_QUIESCENT,
+        next,
+    }
+}
+
 // ============================================================================
 // T11.43: end_instruction_auto_finalizes_ready_side
 // ============================================================================
@@ -487,6 +662,85 @@ fn proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary() {
     kani::cover!(
         blocked_by_slot_rate && out.inspected == 0 && out.next_cursor == cursor as u64,
         "slot-rate boundary branch is reachable"
+    );
+}
+
+// ============================================================================
+// proof_honest_crank_rank_progress_or_recovery
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(1)]
+#[kani::solver(cadical)]
+fn proof_honest_crank_rank_progress_or_recovery() {
+    let work = HonestCrankWorkModel {
+        catchup_lag: kani::any(),
+        cursor_remaining: kani::any(),
+        stress_remaining: kani::any(),
+        reset_stale_remaining: kani::any(),
+        b_remaining: kani::any(),
+        close_chunk_remaining: kani::any(),
+        resolved_blockers: kani::any(),
+        segment_blocked: kani::any(),
+    };
+    let profile = HonestCrankProfileModel {
+        scan_budget: kani::any(),
+        touch_budget: kani::any(),
+        b_budget: kani::any(),
+        close_budget: kani::any(),
+        resolved_budget: kani::any(),
+        recovery_enabled: kani::any(),
+    };
+
+    kani::assume(work.catchup_lag <= 4);
+    kani::assume(work.cursor_remaining <= 4);
+    kani::assume(work.stress_remaining <= 4);
+    kani::assume(work.reset_stale_remaining <= 4);
+    kani::assume(work.b_remaining <= 4);
+    kani::assume(work.close_chunk_remaining <= 4);
+    kani::assume(work.resolved_blockers <= 4);
+    kani::assume(profile.scan_budget <= 4);
+    kani::assume(profile.touch_budget <= 4);
+    kani::assume(profile.b_budget <= 4);
+    kani::assume(profile.close_budget <= 4);
+    kani::assume(profile.resolved_budget <= 4);
+    kani::assume(honest_crank_valid_public_profile(profile));
+
+    let before = honest_crank_work_sum(work);
+    let step = honest_crank_step_model(work, profile);
+
+    assert!(
+        step.outcome != MODEL_OUTCOME_STUCK,
+        "valid one-honest-cranker profile must not produce a stuck transition"
+    );
+    if step.outcome == MODEL_OUTCOME_PROGRESS {
+        assert!(
+            honest_crank_work_sum(step.next) < before,
+            "progress transition must reduce the public liveness rank"
+        );
+    } else if step.outcome == MODEL_OUTCOME_RECOVERY {
+        assert!(
+            work.segment_blocked && profile.recovery_enabled,
+            "recovery is only the explicit route for blocked ordinary progress"
+        );
+    } else {
+        assert_eq!(
+            before, 0,
+            "quiescent outcome is only valid when no public work remains"
+        );
+    }
+
+    kani::cover!(
+        step.outcome == MODEL_OUTCOME_PROGRESS && honest_crank_work_sum(step.next) < before,
+        "rank-decreasing progress branch is reachable"
+    );
+    kani::cover!(
+        step.outcome == MODEL_OUTCOME_RECOVERY && work.segment_blocked,
+        "recovery-required branch is reachable"
+    );
+    kani::cover!(
+        step.outcome == MODEL_OUTCOME_QUIESCENT && before == 0,
+        "quiescent branch is reachable"
     );
 }
 

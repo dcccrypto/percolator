@@ -4504,6 +4504,73 @@ fn honest_cranker_repeatedly_reduces_stale_gap_while_scanning_empty_slots() {
 }
 
 #[test]
+fn honest_cranker_reaches_loss_current_with_bounded_candidate_free_cranks() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine
+        .execute_trade_not_atomic(
+            a,
+            b,
+            oracle,
+            slot,
+            make_size_q(10),
+            oracle,
+            0i128,
+            1,
+            100,
+            Some(1),
+        )
+        .unwrap();
+
+    let max_dt = engine.params.max_accrual_dt_slots;
+    let now_slot = slot + (3 * max_dt) + 1;
+    engine.rr_cursor_position = 2;
+
+    let mut previous_lag = now_slot - engine.last_market_slot;
+    let mut oracle_step = oracle;
+    let mut rounds = 0u8;
+    while engine.last_market_slot < now_slot {
+        oracle_step -= 1;
+        engine
+            .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+                now_slot,
+                oracle_price: oracle_step,
+                ordered_candidates: &[],
+                max_revalidations: 0,
+                max_candidate_inspections: 0,
+                funding_rate_e9: 0,
+                admit_h_min: 1,
+                admit_h_max: 100,
+                admit_h_max_consumption_threshold_bps_opt: Some(1),
+                rr_touch_limit: 1,
+                rr_scan_limit: 3,
+            })
+            .unwrap();
+        rounds += 1;
+
+        let lag = now_slot - engine.last_market_slot;
+        assert!(
+            lag < previous_lag,
+            "each accepted honest crank must reduce the stale catchup rank"
+        );
+        previous_lag = lag;
+        assert!(
+            rounds <= 5,
+            "bounded catchup should finish in ceil(lag/max_dt) progress rounds"
+        );
+    }
+
+    assert_eq!(engine.last_market_slot, now_slot);
+    assert_eq!(engine.current_slot, now_slot);
+    assert!(
+        engine.rr_cursor_position > 2,
+        "candidate-free progress must also advance structural cursor work"
+    );
+}
+
+#[test]
 fn loss_stale_catchup_blocks_trade_until_loss_current() {
     let (mut engine, a, b) =
         setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());

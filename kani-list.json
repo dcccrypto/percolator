@@ -262,6 +262,7 @@
     "tests/proofs_liveness.rs": [
       "proof_adl_pipeline_trade_liquidate_reopen",
       "proof_drain_only_to_reset_progress",
+      "proof_honest_crank_rank_progress_or_recovery",
       "proof_keeper_reset_lifecycle_last_stale_triggers_finalize",
       "proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary",
       "proof_unilateral_empty_orphan_reset",
