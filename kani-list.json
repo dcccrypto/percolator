@@ -120,12 +120,23 @@
       "proof_withdraw_no_crank_gate"
     ],
     "tests/proofs_b_index.rs": [
+      "proof_account_b_chunk_commit_requires_combined_pnl_candidate_fits",
+      "proof_account_b_partial_settlement_blocks_user_value_until_current",
+      "proof_account_b_settlement_chunk_respects_loss_limit_and_advances_locally",
+      "proof_account_b_zero_delta_routes_to_progress_required_or_recovery",
+      "proof_active_bankrupt_close_chunk_caps_force_recovery_not_infinite_progress",
       "proof_active_bankrupt_close_uses_frozen_economics",
       "proof_b_booking_chunk_conserves_scaled_loss_and_bounds_b",
       "proof_crankforward_requires_recovery_or_impossibility_proof",
       "proof_explicit_unallocated_loss_is_durable_before_clear_and_not_payout_capacity",
+      "proof_healthy_hmin_zero_lane_is_not_raised_to_cfg_min",
+      "proof_liquidation_fee_shortfall_is_not_socialized_through_b",
       "proof_loose_b_chunk_formula_has_overflow_counterexample",
       "proof_position_closed_phase_preserves_public_exposure_invariants",
+      "proof_public_instruction_work_is_bounded_not_whole_market",
+      "proof_public_user_fund_profile_requires_crankforward_recovery_and_chunk_caps",
+      "proof_recovery_price_uses_authenticated_price_or_non_forced_p_last_fallback",
+      "proof_residual_b_booking_uses_engine_determined_chunk_not_caller_smaller",
       "proof_weight_change_flushes_global_b_remainder",
       "proof_zero_effective_member_blocks_future_b_booking"
     ],
@@ -369,7 +380,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 341,
+    "standard-harnesses": 352,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
