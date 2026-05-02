@@ -1,139 +1,14 @@
-# Kani Proof Strength Audit Results
+# Kani Proof Audit Results
 
-Generated: 2026-04-30
+Generated: 2026-05-01
 
 Source prompt: `scripts/audit-proof-strength.md`.
 
-Execution note: `scripts/audit proof strength` is not an executable in this checkout. This audit applies the prompt directly to the current `tests/proofs_*.rs` harnesses and uses `cargo kani list --format json` for the harness inventory.
+Timing sweep command: `scripts/run_kani_full_audit.sh`.
 
-Kani version: `0.66.0`. Kani-listed standard harnesses: `312`. Parsed proof harnesses: `312`.
+Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
 
-This audit classifies harness shape, symbolic breadth, non-vacuity risk, and inductive strength. It is paired with a full per-harness CBMC timing run using `scripts/run_kani_full_audit.sh`; the only later harness change in this follow-up was rerun with exact Kani selection.
-
-## Final Tally
-
-| Classification | Count | Audit meaning |
-|---|---:|---|
-| **INDUCTIVE** | 0 | Fully symbolic initial state plus assumed decomposed invariant and loop-free modular preservation proof. |
-| **STRONG** | 181 | Symbolic proof harness with meaningful assertions and no observed vacuity risk, but not inductive. |
-| **WEAK** | 0 | Symbolic harness with a proof-strength issue that should be tightened. |
-| **UNIT TEST** | 131 | Concrete or deterministic scenario harness with no `kani::any()` input. |
-| **VACUOUS** | 0 | Confirmed contradictory assumptions or unreachable assertions. |
-
-## Key Findings
-
-- No WEAK harnesses remain after this pass.
-- No confirmed VACUOUS harnesses were found.
-- No Ok-gated assertion patterns remain. The prior `if result.is_ok() { assert!(...) }` harnesses were strengthened into explicit success proofs with unconditional postconditions.
-- No proof harness lacks a checked outcome. Six harnesses have no direct `assert!`, and all six are intentional `#[kani::should_panic]` negative checks.
-- No trivially false `kani::assume(false)` or `assert!(true)` proof patterns were found.
-- No harness is INDUCTIVE under the prompt definition. The suite still uses constructed engine states rather than a fully symbolic `RiskEngine` with decomposed invariant assumptions.
-- Concrete regression harnesses are retained as UNIT TEST by the audit rubric. They are useful scenario coverage, but they are not counted as symbolic proofs.
-- The new sparse-sweep/stress-envelope harnesses are not weak implementation snapshots: they check spec-level properties for zero touch limits, greedy touch-budget bounds, funding and price stress accounting, no same-slot stress clearing, stress-envelope clearing only after a later eligible wrap, and at-most-once-per-slot generation advancement.
-- The unilateral-empty phantom-dust harnesses now check the current spec rule directly: both the empty side and the non-empty side must have side-local dust bounds covering their own residual OI before a dust cleanup branch can zero both sides and schedule reset.
-- Self-audit follow-up: `proof_unilateral_empty_orphan_dust_clearance` was upgraded from one concrete dust scenario to a symbolic bounded dust proof and now also asserts that the consumed side-local dust bounds are zeroed.
-- Full per-harness Kani audit baseline: `312/312` PASS, `0` failures, `0` timeouts. Slowest harness: `proof_validate_hint_preflight_oracle_shift` at `234s`, below the `600s` per-harness cap. The only follow-up code change was `proof_unilateral_empty_orphan_dust_clearance`, rerun exactly after the symbolic strengthening.
-
-## Medium Follow-Up Items
-
-| Item | Result |
-|---|---|
-| State-field migration path for renamed stress fields | The percolator repo is a pure engine library with no runtime serialization dependency, on-chain program id, account decoder, persisted market registry, or deployment manifest. There is no in-repo deployed market state to migrate. Wrappers that persist raw engine state own layout versioning and must migrate their stored account data before linking a changed engine layout. |
-| `add_touched` false-return handling on finalized contexts | The only production engine caller is `touch_account_live_local`, and it propagates `false` as a conservative `Err(RiskError::Overflow)`. Unit coverage now checks that finalized contexts reject later touches without mutation and that the live-touch caller fails closed when `add_touched` returns false. |
-
-## Strengthened Harnesses
-
-These harnesses previously gated assertions behind an Ok path or accepted an impossible Err path. They now assert the valid call must succeed and then check the spec postcondition unconditionally:
-
-- `proof_goal23_deposit_no_insurance_draw`
-- `inductive_withdraw_preserves_accounting`
-- `bounded_withdraw_conservation`
-- `proof_audit3_compute_trade_pnl_no_panic_at_boundary`
-
-## Targeted Kani Verification
-
-The four strengthened harnesses were re-run one by one with exact Kani harness selection:
-
-```text
-cargo kani --tests --exact --harness proof_goal23_deposit_no_insurance_draw --output-format terse
-cargo kani --tests --exact --harness inductive_withdraw_preserves_accounting --output-format terse
-cargo kani --tests --exact --harness bounded_withdraw_conservation --output-format terse
-cargo kani --tests --exact --harness proof_audit3_compute_trade_pnl_no_panic_at_boundary --output-format terse
-```
-
-All four completed successfully.
-
-The new/changed sparse-sweep and stress-envelope harnesses were also run one by one:
-
-```text
-cargo kani --tests --exact --harness v19_consumption_monotone_within_generation --output-format terse
-cargo kani --tests --exact --harness v19_consumption_floor_below_one_bp --output-format terse
-cargo kani --tests --exact --harness v19_funding_consumption_accumulates_scaled_bps --output-format terse
-cargo kani --tests --exact --harness v19_rr_touch_zero_no_cursor_advance --output-format terse
-cargo kani --tests --exact --harness v19_rr_scan_zero_no_stress_progress --output-format terse
-cargo kani --tests --exact --harness v19_greedy_phase2_model_respects_touch_budget_and_bounds --output-format terse
-cargo kani --tests --exact --harness v19_same_slot_stress_wrap_defers_generation_reset --output-format terse
-cargo kani --tests --exact --harness v19_stress_envelope_clear_requires_later_wrap --output-format terse
-cargo kani --tests --exact --harness v19_generation_advances_at_most_once_per_slot --output-format terse
-cargo kani --tests --exact --harness v19_accrual_consumption_only_commits_on_success --output-format terse
-```
-
-All ten completed successfully in the full per-harness audit. Reported verification times:
-
-| Harness | Time |
-|---|---:|
-| `v19_consumption_monotone_within_generation` | 36s |
-| `v19_consumption_floor_below_one_bp` | 17s |
-| `v19_funding_consumption_accumulates_scaled_bps` | 14s |
-| `v19_rr_touch_zero_no_cursor_advance` | 9s |
-| `v19_rr_scan_zero_no_stress_progress` | 11s |
-| `v19_greedy_phase2_model_respects_touch_budget_and_bounds` | 1s |
-| `v19_same_slot_stress_wrap_defers_generation_reset` | 9s |
-| `v19_stress_envelope_clear_requires_later_wrap` | 27s |
-| `v19_generation_advances_at_most_once_per_slot` | 205s |
-| `v19_accrual_consumption_only_commits_on_success` | 3s |
-
-The unilateral-empty phantom-dust proofs were also rerun as a focused cluster and then in the full audit:
-
-```text
-cargo kani --tests --exact --harness proof_unilateral_empty_orphan_dust_clearance --output-format terse
-cargo kani --tests --exact --harness t13_56_unilateral_empty_orphan_resolution --output-format terse
-cargo kani --tests --exact --harness t13_57_unilateral_empty_corruption_guard --output-format terse
-cargo kani --tests --exact --harness t13_58_unilateral_empty_short_side --output-format terse
-cargo kani --tests --exact --harness t13_58b_unilateral_empty_short_requires_long_bound --output-format terse
-```
-
-Reported full-audit times:
-
-| Harness | Time |
-|---|---:|
-| `proof_unilateral_empty_orphan_dust_clearance` | 1s full audit; 0.650s symbolic follow-up |
-| `t13_56_unilateral_empty_orphan_resolution` | 2s |
-| `t13_57_unilateral_empty_corruption_guard` | 1s |
-| `t13_58_unilateral_empty_short_side` | 1s |
-| `t13_58b_unilateral_empty_short_requires_long_bound` | 2s |
-
-## Validation Commands
-
-The audit update and strengthened harnesses were validated with:
-
-```text
-cargo fmt --all -- --check
-git diff --check
-cargo test --features test
-cargo test --no-default-features
-cargo test --no-default-features --features small
-cargo test --no-default-features --features medium
-scripts/run_kani_full_audit.sh
-```
-
-All commands completed successfully.
-
-Full Kani audit output:
-
-```text
-SUMMARY: 312 passed, 0 failed/timeout (0 timeout) out of 312
-```
+The checked-in `kani-list.json` inventory was refreshed during the audit and now reports `333` standard harnesses.
 
 Timing artifacts:
 
@@ -142,9 +17,66 @@ kani_audit_full.tsv
 kani_audit_final.tsv
 ```
 
-## Deliberate Engine Spec-Item Pass
+`kani_audit_full.tsv` contains one row per proof with raw timing and status. `kani_audit_final.tsv` contains the same rows plus the sweep note `overnight-2026-05-01`.
 
-The engine audit also surfaced the main spec obligations by name rather than relying on incidental harness names:
+## Latest Full Timing Sweep
+
+```text
+SUMMARY: 325 passed, 8 failed/timeout (7 timeout) out of 333
+```
+
+This sweep completed and recorded timings for every parsed proof harness. It did not complete cleanly: one proof failed and seven proofs hit the `600s` cap.
+
+## Non-Passing Harnesses
+
+| Harness | Time | Status | Note |
+|---|---:|---|---|
+| `proof_adl_k_loss_write_bounded_by_rounded_settlement_effect` | 600s | TIMEOUT | Hit per-harness cap. |
+| `proof_adl_pipeline_trade_liquidate_reopen` | 68s | FAIL | Failed assertion: `deficit must be socialized to the opposing short side K` in `tests/proofs_liveness.rs:527`. |
+| `proof_funding_rate_validated_before_storage` | 600s | TIMEOUT | Hit per-harness cap. |
+| `proof_keeper_crank_r_last_stores_supplied_rate` | 600s | TIMEOUT | Hit per-harness cap. |
+| `proof_property_31_missing_account_safety` | 600s | TIMEOUT | Hit per-harness cap. |
+| `proof_property_56_exact_raw_im_approval` | 600s | TIMEOUT | Hit per-harness cap. |
+| `t11_53_keeper_crank_quiesces_after_pending_reset` | 600s | TIMEOUT | Hit per-harness cap. |
+| `v19_generation_advances_at_most_once_per_slot` | 600s | TIMEOUT | Hit per-harness cap. |
+
+The one FAIL was rerun exactly:
+
+```text
+timeout 600 cargo kani --tests --exact --harness proof_adl_pipeline_trade_liquidate_reopen --output-format terse
+```
+
+It failed again in about `67s` with the same assertion. The rerun log was captured at `/tmp/kani_proof_adl_pipeline_trade_liquidate_reopen.log` during this audit session.
+
+## Slowest Passing Harnesses
+
+| Harness | Time |
+|---|---:|
+| `proof_validate_hint_preflight_oracle_shift` | 226s |
+| `t3_16b_reset_counter_with_nonzero_k_diff` | 161s |
+| `t3_16_reset_pending_counter_invariant` | 146s |
+| `v19_cascade_safety_gate_disabled_preserves_invariants` | 142s |
+| `t14_63_dust_bound_position_reattach_remainder` | 136s |
+| `t0_2_mul_div_ceil_algebraic_identity` | 134s |
+| `t11_54_worked_example_regression` | 125s |
+| `t6_26_full_drain_reset_regression` | 121s |
+| `t2_12_floor_shift_lemma` | 120s |
+| `proof_force_close_resolved_with_profit_conserves` | 109s |
+| `t3_14_epoch_mismatch_forces_terminal_close` | 109s |
+| `proof_wide_signed_mul_div_floor_sign_and_rounding` | 83s |
+| `bounded_withdraw_conservation` | 70s |
+| `t3_14b_epoch_mismatch_with_nonzero_k_diff` | 70s |
+| `proof_property_51_withdraw_any_partial_ok` | 64s |
+
+## Current Audit Boundary
+
+This file records the latest full per-harness Kani timing sweep. It should not be read as an all-green proof-strength certification: the current run has one failing proof and seven timing out proofs.
+
+The prior static strength pass found no confirmed weak or vacuous harnesses in the then-current proof inventory, but the proof inventory has since grown from `312` to `333` parsed harnesses. Any new claim that all current proofs are strong and non-vacuous requires a fresh static strength pass over the current 333-harness inventory, separate from this timing sweep.
+
+## Previously Surfaced Spec Coverage
+
+The proof suite continues to surface the main engine obligations by name through harness coverage:
 
 | Spec obligation | Surfaced coverage |
 |---|---|
@@ -152,37 +84,20 @@ The engine audit also surfaced the main spec obligations by name rather than rel
 | Sparse sweep budget semantics | `v19_rr_touch_zero_no_cursor_advance`, `v19_rr_scan_zero_no_stress_progress`, `v19_greedy_phase2_model_respects_touch_budget_and_bounds` |
 | Stress accounting and admission hardening | `v19_accrual_consumption_only_commits_on_success`, `v19_consumption_monotone_within_generation`, `v19_funding_consumption_accumulates_scaled_bps`, `v19_admit_gate_stress_lane_forces_h_max`, `v19_admit_gate_some_zero_rejected` |
 | Phantom-dust cleanup bounds | `proof_unilateral_empty_orphan_dust_clearance`, `t13_56_unilateral_empty_orphan_resolution`, `t13_57_unilateral_empty_corruption_guard`, `t13_58_unilateral_empty_short_side`, `t13_58b_unilateral_empty_short_requires_long_bound` |
-| ADL phantom dust and K-loss safety | `t13_60_unconditional_dust_bound_on_any_a_decay`, `t14_61_dust_bound_adl_a_truncation_sufficient`, `t14_65_dust_bound_end_to_end_clearance`, `t4_22_k_overflow_routes_to_absorb` |
+| ADL phantom dust and K-loss safety | `proof_adl_k_loss_write_bounded_by_rounded_settlement_effect`, `t13_60_unconditional_dust_bound_on_any_a_decay`, `t14_61_dust_bound_adl_a_truncation_sufficient`, `t14_65_dust_bound_end_to_end_clearance`, `t4_22_k_overflow_routes_to_absorb` |
 | Reset lifecycle and side-mode gates | `proof_drain_only_to_reset_progress`, `proof_keeper_reset_lifecycle_last_stale_triggers_finalize`, `t11_43_end_instruction_auto_finalizes_ready_side`, `t3_16_reset_pending_counter_invariant`, `proof_side_mode_gating` |
 | Exact arithmetic and risk checks | `proof_funding_sign_and_floor`, `proof_symbolic_margin_enforcement_on_reduce`, `proof_notional_scales_with_price`, `proof_wide_signed_mul_div_floor_sign_and_rounding`, `t0_2_mul_div_ceil_algebraic_identity` |
 | Resolved/terminal conservation | `proof_force_close_resolved_position_conservation`, `proof_force_close_resolved_with_profit_conserves`, `proof_force_close_resolved_pos_count_decrements`, `proof_force_close_resolved_fee_sweep_conservation` |
 
-## Inductive Criteria 6a-6f
+## Inductive Criteria Snapshot
+
+No current claim is made that the suite is fully inductive. The prior audit classified proof style against these criteria:
 
 | Criterion | Current status |
 |---|---|
-| 6a State construction | Engine harnesses use constructed states (`RiskEngine::new`, helper allocation, direct field setup). None quantify over all invariant-satisfying states. |
-| 6b Topology coverage | Mostly 1-2 account topologies. This exercises key scenarios but does not prove arbitrary account topology or abstract rest-of-system properties. |
-| 6c Invariant decomposition | No reusable decomposed invariant predicates are present in the proof files. Properties are asserted directly or via `check_conservation()`. |
-| 6d Loop-free invariant specs | No loop-free inductive invariant spec suite is present. Some properties are local arithmetic/delta checks, but there is no general modular invariant framework. |
-| 6e Cone of influence | Constructed engine state fixes many fields outside the function under test. This limits generality compared with symbolic state plus minimal assumptions. |
-| 6f Full domain vs bounded ranges | Bounded symbolic ranges are common. This is appropriate for tractability but prevents full-domain inductive classification. |
-
-## Per-File Tally
-
-| File | Total | STRONG | WEAK | UNIT TEST |
-|---|---:|---:|---:|---:|
-| `tests/proofs_admission.rs` | 40 | 33 | 0 | 7 |
-| `tests/proofs_arithmetic.rs` | 19 | 19 | 0 | 0 |
-| `tests/proofs_audit.rs` | 33 | 11 | 0 | 22 |
-| `tests/proofs_checklist.rs` | 16 | 12 | 0 | 4 |
-| `tests/proofs_instructions.rs` | 52 | 20 | 0 | 32 |
-| `tests/proofs_invariants.rs` | 26 | 20 | 0 | 6 |
-| `tests/proofs_lazy_ak.rs` | 15 | 13 | 0 | 2 |
-| `tests/proofs_liveness.rs` | 11 | 1 | 0 | 10 |
-| `tests/proofs_safety.rs` | 76 | 35 | 0 | 41 |
-| `tests/proofs_v1131.rs` | 24 | 17 | 0 | 7 |
-
-## Remaining Audit Boundary
-
-This audit verifies harness strength and includes a full per-harness `scripts/run_kani_full_audit.sh` baseline run across all 312 harnesses with a 10-minute per-harness timeout, plus an exact rerun of the only harness changed after that baseline. It does not make the suite inductive under criteria 6a-6f; it records that no current harness is classified WEAK or VACUOUS by this audit.
+| 6a State construction | Harnesses generally use constructed states (`RiskEngine::new`, helper allocation, direct field setup), not arbitrary invariant-satisfying symbolic engine states. |
+| 6b Topology coverage | Many proofs use 1-2 account topologies. This exercises key scenarios but does not prove arbitrary account topology or abstract rest-of-system properties. |
+| 6c Invariant decomposition | No reusable decomposed invariant predicate suite is present in the proof files. Properties are asserted directly or via conservation helpers. |
+| 6d Loop-free invariant specs | No general loop-free inductive invariant framework is present. |
+| 6e Cone of influence | Constructed engine state fixes many fields outside the function under test, limiting generality compared with symbolic state plus minimal assumptions. |
+| 6f Full domain vs bounded ranges | Bounded symbolic ranges are common and are used for tractability. |
