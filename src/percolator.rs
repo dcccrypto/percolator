@@ -3057,35 +3057,12 @@ impl RiskEngine {
         ))
     }
 
-    fn settle_account_b_to_target(
-        &mut self,
+    fn plan_account_b_chunk_to_target(
+        &self,
         idx: usize,
-        _side: Side,
-        target: u128,
-    ) -> Result<u128> {
-        let account = &self.accounts[idx];
-        if account.loss_weight == 0 {
-            return Err(RiskError::CorruptState);
-        }
-        if account.b_snap > target || account.b_rem >= SOCIAL_LOSS_DEN {
-            return Err(RiskError::CorruptState);
-        }
-        let delta_b = target - account.b_snap;
-        let (loss, rem) =
-            Self::compute_b_loss_and_rem(account.loss_weight, account.b_rem, delta_b)?;
-        self.accounts[idx].b_snap = target;
-        self.accounts[idx].b_rem = rem;
-        Ok(loss)
-    }
-
-    test_visible! {
-    fn settle_account_b_chunk_to_target(
-        &mut self,
-        idx: usize,
-        _side: Side,
         target: u128,
         loss_limit: u128,
-    ) -> Result<(u128, bool)> {
+    ) -> Result<(u128, u128, u128, bool)> {
         let account = &self.accounts[idx];
         if account.loss_weight == 0 {
             return Err(RiskError::CorruptState);
@@ -3095,7 +3072,7 @@ impl RiskEngine {
         }
         let remaining_delta = target - account.b_snap;
         if remaining_delta == 0 {
-            return Ok((0, true));
+            return Ok((0, 0, account.b_rem, true));
         }
 
         let capped_loss_limit = core::cmp::min(loss_limit, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS);
@@ -3126,9 +3103,29 @@ impl RiskEngine {
             .b_snap
             .checked_add(delta_b)
             .ok_or(RiskError::Overflow)?;
+        Ok((delta_b, loss, rem, new_snap == target))
+    }
+
+    test_visible! {
+    fn settle_account_b_chunk_to_target(
+        &mut self,
+        idx: usize,
+        _side: Side,
+        target: u128,
+        loss_limit: u128,
+    ) -> Result<(u128, bool)> {
+        let (delta_b, loss, rem, current) =
+            self.plan_account_b_chunk_to_target(idx, target, loss_limit)?;
+        if delta_b == 0 {
+            return Ok((loss, current));
+        }
+        let new_snap = self.accounts[idx]
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(RiskError::Overflow)?;
         self.accounts[idx].b_snap = new_snap;
         self.accounts[idx].b_rem = rem;
-        Ok((loss, new_snap == target))
+        Ok((loss, current))
     }
     }
 
@@ -8351,6 +8348,9 @@ impl RiskEngine {
 
         // Finalize any sides that are fully ready for reopening
         self.maybe_finalize_ready_reset_sides();
+        if self.accounts[i].position_basis_q != 0 {
+            return Ok(ResolvedCloseResult::ProgressOnly);
+        }
         self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
         self.assert_public_postconditions()?;
 
@@ -8419,7 +8419,7 @@ impl RiskEngine {
                 Side::Short => self.resolved_k_short_terminal_delta,
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-            let kf_delta = if epoch_snap == epoch_side {
+            let (kf_delta, k_terminal_wide, f_end) = if epoch_snap == epoch_side {
                 // Same-epoch with nonzero basis in resolved mode is corrupt state.
                 // After resolution, all nonzero-basis accounts must be stale.
                 return Err(RiskError::CorruptState);
@@ -8436,18 +8436,35 @@ impl RiskEngine {
                 let k_terminal_wide = I256::from_i128(self.get_k_epoch_start(side))
                     .checked_add(I256::from_i128(resolved_k_td))
                     .ok_or(RiskError::Overflow)?;
-                let f_end_wide = I256::from_i128(self.get_f_epoch_start(side));
-                Self::compute_kf_pnl_delta_wide(
+                let f_end = self.get_f_epoch_start(side);
+                let f_end_wide = I256::from_i128(f_end);
+                let delta = Self::compute_kf_pnl_delta_wide(
                     abs_basis,
                     k_snap,
                     k_terminal_wide,
                     f_snap_acct,
                     f_end_wide,
                     den,
-                )?
+                )?;
+                (delta, k_terminal_wide, f_end)
             };
             let b_target = self.b_target_for_account(i, side)?;
-            let b_loss = self.settle_account_b_to_target(i, side, b_target)?;
+            let (_, _, _, b_will_be_current) = self.plan_account_b_chunk_to_target(
+                i,
+                b_target,
+                PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+            )?;
+            let k_terminal_snap = if b_will_be_current {
+                0
+            } else {
+                Self::try_into_non_min_i128(k_terminal_wide)?
+            };
+            let (b_loss, b_current) = self.settle_account_b_chunk_to_target(
+                i,
+                side,
+                b_target,
+                PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+            )?;
             let pnl_delta = Self::try_into_non_min_i128(
                 I256::from_i128(kf_delta)
                     .checked_sub(I256::from_u128(b_loss))
@@ -8467,17 +8484,26 @@ impl RiskEngine {
                 self.pnl_matured_pos_tot = self.pnl_pos_tot;
             }
             if epoch_snap != epoch_side {
-                let old_stale = self.get_stale_count(side);
-                self.set_stale_count(
-                    side,
-                    old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?,
-                );
+                if b_current {
+                    let old_stale = self.get_stale_count(side);
+                    self.set_stale_count(
+                        side,
+                        old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?,
+                    );
+                } else {
+                    self.accounts[i].adl_k_snap = k_terminal_snap;
+                    self.accounts[i].f_snap = f_end;
+                }
             }
-            self.clear_position_basis_q(i)?;
+            if b_current {
+                self.clear_position_basis_q(i)?;
+            }
         }
 
         self.settle_losses(i)?;
-        self.resolve_flat_negative(i)?;
+        if self.accounts[i].position_basis_q == 0 {
+            self.resolve_flat_negative(i)?;
+        }
         self.maybe_finalize_ready_reset_sides();
 
         self.assert_public_postconditions()?;

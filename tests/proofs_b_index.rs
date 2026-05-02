@@ -179,6 +179,17 @@ fn user_value_allowed_after_b(state: AccountBModel) -> bool {
     state.b_snap == state.b_target
 }
 
+fn resolved_close_after_b_chunk(
+    state: AccountBModel,
+    loss_limit: u8,
+    delta_budget: u8,
+    terminal_ready: bool,
+) -> Option<(AccountBModel, bool)> {
+    let (next, _, _) = settle_account_b_chunk(state, loss_limit, delta_budget)?;
+    let terminal_close_allowed = user_value_allowed_after_b(next) && terminal_ready;
+    Some((next, terminal_close_allowed))
+}
+
 fn flush_remainder_to_dust(rem: u8, dust: u8) -> (u8, u8, u8) {
     let total = rem as u16 + dust as u16;
     let whole = total / MODEL_DEN as u16;
@@ -559,6 +570,61 @@ fn proof_account_b_partial_settlement_blocks_user_value_until_current() {
             );
         }
     }
+}
+
+#[kani::proof]
+#[kani::unwind(1)]
+#[kani::solver(cadical)]
+fn proof_resolved_close_cannot_terminal_close_until_account_b_current() {
+    let state = AccountBModel {
+        b_snap: kani::any(),
+        b_target: kani::any(),
+        weight: kani::any(),
+        b_rem: kani::any(),
+    };
+    let loss_limit: u8 = kani::any();
+    let delta_budget: u8 = kani::any();
+    let terminal_ready: bool = kani::any();
+
+    kani::assume((state.b_target as u32) <= MODEL_MAX_B);
+    kani::assume(state.b_snap < state.b_target);
+    kani::assume(state.weight > 0 && (state.weight as u32) <= MODEL_DEN);
+    kani::assume((state.b_rem as u32) < MODEL_DEN);
+    kani::assume((loss_limit as u32) <= MODEL_MAX_ACCOUNT_B_LOSS);
+    kani::assume(delta_budget > 0);
+
+    if let Some((next, terminal_close_allowed)) =
+        resolved_close_after_b_chunk(state, loss_limit, delta_budget, terminal_ready)
+    {
+        assert!(next.b_snap > state.b_snap);
+        assert!(next.b_snap <= next.b_target);
+        if next.b_snap < next.b_target {
+            assert!(
+                !terminal_close_allowed,
+                "resolved close must return progress, not payout/free, while account B is stale"
+            );
+        }
+        if terminal_close_allowed {
+            assert!(next.b_snap == next.b_target && terminal_ready);
+        }
+    }
+
+    kani::cover!(
+        resolved_close_after_b_chunk(
+            AccountBModel {
+                b_snap: 0,
+                b_target: 6,
+                weight: 8,
+                b_rem: 0,
+            },
+            1,
+            6,
+            true,
+        )
+        .map(|(next, closed)| next.b_snap < next.b_target && !closed)
+        .unwrap_or(false),
+        "resolved close partial B chunk returns progress without terminal close"
+    );
 }
 
 #[kani::proof]

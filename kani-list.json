@@ -135,6 +135,7 @@
       "proof_position_closed_phase_preserves_public_exposure_invariants",
       "proof_public_instruction_work_is_bounded_not_whole_market",
       "proof_public_user_fund_profile_requires_crankforward_recovery_and_chunk_caps",
+      "proof_resolved_close_cannot_terminal_close_until_account_b_current",
       "proof_recovery_price_uses_authenticated_price_or_non_forced_p_last_fallback",
       "proof_residual_b_booking_uses_engine_determined_chunk_not_caller_smaller",
       "proof_weight_change_flushes_global_b_remainder",

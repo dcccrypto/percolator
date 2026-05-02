@@ -8163,6 +8163,32 @@ fn live_touch_partially_settles_huge_b_delta_and_leaves_account_b_stale() {
 }
 
 #[test]
+fn resolved_close_partially_settles_huge_b_delta_and_keeps_account_open() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS, 0);
+    engine.materialize_at(1, 0).unwrap();
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.attach_effective_position(1, 1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = (PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS + 2) * SOCIAL_LOSS_DEN;
+
+    engine
+        .resolve_market_not_atomic(ResolveMode::Ordinary, 1_000_000, 1_000_000, 0, 0)
+        .unwrap();
+
+    let result = engine.force_close_resolved_not_atomic(0).unwrap();
+
+    assert_eq!(result, ResolvedCloseResult::ProgressOnly);
+    assert!(engine.is_used(0));
+    assert_ne!(engine.accounts[0].position_basis_q, 0);
+    assert!(engine.accounts[0].b_snap < engine.b_epoch_start_short_num);
+    assert_eq!(engine.accounts[0].capital.get(), 0);
+    assert_eq!(engine.accounts[0].pnl, 0);
+    assert_eq!(engine.stale_account_count_short, 1);
+}
+
+#[test]
 fn weight_change_quarantines_b_remainder_to_scaled_dust() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 10, 0);
