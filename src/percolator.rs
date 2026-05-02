@@ -218,6 +218,23 @@ pub enum ResolveMode {
     Degenerate = 1,
 }
 
+/// Engine-verifiable permissionless terminal-recovery reason.
+///
+/// The recovery entrypoint intentionally resolves at the engine's `P_last`;
+/// callers provide evidence for why bounded progress cannot continue, not a
+/// settlement price.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryReason {
+    /// Exposed market has an authenticated raw target away from `P_last`, but
+    /// the configured bounded step floors to zero.
+    BelowProgressFloor = 0,
+    /// A B index has no remaining representable headroom.
+    BIndexHeadroomExhausted = 1,
+    /// Explicit non-claim audit state saturated; public progress must not
+    /// depend on widening that audit bucket in-place.
+    ExplicitLossOrDustAuditOverflow = 2,
+}
+
 /// Reserve mode for set_pnl (spec §4.8)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReserveMode {
@@ -3327,6 +3344,80 @@ impl RiskEngine {
             && self.oi_eff_short_q != 0
             && self.fund_px_last > 0;
         price_move_active || funding_active
+    }
+
+    fn exposed_market_has_oi(&self) -> bool {
+        self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0
+    }
+
+    fn bounded_price_step_cap_abs(&self, now_slot: u64) -> Result<u128> {
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let segment_dt = core::cmp::min(remaining_dt, self.params.max_accrual_dt_slots);
+        if segment_dt == 0 {
+            return Ok(0);
+        }
+        U256::from_u128(self.last_oracle_price as u128)
+            .checked_mul(U256::from_u128(
+                self.params.max_price_move_bps_per_slot as u128,
+            ))
+            .and_then(|v| v.checked_mul(U256::from_u128(segment_dt as u128)))
+            .and_then(|v| v.checked_div(U256::from_u128(10_000u128)))
+            .ok_or(RiskError::Overflow)?
+            .try_into_u128()
+            .ok_or(RiskError::Overflow)
+    }
+
+    test_visible! {
+    fn validate_permissionless_p_last_recovery_reason(
+        &self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if authenticated_raw_target_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        match reason {
+            RecoveryReason::BelowProgressFloor => {
+                if authenticated_raw_target_price == 0
+                    || authenticated_raw_target_price == self.last_oracle_price
+                    || !self.exposed_market_has_oi()
+                {
+                    return Err(RiskError::Unauthorized);
+                }
+                if self.bounded_price_step_cap_abs(now_slot)? != 0 {
+                    return Err(RiskError::Unauthorized);
+                }
+                Ok(())
+            }
+            RecoveryReason::BIndexHeadroomExhausted => {
+                if self.b_long_num == u128::MAX || self.b_short_num == u128::MAX {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::ExplicitLossOrDustAuditOverflow => {
+                if self.explicit_unallocated_loss_saturated != 0 {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+        }
+    }
     }
 
     fn keeper_has_possible_protective_progress(
@@ -8206,6 +8297,25 @@ impl RiskEngine {
     // ========================================================================
     // resolve_market (spec §10.7)
     // ========================================================================
+
+    /// Permissionless terminal recovery with deterministic P_last fallback.
+    /// The caller supplies only recovery evidence; the settlement price is
+    /// always the engine's current `last_oracle_price`.
+    pub fn permissionless_recovery_resolve_p_last_not_atomic(
+        &mut self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<()> {
+        self.assert_public_postconditions()?;
+        self.validate_permissionless_p_last_recovery_reason(
+            reason,
+            now_slot,
+            authenticated_raw_target_price,
+        )?;
+        let p_last = self.last_oracle_price;
+        self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
 
     /// Transition market from Live to Resolved at a price-bounded settlement price.
     /// First accrues live state, then stores terminal K deltas separately.

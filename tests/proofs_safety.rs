@@ -797,6 +797,46 @@ fn proof_production_b_residual_booking_or_recording_accounts_for_full_deficit() 
 }
 
 #[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_permissionless_p_last_recovery_uses_engine_price_not_raw_target() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let raw_delta: u8 = kani::any();
+    kani::assume((1..=5).contains(&raw_delta));
+    let raw_target = DEFAULT_ORACLE + raw_delta as u64;
+    let old_p_last = engine.last_oracle_price;
+    let recovery_slot = DEFAULT_SLOT + 1;
+
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BelowProgressFloor,
+        recovery_slot,
+        raw_target,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, old_p_last);
+    assert_eq!(engine.resolved_live_price, old_p_last);
+    assert_eq!(engine.resolved_slot, recovery_slot);
+    assert!(
+        engine.resolved_price != raw_target,
+        "permissionless recovery must not settle at caller-supplied raw target"
+    );
+    kani::cover!(
+        result.is_ok() && engine.resolved_price == old_p_last,
+        "production permissionless P_last recovery is reachable"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {

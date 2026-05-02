@@ -9120,6 +9120,100 @@ fn resolve_market_degenerate_bypasses_deviation_band() {
 }
 
 #[test]
+fn permissionless_recovery_price_floor_uses_p_last_not_raw_target() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    // default_params: P_last=1000, cap=3 bps/slot, dt=1.
+    // floor(1000 * 3 * 1 / 10_000) == 0, so a raw target away from P_last
+    // cannot be represented as bounded live catchup.
+    let raw_target = 1001;
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BelowProgressFloor,
+        1,
+        raw_target,
+    );
+    assert!(r.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(
+        engine.resolved_price, 1000,
+        "permissionless recovery settles at engine P_last, not caller target"
+    );
+    assert_eq!(engine.resolved_live_price, 1000);
+    assert_eq!(engine.resolved_slot, 1);
+}
+
+#[test]
+fn permissionless_recovery_rejects_price_floor_when_bounded_step_can_move() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BelowProgressFloor,
+        1,
+        1_000_001,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn permissionless_recovery_b_headroom_exhaustion_resolves_at_p_last() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.b_short_num = u128::MAX;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BIndexHeadroomExhausted,
+        1,
+        0,
+    );
+    assert!(r.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, 1000);
+    assert_eq!(engine.resolved_live_price, 1000);
+}
+
+#[test]
+fn permissionless_recovery_rejects_inactive_explicit_loss_reason() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ExplicitLossOrDustAuditOverflow,
+        1,
+        0,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
 fn sync_caps_and_advances_even_when_raw_product_exceeds_u128() {
     // Spec test 86: sync_account_fee_to_slot MUST cap and advance the
     // checkpoint even when the uncapped raw product `rate * dt` exceeds
