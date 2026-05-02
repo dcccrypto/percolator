@@ -789,6 +789,7 @@ pub enum RiskError {
     Unauthorized,
     PnlNotWarmedUp,
     Overflow,
+    RecoveryRequired,
     AccountNotFound,
     SideBlocked,
     CorruptState,
@@ -3082,7 +3083,7 @@ impl RiskEngine {
             .and_then(|v| v.checked_sub(1))
             .ok_or(RiskError::Overflow)?;
         if account.b_rem > max_num {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
         let max_delta_by_loss = max_num
             .checked_sub(account.b_rem)
@@ -3091,7 +3092,7 @@ impl RiskEngine {
             .ok_or(RiskError::CorruptState)?;
         let delta_b = core::cmp::min(remaining_delta, max_delta_by_loss);
         if delta_b == 0 {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
 
         let (loss, rem) =
@@ -3176,7 +3177,7 @@ impl RiskEngine {
         // SOCIAL_LOSS_DEN fits in u128.
         #[cfg(kani)]
         {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
         #[cfg(not(kani))]
         {
@@ -3185,7 +3186,7 @@ impl RiskEngine {
             .ok_or(RiskError::Overflow)?;
         let rem_old_u = U256::from_u128(rem_old);
         if max_scaled < rem_old_u {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
         let available_scaled = max_scaled
             .checked_sub(rem_old_u)
@@ -3197,7 +3198,7 @@ impl RiskEngine {
             .unwrap_or(u128::MAX);
         let engine_chunk = core::cmp::min(residual_remaining, max_chunk_by_b);
         if engine_chunk == 0 {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
         let chunk = if engine_chunk > chunk_cap {
             chunk_cap
@@ -3212,13 +3213,55 @@ impl RiskEngine {
         let delta_b = delta_b_u.try_into_u128().ok_or(RiskError::Overflow)?;
         let rem_new = rem_new_u.try_into_u128().ok_or(RiskError::Overflow)?;
         if delta_b == 0 || rem_new >= SOCIAL_LOSS_DEN {
-            return Err(RiskError::Overflow);
+            return Err(RiskError::RecoveryRequired);
         }
         let new_b = b.checked_add(delta_b).ok_or(RiskError::Overflow)?;
         self.set_b_side(side, new_b);
         self.set_social_remainder(side, rem_new);
         Ok(chunk)
         }
+    }
+    }
+
+    test_visible! {
+    fn book_or_record_bankruptcy_residual_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<(u128, u128)> {
+        if residual_remaining == 0 {
+            return Ok((0, 0));
+        }
+
+        let booked = match self.book_bankruptcy_residual_chunk_to_side(
+            ctx,
+            side,
+            residual_remaining,
+            chunk_budget,
+        ) {
+            Ok(booked) => booked,
+            // If a B write cannot make bounded representable progress, the
+            // spec permits explicit non-claim loss recording. This avoids
+            // making one honest cranker depend on an unbounded or impossible
+            // B-index write.
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        let recorded = residual_remaining
+            .checked_sub(booked)
+            .ok_or(RiskError::CorruptState)?;
+        if recorded > 0 {
+            self.add_explicit_unallocated_loss_side(side, recorded);
+        }
+        Ok((booked, recorded))
     }
     }
 
@@ -4181,15 +4224,12 @@ impl RiskEngine {
                 if uncertified_potential != 0 {
                     self.record_uninsured_protocol_loss(d_social);
                 } else {
-                    let booked = self.book_bankruptcy_residual_chunk_to_side(
+                    let (_booked, _recorded) = self.book_or_record_bankruptcy_residual_to_side(
                         ctx,
                         opp,
                         d_social,
                         PUBLIC_B_CHUNK_ATOMS,
                     )?;
-                    if booked != d_social {
-                        return Err(RiskError::Overflow);
-                    }
                 }
             }
         }

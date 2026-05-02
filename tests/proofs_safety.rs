@@ -741,6 +741,64 @@ fn proof_production_account_b_chunk_advances_and_bounds_loss() {
 #[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
+fn proof_production_b_residual_booking_or_recording_accounts_for_full_deficit() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 10, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(a as usize, -1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+
+    let residual: u8 = kani::any();
+    let chunk_budget: u8 = kani::any();
+    kani::assume((2..=4).contains(&residual));
+    kani::assume((1..=3).contains(&chunk_budget));
+    kani::assume(chunk_budget < residual);
+
+    let old_b_short = engine.b_short_num;
+    let old_rem_short = engine.social_loss_remainder_short_num;
+    let old_explicit_short = engine.explicit_unallocated_loss_short.get();
+    let w = engine.loss_weight_sum_short;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 100);
+    let result = engine.book_or_record_bankruptcy_residual_to_side(
+        &mut ctx,
+        Side::Short,
+        residual as u128,
+        chunk_budget as u128,
+    );
+    assert!(result.is_ok());
+    let (booked, recorded) = result.unwrap();
+
+    assert_eq!(
+        booked + recorded,
+        residual as u128,
+        "production residual path must either book or explicitly record every atom"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_short.get() >= old_explicit_short + recorded,
+        "recorded atoms must become durable non-claim loss"
+    );
+    if booked > 0 {
+        let delta_b = engine.b_short_num - old_b_short;
+        assert!(
+            delta_b * w + engine.social_loss_remainder_short_num
+                == booked * SOCIAL_LOSS_DEN + old_rem_short,
+            "booked prefix must satisfy exact scaled B identity"
+        );
+    }
+    assert!(engine.bankruptcy_hmax_lock_active);
+    kani::cover!(
+        booked > 0 && recorded > 0,
+        "partial B booking plus explicit residual recording is reachable"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(520)]
+#[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {
     // Spec dust rule: potential dust is diagnostic only. If potential dust is
     // not certified, ADL cannot use the affected side as a B-loss denominator;

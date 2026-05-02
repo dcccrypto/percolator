@@ -8257,6 +8257,60 @@ fn b_residual_chunk_booking_satisfies_exact_scaled_identity() {
 }
 
 #[test]
+fn large_b_residual_books_public_chunk_and_records_remainder() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    mat_regression_account(&mut engine, 1, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 2;
+    engine.oi_eff_long_q = 2;
+
+    let residual = PUBLIC_B_CHUNK_ATOMS + 7;
+    let old_b = engine.b_short_num;
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+
+    engine
+        .enqueue_adl(&mut ctx, Side::Long, 0, residual)
+        .unwrap();
+
+    assert!(
+        engine.b_short_num > old_b,
+        "first public residual chunk should be booked into B"
+    );
+    assert_eq!(
+        engine.explicit_unallocated_loss_short.get(),
+        7,
+        "residual that does not fit the public B chunk must be durable explicit non-claim loss"
+    );
+    assert!(
+        engine.bankruptcy_hmax_lock_active,
+        "bankrupt residual still starts h-max reconciliation"
+    );
+}
+
+#[test]
+fn b_headroom_exhaustion_records_residual_instead_of_sticking_crank() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = u128::MAX;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    let (booked, recorded) = engine
+        .book_or_record_bankruptcy_residual_to_side(&mut ctx, Side::Short, 5, PUBLIC_B_CHUNK_ATOMS)
+        .unwrap();
+
+    assert_eq!(booked, 0);
+    assert_eq!(recorded, 5);
+    assert_eq!(engine.b_short_num, u128::MAX);
+    assert_eq!(engine.explicit_unallocated_loss_short.get(), 5);
+    assert!(engine.bankruptcy_hmax_lock_active);
+}
+
+#[test]
 fn account_b_settlement_chunk_advances_without_full_b_loss() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 10, 0);

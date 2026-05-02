@@ -287,6 +287,7 @@
       "proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect",
       "proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write",
       "proof_production_account_b_chunk_advances_and_bounds_loss",
+      "proof_production_b_residual_booking_or_recording_accounts_for_full_deficit",
       "proof_audit2_close_account_structural_safety",
       "proof_audit2_funding_rate_clamped",
       "proof_audit2_positive_overflow_equity_conservative",
