@@ -8113,6 +8113,56 @@ fn b_residual_chunk_booking_satisfies_exact_scaled_identity() {
 }
 
 #[test]
+fn account_b_settlement_chunk_advances_without_full_b_loss() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 10, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    let target = 5u128 * SOCIAL_LOSS_DEN;
+
+    let (loss_1, current_1) = engine
+        .settle_account_b_chunk_to_target(0, Side::Short, target, 2)
+        .unwrap();
+    assert_eq!(loss_1, 2);
+    assert!(!current_1);
+    assert_eq!(engine.accounts[0].b_snap, 3 * SOCIAL_LOSS_DEN - 1);
+    assert_eq!(engine.accounts[0].b_rem, SOCIAL_LOSS_DEN - 1);
+
+    let (loss_2, current_2) = engine
+        .settle_account_b_chunk_to_target(0, Side::Short, target, 2)
+        .unwrap();
+    assert_eq!(loss_2, 2);
+    assert!(!current_2);
+    assert_eq!(engine.accounts[0].b_snap, 5 * SOCIAL_LOSS_DEN - 1);
+    assert_eq!(engine.accounts[0].b_rem, SOCIAL_LOSS_DEN - 1);
+
+    let (loss_3, current_3) = engine
+        .settle_account_b_chunk_to_target(0, Side::Short, target, 2)
+        .unwrap();
+    assert_eq!(loss_3, 1);
+    assert!(current_3);
+    assert_eq!(engine.accounts[0].b_snap, target);
+    assert_eq!(engine.accounts[0].b_rem, 0);
+}
+
+#[test]
+fn live_touch_partially_settles_huge_b_delta_and_leaves_account_b_stale() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = (PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS + 2) * SOCIAL_LOSS_DEN;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    engine.touch_account_live_local(0, &mut ctx).unwrap();
+
+    assert!(ctx.partial_b_settlement_active);
+    assert!(engine.accounts[0].b_snap < engine.b_short_num);
+    assert_eq!(engine.accounts[0].capital.get(), 0);
+    assert_eq!(engine.accounts[0].pnl, 0);
+}
+
+#[test]
 fn weight_change_quarantines_b_remainder_to_scaled_dust() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 10, 0);

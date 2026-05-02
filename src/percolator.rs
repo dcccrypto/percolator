@@ -122,6 +122,12 @@ pub const SOCIAL_LOSS_DEN: u128 = 1_000_000_000_000_000_000_000;
 /// constant satisfies spec §1.4: cfg_public_b_chunk_atoms >= MAX_VAULT_TVL.
 pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
 
+/// Public account-local B settlement loss budget. A single account touch will
+/// never realize more than this many quote atoms of B loss; if a larger stale
+/// B delta remains, the account stays B-stale and later keeper touches continue
+/// bounded progress.
+pub const PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS: u128 = MAX_VAULT_TVL;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -263,6 +269,10 @@ pub struct InstructionContext {
     /// before replaying a cursor window that may discover a latent bankruptcy,
     /// but it is not itself a real stress/h-max event.
     pub speculative_hmax_guard_active: bool,
+    /// Account-local B settlement made only partial progress in this
+    /// instruction. Positive-PnL usability stays h-max/no-positive-credit until
+    /// the account reaches its B target in a later bounded touch.
+    pub partial_b_settlement_active: bool,
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
@@ -295,6 +305,7 @@ impl InstructionContext {
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
             speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: 0,
             admit_h_max_shared: 0,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -313,6 +324,7 @@ impl InstructionContext {
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
             speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -336,6 +348,7 @@ impl InstructionContext {
             positive_pnl_usability_mutated: false,
             stress_envelope_restarted: false,
             speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt
@@ -3066,6 +3079,60 @@ impl RiskEngine {
     }
 
     test_visible! {
+    fn settle_account_b_chunk_to_target(
+        &mut self,
+        idx: usize,
+        _side: Side,
+        target: u128,
+        loss_limit: u128,
+    ) -> Result<(u128, bool)> {
+        let account = &self.accounts[idx];
+        if account.loss_weight == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if account.b_snap > target || account.b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let remaining_delta = target - account.b_snap;
+        if remaining_delta == 0 {
+            return Ok((0, true));
+        }
+
+        let capped_loss_limit = core::cmp::min(loss_limit, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS);
+        let max_num = capped_loss_limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(RiskError::Overflow)?;
+        if account.b_rem > max_num {
+            return Err(RiskError::Overflow);
+        }
+        let max_delta_by_loss = max_num
+            .checked_sub(account.b_rem)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(account.loss_weight)
+            .ok_or(RiskError::CorruptState)?;
+        let delta_b = core::cmp::min(remaining_delta, max_delta_by_loss);
+        if delta_b == 0 {
+            return Err(RiskError::Overflow);
+        }
+
+        let (loss, rem) =
+            Self::compute_b_loss_and_rem(account.loss_weight, account.b_rem, delta_b)?;
+        if loss > capped_loss_limit {
+            return Err(RiskError::Overflow);
+        }
+        let new_snap = account
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(RiskError::Overflow)?;
+        self.accounts[idx].b_snap = new_snap;
+        self.accounts[idx].b_rem = rem;
+        Ok((loss, new_snap == target))
+    }
+    }
+
+    test_visible! {
     fn book_bankruptcy_residual_chunk_to_side(
         &mut self,
         ctx: &mut InstructionContext,
@@ -3179,7 +3246,9 @@ impl RiskEngine {
     }
 
     fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
-        self.real_stress_gate_active(ctx) || ctx.speculative_hmax_guard_active
+        self.real_stress_gate_active(ctx)
+            || ctx.speculative_hmax_guard_active
+            || ctx.partial_b_settlement_active
     }
 
     fn ensure_loss_current_for_position_change(&self) -> Result<()> {
@@ -3439,7 +3508,15 @@ impl RiskEngine {
             let kf_delta =
                 Self::compute_kf_pnl_delta(abs_basis, k_snap, k_side, f_snap, f_side, den)?;
             let b_target = self.b_target_for_account(idx, side)?;
-            let b_loss = self.settle_account_b_to_target(idx, side, b_target)?;
+            let (b_loss, b_current) = self.settle_account_b_chunk_to_target(
+                idx,
+                side,
+                b_target,
+                PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+            )?;
+            if !b_current {
+                ctx.partial_b_settlement_active = true;
+            }
             let pnl_delta = Self::try_into_non_min_i128(
                 I256::from_i128(kf_delta)
                     .checked_sub(I256::from_u128(b_loss))
@@ -3452,7 +3529,7 @@ impl RiskEngine {
 
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared), Some(ctx))?;
 
-            if q_eff_new == 0 {
+            if q_eff_new == 0 && b_current {
                 self.inc_phantom_dust_potential(side)?;
                 self.clear_position_basis_q(idx)?;
             } else {
@@ -3476,7 +3553,15 @@ impl RiskEngine {
             let kf_delta =
                 Self::compute_kf_pnl_delta(abs_basis, k_snap, k_epoch_start, f_snap, f_end, den)?;
             let b_target = self.b_target_for_account(idx, side)?;
-            let b_loss = self.settle_account_b_to_target(idx, side, b_target)?;
+            let (b_loss, b_current) = self.settle_account_b_chunk_to_target(
+                idx,
+                side,
+                b_target,
+                PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+            )?;
+            if !b_current {
+                ctx.partial_b_settlement_active = true;
+            }
             let pnl_delta = Self::try_into_non_min_i128(
                 I256::from_i128(kf_delta)
                     .checked_sub(I256::from_u128(b_loss))
@@ -3492,8 +3577,13 @@ impl RiskEngine {
 
             // Mutate
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared), Some(ctx))?;
-            self.clear_position_basis_q(idx)?;
-            self.set_stale_count(side, new_stale);
+            if b_current {
+                self.clear_position_basis_q(idx)?;
+                self.set_stale_count(side, new_stale);
+            } else {
+                self.accounts[idx].adl_k_snap = k_epoch_start;
+                self.accounts[idx].f_snap = f_end;
+            }
         }
 
         Ok(())
@@ -3914,11 +4004,21 @@ impl RiskEngine {
         if account.adl_epoch_snap != self.get_epoch_side(side) {
             return Ok(true);
         }
+        let b_target = self.b_target_for_account(idx, side)?;
         Ok(account.adl_a_basis != self.get_a_side(side)
             || account.adl_k_snap != self.get_k_side(side)
             || account.f_snap != self.get_f_side(side)
-            || account.b_snap != self.get_b_side(side)
+            || account.b_snap != b_target
             || account.b_epoch_snap != account.adl_epoch_snap)
+    }
+
+    fn account_has_unsettled_b(&self, idx: usize) -> Result<bool> {
+        let account = &self.accounts[idx];
+        if account.position_basis_q == 0 {
+            return Ok(false);
+        }
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
+        Ok(account.b_snap != self.b_target_for_account(idx, side)?)
     }
 
     /// Internal helper that realizes wrapper-owned recurring maintenance fees
@@ -6121,6 +6221,9 @@ impl RiskEngine {
         if !ctx.add_touched(idx as u16) {
             return Err(RiskError::Overflow); // finalized context or touched-set capacity exceeded
         }
+        if self.account_has_unsettled_b(idx)? {
+            ctx.partial_b_settlement_active = true;
+        }
 
         // Step 4: accelerate outstanding reserve if h=1 admits (spec §4.9)
         self.admit_outstanding_reserve_on_touch(idx, ctx)?;
@@ -6135,7 +6238,7 @@ impl RiskEngine {
         self.settle_losses_with_context(idx, Some(ctx))?;
 
         // Step 7: resolve flat negative
-        if self.effective_pos_q_checked(idx, false)? == 0 && self.accounts[idx].pnl < 0 {
+        if self.accounts[idx].position_basis_q == 0 && self.accounts[idx].pnl < 0 {
             self.resolve_flat_negative_with_context(idx, Some(ctx))?;
         }
 
@@ -6172,6 +6275,9 @@ impl RiskEngine {
         }
 
         // Fee-debt sweep
+        if self.market_mode == MarketMode::Live && self.account_has_unsettled_live_effects(idx)? {
+            return Ok(());
+        }
         self.fee_debt_sweep(idx)?;
         Ok(())
     }
@@ -6380,6 +6486,9 @@ impl RiskEngine {
 
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
         let stress_active = self.stress_gate_active(&ctx);
 
         // Finalize touched (whole-only conversion + fee sweep)
@@ -6601,6 +6710,11 @@ impl RiskEngine {
         let (first, second) = if a <= b { (a, b) } else { (b, a) };
         self.touch_account_live_local(first as usize, &mut ctx)?;
         self.touch_account_live_local(second as usize, &mut ctx)?;
+        if self.account_has_unsettled_live_effects(a as usize)?
+            || self.account_has_unsettled_live_effects(b as usize)?
+        {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Step 12a: flush dust-only empty sides before computing
         // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
@@ -7224,6 +7338,9 @@ impl RiskEngine {
 
         if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
             return Err(RiskError::Overflow);
+        }
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Ok(false);
         }
 
         // Check position exists
@@ -7917,6 +8034,9 @@ impl RiskEngine {
 
         // Step 3: live local touch (no auto-convert, no finalize yet)
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
         if self.stress_gate_active(&ctx) {
             return Err(RiskError::Undercollateralized);
         }
@@ -7980,6 +8100,9 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized);
         }
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
         self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Position must be zero

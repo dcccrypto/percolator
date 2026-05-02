@@ -687,6 +687,58 @@ fn proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_production_account_b_chunk_advances_and_bounds_loss() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+
+    let loss_limit: u8 = kani::any();
+    let extra_loss: u8 = kani::any();
+    kani::assume(loss_limit > 0 && loss_limit <= 3);
+    kani::assume(extra_loss > 0 && extra_loss <= 3);
+
+    let target_loss_atoms = (loss_limit as u128) + (extra_loss as u128);
+    let target = target_loss_atoms * SOCIAL_LOSS_DEN;
+    let snap_before = engine.accounts[idx as usize].b_snap;
+    let rem_before = engine.accounts[idx as usize].b_rem;
+    let weight = engine.accounts[idx as usize].loss_weight;
+
+    let result = engine.settle_account_b_chunk_to_target(
+        idx as usize,
+        Side::Short,
+        target,
+        loss_limit as u128,
+    );
+    assert!(result.is_ok());
+    let (loss, current) = result.unwrap();
+    let snap_after = engine.accounts[idx as usize].b_snap;
+    let rem_after = engine.accounts[idx as usize].b_rem;
+    let delta_b = snap_after - snap_before;
+
+    assert!(delta_b > 0);
+    assert!(snap_after <= target);
+    assert!(loss <= loss_limit as u128);
+    assert!(rem_after < SOCIAL_LOSS_DEN);
+    assert!(current == (snap_after == target));
+    assert!(
+        loss * SOCIAL_LOSS_DEN + rem_after == rem_before + weight * delta_b,
+        "production account-local B chunk must conserve scaled loss exactly"
+    );
+    assert!(
+        !current,
+        "target intentionally exceeds one chunk so the proof exercises partial progress"
+    );
+    kani::cover!(
+        delta_b > 0 && loss == loss_limit as u128 && !current,
+        "production account-local B partial chunk is reachable"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {
