@@ -260,7 +260,7 @@
       "t7_28b_noncompounding_exact_additivity_divisible_increments"
     ],
     "tests/proofs_liveness.rs": [
-      "proof_adl_pipeline_trade_liquidate_reopen",
+      "proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code",
       "proof_drain_only_to_reset_progress",
       "proof_keeper_reset_lifecycle_last_stale_triggers_finalize",
       "proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary",

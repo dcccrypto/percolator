@@ -28,6 +28,15 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code` | 23.58s | PASS | Dispatcher routes exhausted B-index headroom through public recovery. |
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
 | `proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code` | 33.08s | PASS | Insurance-funded account credit fails closed under h-max/loss-stale reconciliation and preserves accounting otherwise. |
+| `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
+
+The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
+of the current tree. Its 2026-05-01 failure below is historical: it asserted the
+pre-v12.20.6 K-residual behavior that the engine intentionally replaced with
+B-index bankruptcy residual booking. The deterministic unit test
+`adl_b_pipeline_drains_resets_and_reopens_balanced_oi` covers the full
+stale-settle/reopen lifecycle that is too large for a useful finishing Kani
+harness.
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`

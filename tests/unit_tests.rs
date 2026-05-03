@@ -1437,6 +1437,66 @@ fn bankruptcy_b_write_preserves_future_mark_headroom() {
 }
 
 #[test]
+fn adl_b_pipeline_drains_resets_and_reopens_balanced_oi() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 500_000, 0);
+    mat_regression_account(&mut engine, 2, 500_000, 0);
+
+    let size = 3 * POS_SCALE;
+    engine.attach_effective_position(0, size as i128).unwrap();
+    engine
+        .attach_effective_position(1, -(size as i128))
+        .unwrap();
+    engine.oi_eff_long_q = size;
+    engine.oi_eff_short_q = size;
+
+    let old_k_short = engine.adl_coeff_short;
+    let old_b_short = engine.b_short_num;
+    let mut ctx = InstructionContext::new();
+    engine
+        .enqueue_adl(&mut ctx, Side::Long, size, 1_000)
+        .unwrap();
+
+    assert_eq!(engine.oi_eff_long_q, 0);
+    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(
+        engine.adl_coeff_short, old_k_short,
+        "bankruptcy residual must not mutate K"
+    );
+    assert!(
+        engine.b_short_num > old_b_short,
+        "bankruptcy residual must book through B"
+    );
+    assert!(ctx.pending_reset_long);
+    assert!(ctx.pending_reset_short);
+
+    engine.finalize_end_of_instruction_resets(&ctx).unwrap();
+    assert_eq!(engine.side_mode_long, SideMode::ResetPending);
+    assert_eq!(engine.side_mode_short, SideMode::ResetPending);
+
+    let mut settle_ctx = InstructionContext::new_with_admission(1, 10);
+    engine.settle_side_effects_live(0, &mut settle_ctx).unwrap();
+    engine.settle_side_effects_live(1, &mut settle_ctx).unwrap();
+    engine
+        .finalize_end_of_instruction_resets(&InstructionContext::new())
+        .unwrap();
+    assert_eq!(engine.side_mode_long, SideMode::Normal);
+    assert_eq!(engine.side_mode_short, SideMode::Normal);
+
+    engine
+        .attach_effective_position(2, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q);
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn trade_at_position_cap_accepts_valid_replacement() {
     // Regression (reviewer pass 7, blocker 1): when one side is at the
     // active-position cap, a trade that REPLACES an existing holder on
