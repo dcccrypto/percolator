@@ -935,6 +935,14 @@ pub struct PermissionlessProgressRank {
     pub resolved_blocker_units: u64,
 }
 
+/// O(1) account-local progress view for known blockers. Cursor/proof-packing
+/// wrappers can use this to audit that a supplied account touch reduces its
+/// own B-stale rank instead of relying on any full-market scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionlessAccountProgressRank {
+    pub account_b_remaining_num: u128,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccrualSegmentPlan {
     k_long: i128,
@@ -3762,6 +3770,37 @@ impl RiskEngine {
             stress_envelope_indices,
             active_close_residual_atoms,
             resolved_blocker_units,
+        })
+    }
+
+    pub fn permissionless_account_progress_rank(
+        &self,
+        idx: u16,
+    ) -> Result<PermissionlessAccountProgressRank> {
+        let i = idx as usize;
+        self.validate_touched_account_shape(i)?;
+
+        let account_b_remaining_num = match side_of_i128(self.accounts[i].position_basis_q) {
+            Some(side) => {
+                let target = self.b_target_for_account(i, side)?;
+                if self.accounts[i].b_snap > target {
+                    return Err(RiskError::CorruptState);
+                }
+                target - self.accounts[i].b_snap
+            }
+            None => {
+                if self.accounts[i].loss_weight != 0
+                    || self.accounts[i].b_snap != 0
+                    || self.accounts[i].b_rem != 0
+                {
+                    return Err(RiskError::CorruptState);
+                }
+                0
+            }
+        };
+
+        Ok(PermissionlessAccountProgressRank {
+            account_b_remaining_num,
         })
     }
 

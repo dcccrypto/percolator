@@ -625,6 +625,34 @@ fn proof_keeper_crank_decreases_live_catchup_rank_on_prod_code() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = 3 * SOCIAL_LOSS_DEN;
+
+    let before = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+
+    let mut ctx = InstructionContext::new_with_admission(1, 100);
+    let result = engine.touch_account_live_local(idx as usize, &mut ctx);
+    assert!(result.is_ok());
+
+    let after = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(after.account_b_remaining_num < before.account_b_remaining_num);
+    kani::cover!(
+        result.is_ok() && after.account_b_remaining_num < before.account_b_remaining_num,
+        "production live touch decreases account-local B rank"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_resolved_cursor_missing_slots_advance_on_prod_code() {

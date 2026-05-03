@@ -8448,11 +8448,25 @@ fn live_touch_partially_settles_huge_b_delta_and_leaves_account_b_stale() {
     engine.oi_eff_short_q = 1;
     engine.oi_eff_long_q = 1;
     engine.b_short_num = (PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS + 2) * SOCIAL_LOSS_DEN;
+    let rank_before = engine
+        .permissionless_account_progress_rank(0)
+        .unwrap()
+        .account_b_remaining_num;
+    assert!(rank_before > 0);
 
     let mut ctx = InstructionContext::new_with_admission(1, 10);
     engine.touch_account_live_local(0, &mut ctx).unwrap();
 
+    let rank_after = engine
+        .permissionless_account_progress_rank(0)
+        .unwrap()
+        .account_b_remaining_num;
     assert!(ctx.partial_b_settlement_active);
+    assert!(
+        rank_after < rank_before,
+        "bounded live touch must reduce account-local B rank"
+    );
+    assert!(rank_after > 0, "fixture should exercise partial B progress");
     assert!(engine.accounts[0].b_snap < engine.b_short_num);
     assert_eq!(engine.accounts[0].capital.get(), 0);
     assert_eq!(engine.accounts[0].pnl, 0);
@@ -8499,10 +8513,22 @@ fn resolved_close_repeated_calls_finish_account_b_then_close() {
         .resolve_market_not_atomic(ResolveMode::Ordinary, 1_000_000, 1_000_000, 0, 0)
         .unwrap();
 
+    let rank_before_first = engine
+        .permissionless_account_progress_rank(0)
+        .unwrap()
+        .account_b_remaining_num;
     let first = engine.force_close_resolved_not_atomic(0).unwrap();
     let first_snap = engine.accounts[0].b_snap;
+    let rank_after_first = engine
+        .permissionless_account_progress_rank(0)
+        .unwrap()
+        .account_b_remaining_num;
     assert_eq!(first, ResolvedCloseResult::ProgressOnly);
     assert!(first_snap < engine.b_epoch_start_short_num);
+    assert!(
+        rank_after_first < rank_before_first,
+        "resolved close must reduce account-local B rank before payout readiness"
+    );
     assert_ne!(engine.accounts[0].position_basis_q, 0);
 
     let second = engine.force_close_resolved_not_atomic(0).unwrap();
