@@ -913,6 +913,18 @@ pub struct CrankOutcome {
     pub num_liquidations: u32,
 }
 
+/// Minimal public outcome for the engine-owned permissionless progress
+/// dispatcher. Wrappers still own oracle/time/authentication policy, but do
+/// not need to reimplement recovery-priority selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionlessProgressOutcome {
+    Cranked(CrankOutcome),
+    ResolvedClose(ResolvedCloseResult),
+    ActiveCloseContinued,
+    Recovered(RecoveryReason),
+    AccountBRecovered(u16),
+}
+
 /// Pure Phase 2 cursor-scan outcome. The keeper path computes this before
 /// mutating cursor/generation state, then performs the materialized touches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -976,6 +988,29 @@ pub struct KeeperCrankRequest<'a> {
     pub rr_scan_limit: u64,
 }
 
+/// One-call public progress request for permissionless markets.
+///
+/// `oracle_price` is the effective engine price used for ordinary bounded
+/// keeper catchup. `authenticated_raw_target_price` is only recovery evidence;
+/// permissionless terminal recovery still settles at engine `P_last`.
+pub struct PermissionlessProgressRequest<'a> {
+    pub now_slot: u64,
+    pub oracle_price: u64,
+    pub authenticated_raw_target_price: u64,
+    pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
+    pub account_hint: Option<u16>,
+    pub max_revalidations: u16,
+    pub max_candidate_inspections: u16,
+    pub funding_rate_e9: i128,
+    pub admit_h_min: u64,
+    pub admit_h_max: u64,
+    pub admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    pub rr_touch_limit: u64,
+    pub rr_scan_limit: u64,
+    pub resolved_scan_limit: u64,
+    pub resolved_fee_rate_per_slot: u128,
+}
+
 impl<'a> KeeperCrankRequest<'a> {
     pub fn full_scan(
         now_slot: u64,
@@ -1000,6 +1035,35 @@ impl<'a> KeeperCrankRequest<'a> {
             admit_h_max_consumption_threshold_bps_opt,
             rr_touch_limit,
             rr_scan_limit: u64::MAX,
+        }
+    }
+}
+
+impl<'a> PermissionlessProgressRequest<'a> {
+    pub fn from_keeper_request(
+        req: KeeperCrankRequest<'a>,
+        authenticated_raw_target_price: u64,
+        account_hint: Option<u16>,
+        resolved_scan_limit: u64,
+        resolved_fee_rate_per_slot: u128,
+    ) -> Self {
+        Self {
+            now_slot: req.now_slot,
+            oracle_price: req.oracle_price,
+            authenticated_raw_target_price,
+            ordered_candidates: req.ordered_candidates,
+            account_hint,
+            max_revalidations: req.max_revalidations,
+            max_candidate_inspections: req.max_candidate_inspections,
+            funding_rate_e9: req.funding_rate_e9,
+            admit_h_min: req.admit_h_min,
+            admit_h_max: req.admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt: req
+                .admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit: req.rr_touch_limit,
+            rr_scan_limit: req.rr_scan_limit,
+            resolved_scan_limit,
+            resolved_fee_rate_per_slot,
         }
     }
 }
@@ -8372,6 +8436,132 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
             rr_touch_limit,
         ))
+    }
+
+    fn try_permissionless_global_recovery(
+        &mut self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<Option<PermissionlessProgressOutcome>> {
+        match self.validate_permissionless_p_last_recovery_reason(
+            reason,
+            now_slot,
+            authenticated_raw_target_price,
+        ) {
+            Ok(()) => {
+                self.permissionless_recovery_resolve_p_last_not_atomic(
+                    reason,
+                    now_slot,
+                    authenticated_raw_target_price,
+                )?;
+                Ok(Some(PermissionlessProgressOutcome::Recovered(reason)))
+            }
+            Err(RiskError::Unauthorized) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Engine-owned permissionless progress dispatcher.
+    ///
+    /// This is the minimal public API a wrapper can call after it has supplied
+    /// authenticated time/oracle/raw-target inputs and optional account
+    /// packing. The engine picks the safe progress branch: resolved cursor,
+    /// active-close continuation/recovery, account-B recovery, global P-last
+    /// recovery, or ordinary keeper crank. It does not expose new error types;
+    /// callers continue to receive `RiskError`.
+    pub fn permissionless_progress_not_atomic(
+        &mut self,
+        req: PermissionlessProgressRequest<'_>,
+    ) -> Result<PermissionlessProgressOutcome> {
+        let PermissionlessProgressRequest {
+            now_slot,
+            oracle_price,
+            authenticated_raw_target_price,
+            ordered_candidates,
+            account_hint,
+            max_revalidations,
+            max_candidate_inspections,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit,
+            resolved_scan_limit,
+            resolved_fee_rate_per_slot,
+        } = req;
+
+        if self.market_mode == MarketMode::Resolved {
+            let result = self.force_close_resolved_cursor_with_fee_not_atomic(
+                resolved_scan_limit,
+                resolved_fee_rate_per_slot,
+            )?;
+            return Ok(PermissionlessProgressOutcome::ResolvedClose(result));
+        }
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+
+        if self.active_close_present != 0 {
+            if self.active_bankrupt_close_recovery_required()? {
+                self.permissionless_recovery_resolve_p_last_not_atomic(
+                    RecoveryReason::ActiveBankruptCloseCannotProgress,
+                    now_slot,
+                    authenticated_raw_target_price,
+                )?;
+                return Ok(PermissionlessProgressOutcome::Recovered(
+                    RecoveryReason::ActiveBankruptCloseCannotProgress,
+                ));
+            }
+            self.continue_active_bankrupt_close_not_atomic(now_slot)?;
+            return Ok(PermissionlessProgressOutcome::ActiveCloseContinued);
+        }
+
+        if let Some(idx) = account_hint {
+            match self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot) {
+                Ok(()) => {
+                    self.permissionless_recovery_resolve_account_b_p_last_not_atomic(
+                        idx, now_slot,
+                    )?;
+                    return Ok(PermissionlessProgressOutcome::AccountBRecovered(idx));
+                }
+                Err(RiskError::Unauthorized) | Err(RiskError::AccountNotFound) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        const GLOBAL_RECOVERY_PRIORITY: [RecoveryReason; 5] = [
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+            RecoveryReason::BIndexHeadroomExhausted,
+            RecoveryReason::ExplicitLossOrDustAuditOverflow,
+            RecoveryReason::BelowProgressFloor,
+            RecoveryReason::BlockedSegmentHeadroomOrRepresentability,
+        ];
+        for reason in GLOBAL_RECOVERY_PRIORITY {
+            if let Some(outcome) = self.try_permissionless_global_recovery(
+                reason,
+                now_slot,
+                authenticated_raw_target_price,
+            )? {
+                return Ok(outcome);
+            }
+        }
+
+        let outcome = self.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit,
+        })?;
+        Ok(PermissionlessProgressOutcome::Cranked(outcome))
     }
 
     pub fn keeper_crank_with_request_not_atomic(

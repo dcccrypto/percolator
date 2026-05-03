@@ -625,6 +625,60 @@ fn proof_keeper_crank_decreases_live_catchup_rank_on_prod_code() {
 }
 
 #[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_recovers_b_index_headroom_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.b_short_num = u128::MAX;
+
+    let old_p_last = engine.last_oracle_price;
+    let recovery_slot = DEFAULT_SLOT + 1;
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: recovery_slot,
+        oracle_price: old_p_last,
+        authenticated_raw_target_price: 0,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::BIndexHeadroomExhausted
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, old_p_last);
+    assert_eq!(engine.resolved_live_price, old_p_last);
+    assert_eq!(engine.resolved_slot, recovery_slot);
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::Recovered(
+                RecoveryReason::BIndexHeadroomExhausted
+            ))
+            && engine.resolved_price == old_p_last,
+        "production permissionless progress dispatcher reaches P-last B-index recovery"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
