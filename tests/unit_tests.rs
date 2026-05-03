@@ -911,6 +911,60 @@ fn test_top_up_insurance_fund() {
 }
 
 #[test]
+fn live_insurance_withdraw_empty_current_market_succeeds() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.top_up_insurance_fund(1_000, 0).unwrap();
+
+    engine.withdraw_live_insurance_not_atomic(250, 0).unwrap();
+
+    assert_eq!(engine.vault.get(), 750);
+    assert_eq!(engine.insurance_fund.balance.get(), 750);
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn live_insurance_withdraw_rejects_exposed_market() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    engine.top_up_insurance_fund(1_000, 0).unwrap();
+    mat_regression_account(&mut engine, 0, 10_000, 0);
+    mat_regression_account(&mut engine, 1, 10_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.withdraw_live_insurance_not_atomic(1, 0);
+
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert!(engine.check_conservation());
+}
+
+#[test]
+fn live_insurance_withdraw_rejects_hmax_or_stress_reconciliation() {
+    let mut engine = RiskEngine::new(default_params());
+    engine.top_up_insurance_fund(1_000, 0).unwrap();
+    seed_active_stress_envelope(&mut engine, 1, 0, 1);
+    engine.bankruptcy_hmax_lock_active = true;
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.withdraw_live_insurance_not_atomic(1, 0);
+
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn absorb_protocol_loss_consumes_insurance_without_draining_vault() {
     let mut engine = RiskEngine::new(default_params());
     engine.vault = U128::new(1_000);
@@ -9362,6 +9416,53 @@ fn permissionless_progress_dispatcher_auto_recovers_price_floor() {
     assert_eq!(engine.resolved_price, 1000);
     assert_eq!(engine.resolved_live_price, 1000);
     assert_eq!(engine.resolved_slot, 1);
+}
+
+#[test]
+fn permissionless_progress_dispatcher_cranks_bounded_live_catchup() {
+    let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let now_slot = engine.params.max_accrual_dt_slots + 5;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    let outcome = engine
+        .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+            now_slot,
+            oracle_price: 999,
+            authenticated_raw_target_price: 0,
+            ordered_candidates: &[],
+            account_hint: None,
+            max_revalidations: 0,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: Some(1),
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+            resolved_scan_limit: 1,
+            resolved_fee_rate_per_slot: 0,
+        })
+        .unwrap();
+    let after = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+
+    assert!(matches!(outcome, PermissionlessProgressOutcome::Cranked(_)));
+    assert!(after.live_catchup_slots < before.live_catchup_slots);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    assert!(engine.check_conservation());
 }
 
 #[test]

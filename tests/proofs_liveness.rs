@@ -679,6 +679,61 @@ fn proof_permissionless_progress_dispatcher_recovers_b_index_headroom_on_prod_co
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    let size = POS_SCALE as i128;
+    engine.set_position_basis_q(a as usize, size).unwrap();
+    engine.set_position_basis_q(b as usize, -size).unwrap();
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.rr_cursor_position = 2;
+
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots + 1;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE - 1,
+        authenticated_raw_target_price: 0,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert!(matches!(
+        result,
+        Ok(PermissionlessProgressOutcome::Cranked(_))
+    ));
+    let after = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    assert!(after.live_catchup_slots < before.live_catchup_slots);
+    assert_eq!(after.resolved_blocker_units, 0);
+    kani::cover!(
+        matches!(result, Ok(PermissionlessProgressOutcome::Cranked(_)))
+            && after.live_catchup_slots < before.live_catchup_slots,
+        "production permissionless dispatcher decreases live catchup rank through crank path"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {

@@ -307,6 +307,59 @@ fn proof_top_up_insurance_preserves_conservation() {
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_live_insurance_withdraw_fails_closed_when_exposed_or_reconciling_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.top_up_insurance_fund(100, DEFAULT_SLOT).unwrap();
+
+    let exposed: bool = kani::any();
+    if exposed {
+        let a = add_user_test(&mut engine, 0).unwrap();
+        let b = add_user_test(&mut engine, 0).unwrap();
+        engine.deposit_not_atomic(a, 10, DEFAULT_SLOT).unwrap();
+        engine.deposit_not_atomic(b, 10, DEFAULT_SLOT).unwrap();
+        engine.attach_effective_position(a as usize, 1).unwrap();
+        engine.attach_effective_position(b as usize, -1).unwrap();
+        engine.oi_eff_long_q = 1;
+        engine.oi_eff_short_q = 1;
+    }
+
+    let reconciling: bool = kani::any();
+    if reconciling {
+        engine.bankruptcy_hmax_lock_active = true;
+        engine.stress_consumed_bps_e9_since_envelope = 1;
+        engine.stress_envelope_remaining_indices = 1;
+        engine.stress_envelope_start_slot = DEFAULT_SLOT;
+        engine.stress_envelope_start_generation = engine.sweep_generation;
+    }
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let result = engine.withdraw_live_insurance_not_atomic(1, DEFAULT_SLOT);
+
+    if exposed || reconciling {
+        assert_eq!(result, Err(RiskError::Undercollateralized));
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    } else {
+        assert!(result.is_ok());
+        assert_eq!(engine.vault.get(), vault_before - 1);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before - 1);
+    }
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized) && (exposed || reconciling),
+        "production live insurance withdrawal fails closed under exposure or reconciliation"
+    );
+    kani::cover!(
+        result.is_ok() && !exposed && !reconciling,
+        "production live insurance withdrawal remains available for empty current markets"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_deposit_then_withdraw_roundtrip() {

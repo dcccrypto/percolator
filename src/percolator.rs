@@ -9983,7 +9983,9 @@ impl RiskEngine {
     }
 
     /// Withdraw insurance from a live market. The wrapper owns authorization
-    /// and rate limits; the engine owns canonical accounting.
+    /// and rate limits; the engine owns canonical accounting and loss-current
+    /// safety. Live insurance is withdrawable only from an unexposed,
+    /// fully-current market with no active reconciliation lock.
     pub fn withdraw_live_insurance_not_atomic(
         &mut self,
         amount: u128,
@@ -9997,6 +9999,20 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         self.check_live_accrual_envelope(now_slot)?;
+        if self.active_close_present != 0
+            || self.oi_eff_long_q != 0
+            || self.oi_eff_short_q != 0
+            || self.stored_pos_count_long != 0
+            || self.stored_pos_count_short != 0
+            || self.stale_account_count_long != 0
+            || self.stale_account_count_short != 0
+            || self.neg_pnl_account_count != 0
+            || self.current_slot != self.last_market_slot
+            || self.stress_consumed_bps_e9_since_envelope != 0
+            || self.bankruptcy_hmax_lock_active
+        {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);
