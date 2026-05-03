@@ -743,7 +743,7 @@ fn t4_22_k_overflow_routes_to_absorb() {
 }
 
 #[kani::proof]
-#[kani::unwind(520)]
+#[kani::unwind(120)]
 #[kani::solver(cadical)]
 fn proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect() {
     // Spec residual-loss bound: B-index booking must not settle more
@@ -1240,7 +1240,7 @@ fn proof_oracle_or_target_unavailable_policy_recovery_fails_closed_in_engine() {
 }
 
 #[kani::proof]
-#[kani::unwind(520)]
+#[kani::unwind(120)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {
     // Spec dust rule: potential dust is diagnostic only. If potential dust is

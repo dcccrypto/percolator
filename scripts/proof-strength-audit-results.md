@@ -29,6 +29,8 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
 | `proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code` | 33.08s | PASS | Insurance-funded account credit fails closed under h-max/loss-stale reconciliation and preserves accounting otherwise. |
 | `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
+| `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect` | 65.79s | PASS | Replaces the stale ADL K-loss timeout with production B-index residual booking and proves represented settlement loss is bounded by the deficit. |
+| `proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write` | 34.95s | PASS | Production ADL routes deficits to non-claim audit loss when uncertified potential dust makes the B denominator unsafe. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -37,6 +39,13 @@ B-index bankruptcy residual booking. The deterministic unit test
 `adl_b_pipeline_drains_resets_and_reopens_balanced_oi` covers the full
 stale-settle/reopen lifecycle that is too large for a useful finishing Kani
 harness.
+
+The old `proof_adl_k_loss_write_bounded_by_rounded_settlement_effect` timeout is
+also superseded in the current tree. Bankruptcy residuals are no longer written
+through K; `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect`
+proves the current B-index residual path, and the deterministic unit regression
+`adl_k_loss_must_not_overcharge_floor_rounded_opposing_accounts` covers the
+full live-touch settlement path.
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
@@ -121,7 +130,7 @@ The proof suite continues to surface the main engine obligations by name through
 | Sparse sweep budget semantics | `v19_rr_touch_zero_no_cursor_advance`, `v19_rr_scan_zero_no_stress_progress`, `v19_greedy_phase2_model_respects_touch_budget_and_bounds` |
 | Stress accounting and admission hardening | `v19_accrual_consumption_only_commits_on_success`, `v19_consumption_monotone_within_generation`, `v19_funding_consumption_accumulates_scaled_bps`, `v19_admit_gate_stress_lane_forces_h_max`, `v19_admit_gate_some_zero_rejected` |
 | Phantom-dust cleanup bounds | `proof_unilateral_empty_orphan_dust_clearance`, `t13_56_unilateral_empty_orphan_resolution`, `t13_57_unilateral_empty_corruption_guard`, `t13_58_unilateral_empty_short_side`, `t13_58b_unilateral_empty_short_requires_long_bound` |
-| ADL phantom dust and K-loss safety | `proof_adl_k_loss_write_bounded_by_rounded_settlement_effect`, `t13_60_unconditional_dust_bound_on_any_a_decay`, `t14_61_dust_bound_adl_a_truncation_sufficient`, `t14_65_dust_bound_end_to_end_clearance`, `t4_22_k_overflow_routes_to_absorb` |
+| ADL phantom dust and residual-loss safety | `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect`, `proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write`, `t13_60_unconditional_dust_bound_on_any_a_decay`, `t14_61_dust_bound_adl_a_truncation_sufficient`, `t14_65_dust_bound_end_to_end_clearance`, `t4_22_k_overflow_routes_to_absorb` |
 | Reset lifecycle and side-mode gates | `proof_drain_only_to_reset_progress`, `proof_keeper_reset_lifecycle_last_stale_triggers_finalize`, `t11_43_end_instruction_auto_finalizes_ready_side`, `t3_16_reset_pending_counter_invariant`, `proof_side_mode_gating` |
 | Exact arithmetic and risk checks | `proof_funding_sign_and_floor`, `proof_symbolic_margin_enforcement_on_reduce`, `proof_notional_scales_with_price`, `proof_wide_signed_mul_div_floor_sign_and_rounding`, `t0_2_mul_div_ceil_algebraic_identity` |
 | Resolved/terminal conservation | `proof_force_close_resolved_position_conservation`, `proof_force_close_resolved_with_profit_conserves`, `proof_force_close_resolved_pos_count_decrements`, `proof_force_close_resolved_fee_sweep_conservation` |
