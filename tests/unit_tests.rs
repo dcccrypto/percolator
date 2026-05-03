@@ -9655,6 +9655,8 @@ fn permissionless_progress_dispatcher_continues_active_close_before_crank() {
         .enqueue_adl(&mut ctx, Side::Long, 0, residual)
         .unwrap();
     assert_eq!(engine.active_close_present, 1);
+    let rank_before = engine.permissionless_progress_rank_for_now(1).unwrap();
+    assert_eq!(rank_before.active_close_residual_atoms, 7);
 
     let outcome = engine
         .permissionless_progress_not_atomic(PermissionlessProgressRequest {
@@ -9677,6 +9679,11 @@ fn permissionless_progress_dispatcher_continues_active_close_before_crank() {
         .unwrap();
 
     assert_eq!(outcome, PermissionlessProgressOutcome::ActiveCloseContinued);
+    let rank_after = engine.permissionless_progress_rank_for_now(1).unwrap();
+    assert!(
+        rank_after.active_close_residual_atoms < rank_before.active_close_residual_atoms,
+        "permissionless dispatcher must reduce active-close residual rank"
+    );
     assert_eq!(engine.active_close_present, 0);
     assert_eq!(engine.active_close_residual_remaining, 0);
     assert!(engine.b_short_num > 0);

@@ -734,6 +734,76 @@ fn proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_
 }
 
 #[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = DEFAULT_SLOT;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 0;
+
+    let residual: u8 = kani::any();
+    kani::assume((1..=3).contains(&residual));
+    engine.active_close_residual_remaining = residual as u128;
+
+    let now_slot = DEFAULT_SLOT + 1;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    assert_eq!(before.active_close_residual_atoms, residual as u128);
+    let before_b = engine.b_short_num;
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::ActiveCloseContinued)
+    );
+    let after = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    assert!(after.active_close_residual_atoms < before.active_close_residual_atoms);
+    assert_eq!(after.active_close_residual_atoms, 0);
+    assert!(engine.b_short_num > before_b);
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result == Ok(PermissionlessProgressOutcome::ActiveCloseContinued)
+            && after.active_close_residual_atoms < before.active_close_residual_atoms,
+        "production permissionless dispatcher decreases active-close rank before ordinary crank"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {

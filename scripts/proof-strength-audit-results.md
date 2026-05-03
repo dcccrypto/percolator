@@ -6,6 +6,30 @@ Source prompt: `scripts/audit-proof-strength.md`.
 
 Timing sweep command: `scripts/run_kani_full_audit.sh`.
 
+## Current Tree Addendum
+
+Updated: 2026-05-03.
+
+This report's **full timing sweep** is still the 2026-05-01 overnight run
+below. It is now stale for the current tree: the parsed proof inventory is
+`375` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+covered `333`.
+
+Targeted production-code proofs added after the overnight sweep and rerun on
+2026-05-03:
+
+| Harness | Time | Status | Scope |
+|---|---:|---|---|
+| `proof_permissionless_progress_dispatcher_recovers_b_index_headroom_on_prod_code` | 17.23s | PASS | Dispatcher reaches P-last B-index recovery. |
+| `proof_live_insurance_withdraw_fails_closed_when_exposed_or_reconciling_on_prod_code` | 40.89s | PASS | Live insurance withdrawal fails closed under exposure/reconciliation and remains available for empty current markets. |
+| `proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code` | 61.54s | PASS | Dispatcher ordinary-crank branch reduces live catchup rank. |
+| `proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code` | 36.22s | PASS | Dispatcher active-close branch reduces residual rank before ordinary crank. |
+
+These targeted passes do **not** replace a full proof-strength certification.
+The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
+against the current 375-harness inventory, then rerun the static strength /
+non-vacuity audit over the same inventory.
+
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
 
 The checked-in `kani-list.json` inventory was refreshed during the audit and now reports `333` standard harnesses.
