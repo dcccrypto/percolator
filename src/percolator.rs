@@ -128,6 +128,21 @@ pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
 /// bounded progress.
 pub const PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS: u128 = MAX_VAULT_TVL;
 
+/// Active bankrupt-close residual continuation phase.
+pub const ACTIVE_CLOSE_PHASE_NONE: u8 = 0;
+pub const ACTIVE_CLOSE_PHASE_RESIDUAL_B: u8 = 1;
+
+/// Active-close side encoding. Plain `u8` avoids enum-discriminant zero-copy
+/// hazards for persisted state.
+pub const ACTIVE_CLOSE_SIDE_NONE: u8 = 0;
+pub const ACTIVE_CLOSE_SIDE_LONG: u8 = 1;
+pub const ACTIVE_CLOSE_SIDE_SHORT: u8 = 2;
+
+/// Hard cap on public active-close residual B booking attempts before the
+/// permissionless P-last recovery path must record the remainder as non-claim
+/// audit loss and resolve.
+pub const ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS: u64 = 1;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -243,10 +258,9 @@ pub enum RecoveryReason {
     /// for canonical state; the recovery seam keeps the liveness contract
     /// explicit if deployment constants change.
     AccountBSettlementCannotProgress = 4,
-    /// Reserved terminal-recovery class for a future durable active
-    /// bankrupt-close continuation state. The current engine completes
-    /// full-close bankruptcy with bounded B booking or explicit non-claim
-    /// recording, so this reason is not accepted without such state.
+    /// Durable active bankrupt-close continuation could not make another
+    /// bounded B-booking step, so permissionless terminal recovery records
+    /// the remaining residual as non-claim audit loss before P-last resolve.
     ActiveBankruptCloseCannotProgress = 5,
 }
 
@@ -782,6 +796,22 @@ pub struct RiskEngine {
     /// consumption when the lock came from a post-principal loss tail.
     pub bankruptcy_hmax_lock_active: bool,
 
+    /// Durable active bankrupt-close continuation state (spec v12.20.6).
+    /// Present only while a public full-close has already frozen/removed the
+    /// bankrupt account's exposure but still has residual opposing-side B loss
+    /// to book over bounded follow-up cranks or terminal recovery.
+    pub active_close_present: u8,
+    pub active_close_phase: u8,
+    pub active_close_account_idx: u16,
+    pub active_close_opp_side: u8,
+    pub active_close_close_price: u64,
+    pub active_close_close_slot: u64,
+    pub active_close_q_close_q: u128,
+    pub active_close_residual_remaining: u128,
+    pub active_close_residual_booked: u128,
+    pub active_close_residual_recorded: u128,
+    pub active_close_b_chunks_booked: u64,
+
     /// Last oracle price used in accrue_market_to (P_last, spec §5.5)
     pub last_oracle_price: u64,
     /// Last funding-sample price (fund_px_last, spec §5.5 step 11)
@@ -893,6 +923,14 @@ struct AccrualSegmentPlan {
     f_long: i128,
     f_short: i128,
     consumed_this_step: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BResidualChunkPlan {
+    booked: u128,
+    delta_b: u128,
+    rem_new: u128,
+    records_explicit: bool,
 }
 
 /// Stable keeper-crank request object. New crank policy fields should be added
@@ -1577,6 +1615,17 @@ impl RiskEngine {
             stress_envelope_start_generation: NO_SLOT,
             last_sweep_generation_advance_slot: NO_SLOT,
             bankruptcy_hmax_lock_active: false,
+            active_close_present: 0,
+            active_close_phase: ACTIVE_CLOSE_PHASE_NONE,
+            active_close_account_idx: u16::MAX,
+            active_close_opp_side: ACTIVE_CLOSE_SIDE_NONE,
+            active_close_close_price: 0,
+            active_close_close_slot: 0,
+            active_close_q_close_q: 0,
+            active_close_residual_remaining: 0,
+            active_close_residual_booked: 0,
+            active_close_residual_recorded: 0,
+            active_close_b_chunks_booked: 0,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
@@ -1691,6 +1740,17 @@ impl RiskEngine {
         self.stress_envelope_start_generation = NO_SLOT;
         self.last_sweep_generation_advance_slot = NO_SLOT;
         self.bankruptcy_hmax_lock_active = false;
+        self.active_close_present = 0;
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_NONE;
+        self.active_close_account_idx = u16::MAX;
+        self.active_close_opp_side = ACTIVE_CLOSE_SIDE_NONE;
+        self.active_close_close_price = 0;
+        self.active_close_close_slot = 0;
+        self.active_close_q_close_q = 0;
+        self.active_close_residual_remaining = 0;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
         self.last_oracle_price = init_oracle_price;
         self.fund_px_last = init_oracle_price;
         self.last_market_slot = init_slot;
@@ -2728,6 +2788,149 @@ impl RiskEngine {
         }
     }
 
+    fn encode_active_close_side(side: Side) -> u8 {
+        match side {
+            Side::Long => ACTIVE_CLOSE_SIDE_LONG,
+            Side::Short => ACTIVE_CLOSE_SIDE_SHORT,
+        }
+    }
+
+    fn decode_active_close_side(encoded: u8) -> Result<Side> {
+        match encoded {
+            ACTIVE_CLOSE_SIDE_LONG => Ok(Side::Long),
+            ACTIVE_CLOSE_SIDE_SHORT => Ok(Side::Short),
+            _ => Err(RiskError::CorruptState),
+        }
+    }
+
+    fn clear_active_bankrupt_close_state(&mut self) {
+        self.active_close_present = 0;
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_NONE;
+        self.active_close_account_idx = u16::MAX;
+        self.active_close_opp_side = ACTIVE_CLOSE_SIDE_NONE;
+        self.active_close_close_price = 0;
+        self.active_close_close_slot = 0;
+        self.active_close_q_close_q = 0;
+        self.active_close_residual_remaining = 0;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
+    }
+
+    fn ensure_no_active_bankrupt_close(&self) -> Result<()> {
+        if self.active_close_present != 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    fn start_active_bankrupt_close_residual(
+        &mut self,
+        account_idx: u16,
+        opp_side: Side,
+        close_price: u64,
+        close_slot: u64,
+        q_close_q: u128,
+        residual_remaining: u128,
+    ) -> Result<()> {
+        if residual_remaining == 0 {
+            return Ok(());
+        }
+        if self.active_close_present != 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+        if account_idx != u16::MAX && account_idx as u64 >= self.params.max_accounts {
+            return Err(RiskError::CorruptState);
+        }
+        if close_price == 0 || close_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+        if close_slot > self.current_slot {
+            return Err(RiskError::CorruptState);
+        }
+        self.active_close_present = 1;
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+        self.active_close_account_idx = account_idx;
+        self.active_close_opp_side = Self::encode_active_close_side(opp_side);
+        self.active_close_close_price = close_price;
+        self.active_close_close_slot = close_slot;
+        self.active_close_q_close_q = q_close_q;
+        self.active_close_residual_remaining = residual_remaining;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+        Ok(())
+    }
+
+    fn active_bankrupt_close_recovery_required(&self) -> Result<bool> {
+        self.validate_active_bankrupt_close_shape()?;
+        if self.active_close_present == 0 {
+            return Ok(false);
+        }
+        if self.active_close_residual_remaining == 0 {
+            return Ok(false);
+        }
+        if self.active_close_b_chunks_booked >= ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS {
+            return Ok(true);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        match self.plan_bankruptcy_residual_chunk_to_side(
+            side,
+            self.active_close_residual_remaining,
+            PUBLIC_B_CHUNK_ATOMS,
+        ) {
+            Ok(plan) if plan.booked > 0 => Ok(false),
+            Ok(_) => Ok(true),
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn validate_active_bankrupt_close_shape(&self) -> Result<()> {
+        if self.active_close_present > 1 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.active_close_present == 0 {
+            if self.active_close_phase != ACTIVE_CLOSE_PHASE_NONE
+                || self.active_close_account_idx != u16::MAX
+                || self.active_close_opp_side != ACTIVE_CLOSE_SIDE_NONE
+                || self.active_close_close_price != 0
+                || self.active_close_close_slot != 0
+                || self.active_close_q_close_q != 0
+                || self.active_close_residual_remaining != 0
+                || self.active_close_residual_booked != 0
+                || self.active_close_residual_recorded != 0
+                || self.active_close_b_chunks_booked != 0
+            {
+                return Err(RiskError::CorruptState);
+            }
+            return Ok(());
+        }
+
+        if self.market_mode != MarketMode::Live
+            || !self.bankruptcy_hmax_lock_active
+            || self.active_close_phase != ACTIVE_CLOSE_PHASE_RESIDUAL_B
+            || (self.active_close_account_idx != u16::MAX
+                && self.active_close_account_idx as u64 >= self.params.max_accounts)
+            || self.active_close_close_price == 0
+            || self.active_close_close_price > MAX_ORACLE_PRICE
+            || self.active_close_close_slot > self.current_slot
+            || self.active_close_residual_remaining == 0
+            || self.active_close_b_chunks_booked > ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS
+        {
+            return Err(RiskError::CorruptState);
+        }
+        Self::decode_active_close_side(self.active_close_opp_side)?;
+        self.active_close_residual_booked
+            .checked_add(self.active_close_residual_recorded)
+            .ok_or(RiskError::CorruptState)?;
+        Ok(())
+    }
+
     fn transfer_scaled_dust_side(&mut self, s: Side, rem_to_transfer: u128) -> Result<()> {
         if rem_to_transfer == 0 {
             return Ok(());
@@ -3171,22 +3374,28 @@ impl RiskEngine {
     }
     }
 
-    test_visible! {
-    fn book_bankruptcy_residual_chunk_to_side(
-        &mut self,
-        ctx: &mut InstructionContext,
+    fn plan_bankruptcy_residual_chunk_to_side(
+        &self,
         side: Side,
         residual_remaining: u128,
         chunk_budget: u128,
-    ) -> Result<u128> {
+    ) -> Result<BResidualChunkPlan> {
         if residual_remaining == 0 {
-            return Ok(0);
+            return Ok(BResidualChunkPlan {
+                booked: 0,
+                delta_b: 0,
+                rem_new: 0,
+                records_explicit: false,
+            });
         }
-        self.trigger_bankruptcy_hmax_lock(ctx)?;
         let w = self.get_loss_weight_sum(side);
         if w == 0 {
-            self.add_explicit_unallocated_loss_side(side, residual_remaining);
-            return Ok(residual_remaining);
+            return Ok(BResidualChunkPlan {
+                booked: residual_remaining,
+                delta_b: 0,
+                rem_new: 0,
+                records_explicit: true,
+            });
         }
         if w > SOCIAL_LOSS_DEN {
             return Err(RiskError::CorruptState);
@@ -3206,10 +3415,12 @@ impl RiskEngine {
         let fast_delta_b = fast_scaled / w;
         let fast_rem_new = fast_scaled % w;
         if fast_delta_b != 0 && fast_delta_b <= headroom && fast_rem_new < SOCIAL_LOSS_DEN {
-            let new_b = b.checked_add(fast_delta_b).ok_or(RiskError::Overflow)?;
-            self.set_b_side(side, new_b);
-            self.set_social_remainder(side, fast_rem_new);
-            return Ok(fast_chunk);
+            return Ok(BResidualChunkPlan {
+                booked: fast_chunk,
+                delta_b: fast_delta_b,
+                rem_new: fast_rem_new,
+                records_explicit: false,
+            });
         }
 
         // Boundary fallback: when B is near u128 headroom exhaustion, select a
@@ -3222,45 +3433,80 @@ impl RiskEngine {
         }
         #[cfg(not(kani))]
         {
-        let max_scaled = U256::from_u128(headroom)
-            .checked_mul(U256::from_u128(w))
-            .ok_or(RiskError::Overflow)?;
-        let rem_old_u = U256::from_u128(rem_old);
-        if max_scaled < rem_old_u {
+            let max_scaled = U256::from_u128(headroom)
+                .checked_mul(U256::from_u128(w))
+                .ok_or(RiskError::Overflow)?;
+            let rem_old_u = U256::from_u128(rem_old);
+            if max_scaled < rem_old_u {
+                return Err(RiskError::RecoveryRequired);
+            }
+            let available_scaled = max_scaled
+                .checked_sub(rem_old_u)
+                .ok_or(RiskError::Overflow)?;
+            let max_chunk_by_b = available_scaled
+                .checked_div(U256::from_u128(SOCIAL_LOSS_DEN))
+                .ok_or(RiskError::Overflow)?
+                .try_into_u128()
+                .unwrap_or(u128::MAX);
+            let engine_chunk = core::cmp::min(residual_remaining, max_chunk_by_b);
+            if engine_chunk == 0 {
+                return Err(RiskError::RecoveryRequired);
+            }
+            let chunk = if engine_chunk > chunk_cap {
+                chunk_cap
+            } else {
+                engine_chunk
+            };
+            let scaled = U256::from_u128(chunk)
+                .checked_mul(U256::from_u128(SOCIAL_LOSS_DEN))
+                .and_then(|v| v.checked_add(U256::from_u128(rem_old)))
+                .ok_or(RiskError::Overflow)?;
+            let (delta_b_u, rem_new_u) = wide_math::div_rem_u256(scaled, U256::from_u128(w));
+            let delta_b = delta_b_u.try_into_u128().ok_or(RiskError::Overflow)?;
+            let rem_new = rem_new_u.try_into_u128().ok_or(RiskError::Overflow)?;
+            if delta_b == 0 || rem_new >= SOCIAL_LOSS_DEN {
+                return Err(RiskError::RecoveryRequired);
+            }
+            Ok(BResidualChunkPlan {
+                booked: chunk,
+                delta_b,
+                rem_new,
+                records_explicit: false,
+            })
+        }
+    }
+
+    test_visible! {
+    fn book_bankruptcy_residual_chunk_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<u128> {
+        if residual_remaining == 0 {
+            return Ok(0);
+        }
+        self.trigger_bankruptcy_hmax_lock(ctx)?;
+        let plan =
+            self.plan_bankruptcy_residual_chunk_to_side(side, residual_remaining, chunk_budget)?;
+        if plan.booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        if plan.records_explicit {
+            self.add_explicit_unallocated_loss_side(side, plan.booked);
+            return Ok(plan.booked);
+        }
+        if plan.booked == 0 || plan.delta_b == 0 {
             return Err(RiskError::RecoveryRequired);
         }
-        let available_scaled = max_scaled
-            .checked_sub(rem_old_u)
+        let new_b = self
+            .get_b_side(side)
+            .checked_add(plan.delta_b)
             .ok_or(RiskError::Overflow)?;
-        let max_chunk_by_b = available_scaled
-            .checked_div(U256::from_u128(SOCIAL_LOSS_DEN))
-            .ok_or(RiskError::Overflow)?
-            .try_into_u128()
-            .unwrap_or(u128::MAX);
-        let engine_chunk = core::cmp::min(residual_remaining, max_chunk_by_b);
-        if engine_chunk == 0 {
-            return Err(RiskError::RecoveryRequired);
-        }
-        let chunk = if engine_chunk > chunk_cap {
-            chunk_cap
-        } else {
-            engine_chunk
-        };
-        let scaled = U256::from_u128(chunk)
-            .checked_mul(U256::from_u128(SOCIAL_LOSS_DEN))
-            .and_then(|v| v.checked_add(U256::from_u128(rem_old)))
-            .ok_or(RiskError::Overflow)?;
-        let (delta_b_u, rem_new_u) = wide_math::div_rem_u256(scaled, U256::from_u128(w));
-        let delta_b = delta_b_u.try_into_u128().ok_or(RiskError::Overflow)?;
-        let rem_new = rem_new_u.try_into_u128().ok_or(RiskError::Overflow)?;
-        if delta_b == 0 || rem_new >= SOCIAL_LOSS_DEN {
-            return Err(RiskError::RecoveryRequired);
-        }
-        let new_b = b.checked_add(delta_b).ok_or(RiskError::Overflow)?;
         self.set_b_side(side, new_b);
-        self.set_social_remainder(side, rem_new);
-        Ok(chunk)
-        }
+        self.set_social_remainder(side, plan.rem_new);
+        Ok(plan.booked)
     }
     }
 
@@ -3304,6 +3550,123 @@ impl RiskEngine {
         }
         Ok((booked, recorded))
     }
+    }
+
+    test_visible! {
+    fn book_or_start_active_close_residual_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        account_idx: u16,
+        side: Side,
+        close_price: u64,
+        close_slot: u64,
+        q_close_q: u128,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<(u128, u128)> {
+        if residual_remaining == 0 {
+            return Ok((0, 0));
+        }
+
+        let booked = match self.book_bankruptcy_residual_chunk_to_side(
+            ctx,
+            side,
+            residual_remaining,
+            chunk_budget,
+        ) {
+            Ok(booked) => booked,
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        let remainder = residual_remaining
+            .checked_sub(booked)
+            .ok_or(RiskError::CorruptState)?;
+        if remainder == 0 {
+            return Ok((booked, 0));
+        }
+        if booked == 0 {
+            self.add_explicit_unallocated_loss_side(side, remainder);
+            return Ok((0, remainder));
+        }
+        self.start_active_bankrupt_close_residual(
+            account_idx,
+            side,
+            close_price,
+            close_slot,
+            q_close_q,
+            remainder,
+        )?;
+        Ok((booked, 0))
+    }
+    }
+
+    fn continue_active_bankrupt_close_core(
+        &mut self,
+        now_slot: u64,
+        ctx: &mut InstructionContext,
+    ) -> Result<bool> {
+        self.validate_active_bankrupt_close_shape()?;
+        if self.active_close_present == 0 {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if self.active_close_b_chunks_booked >= ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS {
+            return Err(RiskError::RecoveryRequired);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        let before = self.active_close_residual_remaining;
+        let booked =
+            self.book_bankruptcy_residual_chunk_to_side(ctx, side, before, PUBLIC_B_CHUNK_ATOMS)?;
+        if booked == 0 || booked > before {
+            return Err(RiskError::RecoveryRequired);
+        }
+        self.active_close_residual_remaining =
+            before.checked_sub(booked).ok_or(RiskError::CorruptState)?;
+        self.active_close_residual_booked = self
+            .active_close_residual_booked
+            .checked_add(booked)
+            .ok_or(RiskError::Overflow)?;
+        self.active_close_b_chunks_booked = self
+            .active_close_b_chunks_booked
+            .checked_add(1)
+            .ok_or(RiskError::Overflow)?;
+        if self.active_close_residual_remaining == 0 {
+            self.clear_active_bankrupt_close_state();
+        }
+        Ok(true)
+    }
+
+    pub fn continue_active_bankrupt_close_not_atomic(&mut self, now_slot: u64) -> Result<bool> {
+        self.assert_public_postconditions()?;
+        let mut ctx = InstructionContext::new_with_admission(self.params.h_max, self.params.h_max);
+        let progressed = self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
+        self.assert_public_postconditions()?;
+        Ok(progressed)
+    }
+
+    fn complete_active_bankrupt_close_for_recovery(&mut self) -> Result<()> {
+        self.validate_active_bankrupt_close_shape()?;
+        if !self.active_bankrupt_close_recovery_required()? {
+            return Err(RiskError::Unauthorized);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        let residual = self.active_close_residual_remaining;
+        self.add_explicit_unallocated_loss_side(side, residual);
+        self.active_close_residual_recorded = self
+            .active_close_residual_recorded
+            .checked_add(residual)
+            .ok_or(RiskError::Overflow)?;
+        self.active_close_residual_remaining = 0;
+        self.clear_active_bankrupt_close_state();
+        Ok(())
     }
 
     fn threshold_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
@@ -3502,7 +3865,13 @@ impl RiskEngine {
                 }
             }
             RecoveryReason::AccountBSettlementCannotProgress => Err(RiskError::Unauthorized),
-            RecoveryReason::ActiveBankruptCloseCannotProgress => Err(RiskError::Unauthorized),
+            RecoveryReason::ActiveBankruptCloseCannotProgress => {
+                if self.active_bankrupt_close_recovery_required()? {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
             RecoveryReason::ExplicitLossOrDustAuditOverflow => {
                 if self.explicit_unallocated_loss_saturated != 0 {
                     Ok(())
@@ -4032,6 +4401,7 @@ impl RiskEngine {
         // surfaces BEFORE any mutation. Same validate-then-mutate contract
         // as top_up_insurance_fund and deposit_fee_credits.
         self.assert_public_postconditions()?;
+        self.ensure_no_active_bankrupt_close()?;
         self.accrue_market_segment_to_internal(
             now_slot,
             now_slot,
@@ -4402,9 +4772,13 @@ impl RiskEngine {
                 if uncertified_potential != 0 {
                     self.record_uninsured_protocol_loss(d_social);
                 } else {
-                    let (_booked, _recorded) = self.book_or_record_bankruptcy_residual_to_side(
+                    let (_booked, _recorded) = self.book_or_start_active_close_residual_to_side(
                         ctx,
+                        u16::MAX,
                         opp,
+                        self.last_oracle_price,
+                        self.current_slot,
+                        q_close_q,
                         d_social,
                         PUBLIC_B_CHUNK_ATOMS,
                     )?;
@@ -5338,6 +5712,7 @@ impl RiskEngine {
         {
             return Err(RiskError::CorruptState);
         }
+        self.validate_active_bankrupt_close_shape()?;
         if self.market_mode == MarketMode::Live {
             self.validate_live_kf_future_headroom(
                 self.adl_coeff_long,
@@ -5530,6 +5905,7 @@ impl RiskEngine {
         if self.stress_envelope_remaining_indices == 0
             && self.stress_envelope_start_slot != now_slot
             && generation_after_stress
+            && self.active_close_present == 0
         {
             self.clear_stress_envelope();
         }
@@ -6563,6 +6939,7 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        self.ensure_no_active_bankrupt_close()?;
         // Time monotonicity (spec §10.3 step 1)
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
@@ -7860,6 +8237,13 @@ impl RiskEngine {
         if now_slot < self.last_market_slot {
             return Err(RiskError::Overflow);
         }
+        if self.active_close_present != 0 {
+            self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
+            self.assert_public_postconditions()?;
+            return Ok(CrankOutcome {
+                num_liquidations: 0,
+            });
+        }
         let equity_active_accrual =
             self.keeper_accrual_is_equity_active(now_slot, oracle_price, funding_rate_e9);
         let remaining_dt = now_slot
@@ -8400,6 +8784,9 @@ impl RiskEngine {
             now_slot,
             authenticated_raw_target_price,
         )?;
+        if reason == RecoveryReason::ActiveBankruptCloseCannotProgress {
+            self.complete_active_bankrupt_close_for_recovery()?;
+        }
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
     }
@@ -8432,6 +8819,7 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        self.ensure_no_active_bankrupt_close()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }

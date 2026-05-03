@@ -8257,7 +8257,7 @@ fn b_residual_chunk_booking_satisfies_exact_scaled_identity() {
 }
 
 #[test]
-fn large_b_residual_books_public_chunk_and_records_remainder() {
+fn large_b_residual_books_public_chunk_and_starts_active_close_for_remainder() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 10, 0);
     mat_regression_account(&mut engine, 1, 10, 0);
@@ -8279,10 +8279,12 @@ fn large_b_residual_books_public_chunk_and_records_remainder() {
         "first public residual chunk should be booked into B"
     );
     assert_eq!(
-        engine.explicit_unallocated_loss_short.get(),
-        7,
-        "residual that does not fit the public B chunk must be durable explicit non-claim loss"
+        engine.active_close_residual_remaining, 7,
+        "residual that does not fit one public B chunk must be durable active-close work"
     );
+    assert_eq!(engine.explicit_unallocated_loss_short.get(), 0);
+    assert_eq!(engine.active_close_present, 1);
+    assert_eq!(engine.active_close_opp_side, ACTIVE_CLOSE_SIDE_SHORT);
     assert!(
         engine.bankruptcy_hmax_lock_active,
         "bankrupt residual still starts h-max reconciliation"
@@ -9285,6 +9287,111 @@ fn generic_p_last_recovery_rejects_active_close_reason_without_active_close_stat
     );
     assert_eq!(r, Err(RiskError::Unauthorized));
     assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn bankrupt_residual_over_public_chunk_starts_active_close_and_keeper_completes_it() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    let residual = PUBLIC_B_CHUNK_ATOMS + 7;
+    engine
+        .enqueue_adl(&mut ctx, Side::Long, 0, residual)
+        .unwrap();
+
+    assert_eq!(engine.active_close_present, 1);
+    assert_eq!(engine.active_close_phase, ACTIVE_CLOSE_PHASE_RESIDUAL_B);
+    assert_eq!(engine.active_close_opp_side, ACTIVE_CLOSE_SIDE_SHORT);
+    assert_eq!(engine.active_close_residual_remaining, 7);
+    assert_eq!(engine.active_close_b_chunks_booked, 0);
+    assert!(engine.bankruptcy_hmax_lock_active);
+
+    let premature_recovery = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        1,
+        1000,
+    );
+    assert_eq!(premature_recovery, Err(RiskError::Unauthorized));
+
+    let outcome = engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            ordered_candidates: &[],
+            max_revalidations: 0,
+            max_candidate_inspections: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 10,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 0,
+            rr_scan_limit: 0,
+        })
+        .unwrap();
+    assert_eq!(outcome.num_liquidations, 0);
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.active_close_residual_remaining, 0);
+    assert!(engine.b_short_num > 0);
+}
+
+#[test]
+fn active_close_recovery_records_remaining_residual_before_p_last_resolve() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = 0;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = 1000;
+    engine.active_close_close_slot = 0;
+    engine.active_close_q_close_q = 0;
+    engine.active_close_residual_remaining = 11;
+    engine.active_close_b_chunks_booked = ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS;
+
+    engine
+        .permissionless_recovery_resolve_p_last_not_atomic(
+            RecoveryReason::ActiveBankruptCloseCannotProgress,
+            1,
+            1000,
+        )
+        .unwrap();
+
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, 1000);
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.explicit_unallocated_loss_short.get(), 11);
+}
+
+#[test]
+fn active_close_blocks_unrelated_live_accrual_until_continued_or_recovered() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = 0;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = 1000;
+    engine.active_close_close_slot = 0;
+    engine.active_close_residual_remaining = 1;
+
+    assert_eq!(
+        engine.accrue_market_to(1, 1000, 0),
+        Err(RiskError::RecoveryRequired)
+    );
+    assert_eq!(
+        engine.deposit_not_atomic(0, 1, 1),
+        Err(RiskError::RecoveryRequired)
+    );
 }
 
 #[test]

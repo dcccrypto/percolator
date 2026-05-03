@@ -937,6 +937,85 @@ fn proof_active_close_recovery_reason_fails_closed_without_active_close_state() 
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_active_close_continuation_makes_bounded_progress_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = DEFAULT_SLOT;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 0;
+
+    let residual: u8 = kani::any();
+    kani::assume((1..=3).contains(&residual));
+    engine.active_close_residual_remaining = residual as u128;
+
+    let before_b = engine.b_short_num;
+    let result = engine.continue_active_bankrupt_close_not_atomic(DEFAULT_SLOT + 1);
+    assert!(result.is_ok());
+    assert!(engine.b_short_num > before_b);
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.active_close_residual_remaining, 0);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result.is_ok() && engine.b_short_num > before_b && engine.active_close_present == 0,
+        "production active-close continuation books B residual and clears state"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_active_close_recovery_records_residual_before_resolve_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = DEFAULT_SLOT;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 0;
+    engine.active_close_b_chunks_booked = ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS;
+
+    let residual: u8 = kani::any();
+    kani::assume((1..=3).contains(&residual));
+    engine.active_close_residual_remaining = residual as u128;
+
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        DEFAULT_SLOT + 1,
+        DEFAULT_ORACLE,
+    );
+    assert!(result.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.active_close_present, 0);
+    assert!(engine.explicit_unallocated_loss_short.get() >= residual as u128);
+    kani::cover!(
+        result.is_ok()
+            && engine.market_mode == MarketMode::Resolved
+            && engine.explicit_unallocated_loss_short.get() >= residual as u128,
+        "production active-close recovery records residual before resolving"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(160)]
 #[kani::solver(cadical)]
 fn proof_bankruptcy_residual_handler_fails_forward_without_active_close_state() {

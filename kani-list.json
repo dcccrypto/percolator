@@ -292,6 +292,8 @@
       "proof_permissionless_blocked_segment_recovery_uses_engine_price_not_raw_target",
       "proof_account_b_recovery_rejects_when_production_chunk_advances",
       "proof_active_close_recovery_reason_fails_closed_without_active_close_state",
+      "proof_active_close_continuation_makes_bounded_progress_on_prod_code",
+      "proof_active_close_recovery_records_residual_before_resolve_on_prod_code",
       "proof_bankruptcy_residual_handler_fails_forward_without_active_close_state",
       "proof_audit2_close_account_structural_safety",
       "proof_audit2_funding_rate_clamped",
@@ -391,7 +393,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 352,
+    "standard-harnesses": 354,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
