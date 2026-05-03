@@ -916,6 +916,62 @@ fn proof_account_b_recovery_rejects_when_production_chunk_advances() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_active_close_recovery_reason_fails_closed_without_active_close_state() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    let recovery = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        DEFAULT_SLOT + 1,
+        DEFAULT_ORACLE,
+    );
+
+    assert_eq!(recovery, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        recovery == Err(RiskError::Unauthorized),
+        "active-close recovery reason is fail-closed without production active-close state"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(160)]
+#[kani::solver(cadical)]
+fn proof_bankruptcy_residual_handler_fails_forward_without_active_close_state() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 10, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(a as usize, -1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_short_q = 2;
+    engine.oi_eff_long_q = 2;
+
+    let mut ctx = InstructionContext::new_with_admission(1, 100);
+    let result = engine.book_or_record_bankruptcy_residual_to_side(&mut ctx, Side::Short, 2, 1);
+    assert!(result.is_ok());
+    let (booked, recorded) = result.unwrap();
+    assert_eq!(booked + recorded, 2);
+    assert!(engine.bankruptcy_hmax_lock_active);
+
+    let recovery = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        DEFAULT_SLOT + 1,
+        DEFAULT_ORACLE,
+    );
+    assert_eq!(recovery, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result.is_ok() && booked + recorded == 2 && engine.bankruptcy_hmax_lock_active,
+        "production residual handler completes without requiring active-close recovery"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {

@@ -8308,6 +8308,14 @@ fn b_headroom_exhaustion_records_residual_instead_of_sticking_crank() {
     assert_eq!(engine.b_short_num, u128::MAX);
     assert_eq!(engine.explicit_unallocated_loss_short.get(), 5);
     assert!(engine.bankruptcy_hmax_lock_active);
+
+    let recovery = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        1,
+        1000,
+    );
+    assert_eq!(recovery, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
 }
 
 #[test]
@@ -9265,6 +9273,48 @@ fn generic_p_last_recovery_rejects_account_b_reason_without_blocking_account() {
     );
     assert_eq!(r, Err(RiskError::Unauthorized));
     assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn generic_p_last_recovery_rejects_active_close_reason_without_active_close_state() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ActiveBankruptCloseCannotProgress,
+        1,
+        0,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn bankrupt_full_close_completes_without_durable_active_close_state() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 1, 0);
+    mat_regression_account(&mut engine, 1, 100, 0);
+    engine.attach_effective_position(0, 1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.set_pnl(0, -5).unwrap();
+
+    let result = engine.liquidate_at_oracle_not_atomic(
+        0,
+        0,
+        1000,
+        LiquidationPolicy::FullClose,
+        0,
+        1,
+        10,
+        None,
+    );
+    assert_eq!(result, Ok(true));
+    assert_eq!(engine.accounts[0].position_basis_q, 0);
+    assert_eq!(engine.accounts[0].capital.get(), 0);
+    assert_eq!(engine.accounts[0].pnl, 0);
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(engine.neg_pnl_account_count, 0);
+    assert!(engine.check_conservation());
 }
 
 #[test]

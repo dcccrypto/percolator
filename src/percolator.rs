@@ -243,6 +243,11 @@ pub enum RecoveryReason {
     /// for canonical state; the recovery seam keeps the liveness contract
     /// explicit if deployment constants change.
     AccountBSettlementCannotProgress = 4,
+    /// Reserved terminal-recovery class for a future durable active
+    /// bankrupt-close continuation state. The current engine completes
+    /// full-close bankruptcy with bounded B booking or explicit non-claim
+    /// recording, so this reason is not accepted without such state.
+    ActiveBankruptCloseCannotProgress = 5,
 }
 
 /// Reserve mode for set_pnl (spec §4.8)
@@ -3497,6 +3502,7 @@ impl RiskEngine {
                 }
             }
             RecoveryReason::AccountBSettlementCannotProgress => Err(RiskError::Unauthorized),
+            RecoveryReason::ActiveBankruptCloseCannotProgress => Err(RiskError::Unauthorized),
             RecoveryReason::ExplicitLossOrDustAuditOverflow => {
                 if self.explicit_unallocated_loss_saturated != 0 {
                     Ok(())
