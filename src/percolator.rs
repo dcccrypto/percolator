@@ -237,6 +237,12 @@ pub enum RecoveryReason {
     /// movement cap, but the resulting K/F state cannot satisfy persistent
     /// representability or future-headroom checks.
     BlockedSegmentHeadroomOrRepresentability = 3,
+    /// A specific account has unsettled B-index loss and the production
+    /// account-local settlement planner cannot produce a positive bounded
+    /// chunk. With current public chunk constants this should be unreachable
+    /// for canonical state; the recovery seam keeps the liveness contract
+    /// explicit if deployment constants change.
+    AccountBSettlementCannotProgress = 4,
 }
 
 /// Reserve mode for set_pnl (spec §4.8)
@@ -3490,6 +3496,7 @@ impl RiskEngine {
                     Ok(_) => Err(RiskError::Unauthorized),
                 }
             }
+            RecoveryReason::AccountBSettlementCannotProgress => Err(RiskError::Unauthorized),
             RecoveryReason::ExplicitLossOrDustAuditOverflow => {
                 if self.explicit_unallocated_loss_saturated != 0 {
                     Ok(())
@@ -3497,6 +3504,40 @@ impl RiskEngine {
                     Err(RiskError::Unauthorized)
                 }
             }
+        }
+    }
+    }
+
+    test_visible! {
+    fn validate_permissionless_account_b_recovery_reason(
+        &self,
+        idx: usize,
+        now_slot: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        self.validate_touched_account_shape(idx)?;
+
+        let account = &self.accounts[idx];
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::Unauthorized)?;
+        let target = self.b_target_for_account(idx, side)?;
+        if account.b_snap >= target {
+            return Err(RiskError::Unauthorized);
+        }
+
+        match self.plan_account_b_chunk_to_target(
+            idx,
+            target,
+            PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+        ) {
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => Ok(()),
+            Err(e) => Err(e),
+            Ok((delta_b, _, _, _)) if delta_b > 0 => Err(RiskError::Unauthorized),
+            Ok(_) => Err(RiskError::CorruptState),
         }
     }
     }
@@ -8353,6 +8394,21 @@ impl RiskEngine {
             now_slot,
             authenticated_raw_target_price,
         )?;
+        let p_last = self.last_oracle_price;
+        self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
+
+    /// Account-specific permissionless terminal recovery for the account-local
+    /// B-settlement conservative-failure class. The caller identifies the
+    /// blocking account; the engine validates with the production B planner.
+    /// Settlement still uses deterministic P_last fallback.
+    pub fn permissionless_recovery_resolve_account_b_p_last_not_atomic(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+    ) -> Result<()> {
+        self.assert_public_postconditions()?;
+        self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot)?;
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
     }

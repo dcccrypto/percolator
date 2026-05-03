@@ -877,6 +877,45 @@ fn proof_permissionless_blocked_segment_recovery_uses_engine_price_not_raw_targe
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_account_b_recovery_rejects_when_production_chunk_advances() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+
+    let target_loss_atoms: u8 = kani::any();
+    kani::assume((1..=3).contains(&target_loss_atoms));
+    engine.b_short_num = target_loss_atoms as u128;
+
+    let recovery =
+        engine.permissionless_recovery_resolve_account_b_p_last_not_atomic(idx, DEFAULT_SLOT + 1);
+    assert_eq!(recovery, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+
+    let snap_before = engine.accounts[idx as usize].b_snap;
+    let chunk = engine.settle_account_b_chunk_to_target(
+        idx as usize,
+        Side::Short,
+        engine.b_short_num,
+        PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+    );
+    assert!(chunk.is_ok());
+    let (loss, current) = chunk.unwrap();
+    assert!(engine.accounts[idx as usize].b_snap > snap_before);
+    assert!(loss <= PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS);
+    assert!(current || engine.accounts[idx as usize].b_snap < engine.b_short_num);
+    kani::cover!(
+        recovery == Err(RiskError::Unauthorized)
+            && engine.accounts[idx as usize].b_snap > snap_before,
+        "production account-B chunk progress makes account-B recovery unnecessary"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {

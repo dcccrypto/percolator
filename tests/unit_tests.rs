@@ -9256,6 +9256,44 @@ fn permissionless_recovery_rejects_blocked_segment_when_accrual_can_progress() {
 }
 
 #[test]
+fn generic_p_last_recovery_rejects_account_b_reason_without_blocking_account() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::AccountBSettlementCannotProgress,
+        1,
+        0,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn account_b_recovery_rejects_when_production_chunk_can_progress() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = 3 * SOCIAL_LOSS_DEN;
+
+    let r = engine.permissionless_recovery_resolve_account_b_p_last_not_atomic(0, 1);
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+
+    let before = engine.accounts[0].b_snap;
+    let (loss, current) = engine
+        .settle_account_b_chunk_to_target(
+            0,
+            Side::Short,
+            engine.b_short_num,
+            PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+        )
+        .unwrap();
+    assert!(loss > 0 || current);
+    assert!(engine.accounts[0].b_snap > before);
+}
+
+#[test]
 fn permissionless_recovery_rejects_inactive_explicit_loss_reason() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
