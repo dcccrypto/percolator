@@ -579,6 +579,52 @@ fn proof_live_phase2_honest_scan_reduces_cursor_rank_or_rate_limited_boundary() 
 }
 
 #[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_decreases_live_catchup_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    let size = POS_SCALE as i128;
+    engine.set_position_basis_q(a as usize, size).unwrap();
+    engine.set_position_basis_q(b as usize, -size).unwrap();
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.rr_cursor_position = 2;
+
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots + 1;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE - 1,
+        ordered_candidates: &[],
+        max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+    });
+    assert!(result.is_ok());
+    let after = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    assert!(after.live_catchup_slots < before.live_catchup_slots);
+    assert_eq!(after.resolved_blocker_units, 0);
+    kani::cover!(
+        result.is_ok() && after.live_catchup_slots < before.live_catchup_slots,
+        "production keeper crank decreases live catchup rank"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_resolved_cursor_missing_slots_advance_on_prod_code() {
@@ -617,21 +663,42 @@ fn proof_resolved_cursor_close_unblocks_winner_on_prod_code() {
     engine.set_pnl(0, 10).unwrap();
     engine.set_pnl(1, -5).unwrap();
     engine.rr_cursor_position = 0;
+    let before = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
 
     let winner_first = engine.force_close_resolved_cursor_not_atomic(1);
     assert_eq!(winner_first, Ok(ResolvedCloseResult::ProgressOnly));
     assert!(engine.is_used(0));
     assert_eq!(engine.rr_cursor_position, 1);
+    assert_eq!(
+        engine
+            .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+            .unwrap()
+            .resolved_blocker_units,
+        before.resolved_blocker_units
+    );
 
     let blocker = engine.force_close_resolved_cursor_not_atomic(1);
     assert_eq!(blocker, Ok(ResolvedCloseResult::Closed(95)));
     assert!(!engine.is_used(1));
     assert_eq!(engine.neg_pnl_account_count, 0);
+    let after_blocker = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
+    assert!(after_blocker.resolved_blocker_units < before.resolved_blocker_units);
 
     let winner_final = engine.force_close_resolved_cursor_not_atomic(4);
     assert_eq!(winner_final, Ok(ResolvedCloseResult::Closed(105)));
     assert!(!engine.is_used(0));
     assert!(engine.check_conservation());
+    assert_eq!(
+        engine
+            .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+            .unwrap()
+            .resolved_blocker_units,
+        0
+    );
     kani::cover!(
         winner_final == Ok(ResolvedCloseResult::Closed(105)) && !engine.is_used(0),
         "resolved cursor close reaches the winner after bounded blocker progress"

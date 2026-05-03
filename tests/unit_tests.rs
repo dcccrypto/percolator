@@ -4528,7 +4528,10 @@ fn honest_cranker_reaches_loss_current_with_bounded_candidate_free_cranks() {
     let now_slot = slot + (3 * max_dt) + 1;
     engine.rr_cursor_position = 2;
 
-    let mut previous_lag = now_slot - engine.last_market_slot;
+    let mut previous_rank = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap()
+        .live_catchup_slots;
     let mut oracle_step = oracle;
     let mut rounds = 0u8;
     while engine.last_market_slot < now_slot {
@@ -4550,12 +4553,15 @@ fn honest_cranker_reaches_loss_current_with_bounded_candidate_free_cranks() {
             .unwrap();
         rounds += 1;
 
-        let lag = now_slot - engine.last_market_slot;
+        let lag = engine
+            .permissionless_progress_rank_for_now(now_slot)
+            .unwrap()
+            .live_catchup_slots;
         assert!(
-            lag < previous_lag,
+            lag < previous_rank,
             "each accepted honest crank must reduce the stale catchup rank"
         );
-        previous_lag = lag;
+        previous_rank = lag;
         assert!(
             rounds <= 5,
             "bounded catchup should finish in ceil(lag/max_dt) progress rounds"
@@ -6460,12 +6466,24 @@ fn resolved_cursor_close_scans_empty_slots_and_unblocks_winner() {
     engine.set_pnl(3, 10).unwrap();
     engine.set_pnl(5, -5).unwrap();
     engine.rr_cursor_position = 0;
+    let rank_before = engine
+        .permissionless_progress_rank_for_now(0)
+        .unwrap()
+        .resolved_blocker_units;
 
     let empty_scan = engine.force_close_resolved_cursor_not_atomic(3).unwrap();
     assert_eq!(empty_scan, ResolvedCloseResult::ProgressOnly);
     assert_eq!(
         engine.rr_cursor_position, 3,
         "bounded empty-slot scans are durable resolved-close progress"
+    );
+    assert_eq!(
+        engine
+            .permissionless_progress_rank_for_now(0)
+            .unwrap()
+            .resolved_blocker_units,
+        rank_before,
+        "empty scans move the cursor but do not claim account-close progress"
     );
 
     let winner_first = engine.force_close_resolved_cursor_not_atomic(1).unwrap();
@@ -6476,17 +6494,40 @@ fn resolved_cursor_close_scans_empty_slots_and_unblocks_winner() {
     );
     assert!(engine.is_used(3));
     assert_eq!(engine.rr_cursor_position, 4);
+    assert_eq!(
+        engine
+            .permissionless_progress_rank_for_now(0)
+            .unwrap()
+            .resolved_blocker_units,
+        rank_before,
+        "winner reconciliation before terminal readiness must not fake blocker reduction"
+    );
 
     let loser = engine.force_close_resolved_cursor_not_atomic(2).unwrap();
     assert_eq!(loser, ResolvedCloseResult::Closed(95));
     assert!(!engine.is_used(5));
     assert_eq!(engine.neg_pnl_account_count, 0);
     assert_eq!(engine.rr_cursor_position, 6);
+    let rank_after_loser = engine
+        .permissionless_progress_rank_for_now(0)
+        .unwrap()
+        .resolved_blocker_units;
+    assert!(
+        rank_after_loser < rank_before,
+        "closing the blocking negative account must reduce resolved blocker rank"
+    );
 
     let winner_final = engine.force_close_resolved_cursor_not_atomic(8).unwrap();
     assert_eq!(winner_final, ResolvedCloseResult::Closed(105));
     assert!(!engine.is_used(3));
     assert_eq!(engine.rr_cursor_position, 4);
+    assert_eq!(
+        engine
+            .permissionless_progress_rank_for_now(0)
+            .unwrap()
+            .resolved_blocker_units,
+        0
+    );
     assert!(engine.check_conservation());
 }
 

@@ -924,6 +924,17 @@ pub struct Phase2ScanOutcome {
     pub wrapped: bool,
 }
 
+/// O(1) audit view for permissionless-progress proofs. This is not used to
+/// authorize mutations; it exposes durable rank components that honest public
+/// progress calls should monotonically reduce or route to recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionlessProgressRank {
+    pub live_catchup_slots: u64,
+    pub stress_envelope_indices: u64,
+    pub active_close_residual_atoms: u128,
+    pub resolved_blocker_units: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccrualSegmentPlan {
     k_long: i128,
@@ -3695,6 +3706,63 @@ impl RiskEngine {
         self.market_mode == MarketMode::Live
             && self.last_market_slot < self.current_slot
             && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
+    }
+
+    pub fn permissionless_progress_rank_for_now(
+        &self,
+        now_slot: u64,
+    ) -> Result<PermissionlessProgressRank> {
+        if now_slot < self.last_market_slot || now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        let live_catchup_slots = if self.market_mode == MarketMode::Live
+            && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
+        {
+            now_slot
+                .checked_sub(self.last_market_slot)
+                .ok_or(RiskError::Overflow)?
+        } else {
+            0
+        };
+
+        let reconciliation_envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        let stress_envelope_indices = if reconciliation_envelope_active {
+            self.stress_envelope_remaining_indices
+        } else {
+            0
+        };
+
+        let active_close_residual_atoms = if self.active_close_present != 0 {
+            self.validate_active_bankrupt_close_shape()?;
+            self.active_close_residual_remaining
+        } else {
+            0
+        };
+
+        let resolved_blocker_units = if self.market_mode == MarketMode::Resolved {
+            (self.num_used_accounts as u64)
+                .checked_add(self.stored_pos_count_long)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stored_pos_count_short)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stale_account_count_long)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stale_account_count_short)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.neg_pnl_account_count)
+                .ok_or(RiskError::Overflow)?
+        } else {
+            0
+        };
+
+        Ok(PermissionlessProgressRank {
+            live_catchup_slots,
+            stress_envelope_indices,
+            active_close_residual_atoms,
+            resolved_blocker_units,
+        })
     }
 
     fn real_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
