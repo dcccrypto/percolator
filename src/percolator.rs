@@ -3846,6 +3846,14 @@ impl RiskEngine {
             && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
     }
 
+    fn live_reconciliation_lock_active(&self) -> bool {
+        self.active_close_present != 0
+            || self.bankruptcy_hmax_lock_active
+            || self.stress_consumed_bps_e9_since_envelope != 0
+            || self.neg_pnl_account_count != 0
+            || self.loss_stale_positive_pnl_lock_active()
+    }
+
     #[cfg(any(feature = "test", feature = "stress", kani))]
     pub fn permissionless_progress_rank_for_now(
         &self,
@@ -10157,6 +10165,9 @@ impl RiskEngine {
         self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
         self.assert_public_postconditions()?;
         self.check_live_accrual_envelope(now_slot)?;
+        if self.live_reconciliation_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);

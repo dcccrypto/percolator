@@ -8202,6 +8202,60 @@ fn account_local_public_paths_reject_i128_min_fee_credits() {
 }
 
 #[test]
+fn insurance_reward_credit_rejects_reconciliation_locks() {
+    let mut engine = RiskEngine::new(default_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.top_up_insurance_fund(10, 0).unwrap();
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_consumed_bps_e9_since_envelope = 1;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = 0;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    assert_eq!(
+        engine.credit_account_from_insurance_not_atomic(idx, 1, 0),
+        Err(RiskError::Undercollateralized)
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), capital_before);
+}
+
+#[test]
+fn insurance_reward_credit_allows_loss_current_exposed_market() {
+    let mut engine = RiskEngine::new(default_params());
+    let reward = add_user_test(&mut engine, 0).unwrap();
+    let long = add_user_test(&mut engine, 0).unwrap();
+    let short = add_user_test(&mut engine, 0).unwrap();
+    engine.top_up_insurance_fund(10, 0).unwrap();
+    engine
+        .attach_effective_position(long as usize, make_size_q(1))
+        .unwrap();
+    engine
+        .attach_effective_position(short as usize, -make_size_q(1))
+        .unwrap();
+    engine.oi_eff_long_q = make_size_q(1) as u128;
+    engine.oi_eff_short_q = make_size_q(1) as u128;
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let capital_before = engine.accounts[reward as usize].capital.get();
+    engine
+        .credit_account_from_insurance_not_atomic(reward, 1, 0)
+        .unwrap();
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before - 1);
+    assert_eq!(
+        engine.accounts[reward as usize].capital.get(),
+        capital_before + 1
+    );
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn keeper_hint_rejects_corrupt_fee_credits() {
     let mut engine = RiskEngine::new(default_params());
     let idx = add_user_test(&mut engine, 0).unwrap();

@@ -360,6 +360,69 @@ fn proof_live_insurance_withdraw_fails_closed_when_exposed_or_reconciling_on_pro
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    let long = add_user_test(&mut engine, 0).unwrap();
+    let short = add_user_test(&mut engine, 0).unwrap();
+    engine.top_up_insurance_fund(100, DEFAULT_SLOT).unwrap();
+
+    let hmax_reconciliation: bool = kani::any();
+    if hmax_reconciliation {
+        engine.bankruptcy_hmax_lock_active = true;
+        engine.stress_consumed_bps_e9_since_envelope = 1;
+        engine.stress_envelope_remaining_indices = 1;
+        engine.stress_envelope_start_slot = DEFAULT_SLOT;
+        engine.stress_envelope_start_generation = engine.sweep_generation;
+    }
+
+    let loss_stale_reconciliation: bool = kani::any();
+    if loss_stale_reconciliation {
+        engine.attach_effective_position(long as usize, 1).unwrap();
+        engine
+            .attach_effective_position(short as usize, -1)
+            .unwrap();
+        engine.oi_eff_long_q = 1;
+        engine.oi_eff_short_q = 1;
+        engine.current_slot = DEFAULT_SLOT + 1;
+        engine.last_market_slot = DEFAULT_SLOT;
+    }
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    let result = engine.credit_account_from_insurance_not_atomic(idx, 1, engine.current_slot);
+
+    if hmax_reconciliation || loss_stale_reconciliation {
+        assert_eq!(result, Err(RiskError::Undercollateralized));
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+        assert_eq!(engine.accounts[idx as usize].capital.get(), capital_before);
+    } else {
+        assert!(result.is_ok());
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before - 1);
+        assert_eq!(
+            engine.accounts[idx as usize].capital.get(),
+            capital_before + 1
+        );
+    }
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && (hmax_reconciliation || loss_stale_reconciliation),
+        "production insurance reward credit fails closed under reconciliation"
+    );
+    kani::cover!(
+        result.is_ok() && !hmax_reconciliation && !loss_stale_reconciliation,
+        "production insurance reward credit remains available without reconciliation"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_deposit_then_withdraw_roundtrip() {
