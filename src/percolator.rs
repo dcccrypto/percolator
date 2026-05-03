@@ -57,6 +57,35 @@ macro_rules! test_visible {
     };
 }
 
+/// Types that proof harnesses and integration tests need to name directly.
+/// Private in production builds, `pub` under test/stress/kani.
+macro_rules! test_visible_struct {
+    (
+        $(#[$meta:meta])*
+        struct $name:ident <$lt:lifetime> $body:tt
+    ) => {
+        $(#[$meta])*
+        #[cfg(any(feature = "test", feature = "stress", kani))]
+        pub struct $name <$lt> $body
+
+        $(#[$meta])*
+        #[cfg(not(any(feature = "test", feature = "stress", kani)))]
+        struct $name <$lt> $body
+    };
+    (
+        $(#[$meta:meta])*
+        struct $name:ident $body:tt
+    ) => {
+        $(#[$meta])*
+        #[cfg(any(feature = "test", feature = "stress", kani))]
+        pub struct $name $body
+
+        $(#[$meta])*
+        #[cfg(not(any(feature = "test", feature = "stress", kani)))]
+        struct $name $body
+    };
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -305,8 +334,9 @@ pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 256;
 /// Storage cost: (MAX_ACCOUNTS / 8) bytes. At MAX_ACCOUNTS=4096, 512 bytes.
 /// Lookup/insert are O(1).
 
+test_visible_struct! {
 /// Instruction context for deferred reset scheduling and shared touched-account tracking.
-pub struct InstructionContext {
+struct InstructionContext {
     pub pending_reset_long: bool,
     pub pending_reset_short: bool,
     /// Instruction-local bankruptcy h-max candidate. This is set before
@@ -348,6 +378,7 @@ pub struct InstructionContext {
     /// Per-instruction sticky set: accounts that required admit_h_max.
     /// Bitmap indexed by storage slot for O(1) membership test/insert.
     pub h_max_sticky_bitmap: [u64; BITMAP_WORDS],
+}
 }
 
 impl InstructionContext {
@@ -928,24 +959,28 @@ pub enum PermissionlessProgressOutcome {
 
 /// Pure Phase 2 cursor-scan outcome. The keeper path computes this before
 /// mutating cursor/generation state, then performs the materialized touches.
+test_visible_struct! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Phase2ScanOutcome {
+struct Phase2ScanOutcome {
     pub next_cursor: u64,
     pub inspected: u64,
     pub touched: u64,
     pub stress_counted_inspected: u64,
     pub wrapped: bool,
 }
+}
 
 /// O(1) audit view for permissionless-progress proofs. This is not used to
 /// authorize mutations; it exposes durable rank components that honest public
 /// progress calls should monotonically reduce or route to recovery.
+test_visible_struct! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PermissionlessProgressRank {
+struct PermissionlessProgressRank {
     pub live_catchup_slots: u64,
     pub stress_envelope_indices: u64,
     pub active_close_residual_atoms: u128,
     pub resolved_blocker_units: u64,
+}
 }
 
 impl PermissionlessProgressRank {
@@ -972,9 +1007,11 @@ impl PermissionlessProgressRank {
 /// O(1) account-local progress view for known blockers. Cursor/proof-packing
 /// wrappers can use this to audit that a supplied account touch reduces its
 /// own B-stale rank instead of relying on any full-market scan.
+test_visible_struct! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PermissionlessAccountProgressRank {
+struct PermissionlessAccountProgressRank {
     pub account_b_remaining_num: u128,
+}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -996,7 +1033,8 @@ struct BResidualChunkPlan {
 
 /// Stable keeper-crank request object. New crank policy fields should be added
 /// here rather than appended to positional call sites.
-pub struct KeeperCrankRequest<'a> {
+test_visible_struct! {
+struct KeeperCrankRequest<'a> {
     pub now_slot: u64,
     pub oracle_price: u64,
     pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
@@ -1008,6 +1046,7 @@ pub struct KeeperCrankRequest<'a> {
     pub admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     pub rr_touch_limit: u64,
     pub rr_scan_limit: u64,
+}
 }
 
 /// One-call public progress request for permissionless markets.
@@ -1062,6 +1101,7 @@ impl<'a> KeeperCrankRequest<'a> {
 }
 
 impl<'a> PermissionlessProgressRequest<'a> {
+    #[cfg(any(feature = "test", feature = "stress", kani))]
     pub fn from_keeper_request(
         req: KeeperCrankRequest<'a>,
         authenticated_raw_target_price: u64,
@@ -1359,12 +1399,12 @@ impl RiskEngine {
     }
 
     #[cfg(not(kani))]
-    pub fn exact_solvency_envelope_ok(params: &RiskParams) -> bool {
+    fn exact_solvency_envelope_ok(params: &RiskParams) -> bool {
         Self::validate_exact_solvency_envelope(params).is_ok()
     }
 
     #[cfg(kani)]
-    pub fn exact_solvency_envelope_ok(_params: &RiskParams) -> bool {
+    fn exact_solvency_envelope_ok(_params: &RiskParams) -> bool {
         true
     }
 
@@ -1920,13 +1960,15 @@ impl RiskEngine {
     // Bitmap Helpers
     // ========================================================================
 
-    pub fn is_used(&self, idx: usize) -> bool {
+    test_visible! {
+    fn is_used(&self, idx: usize) -> bool {
         if idx >= MAX_ACCOUNTS {
             return false;
         }
         let w = idx >> 6;
         let b = idx & 63;
         ((self.used[w] >> b) & 1) == 1
+    }
     }
 
     fn set_used(&mut self, idx: usize) {
@@ -3764,12 +3806,14 @@ impl RiskEngine {
         Ok(true)
     }
 
-    pub fn continue_active_bankrupt_close_not_atomic(&mut self, now_slot: u64) -> Result<bool> {
+    test_visible! {
+    fn continue_active_bankrupt_close_not_atomic(&mut self, now_slot: u64) -> Result<bool> {
         self.assert_public_postconditions()?;
         let mut ctx = InstructionContext::new_with_admission(self.params.h_max, self.params.h_max);
         let progressed = self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
         self.assert_public_postconditions()?;
         Ok(progressed)
+    }
     }
 
     fn complete_active_bankrupt_close_for_recovery(&mut self) -> Result<()> {
@@ -3802,6 +3846,7 @@ impl RiskEngine {
             && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
     }
 
+    #[cfg(any(feature = "test", feature = "stress", kani))]
     pub fn permissionless_progress_rank_for_now(
         &self,
         now_slot: u64,
@@ -3859,6 +3904,7 @@ impl RiskEngine {
         })
     }
 
+    #[cfg(any(feature = "test", feature = "stress", kani))]
     pub fn permissionless_account_progress_rank(
         &self,
         idx: u16,
@@ -4319,8 +4365,10 @@ impl RiskEngine {
         }
     }
 
-    pub fn try_effective_pos_q(&self, idx: usize) -> Result<i128> {
+    test_visible! {
+    fn try_effective_pos_q(&self, idx: usize) -> Result<i128> {
         self.effective_pos_q_checked(idx, true)
+    }
     }
 
     test_visible! {
@@ -4611,7 +4659,8 @@ impl RiskEngine {
     // accrue_market_to (spec §5.4)
     // ========================================================================
 
-    pub fn accrue_market_to(
+    test_visible! {
+    fn accrue_market_to(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -4630,6 +4679,7 @@ impl RiskEngine {
             oracle_price,
             funding_rate_e9,
         )
+    }
     }
 
     fn accrue_market_segment_to_internal(
@@ -4698,8 +4748,8 @@ impl RiskEngine {
     }
 
     /// Validate h_lock before any state mutation.
-    #[cfg_attr(any(feature = "test", feature = "stress", kani), doc(hidden))]
-    pub fn validate_admission_pair(
+    test_visible! {
+    fn validate_admission_pair(
         admit_h_min: u64,
         admit_h_max: u64,
         params: &RiskParams,
@@ -4727,17 +4777,20 @@ impl RiskEngine {
         }
         Ok(())
     }
+    }
 
     /// Validate the optional consumption-threshold (spec §4.7, §9.0 step 1,
     /// v12.20.6). `None` disables the gate; `Some(threshold)` requires
     /// `threshold > 0`. `Some(0)` is invalid and must be rejected
     /// conservatively before any state mutation.
-    pub fn validate_threshold_opt(threshold_opt: Option<u128>) -> Result<()> {
+    test_visible! {
+    fn validate_threshold_opt(threshold_opt: Option<u128>) -> Result<()> {
         match threshold_opt {
             None => Ok(()),
             Some(t) if t > 0 && t <= u128::MAX / STRESS_CONSUMPTION_SCALE => Ok(()),
             Some(_) => Err(RiskError::Overflow),
         }
+    }
     }
 
     // ========================================================================
@@ -5392,7 +5445,8 @@ impl RiskEngine {
 
     /// Compute haircut ratio (h_num, h_den) as u128 pair (spec §3.3)
     /// Uses pnl_matured_pos_tot as denominator.
-    pub fn haircut_ratio(&self) -> (u128, u128) {
+    test_visible! {
+    fn haircut_ratio(&self) -> (u128, u128) {
         if self.pnl_matured_pos_tot == 0 {
             return (1u128, 1u128);
         }
@@ -5417,6 +5471,7 @@ impl RiskEngine {
         };
         (h_num, self.pnl_matured_pos_tot)
     }
+    }
 
     fn released_pos_checked(&self, idx: usize, require_used: bool) -> Result<u128> {
         if idx >= MAX_ACCOUNTS {
@@ -5439,8 +5494,10 @@ impl RiskEngine {
         Ok(pos_pnl - self.accounts[idx].reserved_pnl)
     }
 
-    pub fn try_released_pos(&self, idx: usize) -> Result<u128> {
+    test_visible! {
+    fn try_released_pos(&self, idx: usize) -> Result<u128> {
         self.released_pos_checked(idx, true)
+    }
     }
 
     fn effective_matured_pnl_checked(&self, idx: usize, require_used: bool) -> Result<u128> {
@@ -5455,8 +5512,10 @@ impl RiskEngine {
         Ok(wide_mul_div_floor_u128(released, h_num, h_den))
     }
 
-    pub fn try_effective_matured_pnl(&self, idx: usize) -> Result<u128> {
+    test_visible! {
+    fn try_effective_matured_pnl(&self, idx: usize) -> Result<u128> {
         self.effective_matured_pnl_checked(idx, true)
+    }
     }
 
     /// PNL_eff_matured_i (spec §3.3): haircutted matured released positive PnL
@@ -5472,7 +5531,8 @@ impl RiskEngine {
     /// Returns i128. Negative overflow is projected to i128::MIN + 1 per §3.4
     /// (safe for one-sided checks against nonneg thresholds). For strict
     /// before/after buffer comparisons, use account_equity_maint_raw_wide.
-    pub fn account_equity_maint_raw(&self, account: &Account) -> i128 {
+    test_visible! {
+    fn account_equity_maint_raw(&self, account: &Account) -> i128 {
         let wide = self.account_equity_maint_raw_wide(account);
         match wide.try_into_i128() {
             Some(v) => v,
@@ -5483,11 +5543,13 @@ impl RiskEngine {
             }
         }
     }
+    }
 
     /// Eq_maint_raw_i in exact I256 (spec §3.4 "transient widened signed type").
     /// MUST be used for strict before/after raw maintenance-buffer comparisons
     /// (§10.5 step 29). No saturation or clamping.
-    pub fn account_equity_maint_raw_wide(&self, account: &Account) -> I256 {
+    test_visible! {
+    fn account_equity_maint_raw_wide(&self, account: &Account) -> I256 {
         let cap = I256::from_u128(account.capital.get());
         let pnl = I256::from_i128(account.pnl);
         let fee_debt = I256::from_u128(fee_debt_u128_checked(account.fee_credits.get()));
@@ -5496,9 +5558,11 @@ impl RiskEngine {
         let sum = cap.checked_add(pnl).expect("I256 add overflow");
         sum.checked_sub(fee_debt).expect("I256 sub overflow")
     }
+    }
 
     /// Eq_net_i (spec §3.4): max(0, Eq_maint_raw_i). For maintenance margin checks.
-    pub fn account_equity_net(&self, account: &Account, _oracle_price: u64) -> i128 {
+    test_visible! {
+    fn account_equity_net(&self, account: &Account, _oracle_price: u64) -> i128 {
         let raw = self.account_equity_maint_raw(account);
         if raw < 0 {
             0i128
@@ -5506,11 +5570,13 @@ impl RiskEngine {
             raw
         }
     }
+    }
 
     /// Eq_init_raw_i (spec §3.4): C_i + min(PNL_i, 0) + PNL_eff_matured_i - FeeDebt_i
     /// For initial margin and withdrawal checks. Uses haircutted matured PnL only.
     /// Returns i128. Negative overflow projected to i128::MIN + 1 per §3.4.
-    pub fn account_equity_init_raw(&self, account: &Account, idx: usize) -> i128 {
+    test_visible! {
+    fn account_equity_init_raw(&self, account: &Account, idx: usize) -> i128 {
         let cap = I256::from_u128(account.capital.get());
         let neg_pnl = I256::from_i128(if account.pnl < 0 { account.pnl } else { 0i128 });
         let eff_matured = match self.effective_matured_pnl_checked(idx, false) {
@@ -5535,9 +5601,11 @@ impl RiskEngine {
             }
         }
     }
+    }
 
     /// Eq_init_net_i (spec §3.4): max(0, Eq_init_raw_i). For IM checks (trades).
-    pub fn account_equity_init_net(&self, account: &Account, idx: usize) -> i128 {
+    test_visible! {
+    fn account_equity_init_net(&self, account: &Account, idx: usize) -> i128 {
         let raw = self.account_equity_init_raw(account, idx);
         if raw < 0 {
             0i128
@@ -5545,10 +5613,12 @@ impl RiskEngine {
             raw
         }
     }
+    }
 
     /// Eq_withdraw_raw_i (spec §3.5): C + min(PNL, 0) + PNL_eff_matured - FeeDebt.
     /// Uses exact I256 arithmetic. Includes haircutted matured released PnL.
-    pub fn account_equity_withdraw_raw(&self, account: &Account, idx: usize) -> i128 {
+    test_visible! {
+    fn account_equity_withdraw_raw(&self, account: &Account, idx: usize) -> i128 {
         let cap = I256::from_u128(account.capital.get());
         let neg_pnl = I256::from_i128(if account.pnl < 0 { account.pnl } else { 0i128 });
         let eff_matured = match self.effective_matured_pnl_checked(idx, false) {
@@ -5568,8 +5638,10 @@ impl RiskEngine {
             None => i128::MIN + 1, // fail conservative on any overflow
         }
     }
+    }
 
-    pub fn account_equity_withdraw_no_pos_raw(&self, account: &Account) -> i128 {
+    test_visible! {
+    fn account_equity_withdraw_no_pos_raw(&self, account: &Account) -> i128 {
         let cap = I256::from_u128(account.capital.get());
         let neg_pnl = I256::from_i128(if account.pnl < 0 { account.pnl } else { 0i128 });
         let fee_debt = I256::from_u128(fee_debt_u128_checked(account.fee_credits.get()));
@@ -5580,12 +5652,14 @@ impl RiskEngine {
             .expect("I256 sub");
         sum.try_into_i128().unwrap_or(i128::MIN + 1)
     }
+    }
 
     /// max_safe_flat_conversion_released (spec §4.12).
     /// Returns largest x_safe <= x_cap such that converting x_safe released profit
     /// on a live flat account cannot make Eq_maint_raw_i negative post-conversion.
     /// Uses 256-bit exact intermediates per spec §1.6 item 29.
-    pub fn max_safe_flat_conversion_released(
+    test_visible! {
+    fn max_safe_flat_conversion_released(
         &self,
         idx: usize,
         x_cap: u128,
@@ -5613,6 +5687,7 @@ impl RiskEngine {
         let safe = wide_mul_div_floor_u128(e_before as u128, h_den, haircut_loss_num);
         core::cmp::min(x_cap, safe)
     }
+    }
 
     fn risk_notional_from_eff_q(eff: i128, oracle_price: u64) -> u128 {
         if eff == 0 {
@@ -5629,8 +5704,10 @@ impl RiskEngine {
         Ok(Self::risk_notional_from_eff_q(eff, oracle_price))
     }
 
-    pub fn try_notional(&self, idx: usize, oracle_price: u64) -> Result<u128> {
+    test_visible! {
+    fn try_notional(&self, idx: usize, oracle_price: u64) -> Result<u128> {
         self.notional_checked(idx, oracle_price, true)
+    }
     }
 
     /// notional (spec §7): ceil(|effective_pos_q| * oracle_price / POS_SCALE)
@@ -5643,7 +5720,8 @@ impl RiskEngine {
 
     /// is_above_maintenance_margin (spec §9.1): Eq_net_i > MM_req_i
     /// Per spec §9.1: if eff == 0 then MM_req = 0; else MM_req = max(proportional, MIN_NONZERO_MM_REQ)
-    pub fn is_above_maintenance_margin(
+    test_visible! {
+    fn is_above_maintenance_margin(
         &self,
         account: &Account,
         idx: usize,
@@ -5669,12 +5747,14 @@ impl RiskEngine {
         };
         eq_net > mm_req_i128
     }
+    }
 
     /// is_above_initial_margin (spec §9.1): exact Eq_init_raw_i >= IM_req_i
     /// Per spec §9.1: if eff == 0 then IM_req = 0; else IM_req = max(proportional, MIN_NONZERO_IM_REQ)
     /// Per spec §3.4: MUST use exact raw equity, not clamped Eq_init_net_i,
     /// so negative raw equity is distinguishable from zero.
-    pub fn is_above_initial_margin(
+    test_visible! {
+    fn is_above_initial_margin(
         &self,
         account: &Account,
         idx: usize,
@@ -5699,12 +5779,14 @@ impl RiskEngine {
         };
         eq_init_raw >= im_req_i128
     }
+    }
 
     /// Eq_trade_open_raw_i (spec §3.5): counterfactual trade approval
     /// metric with the candidate trade's own positive slippage removed.
     /// `candidate_trade_pnl` is the signed execution-slippage PnL for this account
     /// from the candidate trade under evaluation.
-    pub fn account_equity_trade_open_raw(
+    test_visible! {
+    fn account_equity_trade_open_raw(
         &self,
         account: &Account,
         _idx: usize,
@@ -5780,8 +5862,10 @@ impl RiskEngine {
             None => i128::MIN + 1, // fail conservative on any overflow
         }
     }
+    }
 
-    pub fn account_equity_trade_open_no_pos_raw(
+    test_visible! {
+    fn account_equity_trade_open_no_pos_raw(
         &self,
         account: &Account,
         candidate_trade_pnl: i128,
@@ -5809,10 +5893,12 @@ impl RiskEngine {
             .expect("I256 sub");
         result.try_into_i128().unwrap_or(i128::MIN + 1)
     }
+    }
 
     /// is_above_initial_margin_trade_open (spec §9.1 + §3.5):
     /// Uses Eq_trade_open_raw_i for risk-increasing trade approval.
-    pub fn is_above_initial_margin_trade_open(
+    test_visible! {
+    fn is_above_initial_margin_trade_open(
         &self,
         account: &Account,
         idx: usize,
@@ -5838,8 +5924,10 @@ impl RiskEngine {
         };
         eq >= im_req_i128
     }
+    }
 
-    pub fn is_above_initial_margin_trade_open_no_pos(
+    test_visible! {
+    fn is_above_initial_margin_trade_open_no_pos(
         &self,
         account: &Account,
         idx: usize,
@@ -5865,12 +5953,14 @@ impl RiskEngine {
         };
         eq >= im_req_i128
     }
+    }
 
     // ========================================================================
     // Conservation check (spec §3.1)
     // ========================================================================
 
-    pub fn check_conservation(&self) -> bool {
+    test_visible! {
+    fn check_conservation(&self) -> bool {
         let senior = self
             .c_tot
             .get()
@@ -5879,6 +5969,7 @@ impl RiskEngine {
             Some(s) => self.vault.get() >= s,
             None => false,
         }
+    }
     }
 
     /// sweep_empty_market_surplus_to_insurance (spec §3.2, v12.20.6).
@@ -7189,7 +7280,8 @@ impl RiskEngine {
     // Account Management
     // ========================================================================
 
-    pub fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
+    test_visible! {
+    fn set_owner(&mut self, idx: u16, owner: [u8; 32]) -> Result<()> {
         if self.validate_used_account_slot(idx as usize).is_err() {
             return Err(RiskError::Unauthorized);
         }
@@ -7207,6 +7299,7 @@ impl RiskEngine {
         }
         self.accounts[idx as usize].owner = owner;
         Ok(())
+    }
     }
 
     // ========================================================================
@@ -8435,7 +8528,8 @@ impl RiskEngine {
     }
     }
 
-    pub fn keeper_crank_not_atomic(
+    test_visible! {
+    fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -8458,6 +8552,7 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
             rr_touch_limit,
         ))
+    }
     }
 
     fn try_permissionless_global_recovery(
@@ -8649,7 +8744,8 @@ impl RiskEngine {
         Ok(PermissionlessProgressOutcome::Cranked(outcome))
     }
 
-    pub fn keeper_crank_with_request_not_atomic(
+    test_visible! {
+    fn keeper_crank_with_request_not_atomic(
         &mut self,
         req: KeeperCrankRequest<'_>,
     ) -> Result<CrankOutcome> {
@@ -8912,6 +9008,7 @@ impl RiskEngine {
 
         self.assert_public_postconditions()?;
         Ok(CrankOutcome { num_liquidations })
+    }
     }
 
     /// Validate a keeper-supplied liquidation-policy hint (spec §11.1 rule 3).
@@ -9241,7 +9338,8 @@ impl RiskEngine {
     /// Permissionless terminal recovery with deterministic P_last fallback.
     /// The caller supplies only recovery evidence; the settlement price is
     /// always the engine's current `last_oracle_price`.
-    pub fn permissionless_recovery_resolve_p_last_not_atomic(
+    test_visible! {
+    fn permissionless_recovery_resolve_p_last_not_atomic(
         &mut self,
         reason: RecoveryReason,
         now_slot: u64,
@@ -9261,6 +9359,7 @@ impl RiskEngine {
         }
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
     }
 
     fn resolve_counter_or_epoch_overflow_recovery_not_atomic(
@@ -9343,7 +9442,8 @@ impl RiskEngine {
     /// B-settlement conservative-failure class. The caller identifies the
     /// blocking account; the engine validates with the production B planner.
     /// Settlement still uses deterministic P_last fallback.
-    pub fn permissionless_recovery_resolve_account_b_p_last_not_atomic(
+    test_visible! {
+    fn permissionless_recovery_resolve_account_b_p_last_not_atomic(
         &mut self,
         idx: u16,
         now_slot: u64,
@@ -9352,6 +9452,7 @@ impl RiskEngine {
         self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot)?;
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
     }
 
     /// Transition market from Live to Resolved at a price-bounded settlement price.
@@ -9520,8 +9621,10 @@ impl RiskEngine {
     /// For positive-PnL on non-terminal markets, reconciliation persists and
     /// `ResolvedCloseResult::ProgressOnly` is returned (account stays open —
     /// re-call after terminal readiness is reached).
-    pub fn force_close_resolved_not_atomic(&mut self, idx: u16) -> Result<ResolvedCloseResult> {
+    test_visible! {
+    fn force_close_resolved_not_atomic(&mut self, idx: u16) -> Result<ResolvedCloseResult> {
         self.force_close_resolved_with_fee_not_atomic(idx, 0)
+    }
     }
 
     pub fn force_close_resolved_with_fee_not_atomic(
@@ -9550,21 +9653,24 @@ impl RiskEngine {
         }
 
         // Phase 2: terminal close
-        let capital = self.close_resolved_terminal_not_atomic(idx)?;
+        let capital = self.close_resolved_terminal_with_fee_not_atomic(idx, fee_rate_per_slot)?;
         Ok(ResolvedCloseResult::Closed(capital))
     }
 
-    pub fn force_close_resolved_cursor_not_atomic(
+    test_visible! {
+    fn force_close_resolved_cursor_not_atomic(
         &mut self,
         scan_limit: u64,
     ) -> Result<ResolvedCloseResult> {
         self.force_close_resolved_cursor_with_fee_not_atomic(scan_limit, 0)
     }
+    }
 
     /// Bounded resolved-close cursor progress. Missing-slot scans advance the
     /// durable cursor; the first materialized account in the bounded window is
     /// reconciled/closed through the ordinary resolved-close path.
-    pub fn force_close_resolved_cursor_with_fee_not_atomic(
+    test_visible! {
+    fn force_close_resolved_cursor_with_fee_not_atomic(
         &mut self,
         scan_limit: u64,
         fee_rate_per_slot: u128,
@@ -9607,11 +9713,13 @@ impl RiskEngine {
         self.assert_public_postconditions()?;
         Ok(ResolvedCloseResult::ProgressOnly)
     }
+    }
 
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,
     /// zeroes position, settles losses, absorbs insurance. Always persists
     /// on success. Idempotent on already-reconciled accounts.
-    pub fn reconcile_resolved_not_atomic(&mut self, idx: u16) -> Result<()> {
+    test_visible! {
+    fn reconcile_resolved_not_atomic(&mut self, idx: u16) -> Result<()> {
         if self.market_mode != MarketMode::Resolved {
             return Err(RiskError::Unauthorized);
         }
@@ -9768,6 +9876,7 @@ impl RiskEngine {
         self.assert_public_postconditions()?;
         Ok(())
     }
+    }
 
     /// Check if resolved market is terminal-ready for payouts.
     /// Uses O(1) neg_pnl_account_count instead of an account scan.
@@ -9777,7 +9886,8 @@ impl RiskEngine {
     /// counters are re-checked. This makes readiness fail-conservative:
     /// a corrupt ready flag alone cannot unlock terminal payout if the
     /// stored / stale / negative-PnL counters still say otherwise.
-    pub fn is_terminal_ready(&self) -> bool {
+    test_visible! {
+    fn is_terminal_ready(&self) -> bool {
         if self.market_mode != MarketMode::Resolved {
             return false;
         }
@@ -9802,13 +9912,17 @@ impl RiskEngine {
         // counters-agree as "ready" — both imply a consistent view.
         true
     }
-
-    /// Phase 2: Terminal close. Requires terminal readiness.
-    pub fn close_resolved_terminal_not_atomic(&mut self, idx: u16) -> Result<u128> {
-        self.close_resolved_terminal_with_fee_not_atomic(idx, 0)
     }
 
-    pub fn close_resolved_terminal_with_fee_not_atomic(
+    /// Phase 2: Terminal close. Requires terminal readiness.
+    test_visible! {
+    fn close_resolved_terminal_not_atomic(&mut self, idx: u16) -> Result<u128> {
+        self.close_resolved_terminal_with_fee_not_atomic(idx, 0)
+    }
+    }
+
+    test_visible! {
+    fn close_resolved_terminal_with_fee_not_atomic(
         &mut self,
         idx: u16,
         fee_rate_per_slot: u128,
@@ -9912,6 +10026,7 @@ impl RiskEngine {
 
         self.assert_public_postconditions()?;
         Ok(capital.get())
+    }
     }
 
     // ========================================================================
@@ -10029,7 +10144,8 @@ impl RiskEngine {
     /// Move insurance balance into an existing account's capital without
     /// changing vault size. Intended for wrapper-level incentives that are paid
     /// out of already-collected insurance funds.
-    pub fn credit_account_from_insurance_not_atomic(
+    test_visible! {
+    fn credit_account_from_insurance_not_atomic(
         &mut self,
         idx: u16,
         amount: u128,
@@ -10065,6 +10181,7 @@ impl RiskEngine {
 
         self.assert_public_postconditions()?;
         Ok(())
+    }
     }
 
     /// Withdraw insurance from a live market. The wrapper owns authorization
@@ -10163,7 +10280,8 @@ impl RiskEngine {
     /// side modes, stale counters, or dust bounds.
     ///
     /// Fee beyond collectible headroom is dropped (not socialized).
-    pub fn charge_account_fee_not_atomic(
+    test_visible! {
+    fn charge_account_fee_not_atomic(
         &mut self,
         idx: u16,
         fee_abs: u128,
@@ -10194,6 +10312,7 @@ impl RiskEngine {
         self.assert_public_postconditions()?;
         Ok(())
     }
+    }
 
     // ========================================================================
     // Fee credits
@@ -10206,7 +10325,8 @@ impl RiskEngine {
     /// negative PnL through insurance and zeroes it.
     ///
     /// Preconditions: account is flat (position_basis_q == 0) and pnl < 0.
-    pub fn settle_flat_negative_pnl_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
+    test_visible! {
+    fn settle_flat_negative_pnl_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -10245,6 +10365,7 @@ impl RiskEngine {
 
         self.assert_public_postconditions()?;
         Ok(())
+    }
     }
 
     // ========================================================================
@@ -10323,18 +10444,18 @@ impl RiskEngine {
         Ok(())
     }
 
-    // ========================================================================
-    // Public getters for wrapper use
-    // ========================================================================
-
     /// Whether the market is in Resolved mode.
-    pub fn is_resolved(&self) -> bool {
+    test_visible! {
+    fn is_resolved(&self) -> bool {
         self.market_mode == MarketMode::Resolved
+    }
     }
 
     /// Resolved market context (price, slot). Only meaningful when is_resolved().
-    pub fn resolved_context(&self) -> (u64, u64) {
+    test_visible! {
+    fn resolved_context(&self) -> (u64, u64) {
         (self.resolved_price, self.resolved_slot)
+    }
     }
 
     // ========================================================================
