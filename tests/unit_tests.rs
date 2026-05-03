@@ -4051,7 +4051,7 @@ fn accrue_market_to_sub_bps_jitter_is_scaled_not_zero() {
     engine.oi_eff_short_q = POS_SCALE;
 
     let r = engine.accrue_market_to(1, 100_009, 0);
-    assert!(r.is_ok());
+    assert!(r.is_ok(), "accrual failed: {r:?}");
     assert_eq!(
         engine.stress_consumed_bps_e9_since_envelope, 900_000_000,
         "sub-whole-bps jitter must be tracked at scaled-bps precision"
@@ -9455,6 +9455,98 @@ fn permissionless_recovery_rejects_inactive_explicit_loss_reason() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
         RecoveryReason::ExplicitLossOrDustAuditOverflow,
+        1,
+        0,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+}
+
+#[test]
+fn oracle_unavailable_recovery_reason_fails_closed_without_engine_authentication() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        1,
+        0,
+    );
+    assert_eq!(r, Err(RiskError::Unauthorized));
+    assert_eq!(
+        engine.market_mode,
+        MarketMode::Live,
+        "bare engine must not let a caller terminate an exposed market by claiming oracle outage"
+    );
+}
+
+#[test]
+fn counter_or_epoch_overflow_recovery_resolves_at_p_last() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.sweep_generation = u64::MAX;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+        1,
+        0,
+    );
+    assert!(r.is_ok(), "recovery failed: {r:?}");
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, 1000);
+    assert_eq!(engine.resolved_live_price, 1000);
+}
+
+#[test]
+fn side_epoch_overflow_recovery_resolves_at_p_last_from_canonical_epoch_state() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_epoch_long = u64::MAX;
+    engine.accounts[0].adl_epoch_snap = u64::MAX;
+    engine.accounts[0].b_epoch_snap = u64::MAX;
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+        1,
+        0,
+    );
+    assert!(r.is_ok(), "recovery failed: {r:?}");
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, 1000);
+}
+
+#[test]
+fn counter_or_epoch_overflow_recovery_rejects_without_exhausted_counter() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
         1,
         0,
     );

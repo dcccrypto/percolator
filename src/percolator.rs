@@ -262,6 +262,14 @@ pub enum RecoveryReason {
     /// bounded B-booking step, so permissionless terminal recovery records
     /// the remaining residual as non-claim audit loss before P-last resolve.
     ActiveBankruptCloseCannotProgress = 5,
+    /// Wrapper-authenticated oracle/raw-target unavailability. The bare
+    /// engine cannot validate this policy proof, so this reason fails closed
+    /// here; wrappers must not expose it without authenticated evidence.
+    OracleOrTargetUnavailableByAuthenticatedPolicy = 6,
+    /// Engine counters or side epochs reached their representable terminal
+    /// value. Ordinary bounded progress may need one more increment, so
+    /// permissionless P-last terminal recovery is allowed.
+    CounterOrEpochOverflowDeclaredRecovery = 7,
 }
 
 /// Reserve mode for set_pnl (spec §4.8)
@@ -3273,7 +3281,14 @@ impl RiskEngine {
         }
         let epoch_side = self.get_epoch_side(side);
         if account.adl_epoch_snap == epoch_side {
-            Ok(self.get_b_side(side))
+            if self.market_mode == MarketMode::Resolved
+                && self.get_side_mode(side) == SideMode::ResetPending
+                && epoch_side == u64::MAX
+            {
+                Ok(self.get_b_epoch_start(side))
+            } else {
+                Ok(self.get_b_side(side))
+            }
         } else {
             if self.get_side_mode(side) != SideMode::ResetPending
                 || account.adl_epoch_snap.checked_add(1) != Some(epoch_side)
@@ -3867,6 +3882,19 @@ impl RiskEngine {
             RecoveryReason::AccountBSettlementCannotProgress => Err(RiskError::Unauthorized),
             RecoveryReason::ActiveBankruptCloseCannotProgress => {
                 if self.active_bankrupt_close_recovery_required()? {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::OracleOrTargetUnavailableByAuthenticatedPolicy => {
+                Err(RiskError::Unauthorized)
+            }
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery => {
+                if self.sweep_generation == u64::MAX
+                    || self.adl_epoch_long == u64::MAX
+                    || self.adl_epoch_short == u64::MAX
+                {
                     Ok(())
                 } else {
                     Err(RiskError::Unauthorized)
@@ -4954,6 +4982,55 @@ impl RiskEngine {
     }
     }
 
+    fn begin_terminal_epoch_exhaustion_reset(&mut self, side: Side) -> Result<()> {
+        if self.get_oi_eff(side) != 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.get_side_mode(side) == SideMode::ResetPending {
+            return Err(RiskError::CorruptState);
+        }
+        if self.get_epoch_side(side) != u64::MAX {
+            return Err(RiskError::CorruptState);
+        }
+        self.validate_persistent_global_signed_shape()?;
+
+        let k = self.get_k_side(side);
+        match side {
+            Side::Long => self.adl_epoch_start_k_long = k,
+            Side::Short => self.adl_epoch_start_k_short = k,
+        }
+        match side {
+            Side::Long => self.f_epoch_start_long_num = self.f_long_num,
+            Side::Short => self.f_epoch_start_short_num = self.f_short_num,
+        }
+
+        self.quarantine_social_remainder_before_weight_change(side)?;
+        self.set_b_epoch_start(side, self.get_b_side(side));
+        self.set_b_side(side, 0);
+        self.set_social_remainder(side, 0);
+        self.set_loss_weight_sum(side, 0);
+
+        match side {
+            Side::Long => {
+                self.adl_coeff_long = 0;
+                self.f_long_num = 0;
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+            }
+            Side::Short => {
+                self.adl_coeff_short = 0;
+                self.f_short_num = 0;
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+            }
+        }
+
+        self.set_a_side(side, ADL_ONE);
+        self.set_stale_count(side, self.get_stored_pos_count(side));
+        self.set_side_mode(side, SideMode::ResetPending);
+        Ok(())
+    }
+
     test_visible! {
     fn finalize_side_reset(&mut self, side: Side) -> Result<()> {
         if self.get_side_mode(side) != SideMode::ResetPending {
@@ -6011,10 +6088,15 @@ impl RiskEngine {
                 match side_of_i128(account.position_basis_q) {
                     Some(Side::Long) => {
                         stored_long = stored_long.checked_add(1).ok_or(RiskError::CorruptState)?;
-                        if account.adl_epoch_snap != self.adl_epoch_long {
-                            if self.side_mode_long != SideMode::ResetPending
-                                || account.adl_epoch_snap.checked_add(1)
-                                    != Some(self.adl_epoch_long)
+                        let terminal_epoch_stale = self.market_mode == MarketMode::Resolved
+                            && self.side_mode_long == SideMode::ResetPending
+                            && self.adl_epoch_long == u64::MAX
+                            && account.adl_epoch_snap == self.adl_epoch_long;
+                        if account.adl_epoch_snap != self.adl_epoch_long || terminal_epoch_stale {
+                            if !terminal_epoch_stale
+                                && (self.side_mode_long != SideMode::ResetPending
+                                    || account.adl_epoch_snap.checked_add(1)
+                                        != Some(self.adl_epoch_long))
                             {
                                 return Err(RiskError::CorruptState);
                             }
@@ -6042,10 +6124,15 @@ impl RiskEngine {
                     Some(Side::Short) => {
                         stored_short =
                             stored_short.checked_add(1).ok_or(RiskError::CorruptState)?;
-                        if account.adl_epoch_snap != self.adl_epoch_short {
-                            if self.side_mode_short != SideMode::ResetPending
-                                || account.adl_epoch_snap.checked_add(1)
-                                    != Some(self.adl_epoch_short)
+                        let terminal_epoch_stale = self.market_mode == MarketMode::Resolved
+                            && self.side_mode_short == SideMode::ResetPending
+                            && self.adl_epoch_short == u64::MAX
+                            && account.adl_epoch_snap == self.adl_epoch_short;
+                        if account.adl_epoch_snap != self.adl_epoch_short || terminal_epoch_stale {
+                            if !terminal_epoch_stale
+                                && (self.side_mode_short != SideMode::ResetPending
+                                    || account.adl_epoch_snap.checked_add(1)
+                                        != Some(self.adl_epoch_short))
                             {
                                 return Err(RiskError::CorruptState);
                             }
@@ -8787,8 +8874,87 @@ impl RiskEngine {
         if reason == RecoveryReason::ActiveBankruptCloseCannotProgress {
             self.complete_active_bankrupt_close_for_recovery()?;
         }
+        if reason == RecoveryReason::CounterOrEpochOverflowDeclaredRecovery {
+            return self.resolve_counter_or_epoch_overflow_recovery_not_atomic(now_slot);
+        }
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
+
+    fn resolve_counter_or_epoch_overflow_recovery_not_atomic(
+        &mut self,
+        now_slot: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        self.ensure_no_active_bankrupt_close()?;
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let p_last = self.last_oracle_price;
+        if p_last == 0 || p_last > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+
+        let pre_mode_long = self.side_mode_long;
+        let pre_mode_short = self.side_mode_short;
+        let pre_stored_long = self.stored_pos_count_long;
+        let pre_stored_short = self.stored_pos_count_short;
+
+        self.current_slot = now_slot;
+        self.last_market_slot = now_slot;
+        self.market_mode = MarketMode::Resolved;
+        self.resolved_price = p_last;
+        self.resolved_live_price = p_last;
+        self.resolved_slot = now_slot;
+        self.resolved_k_long_terminal_delta = 0;
+        self.resolved_k_short_terminal_delta = 0;
+        self.clear_stress_envelope();
+        self.resolved_payout_h_num = 0;
+        self.resolved_payout_h_den = 0;
+        self.resolved_payout_ready = 0;
+        self.pnl_matured_pos_tot = self.pnl_pos_tot;
+        self.oi_eff_long_q = 0;
+        self.oi_eff_short_q = 0;
+        if pre_stored_long == 0 {
+            self.phantom_dust_certified_long_q = 0;
+            self.phantom_dust_potential_long_q = 0;
+        }
+        if pre_stored_short == 0 {
+            self.phantom_dust_certified_short_q = 0;
+            self.phantom_dust_potential_short_q = 0;
+        }
+
+        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
+            if self.adl_epoch_long == u64::MAX {
+                self.begin_terminal_epoch_exhaustion_reset(Side::Long)?;
+            } else {
+                self.begin_full_drain_reset(Side::Long)?;
+            }
+        }
+        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
+            if self.adl_epoch_short == u64::MAX {
+                self.begin_terminal_epoch_exhaustion_reset(Side::Short)?;
+            } else {
+                self.begin_full_drain_reset(Side::Short)?;
+            }
+        }
+        if self.side_mode_long == SideMode::ResetPending
+            && self.stale_account_count_long == 0
+            && self.stored_pos_count_long == 0
+        {
+            self.finalize_side_reset(Side::Long)?;
+        }
+        if self.side_mode_short == SideMode::ResetPending
+            && self.stale_account_count_short == 0
+            && self.stored_pos_count_short == 0
+        {
+            self.finalize_side_reset(Side::Short)?;
+        }
+
+        self.assert_public_postconditions()?;
+        Ok(())
     }
 
     /// Account-specific permissionless terminal recovery for the account-local
@@ -9060,9 +9226,26 @@ impl RiskEngine {
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
             let (kf_delta, k_terminal_wide, f_end) = if epoch_snap == epoch_side {
-                // Same-epoch with nonzero basis in resolved mode is corrupt state.
-                // After resolution, all nonzero-basis accounts must be stale.
-                return Err(RiskError::CorruptState);
+                if self.get_side_mode(side) != SideMode::ResetPending
+                    || epoch_side != u64::MAX
+                    || self.get_stale_count(side) == 0
+                {
+                    return Err(RiskError::CorruptState);
+                }
+                let k_terminal_wide = I256::from_i128(self.get_k_epoch_start(side))
+                    .checked_add(I256::from_i128(resolved_k_td))
+                    .ok_or(RiskError::Overflow)?;
+                let f_end = self.get_f_epoch_start(side);
+                let f_end_wide = I256::from_i128(f_end);
+                let delta = Self::compute_kf_pnl_delta_wide(
+                    abs_basis,
+                    k_snap,
+                    k_terminal_wide,
+                    f_snap_acct,
+                    f_end_wide,
+                    den,
+                )?;
+                (delta, k_terminal_wide, f_end)
             } else {
                 // Stale (normal resolved path): require one-epoch lag
                 if epoch_snap.checked_add(1) != Some(epoch_side) {

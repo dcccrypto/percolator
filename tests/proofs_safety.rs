@@ -1051,6 +1051,79 @@ fn proof_bankruptcy_residual_handler_fails_forward_without_active_close_state() 
 }
 
 #[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_counter_or_epoch_overflow_recovery_resolves_at_p_last_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let overflow_kind: u8 = kani::any();
+    kani::assume(overflow_kind <= 2);
+    match overflow_kind {
+        0 => engine.sweep_generation = u64::MAX,
+        1 => {
+            engine.adl_epoch_long = u64::MAX;
+            engine.accounts[a as usize].adl_epoch_snap = u64::MAX;
+            engine.accounts[a as usize].b_epoch_snap = u64::MAX;
+        }
+        _ => {
+            engine.adl_epoch_short = u64::MAX;
+            engine.accounts[b as usize].adl_epoch_snap = u64::MAX;
+            engine.accounts[b as usize].b_epoch_snap = u64::MAX;
+        }
+    }
+
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+        DEFAULT_SLOT + 1,
+        0,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, DEFAULT_ORACLE);
+    assert_eq!(engine.resolved_live_price, DEFAULT_ORACLE);
+    kani::cover!(
+        result.is_ok() && engine.market_mode == MarketMode::Resolved,
+        "production counter/epoch overflow recovery resolves at P_last"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+fn proof_oracle_or_target_unavailable_policy_recovery_fails_closed_in_engine() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let raw_target: u16 = kani::any();
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        DEFAULT_SLOT + 1,
+        raw_target as u64,
+    );
+
+    assert_eq!(result, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result == Err(RiskError::Unauthorized),
+        "bare engine oracle-unavailable recovery reason is fail-closed"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(520)]
 #[kani::solver(cadical)]
 fn proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write() {
