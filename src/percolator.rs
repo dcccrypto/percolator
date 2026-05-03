@@ -4659,8 +4659,7 @@ impl RiskEngine {
     // accrue_market_to (spec §5.4)
     // ========================================================================
 
-    test_visible! {
-    fn accrue_market_to(
+    pub fn accrue_market_to(
         &mut self,
         now_slot: u64,
         oracle_price: u64,
@@ -4679,7 +4678,6 @@ impl RiskEngine {
             oracle_price,
             funding_rate_e9,
         )
-    }
     }
 
     fn accrue_market_segment_to_internal(
@@ -10144,8 +10142,7 @@ impl RiskEngine {
     /// Move insurance balance into an existing account's capital without
     /// changing vault size. Intended for wrapper-level incentives that are paid
     /// out of already-collected insurance funds.
-    test_visible! {
-    fn credit_account_from_insurance_not_atomic(
+    pub fn credit_account_from_insurance_not_atomic(
         &mut self,
         idx: u16,
         amount: u128,
@@ -10181,7 +10178,6 @@ impl RiskEngine {
 
         self.assert_public_postconditions()?;
         Ok(())
-    }
     }
 
     /// Withdraw insurance from a live market. The wrapper owns authorization
