@@ -9466,6 +9466,165 @@ fn permissionless_progress_dispatcher_cranks_bounded_live_catchup() {
 }
 
 #[test]
+fn permissionless_progress_dispatcher_reduces_rank_or_recovers_core_blockers() {
+    {
+        let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000);
+        mat_regression_account(&mut engine, 0, 100_000, 0);
+        mat_regression_account(&mut engine, 1, 100_000, 0);
+        engine
+            .attach_effective_position(0, POS_SCALE as i128)
+            .unwrap();
+        engine
+            .attach_effective_position(1, -(POS_SCALE as i128))
+            .unwrap();
+        engine.oi_eff_long_q = POS_SCALE;
+        engine.oi_eff_short_q = POS_SCALE;
+
+        let now_slot = engine.params.max_accrual_dt_slots + 5;
+        let before = engine
+            .permissionless_progress_rank_for_now(now_slot)
+            .unwrap();
+        let outcome = engine
+            .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+                now_slot,
+                oracle_price: 999,
+                authenticated_raw_target_price: 0,
+                ordered_candidates: &[],
+                account_hint: None,
+                max_revalidations: 0,
+                max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+                funding_rate_e9: 0,
+                admit_h_min: 1,
+                admit_h_max: 100,
+                admit_h_max_consumption_threshold_bps_opt: Some(1),
+                rr_touch_limit: 1,
+                rr_scan_limit: 1,
+                resolved_scan_limit: 1,
+                resolved_fee_rate_per_slot: 0,
+            })
+            .unwrap();
+        let after = engine
+            .permissionless_progress_rank_for_now(now_slot)
+            .unwrap();
+        assert!(matches!(outcome, PermissionlessProgressOutcome::Cranked(_)));
+        assert!(after.strictly_reduces_from(&before));
+    }
+
+    {
+        let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+        mat_regression_account(&mut engine, 0, 100, 0);
+        engine.attach_effective_position(0, -1).unwrap();
+        engine.oi_eff_short_q = 1;
+        engine.oi_eff_long_q = 1;
+        let mut ctx = InstructionContext::new_with_admission(1, 10);
+        engine
+            .enqueue_adl(&mut ctx, Side::Long, 0, PUBLIC_B_CHUNK_ATOMS + 7)
+            .unwrap();
+
+        let before = engine.permissionless_progress_rank_for_now(1).unwrap();
+        let outcome = engine
+            .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+                now_slot: 1,
+                oracle_price: 1000,
+                authenticated_raw_target_price: 1000,
+                ordered_candidates: &[],
+                account_hint: None,
+                max_revalidations: 0,
+                max_candidate_inspections: 0,
+                funding_rate_e9: 0,
+                admit_h_min: 1,
+                admit_h_max: 10,
+                admit_h_max_consumption_threshold_bps_opt: None,
+                rr_touch_limit: 0,
+                rr_scan_limit: 0,
+                resolved_scan_limit: 1,
+                resolved_fee_rate_per_slot: 0,
+            })
+            .unwrap();
+        let after = engine.permissionless_progress_rank_for_now(1).unwrap();
+        assert_eq!(outcome, PermissionlessProgressOutcome::ActiveCloseContinued);
+        assert!(after.strictly_reduces_from(&before));
+    }
+
+    {
+        let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+        mat_regression_account(&mut engine, 0, 100, 0);
+        mat_regression_account(&mut engine, 1, 100, 0);
+        engine.attach_effective_position(0, 1).unwrap();
+        engine.attach_effective_position(1, -1).unwrap();
+        engine.oi_eff_long_q = 1;
+        engine.oi_eff_short_q = 1;
+        engine.b_short_num = u128::MAX;
+
+        let outcome = engine
+            .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+                now_slot: 1,
+                oracle_price: 1000,
+                authenticated_raw_target_price: 1000,
+                ordered_candidates: &[],
+                account_hint: None,
+                max_revalidations: 0,
+                max_candidate_inspections: 0,
+                funding_rate_e9: 0,
+                admit_h_min: 1,
+                admit_h_max: 10,
+                admit_h_max_consumption_threshold_bps_opt: None,
+                rr_touch_limit: 1,
+                rr_scan_limit: 1,
+                resolved_scan_limit: 1,
+                resolved_fee_rate_per_slot: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PermissionlessProgressOutcome::Recovered(RecoveryReason::BIndexHeadroomExhausted)
+        );
+        assert_eq!(engine.market_mode, MarketMode::Resolved);
+    }
+
+    {
+        let mut params = regression_safe_params();
+        params.max_accounts = 4;
+        params.max_active_positions_per_side = 4;
+        let mut engine = RiskEngine::new_with_market(params, 0, 1000);
+        mat_regression_account(&mut engine, 2, 100, 0);
+        engine.market_mode = MarketMode::Resolved;
+        engine.resolved_slot = 0;
+        engine.current_slot = 0;
+        engine.resolved_price = 1000;
+        engine.resolved_live_price = 1000;
+        engine.rr_cursor_position = 0;
+
+        let before = engine.permissionless_progress_rank_for_now(0).unwrap();
+        let outcome = engine
+            .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+                now_slot: 0,
+                oracle_price: 1000,
+                authenticated_raw_target_price: 1000,
+                ordered_candidates: &[],
+                account_hint: None,
+                max_revalidations: 0,
+                max_candidate_inspections: 0,
+                funding_rate_e9: 0,
+                admit_h_min: 1,
+                admit_h_max: 10,
+                admit_h_max_consumption_threshold_bps_opt: None,
+                rr_touch_limit: 0,
+                rr_scan_limit: 0,
+                resolved_scan_limit: 4,
+                resolved_fee_rate_per_slot: 0,
+            })
+            .unwrap();
+        let after = engine.permissionless_progress_rank_for_now(0).unwrap();
+        assert_eq!(
+            outcome,
+            PermissionlessProgressOutcome::ResolvedClose(ResolvedCloseResult::Closed(100))
+        );
+        assert!(after.strictly_reduces_from(&before));
+    }
+}
+
+#[test]
 fn permissionless_recovery_rejects_price_floor_when_bounded_step_can_move() {
     let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 100_000, 0);

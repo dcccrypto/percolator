@@ -804,6 +804,158 @@ fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_
 }
 
 #[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    let size = POS_SCALE as i128;
+    engine.set_position_basis_q(a as usize, size).unwrap();
+    engine.set_position_basis_q(b as usize, -size).unwrap();
+    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
+    engine.oi_eff_long_q = size as u128;
+    engine.oi_eff_short_q = size as u128;
+    engine.rr_cursor_position = 2;
+
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots + 1;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE - 1,
+        authenticated_raw_target_price: 0,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: Some(1),
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+    assert!(result.is_ok());
+    let after = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    assert!(matches!(
+        result,
+        Ok(PermissionlessProgressOutcome::Cranked(_))
+    ));
+    assert!(after.strictly_reduces_from(&before));
+    kani::cover!(
+        matches!(result, Ok(PermissionlessProgressOutcome::Cranked(_)))
+            && after.strictly_reduces_from(&before),
+        "production dispatcher reduces live-catchup rank"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.b_short_num = u128::MAX;
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT + 1,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::BIndexHeadroomExhausted
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::Recovered(
+                RecoveryReason::BIndexHeadroomExhausted
+            )),
+        "production dispatcher routes exhausted B-index headroom to recovery"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.rr_cursor_position = 0;
+
+    let before = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+        resolved_scan_limit: 4,
+        resolved_fee_rate_per_slot: 0,
+    });
+    assert!(matches!(
+        result,
+        Ok(PermissionlessProgressOutcome::ResolvedClose(
+            ResolvedCloseResult::Closed(100)
+        ))
+    ));
+    let after = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
+    assert!(after.strictly_reduces_from(&before));
+    kani::cover!(
+        matches!(result, Ok(PermissionlessProgressOutcome::ResolvedClose(_)))
+            && after.strictly_reduces_from(&before),
+        "production dispatcher reduces resolved-blocker rank"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {

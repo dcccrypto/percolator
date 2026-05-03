@@ -947,6 +947,27 @@ pub struct PermissionlessProgressRank {
     pub resolved_blocker_units: u64,
 }
 
+impl PermissionlessProgressRank {
+    /// Strict public progress ordering for permissionless-market liveness.
+    ///
+    /// The ordering is intentionally not a full state comparison: bounded live
+    /// catchup may start or restart a stress envelope while still reducing the
+    /// more important stale-loss rank. Terminal recovery is represented by the
+    /// dispatcher outcome, not by this rank relation.
+    pub fn strictly_reduces_from(&self, before: &Self) -> bool {
+        self.live_catchup_slots < before.live_catchup_slots
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms < before.active_close_residual_atoms)
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms == before.active_close_residual_atoms
+                && self.resolved_blocker_units < before.resolved_blocker_units)
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms == before.active_close_residual_atoms
+                && self.resolved_blocker_units == before.resolved_blocker_units
+                && self.stress_envelope_indices < before.stress_envelope_indices)
+    }
+}
+
 /// O(1) account-local progress view for known blockers. Cursor/proof-packing
 /// wrappers can use this to audit that a supplied account touch reduces its
 /// own B-stale rank instead of relying on any full-market scan.
