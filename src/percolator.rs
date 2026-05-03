@@ -921,6 +921,7 @@ pub enum PermissionlessProgressOutcome {
     Cranked(CrankOutcome),
     ResolvedClose(ResolvedCloseResult),
     ActiveCloseContinued,
+    AccountBProgress(u16),
     Recovered(RecoveryReason),
     AccountBRecovered(u16),
 }
@@ -8483,14 +8484,68 @@ impl RiskEngine {
         }
     }
 
+    fn try_permissionless_account_b_progress(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<bool> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        self.assert_public_postconditions()?;
+
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        let i = idx as usize;
+        match self.validate_touched_account_shape(i) {
+            Ok(()) => {}
+            Err(RiskError::AccountNotFound) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        let side = match side_of_i128(self.accounts[i].position_basis_q) {
+            Some(side) => side,
+            None => return Ok(false),
+        };
+        let target = self.b_target_for_account(i, side)?;
+        if self.accounts[i].b_snap >= target {
+            return Ok(false);
+        }
+        match self.plan_account_b_chunk_to_target(i, target, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS)
+        {
+            Ok((delta_b, _, _, _)) if delta_b > 0 => {}
+            Ok(_) => return Err(RiskError::CorruptState),
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+        );
+        self.touch_account_live_local(i, &mut ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx)?;
+        self.assert_public_postconditions()?;
+        Ok(true)
+    }
+
     /// Engine-owned permissionless progress dispatcher.
     ///
     /// This is the minimal public API a wrapper can call after it has supplied
     /// authenticated time/oracle/raw-target inputs and optional account
     /// packing. The engine picks the safe progress branch: resolved cursor,
-    /// active-close continuation/recovery, account-B recovery, global P-last
-    /// recovery, or ordinary keeper crank. It does not expose new error types;
-    /// callers continue to receive `RiskError`.
+    /// active-close continuation/recovery, account-B progress/recovery,
+    /// global P-last recovery, or ordinary keeper crank. It does not expose
+    /// new error types; callers continue to receive `RiskError`.
     pub fn permissionless_progress_not_atomic(
         &mut self,
         req: PermissionlessProgressRequest<'_>,
@@ -8540,6 +8595,15 @@ impl RiskEngine {
         }
 
         if let Some(idx) = account_hint {
+            if self.try_permissionless_account_b_progress(
+                idx,
+                now_slot,
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            )? {
+                return Ok(PermissionlessProgressOutcome::AccountBProgress(idx));
+            }
             match self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot) {
                 Ok(()) => {
                     self.permissionless_recovery_resolve_account_b_p_last_not_atomic(

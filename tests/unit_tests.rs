@@ -9625,6 +9625,48 @@ fn permissionless_progress_dispatcher_reduces_rank_or_recovers_core_blockers() {
 }
 
 #[test]
+fn permissionless_progress_dispatcher_makes_hinted_account_b_progress() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100, 0);
+    engine.attach_effective_position(0, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = 3 * SOCIAL_LOSS_DEN;
+
+    let before = engine.permissionless_account_progress_rank(0).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+
+    let outcome = engine
+        .permissionless_progress_not_atomic(PermissionlessProgressRequest {
+            now_slot: 1,
+            oracle_price: 1000,
+            authenticated_raw_target_price: 1000,
+            ordered_candidates: &[],
+            account_hint: Some(0),
+            max_revalidations: 0,
+            max_candidate_inspections: 0,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 10,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 0,
+            rr_scan_limit: 0,
+            resolved_scan_limit: 1,
+            resolved_fee_rate_per_slot: 0,
+        })
+        .unwrap();
+
+    let after = engine.permissionless_account_progress_rank(0).unwrap();
+    assert_eq!(outcome, PermissionlessProgressOutcome::AccountBProgress(0));
+    assert!(
+        after.account_b_remaining_num < before.account_b_remaining_num,
+        "hinted permissionless dispatcher path must reduce account-local B rank"
+    );
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn permissionless_recovery_rejects_price_floor_when_bounded_step_can_move() {
     let mut engine = RiskEngine::new_with_market(default_params(), 0, 1_000_000);
     mat_regression_account(&mut engine, 0, 100_000, 0);
