@@ -265,6 +265,8 @@
       "proof_keeper_reset_lifecycle_last_stale_triggers_finalize",
       "proof_phase2_missing_slot_scan_progress_or_rate_limited_boundary",
       "proof_live_phase2_honest_scan_reduces_cursor_rank_or_rate_limited_boundary",
+      "proof_resolved_cursor_missing_slots_advance_on_prod_code",
+      "proof_resolved_cursor_close_unblocks_winner_on_prod_code",
       "proof_unilateral_empty_orphan_reset",
       "t11_43_end_instruction_auto_finalizes_ready_side",
       "t11_44_trade_path_reopens_ready_reset_side",
@@ -395,7 +397,7 @@
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 356,
+    "standard-harnesses": 358,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }

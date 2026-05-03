@@ -9172,6 +9172,60 @@ impl RiskEngine {
         Ok(ResolvedCloseResult::Closed(capital))
     }
 
+    pub fn force_close_resolved_cursor_not_atomic(
+        &mut self,
+        scan_limit: u64,
+    ) -> Result<ResolvedCloseResult> {
+        self.force_close_resolved_cursor_with_fee_not_atomic(scan_limit, 0)
+    }
+
+    /// Bounded resolved-close cursor progress. Missing-slot scans advance the
+    /// durable cursor; the first materialized account in the bounded window is
+    /// reconciled/closed through the ordinary resolved-close path.
+    pub fn force_close_resolved_cursor_with_fee_not_atomic(
+        &mut self,
+        scan_limit: u64,
+        fee_rate_per_slot: u128,
+    ) -> Result<ResolvedCloseResult> {
+        if self.market_mode != MarketMode::Resolved {
+            return Err(RiskError::Unauthorized);
+        }
+        if scan_limit == 0 {
+            return Err(RiskError::Overflow);
+        }
+        self.assert_public_postconditions()?;
+
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        let scan_cap = core::cmp::min(scan_limit, wrap_bound);
+        let mut cursor = self.rr_cursor_position;
+
+        for _ in 0..scan_cap {
+            if cursor >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let advanced = cursor.checked_add(1).ok_or(RiskError::Overflow)?;
+            if advanced > wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let next = if advanced == wrap_bound { 0 } else { advanced };
+            if self.is_used(cursor as usize) {
+                let result = self
+                    .force_close_resolved_with_fee_not_atomic(cursor as u16, fee_rate_per_slot)?;
+                self.rr_cursor_position = next;
+                self.assert_public_postconditions()?;
+                return Ok(result);
+            }
+            cursor = next;
+        }
+
+        self.rr_cursor_position = cursor;
+        self.assert_public_postconditions()?;
+        Ok(ResolvedCloseResult::ProgressOnly)
+    }
+
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,
     /// zeroes position, settles losses, absorbs insurance. Always persists
     /// on success. Idempotent on already-reconciled accounts.

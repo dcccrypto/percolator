@@ -6444,6 +6444,53 @@ fn test_force_close_combined_convenience() {
 }
 
 #[test]
+fn resolved_cursor_close_scans_empty_slots_and_unblocks_winner() {
+    let mut params = regression_safe_params();
+    params.max_accounts = 8;
+    params.max_active_positions_per_side = 8;
+    let mut engine = RiskEngine::new_with_market(params, 0, 1000);
+    mat_regression_account(&mut engine, 3, 100, 0);
+    mat_regression_account(&mut engine, 5, 100, 0);
+
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = 0;
+    engine.current_slot = 0;
+    engine.resolved_price = 1000;
+    engine.resolved_live_price = 1000;
+    engine.set_pnl(3, 10).unwrap();
+    engine.set_pnl(5, -5).unwrap();
+    engine.rr_cursor_position = 0;
+
+    let empty_scan = engine.force_close_resolved_cursor_not_atomic(3).unwrap();
+    assert_eq!(empty_scan, ResolvedCloseResult::ProgressOnly);
+    assert_eq!(
+        engine.rr_cursor_position, 3,
+        "bounded empty-slot scans are durable resolved-close progress"
+    );
+
+    let winner_first = engine.force_close_resolved_cursor_not_atomic(1).unwrap();
+    assert_eq!(
+        winner_first,
+        ResolvedCloseResult::ProgressOnly,
+        "winner payout must wait for blocking negative account progress"
+    );
+    assert!(engine.is_used(3));
+    assert_eq!(engine.rr_cursor_position, 4);
+
+    let loser = engine.force_close_resolved_cursor_not_atomic(2).unwrap();
+    assert_eq!(loser, ResolvedCloseResult::Closed(95));
+    assert!(!engine.is_used(5));
+    assert_eq!(engine.neg_pnl_account_count, 0);
+    assert_eq!(engine.rr_cursor_position, 6);
+
+    let winner_final = engine.force_close_resolved_cursor_not_atomic(8).unwrap();
+    assert_eq!(winner_final, ResolvedCloseResult::Closed(105));
+    assert!(!engine.is_used(3));
+    assert_eq!(engine.rr_cursor_position, 4);
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn test_force_close_same_epoch_positive_k_pair_pnl() {
     // Account opened long, price moved up → unrealized profit from K-pair
     let mut engine = RiskEngine::new(wide_price_move_params());

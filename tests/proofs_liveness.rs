@@ -578,6 +578,66 @@ fn proof_live_phase2_honest_scan_reduces_cursor_rank_or_rate_limited_boundary() 
     );
 }
 
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_resolved_cursor_missing_slots_advance_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.rr_cursor_position = 1;
+
+    let result = engine.force_close_resolved_cursor_not_atomic(2);
+    assert_eq!(result, Ok(ResolvedCloseResult::ProgressOnly));
+    assert_eq!(engine.rr_cursor_position, 3);
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    kani::cover!(
+        result == Ok(ResolvedCloseResult::ProgressOnly) && engine.rr_cursor_position == 3,
+        "resolved cursor authenticates missing slots as bounded progress"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_resolved_cursor_close_unblocks_winner_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(1, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.set_pnl(0, 10).unwrap();
+    engine.set_pnl(1, -5).unwrap();
+    engine.rr_cursor_position = 0;
+
+    let winner_first = engine.force_close_resolved_cursor_not_atomic(1);
+    assert_eq!(winner_first, Ok(ResolvedCloseResult::ProgressOnly));
+    assert!(engine.is_used(0));
+    assert_eq!(engine.rr_cursor_position, 1);
+
+    let blocker = engine.force_close_resolved_cursor_not_atomic(1);
+    assert_eq!(blocker, Ok(ResolvedCloseResult::Closed(95)));
+    assert!(!engine.is_used(1));
+    assert_eq!(engine.neg_pnl_account_count, 0);
+
+    let winner_final = engine.force_close_resolved_cursor_not_atomic(4);
+    assert_eq!(winner_final, Ok(ResolvedCloseResult::Closed(105)));
+    assert!(!engine.is_used(0));
+    assert!(engine.check_conservation());
+    kani::cover!(
+        winner_final == Ok(ResolvedCloseResult::Closed(105)) && !engine.is_used(0),
+        "resolved cursor close reaches the winner after bounded blocker progress"
+    );
+}
+
 // ============================================================================
 // proof_unilateral_empty_orphan_reset
 // ============================================================================
