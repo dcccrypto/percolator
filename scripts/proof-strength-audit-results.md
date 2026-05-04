@@ -8,15 +8,15 @@ Timing sweep command: `scripts/run_kani_full_audit.sh`.
 
 ## Current Tree Addendum
 
-Updated: 2026-05-03.
+Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`378` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`381` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
-2026-05-03:
+2026-05-03 and 2026-05-04:
 
 | Harness | Time | Status | Scope |
 |---|---:|---|---|
@@ -31,6 +31,8 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
 | `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect` | 65.79s | PASS | Replaces the stale ADL K-loss timeout with production B-index residual booking and proves represented settlement loss is bounded by the deficit. |
 | `proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write` | 34.95s | PASS | Production ADL routes deficits to non-claim audit loss when uncertified potential dust makes the B denominator unsafe. |
+| `v19_speculative_hmax_does_not_mask_prior_positive_pnl_use_on_prod_code` | 3.87s | PASS | Production bankruptcy-residual trigger fails closed when speculative Phase 2 h-max would otherwise mask earlier ordinary positive-PnL usability. |
+| `v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code` | 53.97s | PASS | Production live-touch replay proves a winner -> latent-bankrupt Phase 2 window progresses while keeping the winner reserve paused. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -49,7 +51,7 @@ full live-touch settlement path.
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 378-harness inventory, then rerun the static strength /
+against the current 381-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.

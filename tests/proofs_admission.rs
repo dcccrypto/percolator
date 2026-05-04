@@ -10,6 +10,28 @@
 mod common;
 use common::*;
 
+fn same_instruction_bankruptcy_params() -> RiskParams {
+    RiskParams {
+        maintenance_margin_bps: 10_000,
+        initial_margin_bps: 10_000,
+        trading_fee_bps: 0,
+        max_accounts: 4,
+        liquidation_fee_bps: 0,
+        liquidation_fee_cap: U128::ZERO,
+        min_liquidation_abs: U128::ZERO,
+        min_nonzero_mm_req: 1,
+        min_nonzero_im_req: 2,
+        h_min: 1,
+        h_max: 10,
+        resolve_price_deviation_bps: 10_000,
+        max_accrual_dt_slots: 1,
+        max_abs_funding_e9_per_slot: 0,
+        min_funding_lifetime_slots: 1,
+        max_active_positions_per_side: 4,
+        max_price_move_bps_per_slot: 10_000,
+    }
+}
+
 // ============================================================================
 // AH-1: Single admission returns exactly admit_h_min or admit_h_max.
 // ============================================================================
@@ -1716,6 +1738,79 @@ fn v19_phase2_pretriggers_bankruptcy_hmax_before_positive_release() {
     kani::cover!(
         engine.bankruptcy_hmax_lock_active && ctx.stress_envelope_restarted,
         "Phase 2 bankruptcy tail pretrigger starts same-instruction h-max"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn v19_speculative_hmax_does_not_mask_prior_positive_pnl_use_on_prod_code() {
+    // Production trigger proof for the same-instruction h-max rule. The
+    // Phase 2 speculative guard must not count as a real stress gate when an
+    // earlier Phase 1 path already used ordinary positive-PnL usability.
+    let mut engine = RiskEngine::new_with_market(same_instruction_bankruptcy_params(), 0, 100);
+    let mut ctx = InstructionContext::new_with_admission(1, 5);
+    ctx.positive_pnl_usability_mutated = true;
+    ctx.speculative_hmax_guard_active = true;
+
+    let result = engine.book_bankruptcy_residual_chunk_to_side(&mut ctx, Side::Short, 1, 1);
+
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized),
+        "speculative h-max cannot mask earlier positive-PnL usability"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code() {
+    // Production touch proof for cursor liveness: the Phase 2 replay sequence
+    // ordered winner -> latent bankrupt loser makes progress through
+    // touch_account_live_local and keeps the winner's positive-PnL reserve
+    // paused under the speculative h-max guard.
+    let mut engine =
+        RiskEngine::new_with_market(same_instruction_bankruptcy_params(), 1, 1_000_000);
+    engine.deposit_not_atomic(0, 1, 1).unwrap();
+    engine.deposit_not_atomic(1, 1, 1).unwrap();
+    engine.vault = U128::new(engine.vault.get() + 10);
+
+    engine.accounts[0].pnl = 10;
+    engine.accounts[0].reserved_pnl = 10;
+    engine.accounts[0].sched_present = 1;
+    engine.accounts[0].sched_remaining_q = 10;
+    engine.accounts[0].sched_anchor_q = 10;
+    engine.accounts[0].sched_start_slot = 0;
+    engine.accounts[0].sched_horizon = 1;
+    engine.accounts[0].sched_release_q = 0;
+    engine.pnl_pos_tot = 10;
+    engine.pnl_matured_pos_tot = 0;
+
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.adl_coeff_short = -(2 * ADL_ONE as i128 * POS_SCALE as i128);
+    engine.rr_cursor_position = 0;
+
+    let mut ctx = InstructionContext::new_with_admission(0, 10);
+    ctx.speculative_hmax_guard_active = true;
+
+    let winner_touch = engine.touch_account_live_local(0, &mut ctx);
+    assert!(winner_touch.is_ok());
+    assert_eq!(engine.accounts[0].reserved_pnl, 10);
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    assert!(!ctx.positive_pnl_usability_mutated);
+
+    let loser_touch = engine.touch_account_live_local(1, &mut ctx);
+    assert!(loser_touch.is_ok());
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert_eq!(engine.accounts[0].reserved_pnl, 10);
+    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    kani::cover!(
+        winner_touch.is_ok() && loser_touch.is_ok() && engine.bankruptcy_hmax_lock_active,
+        "Phase 2 replay progresses through winner -> latent bankruptcy touches"
     );
 }
 
