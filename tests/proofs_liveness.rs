@@ -951,6 +951,87 @@ fn proof_permissionless_account_b_dispatch_flat_account_falls_through_on_prod_co
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_flat_account_b_hint_falls_through_to_cursor_progress_on_prod_code()
+{
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 10, DEFAULT_SLOT).unwrap();
+    engine.rr_cursor_position = 1;
+
+    let capital_before = engine.accounts[0].capital.get();
+    let pnl_before = engine.accounts[0].pnl;
+    let position_before = engine.accounts[0].position_basis_q;
+    let loss_weight_before = engine.accounts[0].loss_weight;
+    let b_snap_before = engine.accounts[0].b_snap;
+    let b_rem_before = engine.accounts[0].b_rem;
+    let num_used_before = engine.num_used_accounts;
+    let free_head_before = engine.free_head;
+    let c_tot_before = engine.c_tot;
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let rank_before = engine.permissionless_account_progress_rank(0).unwrap();
+    assert_eq!(position_before, 0);
+    assert_eq!(rank_before.account_b_remaining_num, 0);
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT + 1,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: Some(0),
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+    let rank_after = engine.permissionless_account_progress_rank(0).unwrap();
+
+    assert!(matches!(
+        result,
+        Ok(PermissionlessProgressOutcome::Cranked(CrankOutcome {
+            num_liquidations: 0
+        }))
+    ));
+    assert_eq!(engine.rr_cursor_position, 2);
+    assert!(engine.is_used(0));
+    assert_eq!(engine.num_used_accounts, num_used_before);
+    assert_eq!(engine.free_head, free_head_before);
+    assert_eq!(engine.c_tot, c_tot_before);
+    assert_eq!(engine.accounts[0].capital.get(), capital_before);
+    assert_eq!(engine.accounts[0].pnl, pnl_before);
+    assert_eq!(engine.accounts[0].position_basis_q, position_before);
+    assert_eq!(engine.accounts[0].loss_weight, loss_weight_before);
+    assert_eq!(engine.accounts[0].b_snap, b_snap_before);
+    assert_eq!(engine.accounts[0].b_rem, b_rem_before);
+    assert_eq!(
+        rank_after.account_b_remaining_num,
+        rank_before.account_b_remaining_num
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        matches!(
+            result,
+            Ok(PermissionlessProgressOutcome::Cranked(CrankOutcome {
+                num_liquidations: 0
+            }))
+        ) && engine.rr_cursor_position == 2
+            && engine.accounts[0].capital.get() == capital_before
+            && engine.accounts[0].position_basis_q == 0,
+        "public dispatcher falls through a flat account-B hint and still advances cursor progress"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(128)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code() {
