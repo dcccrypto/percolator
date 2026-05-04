@@ -8708,6 +8708,33 @@ impl RiskEngine {
         Ok(true)
     }
 
+    fn try_permissionless_account_b_dispatch(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<Option<PermissionlessProgressOutcome>> {
+        if self.try_permissionless_account_b_progress(
+            idx,
+            now_slot,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+        )? {
+            return Ok(Some(PermissionlessProgressOutcome::AccountBProgress(idx)));
+        }
+        match self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot) {
+            Ok(()) => {
+                self.permissionless_recovery_resolve_account_b_p_last_not_atomic(idx, now_slot)?;
+                Ok(Some(PermissionlessProgressOutcome::AccountBRecovered(idx)))
+            }
+            Err(RiskError::Unauthorized) | Err(RiskError::AccountNotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Engine-owned permissionless progress dispatcher.
     ///
     /// This is the minimal public API a wrapper can call after it has supplied
@@ -8765,24 +8792,14 @@ impl RiskEngine {
         }
 
         if let Some(idx) = account_hint {
-            if self.try_permissionless_account_b_progress(
+            if let Some(outcome) = self.try_permissionless_account_b_dispatch(
                 idx,
                 now_slot,
                 admit_h_min,
                 admit_h_max,
                 admit_h_max_consumption_threshold_bps_opt,
             )? {
-                return Ok(PermissionlessProgressOutcome::AccountBProgress(idx));
-            }
-            match self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot) {
-                Ok(()) => {
-                    self.permissionless_recovery_resolve_account_b_p_last_not_atomic(
-                        idx, now_slot,
-                    )?;
-                    return Ok(PermissionlessProgressOutcome::AccountBRecovered(idx));
-                }
-                Err(RiskError::Unauthorized) | Err(RiskError::AccountNotFound) => {}
-                Err(e) => return Err(e),
+                return Ok(outcome);
             }
         }
 

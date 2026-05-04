@@ -47,6 +47,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_property_56_raw_initial_margin_predicate_rejects_min_floor_shortfall_on_prod_code` | 2.78s | PASS | Production raw initial-margin predicate rejects a nonzero-position floor shortfall. |
 | `proof_property_56_trade_margin_gate_rejects_raw_im_shortfall_on_prod_code` | 2.50s | PASS | Production post-trade margin gate rejects a risk-increasing raw IM floor shortfall. |
 | `t11_53_keeper_phase1_stops_after_pending_reset_on_prod_code` | 4.14s | PASS | Production keeper Phase 1 candidate helper stops on a pending reset before mutating later candidates. |
+| `proof_live_touch_decreases_account_b_rank_on_prod_code` | 37.48s | PASS | Production live touch strictly reduces account-local B settlement rank for a hinted blocker. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
