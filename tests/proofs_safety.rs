@@ -953,6 +953,41 @@ fn proof_permissionless_p_last_recovery_uses_engine_price_not_raw_target() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_below_floor_recovery_rejects_when_bounded_step_can_progress_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let raw_delta: u8 = kani::any();
+    kani::assume((1..=5).contains(&raw_delta));
+    let raw_target = DEFAULT_ORACLE + raw_delta as u64;
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots;
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::BelowProgressFloor,
+        now_slot,
+        raw_target,
+    );
+
+    assert_eq!(result, Err(RiskError::Unauthorized));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    assert_eq!(engine.last_oracle_price, DEFAULT_ORACLE);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    kani::cover!(
+        result == Err(RiskError::Unauthorized) && engine.market_mode == MarketMode::Live,
+        "production below-floor recovery fails closed while bounded catchup can move"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(220)]
 #[kani::solver(cadical)]
 fn proof_permissionless_blocked_segment_recovery_uses_engine_price_not_raw_target() {
