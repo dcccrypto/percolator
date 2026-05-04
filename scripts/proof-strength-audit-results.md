@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`407` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`408` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -26,6 +26,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code` | 61.54s | PASS | Dispatcher ordinary-crank branch reduces live catchup rank. |
 | `proof_permissionless_progress_missing_account_hint_does_not_block_cursor_progress_on_prod_code` | 27.06s | PASS | Public dispatcher ignores a missing account hint without materializing the hinted slot, preserves funds, and still advances cursor progress. |
 | `proof_permissionless_progress_out_of_capacity_hint_does_not_block_cursor_progress_on_prod_code` | 27.20s | PASS | Public dispatcher ignores an account hint outside configured market capacity without materializing the hinted slot, preserves funds, and still advances cursor progress. |
+| `proof_permissionless_account_b_progress_flat_account_is_noop_on_prod_code` | 11.55s | PASS | Production account-B progress branch treats a flat materialized account hint as a no-op, preserving funds and returning fallthrough. |
 | `proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code` | 36.22s | PASS | Dispatcher active-close branch reduces residual rank before ordinary crank. |
 | `proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code` | 70.65s | PASS | Dispatcher ordinary-crank branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code` | 23.58s | PASS | Dispatcher routes exhausted B-index headroom through public recovery. |
@@ -117,7 +118,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 407-harness inventory, then rerun the static strength /
+against the current 408-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.

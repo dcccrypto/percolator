@@ -839,6 +839,40 @@ fn proof_permissionless_progress_out_of_capacity_hint_does_not_block_cursor_prog
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_permissionless_account_b_progress_flat_account_is_noop_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 10, DEFAULT_SLOT).unwrap();
+
+    let capital_before = engine.accounts[0].capital.get();
+    let pnl_before = engine.accounts[0].pnl;
+    let num_used_before = engine.num_used_accounts;
+    let c_tot_before = engine.c_tot;
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.try_permissionless_account_b_progress(0, DEFAULT_SLOT + 1, 1, 100, None);
+
+    assert_eq!(result, Ok(false));
+    assert!(engine.is_used(0));
+    assert_eq!(engine.num_used_accounts, num_used_before);
+    assert_eq!(engine.c_tot, c_tot_before);
+    assert_eq!(engine.accounts[0].capital.get(), capital_before);
+    assert_eq!(engine.accounts[0].pnl, pnl_before);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result == Ok(false)
+            && engine.is_used(0)
+            && engine.accounts[0].capital.get() == capital_before,
+        "production account-B progress branch treats a flat account as no-op without moving funds"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(128)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code() {
