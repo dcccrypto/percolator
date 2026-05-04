@@ -8710,6 +8710,7 @@ impl RiskEngine {
     }
     }
 
+    test_visible! {
     fn try_permissionless_account_b_dispatch(
         &mut self,
         idx: u16,
@@ -8735,6 +8736,7 @@ impl RiskEngine {
             Err(RiskError::Unauthorized) | Err(RiskError::AccountNotFound) => Ok(None),
             Err(e) => Err(e),
         }
+    }
     }
 
     /// Engine-owned permissionless progress dispatcher.
