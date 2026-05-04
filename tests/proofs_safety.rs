@@ -1180,6 +1180,74 @@ fn proof_bankruptcy_residual_handler_fails_forward_without_active_close_state() 
 #[kani::proof]
 #[kani::unwind(220)]
 #[kani::solver(cadical)]
+fn proof_explicit_loss_recovery_resolves_at_p_last_without_minting_claims_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let explicit_long: u8 = kani::any();
+    let explicit_short: u8 = kani::any();
+    kani::assume(explicit_long <= 3);
+    kani::assume((1..=5).contains(&explicit_short));
+    engine.explicit_unallocated_loss_long = U128::new(explicit_long as u128);
+    engine.explicit_unallocated_loss_short = U128::new(explicit_short as u128);
+    engine.explicit_unallocated_loss_saturated = 1;
+
+    let raw_delta: u8 = kani::any();
+    kani::assume((1..=5).contains(&raw_delta));
+    let raw_target = DEFAULT_ORACLE + raw_delta as u64;
+    let p_last_before = engine.last_oracle_price;
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let explicit_long_before = engine.explicit_unallocated_loss_long.get();
+    let explicit_short_before = engine.explicit_unallocated_loss_short.get();
+
+    let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ExplicitLossOrDustAuditOverflow,
+        DEFAULT_SLOT + 1,
+        raw_target,
+    );
+
+    assert!(result.is_ok());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, p_last_before);
+    assert_eq!(engine.resolved_live_price, p_last_before);
+    assert!(
+        engine.resolved_price != raw_target,
+        "explicit-loss recovery must not settle at caller-supplied raw target"
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(
+        engine.explicit_unallocated_loss_long.get(),
+        explicit_long_before
+    );
+    assert_eq!(
+        engine.explicit_unallocated_loss_short.get(),
+        explicit_short_before
+    );
+    kani::cover!(
+        result.is_ok()
+            && engine.market_mode == MarketMode::Resolved
+            && engine.resolved_price == p_last_before
+            && engine.resolved_price != raw_target
+            && engine.vault.get() == vault_before
+            && engine.c_tot.get() == capital_before
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "production explicit-loss recovery resolves at P_last without minting claims"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
 fn proof_counter_or_epoch_overflow_recovery_resolves_at_p_last_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);

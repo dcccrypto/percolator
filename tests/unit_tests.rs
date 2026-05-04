@@ -10173,6 +10173,42 @@ fn permissionless_recovery_rejects_inactive_explicit_loss_reason() {
 }
 
 #[test]
+fn explicit_loss_recovery_resolves_at_p_last_without_minting_claims() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.explicit_unallocated_loss_short = U128::new(11);
+    engine.explicit_unallocated_loss_saturated = 1;
+
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let explicit_short_before = engine.explicit_unallocated_loss_short.get();
+
+    let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
+        RecoveryReason::ExplicitLossOrDustAuditOverflow,
+        1,
+        1200,
+    );
+
+    assert!(r.is_ok(), "explicit-loss recovery failed: {r:?}");
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, 1000);
+    assert_eq!(engine.resolved_live_price, 1000);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(
+        engine.explicit_unallocated_loss_short.get(),
+        explicit_short_before
+    );
+}
+
+#[test]
 fn oracle_unavailable_recovery_reason_fails_closed_without_engine_authentication() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     mat_regression_account(&mut engine, 0, 100_000, 0);
