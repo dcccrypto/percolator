@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`400` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`401` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -43,6 +43,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `v19_speculative_hmax_does_not_mask_prior_positive_pnl_use_on_prod_code` | 3.87s | PASS | Production bankruptcy-residual trigger fails closed when speculative Phase 2 h-max would otherwise mask earlier ordinary positive-PnL usability. |
 | `v19_phase1_positive_pnl_use_forces_later_phase2_bankruptcy_fail_closed_on_prod_code` | 59.99s | PASS | Production Phase 1 candidate runner plus Phase 2 live touch fails closed when an ordinary positive-PnL release precedes a bankruptcy trigger in the same instruction. |
 | `v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code` | 53.97s | PASS | Production live-touch replay proves a winner -> latent-bankrupt Phase 2 window progresses while keeping the winner reserve paused. |
+| `v19_explicit_fee_rejects_nonflat_unsettled_side_effects_before_fee_draw` | 35.45s | PASS | Production explicit-fee path rejects nonflat stale K/F/A/B side effects before moving account capital into insurance, preserving capital, PnL, fee credits, insurance, and current_slot. |
 | `v19_generation_first_wrap_advances_on_prod_code` | 13.81s | PASS | Production keeper crank advances sweep generation on a permitted cursor wrap. |
 | `v19_same_slot_cursor_does_not_wrap_without_generation_advance` | 13.23s | PASS | Production keeper crank cannot cross the cursor wrap boundary again in the same authenticated slot after generation already advanced. |
 | `proof_property_31_settle_rejects_missing_account_on_prod_code` | 6s | PASS | Production settle rejects a missing account without materializing it. |
@@ -110,7 +111,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 400-harness inventory, then rerun the static strength /
+against the current 401-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.

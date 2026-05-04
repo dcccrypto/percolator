@@ -2051,6 +2051,46 @@ fn v19_fee_sync_rejects_nonflat_unsettled_side_effects_before_fee_draw() {
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn v19_explicit_fee_rejects_nonflat_unsettled_side_effects_before_fee_draw() {
+    // Spec loss seniority: ad-hoc wrapper-owned fees have the same
+    // capital-draw boundary as recurring fees. Nonflat capital cannot be
+    // moved into insurance while local K/F/A/B side effects are stale.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 1_000, DEFAULT_SLOT).unwrap();
+    engine
+        .attach_effective_position(idx as usize, POS_SCALE as i128)
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_coeff_long = -1;
+
+    let cap_before = engine.accounts[idx as usize].capital.get();
+    let pnl_before = engine.accounts[idx as usize].pnl;
+    let fee_credits_before = engine.accounts[idx as usize].fee_credits.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let r = engine.charge_account_fee_not_atomic(idx, 1, DEFAULT_SLOT + 1);
+
+    assert_eq!(r, Err(RiskError::Undercollateralized));
+    assert_eq!(engine.accounts[idx as usize].capital.get(), cap_before);
+    assert_eq!(engine.accounts[idx as usize].pnl, pnl_before);
+    assert_eq!(
+        engine.accounts[idx as usize].fee_credits.get(),
+        fee_credits_before
+    );
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.current_slot, DEFAULT_SLOT);
+
+    kani::cover!(
+        r == Err(RiskError::Undercollateralized),
+        "nonflat stale K/F/A/B account cannot pay explicit fee before touch"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
 fn v19_greedy_phase2_model_respects_touch_budget_and_bounds() {
