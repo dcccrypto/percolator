@@ -2348,16 +2348,17 @@ fn v19_stress_envelope_clear_requires_later_wrap() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn v19_generation_advances_at_most_once_per_slot() {
+fn v19_generation_first_wrap_advances_on_prod_code() {
+    // Production keeper path for the permitted wrap branch. The companion
+    // proof `v19_same_slot_cursor_does_not_wrap_without_generation_advance`
+    // covers the same-slot rate limit after a generation has already advanced.
     let mut params = zero_fee_params();
     params.max_accounts = 2;
     params.max_active_positions_per_side = 2;
     let mut engine = RiskEngine::new_with_market(params, 1, DEFAULT_ORACLE);
-    let generation_before: u8 = kani::any();
-    engine.sweep_generation = generation_before as u64;
     engine.rr_cursor_position = 1;
 
-    let first = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+    let result = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
         now_slot: 1,
         oracle_price: DEFAULT_ORACLE,
         ordered_candidates: &[],
@@ -2370,26 +2371,15 @@ fn v19_generation_advances_at_most_once_per_slot() {
         rr_touch_limit: 1,
         rr_scan_limit: 1,
     });
-    assert!(first.is_ok());
-    let after_first = engine.sweep_generation;
-    assert_eq!(after_first, generation_before as u64 + 1);
 
-    let second = engine.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
-        now_slot: 1,
-        oracle_price: DEFAULT_ORACLE,
-        ordered_candidates: &[],
-        max_revalidations: 0,
-        max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
-        funding_rate_e9: 0,
-        admit_h_min: 1,
-        admit_h_max: 100,
-        admit_h_max_consumption_threshold_bps_opt: None,
-        rr_touch_limit: 1,
-        rr_scan_limit: 1,
-    });
-    assert!(second.is_ok());
-    assert_eq!(engine.sweep_generation, after_first);
+    assert!(result.is_ok());
+    assert_eq!(engine.rr_cursor_position, 0);
+    assert_eq!(engine.sweep_generation, 1);
     assert_eq!(engine.last_sweep_generation_advance_slot, 1);
+    kani::cover!(
+        result.is_ok() && engine.rr_cursor_position == 0 && engine.sweep_generation == 1,
+        "production keeper advances generation on a permitted cursor wrap"
+    );
 }
 
 #[kani::proof]

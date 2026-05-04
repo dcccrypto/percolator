@@ -33,6 +33,8 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write` | 34.95s | PASS | Production ADL routes deficits to non-claim audit loss when uncertified potential dust makes the B denominator unsafe. |
 | `v19_speculative_hmax_does_not_mask_prior_positive_pnl_use_on_prod_code` | 3.87s | PASS | Production bankruptcy-residual trigger fails closed when speculative Phase 2 h-max would otherwise mask earlier ordinary positive-PnL usability. |
 | `v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code` | 53.97s | PASS | Production live-touch replay proves a winner -> latent-bankrupt Phase 2 window progresses while keeping the winner reserve paused. |
+| `v19_generation_first_wrap_advances_on_prod_code` | 13.81s | PASS | Production keeper crank advances sweep generation on a permitted cursor wrap. |
+| `v19_same_slot_cursor_does_not_wrap_without_generation_advance` | 13.23s | PASS | Production keeper crank cannot cross the cursor wrap boundary again in the same authenticated slot after generation already advanced. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -48,6 +50,14 @@ through K; `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect`
 proves the current B-index residual path, and the deterministic unit regression
 `adl_k_loss_must_not_overcharge_floor_rounded_opposing_accounts` covers the
 full live-touch settlement path.
+
+The old `v19_generation_advances_at_most_once_per_slot` timeout is no longer
+part of the current tree. Its combined two-crank harness was split into the
+finishing production-code proofs
+`v19_generation_first_wrap_advances_on_prod_code` and
+`v19_same_slot_cursor_does_not_wrap_without_generation_advance`, which together
+cover the permitted wrap and same-slot no-second-wrap halves of the slot-rate
+generation invariant.
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
@@ -128,7 +138,7 @@ The proof suite continues to surface the main engine obligations by name through
 
 | Spec obligation | Surfaced coverage |
 |---|---|
-| Slot-rate-limited stress reset | `v19_generation_advances_at_most_once_per_slot`, `v19_same_slot_stress_wrap_defers_generation_reset`, `v19_stress_envelope_clear_requires_later_wrap` |
+| Slot-rate-limited stress reset | `v19_generation_first_wrap_advances_on_prod_code`, `v19_same_slot_cursor_does_not_wrap_without_generation_advance`, `v19_same_slot_stress_wrap_defers_generation_reset`, `v19_stress_envelope_clear_requires_later_wrap` |
 | Sparse sweep budget semantics | `v19_rr_touch_zero_no_cursor_advance`, `v19_rr_scan_zero_no_stress_progress`, `v19_greedy_phase2_model_respects_touch_budget_and_bounds` |
 | Stress accounting and admission hardening | `v19_accrual_consumption_only_commits_on_success`, `v19_consumption_monotone_within_generation`, `v19_funding_consumption_accumulates_scaled_bps`, `v19_admit_gate_stress_lane_forces_h_max`, `v19_admit_gate_some_zero_rejected` |
 | Phantom-dust cleanup bounds | `proof_unilateral_empty_orphan_dust_clearance`, `t13_56_unilateral_empty_orphan_resolution`, `t13_57_unilateral_empty_corruption_guard`, `t13_58_unilateral_empty_short_side`, `t13_58b_unilateral_empty_short_requires_long_bound` |
