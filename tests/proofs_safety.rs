@@ -876,6 +876,11 @@ fn proof_production_b_residual_booking_or_recording_accounts_for_full_deficit() 
     let old_b_short = engine.b_short_num;
     let old_rem_short = engine.social_loss_remainder_short_num;
     let old_explicit_short = engine.explicit_unallocated_loss_short.get();
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let cap_a_before = engine.accounts[a as usize].capital.get();
+    let cap_b_before = engine.accounts[b as usize].capital.get();
     let w = engine.loss_weight_sum_short;
 
     let mut ctx = InstructionContext::new_with_admission(1, 100);
@@ -897,6 +902,31 @@ fn proof_production_b_residual_booking_or_recording_accounts_for_full_deficit() 
         engine.explicit_unallocated_loss_short.get() >= old_explicit_short + recorded,
         "recorded atoms must become durable non-claim loss"
     );
+    assert_eq!(
+        engine.vault.get(),
+        vault_before,
+        "B residual booking/recording must not mint or burn vault funds"
+    );
+    assert_eq!(
+        engine.c_tot.get(),
+        capital_before,
+        "B residual booking/recording must not mutate user capital totals"
+    );
+    assert_eq!(
+        engine.insurance_fund.balance.get(),
+        insurance_before,
+        "B residual booking/recording must not make residuals spendable insurance"
+    );
+    assert_eq!(
+        engine.accounts[a as usize].capital.get(),
+        cap_a_before,
+        "B residual booking/recording must not charge represented accounts eagerly"
+    );
+    assert_eq!(
+        engine.accounts[b as usize].capital.get(),
+        cap_b_before,
+        "B residual booking/recording must not charge represented accounts eagerly"
+    );
     if booked > 0 {
         let delta_b = engine.b_short_num - old_b_short;
         assert!(
@@ -907,8 +937,11 @@ fn proof_production_b_residual_booking_or_recording_accounts_for_full_deficit() 
     }
     assert!(engine.bankruptcy_hmax_lock_active);
     kani::cover!(
-        booked > 0 && recorded > 0,
-        "partial B booking plus explicit residual recording is reachable"
+        booked > 0
+            && recorded > 0
+            && engine.vault.get() == vault_before
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "partial B booking plus explicit non-claim residual recording preserves funds"
     );
 }
 
