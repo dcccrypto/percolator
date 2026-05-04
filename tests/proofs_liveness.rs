@@ -1510,6 +1510,9 @@ fn proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code
     engine.resolved_price = DEFAULT_ORACLE;
     engine.resolved_live_price = DEFAULT_ORACLE;
     engine.rr_cursor_position = 0;
+    let hinted_idx: u8 = kani::any();
+    kani::assume((1..=3).contains(&hinted_idx));
+    let hinted_idx = hinted_idx as usize;
 
     let vault_before = engine.vault.get();
     let insurance_before = engine.insurance_fund.balance.get();
@@ -1521,7 +1524,7 @@ fn proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code
         oracle_price: DEFAULT_ORACLE,
         authenticated_raw_target_price: DEFAULT_ORACLE,
         ordered_candidates: &[],
-        account_hint: Some(3),
+        account_hint: Some(hinted_idx as u16),
         max_revalidations: 0,
         max_candidate_inspections: 0,
         funding_rate_e9: 0,
@@ -1541,7 +1544,7 @@ fn proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code
         ))
     );
     assert!(!engine.is_used(0));
-    assert!(!engine.is_used(3));
+    assert!(!engine.is_used(hinted_idx));
     assert_eq!(engine.vault.get(), vault_before - 100);
     assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
     assert_eq!(engine.market_mode, MarketMode::Resolved);
@@ -1556,7 +1559,7 @@ fn proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code
                 ResolvedCloseResult::Closed(100)
             ))
             && !engine.is_used(0)
-            && !engine.is_used(3)
+            && !engine.is_used(hinted_idx)
             && after.strictly_reduces_from(&before),
         "resolved public dispatcher ignores account hints and still closes through the resolved cursor"
     );
