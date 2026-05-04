@@ -892,6 +892,34 @@ fn proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_permissionless_account_b_progress_reduces_hinted_account_b_rank_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = SOCIAL_LOSS_DEN;
+
+    let before = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+
+    let result = engine.try_permissionless_account_b_progress(idx, DEFAULT_SLOT + 1, 1, 100, None);
+
+    assert_eq!(result, Ok(true));
+    let after = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(after.account_b_remaining_num < before.account_b_remaining_num);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result == Ok(true) && after.account_b_remaining_num < before.account_b_remaining_num,
+        "production account-B progress branch reduces hinted account-B rank"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code() {

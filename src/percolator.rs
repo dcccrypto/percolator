@@ -8654,6 +8654,7 @@ impl RiskEngine {
         }
     }
 
+    test_visible! {
     fn try_permissionless_account_b_progress(
         &mut self,
         idx: u16,
@@ -8706,6 +8707,7 @@ impl RiskEngine {
         self.finalize_end_of_instruction_resets(&ctx)?;
         self.assert_public_postconditions()?;
         Ok(true)
+    }
     }
 
     fn try_permissionless_account_b_dispatch(
