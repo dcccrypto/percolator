@@ -779,6 +779,66 @@ fn proof_permissionless_progress_missing_account_hint_does_not_block_cursor_prog
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_out_of_capacity_hint_does_not_block_cursor_progress_on_prod_code()
+{
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(2), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.rr_cursor_position = 0;
+    let out_of_capacity_hint = 3u16;
+    assert!(out_of_capacity_hint as u64 >= engine.params.max_accounts);
+
+    let num_used_before = engine.num_used_accounts;
+    let free_head_before = engine.free_head;
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT + 1,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: Some(out_of_capacity_hint),
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert!(matches!(
+        result,
+        Ok(PermissionlessProgressOutcome::Cranked(CrankOutcome {
+            num_liquidations: 0
+        }))
+    ));
+    assert_eq!(engine.rr_cursor_position, 1);
+    assert_eq!(engine.num_used_accounts, num_used_before);
+    assert_eq!(engine.free_head, free_head_before);
+    assert!(!engine.is_used(out_of_capacity_hint as usize));
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        matches!(
+            result,
+            Ok(PermissionlessProgressOutcome::Cranked(CrankOutcome {
+                num_liquidations: 0
+            }))
+        ) && engine.rr_cursor_position == 1
+            && engine.num_used_accounts == num_used_before
+            && !engine.is_used(out_of_capacity_hint as usize),
+        "public dispatcher ignores out-of-capacity account hints without materialization and still advances cursor"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(128)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code() {
