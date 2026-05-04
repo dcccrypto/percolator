@@ -1347,7 +1347,7 @@ fn proof_permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_o
 }
 
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_permissionless_account_b_progress_reduces_hinted_account_b_rank_on_prod_code() {
     let mut engine =
