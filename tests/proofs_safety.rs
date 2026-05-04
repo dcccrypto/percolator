@@ -1114,6 +1114,11 @@ fn proof_active_close_recovery_records_residual_before_resolve_on_prod_code() {
     kani::assume((1..=3).contains(&residual));
     engine.active_close_residual_remaining = residual as u128;
 
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let explicit_before = engine.explicit_unallocated_loss_short.get();
+
     let result = engine.permissionless_recovery_resolve_p_last_not_atomic(
         RecoveryReason::ActiveBankruptCloseCannotProgress,
         DEFAULT_SLOT + 1,
@@ -1122,12 +1127,18 @@ fn proof_active_close_recovery_records_residual_before_resolve_on_prod_code() {
     assert!(result.is_ok());
     assert_eq!(engine.market_mode, MarketMode::Resolved);
     assert_eq!(engine.active_close_present, 0);
-    assert!(engine.explicit_unallocated_loss_short.get() >= residual as u128);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert!(engine.explicit_unallocated_loss_short.get() >= explicit_before + residual as u128);
     kani::cover!(
         result.is_ok()
             && engine.market_mode == MarketMode::Resolved
-            && engine.explicit_unallocated_loss_short.get() >= residual as u128,
-        "production active-close recovery records residual before resolving"
+            && engine.vault.get() == vault_before
+            && engine.c_tot.get() == capital_before
+            && engine.insurance_fund.balance.get() == insurance_before
+            && engine.explicit_unallocated_loss_short.get() >= explicit_before + residual as u128,
+        "production active-close recovery records residual as non-claim accounting"
     );
 }
 

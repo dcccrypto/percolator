@@ -27,6 +27,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code` | 70.65s | PASS | Dispatcher ordinary-crank branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code` | 23.58s | PASS | Dispatcher routes exhausted B-index headroom through public recovery. |
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
+| `proof_active_close_recovery_records_residual_before_resolve_on_prod_code` | 8.28s | PASS | Active-close recovery records residual as non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code` | 33.08s | PASS | Insurance-funded account credit fails closed under h-max/loss-stale reconciliation and preserves accounting otherwise. |
 | `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
 | `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect` | 65.79s | PASS | Replaces the stale ADL K-loss timeout with production B-index residual booking and proves represented settlement loss is bounded by the deficit. |
