@@ -791,6 +791,89 @@ fn proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_recovers_exhausted_active_close_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = DEFAULT_SLOT;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 0;
+    engine.active_close_b_chunks_booked = ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS;
+
+    let residual: u8 = kani::any();
+    kani::assume((1..=3).contains(&residual));
+    engine.active_close_residual_remaining = residual as u128;
+
+    let now_slot = DEFAULT_SLOT + 1;
+    let before = engine
+        .permissionless_progress_rank_for_now(now_slot)
+        .unwrap();
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let explicit_before = engine.explicit_unallocated_loss_short.get();
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::ActiveBankruptCloseCannotProgress
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, DEFAULT_ORACLE);
+    assert_eq!(engine.resolved_live_price, DEFAULT_ORACLE);
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert!(
+        engine.explicit_unallocated_loss_short.get() >= explicit_before + residual as u128,
+        "exhausted active-close residual must become durable non-claim loss before recovery"
+    );
+    assert_eq!(
+        before.active_close_residual_atoms, residual as u128,
+        "the proof must exercise the active-close recovery rank component"
+    );
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::Recovered(
+                RecoveryReason::ActiveBankruptCloseCannotProgress
+            ))
+            && engine.market_mode == MarketMode::Resolved
+            && engine.active_close_present == 0
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "production permissionless dispatcher recovers exhausted active-close at P_last"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(120)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code() {
