@@ -423,6 +423,134 @@ fn proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code(
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_live_insurance_withdraw_blocks_active_close_or_negative_pnl_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.top_up_insurance_fund(100, DEFAULT_SLOT).unwrap();
+
+    let active_close_reconciliation: bool = kani::any();
+    if active_close_reconciliation {
+        engine.bankruptcy_hmax_lock_active = true;
+        engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+        engine.stress_envelope_start_slot = DEFAULT_SLOT;
+        engine.stress_envelope_start_generation = engine.sweep_generation;
+        engine.active_close_present = 1;
+        engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+        engine.active_close_account_idx = u16::MAX;
+        engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+        engine.active_close_close_price = DEFAULT_ORACLE;
+        engine.active_close_close_slot = DEFAULT_SLOT;
+        engine.active_close_q_close_q = 0;
+        engine.active_close_residual_remaining = 1;
+    }
+
+    let negative_pnl_reconciliation: bool = kani::any();
+    if negative_pnl_reconciliation {
+        let neg = add_user_test(&mut engine, 0).unwrap();
+        engine.set_pnl(neg as usize, -1).unwrap();
+    }
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let result = engine.withdraw_live_insurance_not_atomic(1, DEFAULT_SLOT);
+
+    if active_close_reconciliation || negative_pnl_reconciliation {
+        assert_eq!(result, Err(RiskError::Undercollateralized));
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    } else {
+        assert!(result.is_ok());
+        assert_eq!(engine.vault.get(), vault_before - 1);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before - 1);
+    }
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && active_close_reconciliation
+            && engine.vault.get() == vault_before
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "live insurance withdrawal fails closed during active-close reconciliation"
+    );
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && negative_pnl_reconciliation
+            && engine.vault.get() == vault_before
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "live insurance withdrawal fails closed while negative PnL remains"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_insurance_reward_credit_blocks_active_close_or_negative_pnl_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.top_up_insurance_fund(100, DEFAULT_SLOT).unwrap();
+
+    let active_close_reconciliation: bool = kani::any();
+    if active_close_reconciliation {
+        engine.bankruptcy_hmax_lock_active = true;
+        engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+        engine.stress_envelope_start_slot = DEFAULT_SLOT;
+        engine.stress_envelope_start_generation = engine.sweep_generation;
+        engine.active_close_present = 1;
+        engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+        engine.active_close_account_idx = u16::MAX;
+        engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+        engine.active_close_close_price = DEFAULT_ORACLE;
+        engine.active_close_close_slot = DEFAULT_SLOT;
+        engine.active_close_q_close_q = 0;
+        engine.active_close_residual_remaining = 1;
+    }
+
+    let negative_pnl_reconciliation: bool = kani::any();
+    if negative_pnl_reconciliation {
+        engine.set_pnl(idx as usize, -1).unwrap();
+    }
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    let pnl_before = engine.accounts[idx as usize].pnl;
+    let result = engine.credit_account_from_insurance_not_atomic(idx, 1, engine.current_slot);
+
+    if active_close_reconciliation || negative_pnl_reconciliation {
+        assert_eq!(result, Err(RiskError::Undercollateralized));
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+        assert_eq!(engine.accounts[idx as usize].capital.get(), capital_before);
+        assert_eq!(engine.accounts[idx as usize].pnl, pnl_before);
+    } else {
+        assert!(result.is_ok());
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before - 1);
+        assert_eq!(
+            engine.accounts[idx as usize].capital.get(),
+            capital_before + 1
+        );
+    }
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && active_close_reconciliation
+            && engine.insurance_fund.balance.get() == insurance_before
+            && engine.accounts[idx as usize].capital.get() == capital_before,
+        "insurance reward credit fails closed during active-close reconciliation"
+    );
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && negative_pnl_reconciliation
+            && engine.insurance_fund.balance.get() == insurance_before
+            && engine.accounts[idx as usize].capital.get() == capital_before,
+        "insurance reward credit fails closed while negative PnL remains"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(34)]
 #[kani::solver(cadical)]
 fn proof_deposit_then_withdraw_roundtrip() {

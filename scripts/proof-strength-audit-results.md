@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`398` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`400` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -34,6 +34,8 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_below_floor_recovery_rejects_when_bounded_step_can_progress_on_prod_code` | 7.51s | PASS | Below-progress-floor P-last recovery fails closed without moving vault, capital, or insurance funds while bounded catchup can still make a price step. |
 | `proof_blocked_segment_recovery_rejects_when_bounded_accrual_can_progress_on_prod_code` | 351.55s | PASS | Blocked-segment P-last recovery fails closed without moving vault, capital, or insurance funds while the production accrual planner can still advance a bounded segment. |
 | `proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code` | 33.08s | PASS | Insurance-funded account credit fails closed under h-max/loss-stale reconciliation and preserves accounting otherwise. |
+| `proof_live_insurance_withdraw_blocks_active_close_or_negative_pnl_on_prod_code` | 15.37s | PASS | Live insurance withdrawal fails closed without moving vault or insurance during active-close reconciliation or while negative PnL remains. |
+| `proof_insurance_reward_credit_blocks_active_close_or_negative_pnl_on_prod_code` | 20.03s | PASS | Insurance-funded account credit fails closed without moving insurance, recipient capital, or recipient PnL during active-close reconciliation or while negative PnL remains. |
 | `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
 | `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect` | 65.79s | PASS | Replaces the stale ADL K-loss timeout with production B-index residual booking and proves represented settlement loss is bounded by the deficit. |
 | `proof_adl_uncertified_potential_dust_routes_deficit_without_b_or_k_write` | 34.95s | PASS | Production ADL routes deficits to non-claim audit loss when uncertified potential dust makes the B denominator unsafe. |
@@ -108,7 +110,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 398-harness inventory, then rerun the static strength /
+against the current 400-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
