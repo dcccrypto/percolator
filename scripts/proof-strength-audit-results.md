@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`411` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`412` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -28,6 +28,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_out_of_capacity_hint_does_not_block_cursor_progress_on_prod_code` | 27.20s | PASS | Public dispatcher ignores an account hint outside configured market capacity without materializing the hinted slot, preserves funds, and still advances cursor progress. |
 | `proof_permissionless_account_b_progress_flat_account_is_noop_on_prod_code` | 11.78s | PASS | Production account-B progress branch treats a flat materialized account hint as a no-op, preserving funds, B metadata, slots, and account rank while returning fallthrough. |
 | `proof_permissionless_account_b_dispatch_flat_account_falls_through_on_prod_code` | 15.33s | PASS | Production account-B dispatch falls through a flat materialized account hint as `Ok(None)`, preserving funds, B metadata, slots, and account rank. |
+| `proof_permissionless_account_b_dispatch_returns_progress_for_hinted_blocker_on_prod_code` | 450.67s | PASS | Production account-B dispatch wrapper returns `AccountBProgress` for a hinted B blocker, reduces account-local B rank, preserves market clock/price, and does not spend insurance. |
 | `proof_permissionless_progress_flat_account_b_hint_falls_through_to_cursor_progress_on_prod_code` | 49.67s | PASS | Public permissionless dispatcher falls through a flat materialized account-B hint and still advances bounded cursor progress while preserving hinted-account funds, B metadata, and rank. |
 | `proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code` | 36.22s | PASS | Dispatcher active-close branch reduces residual rank before ordinary crank. |
 | `proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code` | 70.65s | PASS | Dispatcher ordinary-crank branch strictly reduces the public progress rank. |

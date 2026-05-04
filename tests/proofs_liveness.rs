@@ -1390,6 +1390,52 @@ fn proof_permissionless_account_b_progress_reduces_hinted_account_b_rank_on_prod
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_permissionless_account_b_dispatch_returns_progress_for_hinted_blocker_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.b_short_num = SOCIAL_LOSS_DEN;
+
+    let before = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+    let account_capital_before = engine.accounts[idx as usize].capital.get();
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let current_slot_before = engine.current_slot;
+    let last_market_slot_before = engine.last_market_slot;
+    let last_oracle_price_before = engine.last_oracle_price;
+
+    let result = engine.try_permissionless_account_b_dispatch(idx, DEFAULT_SLOT + 1, 1, 100, None);
+
+    assert_eq!(
+        result,
+        Ok(Some(PermissionlessProgressOutcome::AccountBProgress(idx)))
+    );
+    let after = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(after.account_b_remaining_num < before.account_b_remaining_num);
+    assert!(engine.accounts[idx as usize].capital.get() <= account_capital_before);
+    assert!(vault_before >= engine.vault.get());
+    assert!(vault_before - engine.vault.get() <= PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.current_slot, current_slot_before);
+    assert_eq!(engine.last_market_slot, last_market_slot_before);
+    assert_eq!(engine.last_oracle_price, last_oracle_price_before);
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    kani::cover!(
+        result == Ok(Some(PermissionlessProgressOutcome::AccountBProgress(idx)))
+            && after.account_b_remaining_num < before.account_b_remaining_num
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "production account-B dispatch returns progress and reduces the hinted B blocker"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code() {
