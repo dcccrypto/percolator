@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`405` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`406` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -24,6 +24,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_live_insurance_withdraw_fails_closed_when_exposed_or_reconciling_on_prod_code` | 40.89s | PASS | Live insurance withdrawal fails closed under exposure/reconciliation and remains available for empty current markets. |
 | `proof_resolved_insurance_withdraw_requires_empty_market_and_drains_only_insurance_on_prod_code` | 17.20s | PASS | Resolved insurance withdrawal rejects while any account remains and drains exactly terminal insurance once the market is empty. |
 | `proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code` | 61.54s | PASS | Dispatcher ordinary-crank branch reduces live catchup rank. |
+| `proof_permissionless_progress_missing_account_hint_does_not_block_cursor_progress_on_prod_code` | 27.06s | PASS | Public dispatcher ignores a missing account hint without materializing the hinted slot, preserves funds, and still advances cursor progress. |
 | `proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code` | 36.22s | PASS | Dispatcher active-close branch reduces residual rank before ordinary crank. |
 | `proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code` | 70.65s | PASS | Dispatcher ordinary-crank branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code` | 23.58s | PASS | Dispatcher routes exhausted B-index headroom through public recovery. |
@@ -115,7 +116,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 405-harness inventory, then rerun the static strength /
+against the current 406-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
