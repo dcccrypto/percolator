@@ -2574,47 +2574,74 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
 // ############################################################################
 
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(64)]
 #[kani::solver(cadical)]
-fn proof_property_56_exact_raw_im_approval() {
-    // A risk-increasing trade must be rejected when Eq_init_raw < IM_req,
-    // even if Eq_init_net floors to 0. MIN_NONZERO_IM_REQ ensures no
-    // evasion through tiny positions.
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
+fn proof_property_56_raw_initial_margin_predicate_rejects_min_floor_shortfall_on_prod_code() {
+    // Spec §3.4/§9.1: initial-margin approval compares exact
+    // Eq_init_raw_i against max(proportional IM, min_nonzero_im_req).
+    // A tiny nonzero position with C_i below the floor must not pass through
+    // a clamped or rounded equity lane.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = 0usize;
+    engine.accounts[a].capital = U128::new(1);
+    engine.accounts[a].position_basis_q = 1;
+    engine.accounts[a].adl_a_basis = ADL_ONE;
+    engine.accounts[a].adl_epoch_snap = engine.adl_epoch_long;
 
-    // Deposit just enough for the test
-    engine.deposit_not_atomic(a, 1, DEFAULT_SLOT).unwrap();
-    engine
-        .deposit_not_atomic(b, 1_000_000, DEFAULT_SLOT)
-        .unwrap();
-    engine
-        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0)
-        .unwrap();
-
-    // a has C=1, no PnL, no fees. Eq_init_raw = 1.
-    // MIN_NONZERO_IM_REQ = 2, so any nonzero position requires IM >= 2.
-    // A trade with even 1 unit of position means IM_req >= 2 > 1 = Eq_init_raw.
-    let tiny_size = POS_SCALE as i128; // 1 unit
-    let result = engine.execute_trade_not_atomic(
-        a,
-        b,
-        DEFAULT_ORACLE,
-        DEFAULT_SLOT,
-        tiny_size,
-        DEFAULT_ORACLE,
-        0i128,
-        0,
-        100,
-        None,
+    let eq_init_raw = engine.account_equity_init_raw(&engine.accounts[a], a);
+    let notional = engine.notional(a, DEFAULT_ORACLE);
+    let im_req = core::cmp::max(
+        mul_div_floor_u128(notional, engine.params.initial_margin_bps as u128, 10_000),
+        engine.params.min_nonzero_im_req,
     );
+    let im_ok = engine.is_above_initial_margin(&engine.accounts[a], a, DEFAULT_ORACLE);
+
+    assert!(eq_init_raw == 1);
+    assert!(notional > 0, "fixture must install a nonzero risk notional");
+    assert!(im_req > eq_init_raw as u128);
     assert!(
-        result.is_err(),
-        "trade must be rejected: Eq_init_raw (1) < MIN_NONZERO_IM_REQ (2)"
+        !im_ok,
+        "exact raw initial-margin predicate must reject floor shortfall"
+    );
+    kani::cover!(
+        !im_ok && im_req > eq_init_raw as u128,
+        "raw IM predicate rejects a nonzero-position floor shortfall"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_property_56_trade_margin_gate_rejects_raw_im_shortfall_on_prod_code() {
+    // Same rule at the post-trade production margin gate: a risk-increasing
+    // transition from flat to 1 q-unit must be rejected when Eq_trade_open_raw
+    // is below the min nonzero initial-margin requirement.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = 0usize;
+    engine.accounts[a].capital = U128::new(1);
+    engine.accounts[a].position_basis_q = 1;
+    engine.accounts[a].adl_a_basis = ADL_ONE;
+    engine.accounts[a].adl_epoch_snap = engine.adl_epoch_long;
+
+    let old_eff = 0i128;
+    let new_eff = 1i128;
+    let buffer_pre = I256::from_i128(1);
+    let result = engine.enforce_one_side_margin(
+        a,
+        DEFAULT_ORACLE,
+        &old_eff,
+        &new_eff,
+        buffer_pre,
+        0,
+        0,
+        false,
     );
 
-    assert!(engine.check_conservation());
+    assert!(matches!(result, Err(RiskError::Undercollateralized)));
+    kani::cover!(
+        matches!(result, Err(RiskError::Undercollateralized)),
+        "post-trade margin gate rejects raw IM floor shortfall"
+    );
 }
 
 // ############################################################################

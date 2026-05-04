@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`387` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`388` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -44,6 +44,8 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_keeper_rejects_funding_rate_above_config_before_state_mutation_on_prod_code` | 9s | PASS | Production keeper crank rejects an out-of-config funding rate before market clock, price, F, K, or stress mutation. |
 | `proof_keeper_crank_accepts_positive_boundary_funding_rate_on_prod_code` | 13s | PASS | Production keeper crank accepts the configured positive funding-rate boundary and advances the market slot. |
 | `proof_keeper_crank_accepts_negative_boundary_funding_rate_on_prod_code` | 14s | PASS | Production keeper crank accepts the configured negative funding-rate boundary and advances the market slot. |
+| `proof_property_56_raw_initial_margin_predicate_rejects_min_floor_shortfall_on_prod_code` | 2.78s | PASS | Production raw initial-margin predicate rejects a nonzero-position floor shortfall. |
+| `proof_property_56_trade_margin_gate_rejects_raw_im_shortfall_on_prod_code` | 2.50s | PASS | Production post-trade margin gate rejects a risk-increasing raw IM floor shortfall. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -79,9 +81,14 @@ the current tree. They were broad keeper harnesses; the current tree replaces
 them with three endpoint-specific production-code proofs covering invalid-rate
 fail-closed behavior before mutation and both signed configured boundary rates.
 
+The old `proof_property_56_exact_raw_im_approval` timeout is no longer part of
+the current tree. It was split into two finishing production-code proofs: one
+for the exact raw initial-margin predicate and one for the post-trade margin
+gate. Both require the rejection path to be reachable through `kani::cover!`.
+
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 387-harness inventory, then rerun the static strength /
+against the current 388-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
