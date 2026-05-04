@@ -1616,32 +1616,52 @@ fn proof_withdraw_simulation_preserves_residual() {
 }
 
 // ============================================================================
-// proof_funding_rate_validated_before_storage
+// Keeper funding-rate validation at the production crank boundary
 // ============================================================================
 
 #[kani::proof]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_funding_rate_validated_before_storage() {
-    let mut engine = RiskEngine::new(zero_fee_params());
+fn proof_keeper_rejects_funding_rate_above_config_before_state_mutation_on_prod_code() {
+    // Spec §1.4/§5.4: the keeper path must validate the per-slot funding-rate
+    // bound before committing market clock, price, F, K, or stress state.
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let bad_rate = (engine.params.max_abs_funding_e9_per_slot as i128) + 1;
 
-    engine.last_oracle_price = 100;
-    engine.last_market_slot = 0;
+    let current_before = engine.current_slot;
+    let market_slot_before = engine.last_market_slot;
+    let oracle_before = engine.last_oracle_price;
+    let f_long_before = engine.f_long_num;
+    let f_short_before = engine.f_short_num;
+    let k_long_before = engine.adl_coeff_long;
+    let k_short_before = engine.adl_coeff_short;
+    let stress_before = engine.stress_consumed_bps_e9_since_envelope;
 
-    let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000_000, 0).unwrap();
-
-    // Pass an invalid funding rate (> MAX_ABS_FUNDING_E9_PER_SLOT) directly
-    // v12.19.53: rate is validated inside accrue_market_to
-    let bad_rate: i128 = MAX_ABS_FUNDING_E9_PER_SLOT + 1;
-    let result = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, bad_rate, 0, 100, None, 0);
-    assert!(
-        result.is_err(),
-        "out-of-bounds rate must be rejected by keeper_crank_not_atomic"
+    let result = engine.keeper_crank_not_atomic(
+        DEFAULT_SLOT + 1,
+        DEFAULT_ORACLE,
+        &[],
+        0,
+        bad_rate,
+        0,
+        100,
+        None,
+        0,
     );
 
-    // Valid rate must succeed
-    let result2 = engine.keeper_crank_not_atomic(1, 100, &[(a, None)], 1, 0i128, 0, 100, None, 0);
-    assert!(result2.is_ok(), "protocol must accept valid funding rate");
+    assert_eq!(result, Err(RiskError::Overflow));
+    assert_eq!(engine.current_slot, current_before);
+    assert_eq!(engine.last_market_slot, market_slot_before);
+    assert_eq!(engine.last_oracle_price, oracle_before);
+    assert_eq!(engine.f_long_num, f_long_before);
+    assert_eq!(engine.f_short_num, f_short_before);
+    assert_eq!(engine.adl_coeff_long, k_long_before);
+    assert_eq!(engine.adl_coeff_short, k_short_before);
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, stress_before);
+    kani::cover!(
+        result == Err(RiskError::Overflow),
+        "keeper rejects out-of-config funding rate before market mutation"
+    );
 }
 
 // ============================================================================

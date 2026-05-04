@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`386` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`387` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -41,6 +41,9 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_property_31_trade_rejects_missing_party_b_on_prod_code` | 8s | PASS | Production trade rejects a missing counterparty before materialization. |
 | `proof_property_31_liquidate_rejects_missing_account_on_prod_code` | 7s | PASS | Production liquidation rejects a missing account without materializing it. |
 | `proof_property_31_keeper_candidate_does_not_materialize_missing_account_on_prod_code` | 13s | PASS | Production keeper candidate scan ignores missing candidate slots without materializing them. |
+| `proof_keeper_rejects_funding_rate_above_config_before_state_mutation_on_prod_code` | 9s | PASS | Production keeper crank rejects an out-of-config funding rate before market clock, price, F, K, or stress mutation. |
+| `proof_keeper_crank_accepts_positive_boundary_funding_rate_on_prod_code` | 13s | PASS | Production keeper crank accepts the configured positive funding-rate boundary and advances the market slot. |
+| `proof_keeper_crank_accepts_negative_boundary_funding_rate_on_prod_code` | 14s | PASS | Production keeper crank accepts the configured negative funding-rate boundary and advances the market slot. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -70,9 +73,15 @@ the current tree. It was a broad multi-entrypoint harness; the current tree
 replaces it with six endpoint-specific production-code proofs covering settle,
 withdraw, both trade parties, liquidation, and keeper-candidate scanning.
 
+The old `proof_funding_rate_validated_before_storage` and
+`proof_keeper_crank_r_last_stores_supplied_rate` timeouts are no longer part of
+the current tree. They were broad keeper harnesses; the current tree replaces
+them with three endpoint-specific production-code proofs covering invalid-rate
+fail-closed behavior before mutation and both signed configured boundary rates.
+
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 386-harness inventory, then rerun the static strength /
+against the current 387-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.

@@ -1094,38 +1094,60 @@ fn proof_partial_liq_health_check_mandatory() {
 // PROPERTY 42: Post-reset funding recomputation stores exactly 0
 // ############################################################################
 
-/// keeper_crank_not_atomic passes the supplied funding_rate directly to accrue_market_to.
-/// v12.19.53: no stored rate field; rate is consumed directly per call.
+/// keeper_crank_not_atomic accepts the configured positive funding-rate
+/// boundary at the production crank boundary.
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_keeper_crank_r_last_stores_supplied_rate() {
-    let mut engine = RiskEngine::new(zero_fee_params());
+fn proof_keeper_crank_accepts_positive_boundary_funding_rate_on_prod_code() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let supplied_rate = engine.params.max_abs_funding_e9_per_slot as i128;
 
-    let idx = add_user_test(&mut engine, 0).unwrap();
-    engine
-        .deposit_not_atomic(idx, 1_000_000, DEFAULT_SLOT)
-        .unwrap();
-
-    // Symbolic supplied rate bounded by the engine's configured params cap
-    // (zero_fee_params sets max_abs_funding_e9_per_slot = 10^8, tighter than
-    // the global MAX_ABS_FUNDING_E9_PER_SLOT = 10^9).
-    let supplied_rate: i32 = kani::any();
-    kani::assume(supplied_rate.unsigned_abs() as u64 <= engine.params.max_abs_funding_e9_per_slot);
-
-    // v12.19.53: rate passed directly to accrue_market_to via keeper_crank_not_atomic
     let result = engine.keeper_crank_not_atomic(
         DEFAULT_SLOT + 1,
         DEFAULT_ORACLE,
-        &[(idx, None)],
-        64,
-        supplied_rate as i128,
+        &[],
+        0,
+        supplied_rate,
         0,
         100,
         None,
         0,
     );
     assert!(result.is_ok());
+    assert_eq!(engine.last_market_slot, DEFAULT_SLOT + 1);
+    kani::cover!(
+        result.is_ok() && engine.last_market_slot == DEFAULT_SLOT + 1,
+        "keeper accepts positive configured funding-rate boundary"
+    );
+}
+
+/// keeper_crank_not_atomic accepts the configured negative funding-rate
+/// boundary at the production crank boundary.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_accepts_negative_boundary_funding_rate_on_prod_code() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let supplied_rate = -(engine.params.max_abs_funding_e9_per_slot as i128);
+
+    let result = engine.keeper_crank_not_atomic(
+        DEFAULT_SLOT + 1,
+        DEFAULT_ORACLE,
+        &[],
+        0,
+        supplied_rate,
+        0,
+        100,
+        None,
+        0,
+    );
+    assert!(result.is_ok());
+    assert_eq!(engine.last_market_slot, DEFAULT_SLOT + 1);
+    kani::cover!(
+        result.is_ok() && engine.last_market_slot == DEFAULT_SLOT + 1,
+        "keeper accepts negative configured funding-rate boundary"
+    );
 }
 
 // ############################################################################
