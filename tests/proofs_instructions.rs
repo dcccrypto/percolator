@@ -1662,31 +1662,15 @@ fn proof_property_51_withdraw_any_partial_ok() {
 // ############################################################################
 
 #[kani::proof]
-#[kani::unwind(34)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_property_31_missing_account_safety() {
-    // Per spec §2.3: settle_account_not_atomic, withdraw_not_atomic, execute_trade_not_atomic, liquidate,
-    // and keeper_crank_not_atomic must NOT auto-materialize missing accounts.
-    // deposit IS the canonical materialization path (spec §10.3 step 2).
+fn proof_property_31_settle_rejects_missing_account_on_prod_code() {
+    // Spec §2.3: account-local public methods must not auto-materialize
+    // missing slots. Deposit is the only public materialization path.
     let mut engine = RiskEngine::new(zero_fee_params());
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
 
-    // Add one real user for counterparty testing
-    let real = add_user_test(&mut engine, 0).unwrap();
-    engine
-        .deposit_not_atomic(real, 100_000, DEFAULT_SLOT)
-        .unwrap();
-    engine
-        .keeper_crank_not_atomic(DEFAULT_SLOT, DEFAULT_ORACLE, &[], 0, 0i128, 0, 100, None, 0)
-        .unwrap();
-
-    // Pick an index that was never add_user'd — it's missing
-    let missing: u16 = 3; // MAX_ACCOUNTS=4 in kani, index 3 never materialized
-    assert!(
-        !engine.is_used(missing as usize),
-        "account must be unmaterialized"
-    );
-
-    // settle_account_not_atomic must reject missing account
     let settle_result = engine.settle_account_not_atomic(
         missing,
         DEFAULT_ORACLE,
@@ -1696,12 +1680,22 @@ fn proof_property_31_missing_account_safety() {
         100,
         None,
     );
-    assert!(
-        settle_result.is_err(),
-        "settle_account_not_atomic must reject missing account"
+    assert_eq!(settle_result, Err(RiskError::AccountNotFound));
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        settle_result == Err(RiskError::AccountNotFound),
+        "settle_account_not_atomic rejects a missing account before materialization"
     );
+}
 
-    // withdraw_not_atomic must reject missing account
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_property_31_withdraw_rejects_missing_account_on_prod_code() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
+
     let withdraw_result = engine.withdraw_not_atomic(
         missing,
         100,
@@ -1712,12 +1706,23 @@ fn proof_property_31_missing_account_safety() {
         100,
         None,
     );
-    assert!(
-        withdraw_result.is_err(),
-        "withdraw_not_atomic must reject missing account"
+    assert_eq!(withdraw_result, Err(RiskError::AccountNotFound));
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        withdraw_result == Err(RiskError::AccountNotFound),
+        "withdraw_not_atomic rejects a missing account before materialization"
     );
+}
 
-    // execute_trade_not_atomic with missing account as party a
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_property_31_trade_rejects_missing_party_a_on_prod_code() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let real = add_user_test(&mut engine, 0).unwrap();
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
+
     let trade_result = engine.execute_trade_not_atomic(
         missing,
         real,
@@ -1730,12 +1735,23 @@ fn proof_property_31_missing_account_safety() {
         100,
         None,
     );
-    assert!(
-        trade_result.is_err(),
-        "execute_trade_not_atomic must reject missing account (party a)"
+    assert_eq!(trade_result, Err(RiskError::AccountNotFound));
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        trade_result == Err(RiskError::AccountNotFound),
+        "execute_trade_not_atomic rejects missing party a"
     );
+}
 
-    // execute_trade_not_atomic with missing account as party b
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_property_31_trade_rejects_missing_party_b_on_prod_code() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let real = add_user_test(&mut engine, 0).unwrap();
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
+
     let trade_result_b = engine.execute_trade_not_atomic(
         real,
         missing,
@@ -1748,13 +1764,22 @@ fn proof_property_31_missing_account_safety() {
         100,
         None,
     );
-    assert!(
-        trade_result_b.is_err(),
-        "execute_trade_not_atomic must reject missing account (party b)"
+    assert_eq!(trade_result_b, Err(RiskError::AccountNotFound));
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        trade_result_b == Err(RiskError::AccountNotFound),
+        "execute_trade_not_atomic rejects missing party b"
     );
+}
 
-    // liquidate_at_oracle_not_atomic on missing account — per spec §9.6 step 2 (Bug 4 fix),
-    // public entrypoint rejects with Err(AccountNotFound) before mutating market state.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_property_31_liquidate_rejects_missing_account_on_prod_code() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
+
     let liq_result = engine.liquidate_at_oracle_not_atomic(
         missing,
         DEFAULT_SLOT,
@@ -1765,15 +1790,40 @@ fn proof_property_31_missing_account_safety() {
         100,
         None,
     );
-    assert!(
-        matches!(liq_result, Err(RiskError::AccountNotFound)),
-        "liquidate must reject missing account with AccountNotFound (spec §9.6 step 2)"
+    assert_eq!(liq_result, Err(RiskError::AccountNotFound));
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        liq_result == Err(RiskError::AccountNotFound),
+        "liquidate_at_oracle_not_atomic rejects a missing account before materialization"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_property_31_keeper_candidate_does_not_materialize_missing_account_on_prod_code() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let missing: u16 = 3;
+    assert!(!engine.is_used(missing as usize));
+
+    let candidates = [(missing, None)];
+    let result = engine.keeper_crank_not_atomic(
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        &candidates,
+        1,
+        0,
+        0,
+        100,
+        None,
+        0,
     );
 
-    // Verify no account was materialized
-    assert!(
-        !engine.is_used(missing as usize),
-        "missing account must remain unmaterialized"
+    assert!(result.is_ok());
+    assert!(!engine.is_used(missing as usize));
+    kani::cover!(
+        result.is_ok() && !engine.is_used(missing as usize),
+        "keeper candidate scan does not materialize a missing account"
     );
 }
 

@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`381` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`386` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -35,6 +35,12 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code` | 53.97s | PASS | Production live-touch replay proves a winner -> latent-bankrupt Phase 2 window progresses while keeping the winner reserve paused. |
 | `v19_generation_first_wrap_advances_on_prod_code` | 13.81s | PASS | Production keeper crank advances sweep generation on a permitted cursor wrap. |
 | `v19_same_slot_cursor_does_not_wrap_without_generation_advance` | 13.23s | PASS | Production keeper crank cannot cross the cursor wrap boundary again in the same authenticated slot after generation already advanced. |
+| `proof_property_31_settle_rejects_missing_account_on_prod_code` | 6s | PASS | Production settle rejects a missing account without materializing it. |
+| `proof_property_31_withdraw_rejects_missing_account_on_prod_code` | 7s | PASS | Production withdraw rejects a missing account without materializing it. |
+| `proof_property_31_trade_rejects_missing_party_a_on_prod_code` | 7s | PASS | Production trade rejects a missing maker/taker party before materialization. |
+| `proof_property_31_trade_rejects_missing_party_b_on_prod_code` | 8s | PASS | Production trade rejects a missing counterparty before materialization. |
+| `proof_property_31_liquidate_rejects_missing_account_on_prod_code` | 7s | PASS | Production liquidation rejects a missing account without materializing it. |
+| `proof_property_31_keeper_candidate_does_not_materialize_missing_account_on_prod_code` | 13s | PASS | Production keeper candidate scan ignores missing candidate slots without materializing them. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -59,9 +65,14 @@ finishing production-code proofs
 cover the permitted wrap and same-slot no-second-wrap halves of the slot-rate
 generation invariant.
 
+The old `proof_property_31_missing_account_safety` timeout is no longer part of
+the current tree. It was a broad multi-entrypoint harness; the current tree
+replaces it with six endpoint-specific production-code proofs covering settle,
+withdraw, both trade parties, liquidation, and keeper-candidate scanning.
+
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 381-harness inventory, then rerun the static strength /
+against the current 386-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
