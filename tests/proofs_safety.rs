@@ -1168,6 +1168,66 @@ fn proof_active_close_continuation_makes_bounded_progress_on_prod_code() {
 #[kani::proof]
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
+fn proof_active_close_continuation_preserves_frozen_economics_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.stress_envelope_remaining_indices = engine.params.max_accounts;
+    engine.stress_envelope_start_slot = DEFAULT_SLOT;
+    engine.stress_envelope_start_generation = engine.sweep_generation;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = idx;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_SHORT;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 1;
+    engine.active_close_residual_remaining = PUBLIC_B_CHUNK_ATOMS + 1;
+
+    let before_b = engine.b_short_num;
+    let close_price_before = engine.active_close_close_price;
+    let close_slot_before = engine.active_close_close_slot;
+    let q_close_before = engine.active_close_q_close_q;
+    let account_idx_before = engine.active_close_account_idx;
+    let side_before = engine.active_close_opp_side;
+    let booked_before = engine.active_close_residual_booked;
+    let recorded_before = engine.active_close_residual_recorded;
+
+    let result = engine.continue_active_bankrupt_close_not_atomic(DEFAULT_SLOT + 1);
+
+    assert_eq!(result, Ok(true));
+    assert_eq!(engine.market_mode, MarketMode::Live);
+    assert_eq!(engine.active_close_present, 1);
+    assert_eq!(engine.active_close_phase, ACTIVE_CLOSE_PHASE_RESIDUAL_B);
+    assert_eq!(engine.active_close_account_idx, account_idx_before);
+    assert_eq!(engine.active_close_opp_side, side_before);
+    assert_eq!(engine.active_close_close_price, close_price_before);
+    assert_eq!(engine.active_close_close_slot, close_slot_before);
+    assert_eq!(engine.active_close_q_close_q, q_close_before);
+    assert_eq!(engine.active_close_residual_remaining, 1);
+    assert_eq!(
+        engine.active_close_residual_booked,
+        booked_before + PUBLIC_B_CHUNK_ATOMS
+    );
+    assert_eq!(engine.active_close_residual_recorded, recorded_before);
+    assert_eq!(engine.active_close_b_chunks_booked, 1);
+    assert!(engine.b_short_num > before_b);
+    kani::cover!(
+        result == Ok(true)
+            && engine.active_close_present == 1
+            && engine.active_close_close_price == close_price_before
+            && engine.active_close_residual_remaining == 1,
+        "production active-close continuation preserves frozen economics while partially booking B"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
 fn proof_active_close_recovery_records_residual_before_resolve_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);

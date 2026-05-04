@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`396` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`397` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -56,6 +56,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `t11_53_keeper_phase1_stops_after_pending_reset_on_prod_code` | 4.14s | PASS | Production keeper Phase 1 candidate helper stops on a pending reset before mutating later candidates. |
 | `proof_live_touch_decreases_account_b_rank_on_prod_code` | 37.48s | PASS | Production live touch strictly reduces account-local B settlement rank for a hinted blocker. |
 | `proof_permissionless_account_b_progress_reduces_hinted_account_b_rank_on_prod_code` | 240.35s | PASS | Production permissionless account-B progress branch validates, touches, finalizes, strictly reduces the hinted account's B rank, preserves market clock/price, and does not spend insurance. |
+| `proof_active_close_continuation_preserves_frozen_economics_on_prod_code` | 15.19s | PASS | Production active-close continuation books one bounded B residual chunk while preserving frozen close account/side/price/slot/quantity metadata. |
 | `proof_resolved_terminal_close_rejects_account_b_stale_position_on_prod_code` | 17.61s | PASS | Production resolved terminal close rejects a B-stale account before freeing or paying it. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
@@ -105,7 +106,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 388-harness inventory, then rerun the static strength /
+against the current 397-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.
