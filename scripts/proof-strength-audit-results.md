@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`401` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`402` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -29,6 +29,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_on_prod_code` | 52.03s | PASS | Dispatcher routes global counter overflow through public P-last recovery without using caller raw target or moving vault, capital, or insurance funds. |
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_resolved_progress_only_makes_account_fee_current_on_prod_code` | 25.13s | PASS | Dispatcher resolved ProgressOnly path syncs the touched account to resolved_slot before returning progress without terminal payout/free. |
+| `proof_force_close_resolved_with_fee_progress_only_syncs_before_payout_on_prod_code` | 21.96s | PASS | Production fee-aware resolved close syncs and charges fees before returning ProgressOnly, leaving the positive account open and unpaid while terminal readiness is blocked. |
 | `proof_active_close_recovery_records_residual_before_resolve_on_prod_code` | 8.28s | PASS | Active-close recovery records residual as non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_explicit_loss_recovery_resolves_at_p_last_without_minting_claims_on_prod_code` | 15.51s | PASS | Explicit unallocated-loss recovery resolves at P-last and preserves explicit non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_below_floor_recovery_rejects_when_bounded_step_can_progress_on_prod_code` | 7.51s | PASS | Below-progress-floor P-last recovery fails closed without moving vault, capital, or insurance funds while bounded catchup can still make a price step. |
@@ -111,7 +112,7 @@ keeper entrypoint, plus the deterministic full-keeper regression
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
-against the current 401-harness inventory, then rerun the static strength /
+against the current 402-harness inventory, then rerun the static strength /
 non-vacuity audit over the same inventory.
 
 Kani version: `0.66.0`. The sweep script parsed `333` unique `#[kani::proof]` harnesses from `tests/proofs_*.rs` and ran each one with exact harness selection and a `600s` timeout.

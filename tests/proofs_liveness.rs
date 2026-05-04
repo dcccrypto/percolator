@@ -1189,6 +1189,55 @@ fn proof_permissionless_progress_resolved_progress_only_makes_account_fee_curren
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+fn proof_force_close_resolved_with_fee_progress_only_syncs_before_payout_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(1, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.set_pnl(0, 10).unwrap();
+    engine.set_pnl(1, -5).unwrap();
+    engine.accounts[0].last_fee_slot = DEFAULT_SLOT - 1;
+
+    let fee_rate: u8 = kani::any();
+    kani::assume(fee_rate > 0 && fee_rate <= 10);
+    let capital_before = engine.accounts[0].capital.get();
+    let pnl_before = engine.accounts[0].pnl;
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.force_close_resolved_with_fee_not_atomic(0, fee_rate as u128);
+
+    assert_eq!(result, Ok(ResolvedCloseResult::ProgressOnly));
+    assert!(engine.is_used(0));
+    assert_eq!(engine.accounts[0].last_fee_slot, engine.resolved_slot);
+    assert_eq!(engine.accounts[0].pnl, pnl_before);
+    assert_eq!(
+        engine.accounts[0].capital.get(),
+        capital_before - fee_rate as u128
+    );
+    assert_eq!(
+        engine.insurance_fund.balance.get(),
+        insurance_before + fee_rate as u128
+    );
+    assert_eq!(engine.neg_pnl_account_count, 1);
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Ok(ResolvedCloseResult::ProgressOnly)
+            && engine.is_used(0)
+            && engine.accounts[0].last_fee_slot == engine.resolved_slot
+            && engine.insurance_fund.balance.get() > insurance_before,
+        "fee-aware resolved close syncs fee before ProgressOnly without payout/free"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
