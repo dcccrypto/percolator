@@ -1238,6 +1238,53 @@ fn proof_force_close_resolved_with_fee_progress_only_syncs_before_payout_on_prod
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+fn proof_force_close_resolved_rechecks_terminal_counters_despite_ready_flag_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(1, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.set_pnl(0, 10).unwrap();
+    engine.set_pnl(1, -5).unwrap();
+    engine.resolved_payout_ready = 1;
+    engine.resolved_payout_h_num = engine.pnl_pos_tot;
+    engine.resolved_payout_h_den = engine.pnl_pos_tot;
+
+    assert_eq!(engine.neg_pnl_account_count, 1);
+    assert!(!engine.is_terminal_ready());
+    let vault_before = engine.vault.get();
+    let capital_before = engine.accounts[0].capital.get();
+    let pnl_before = engine.accounts[0].pnl;
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.force_close_resolved_with_fee_not_atomic(0, 0);
+
+    assert_eq!(result, Ok(ResolvedCloseResult::ProgressOnly));
+    assert!(engine.is_used(0));
+    assert_eq!(engine.accounts[0].capital.get(), capital_before);
+    assert_eq!(engine.accounts[0].pnl, pnl_before);
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.neg_pnl_account_count, 1);
+    assert!(!engine.is_terminal_ready());
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Ok(ResolvedCloseResult::ProgressOnly)
+            && engine.resolved_payout_ready == 1
+            && engine.neg_pnl_account_count == 1
+            && engine.is_used(0),
+        "fee-aware resolved close rechecks terminal counters before honoring payout-ready state"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
