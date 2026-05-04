@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`410` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`411` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -35,6 +35,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_on_prod_code` | 52.03s | PASS | Dispatcher routes global counter overflow through public P-last recovery without using caller raw target or moving vault, capital, or insurance funds. |
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_resolved_progress_only_makes_account_fee_current_on_prod_code` | 25.13s | PASS | Dispatcher resolved ProgressOnly path syncs the touched account to resolved_slot before returning progress without terminal payout/free. |
+| `proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code` | 24.18s | PASS | Dispatcher resolved branch ignores irrelevant account hints, closes through the resolved cursor, strictly reduces public progress rank, and does not materialize the hinted slot. |
 | `proof_force_close_resolved_with_fee_progress_only_syncs_before_payout_on_prod_code` | 21.96s | PASS | Production fee-aware resolved close syncs and charges fees before returning ProgressOnly, leaving the positive account open and unpaid while terminal readiness is blocked. |
 | `proof_force_close_resolved_rechecks_terminal_counters_despite_ready_flag_on_prod_code` | 17.99s | PASS | Production fee-aware resolved close rechecks terminal counters before honoring an already-set payout-ready flag, leaving positive winners unpaid while blockers remain. |
 | `proof_reconcile_resolved_settles_account_b_stale_position_on_prod_code` | 47.25s | PASS | Production resolved reconciliation settles a B-stale account into a zero-position closeable shape without moving vault or insurance funds. |

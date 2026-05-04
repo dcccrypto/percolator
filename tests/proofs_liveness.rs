@@ -1500,6 +1500,71 @@ fn proof_permissionless_progress_resolved_progress_only_makes_account_fee_curren
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+fn proof_permissionless_progress_resolved_mode_ignores_account_hint_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.rr_cursor_position = 0;
+
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let before = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: Some(3),
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+        resolved_scan_limit: 4,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::ResolvedClose(
+            ResolvedCloseResult::Closed(100)
+        ))
+    );
+    assert!(!engine.is_used(0));
+    assert!(!engine.is_used(3));
+    assert_eq!(engine.vault.get(), vault_before - 100);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert!(engine.check_conservation());
+    let after = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .unwrap();
+    assert!(after.strictly_reduces_from(&before));
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::ResolvedClose(
+                ResolvedCloseResult::Closed(100)
+            ))
+            && !engine.is_used(0)
+            && !engine.is_used(3)
+            && after.strictly_reduces_from(&before),
+        "resolved public dispatcher ignores account hints and still closes through the resolved cursor"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
 fn proof_force_close_resolved_with_fee_progress_only_syncs_before_payout_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
