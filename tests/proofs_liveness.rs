@@ -1034,6 +1034,63 @@ fn proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_pro
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+fn proof_permissionless_progress_resolved_progress_only_makes_account_fee_current_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.deposit_not_atomic(0, 100, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(1, 100, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.set_pnl(0, 10).unwrap();
+    engine.set_pnl(1, -5).unwrap();
+    engine.accounts[0].last_fee_slot = DEFAULT_SLOT - 1;
+    engine.rr_cursor_position = 0;
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: DEFAULT_ORACLE,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 0,
+        rr_scan_limit: 0,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 1,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::ResolvedClose(
+            ResolvedCloseResult::ProgressOnly
+        ))
+    );
+    assert!(engine.is_used(0));
+    assert_eq!(engine.accounts[0].last_fee_slot, engine.resolved_slot);
+    assert_eq!(engine.accounts[0].pnl, 10);
+    assert_eq!(engine.neg_pnl_account_count, 1);
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::ResolvedClose(
+                ResolvedCloseResult::ProgressOnly
+            ))
+            && engine.accounts[0].last_fee_slot == engine.resolved_slot,
+        "production dispatcher resolved ProgressOnly path makes touched account fee-current"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
 fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
     let mut engine =
         RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
