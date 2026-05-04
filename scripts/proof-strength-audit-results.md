@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`394` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`395` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -31,6 +31,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_active_close_recovery_records_residual_before_resolve_on_prod_code` | 8.28s | PASS | Active-close recovery records residual as non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_explicit_loss_recovery_resolves_at_p_last_without_minting_claims_on_prod_code` | 15.51s | PASS | Explicit unallocated-loss recovery resolves at P-last and preserves explicit non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_below_floor_recovery_rejects_when_bounded_step_can_progress_on_prod_code` | 7.51s | PASS | Below-progress-floor P-last recovery fails closed without moving vault, capital, or insurance funds while bounded catchup can still make a price step. |
+| `proof_blocked_segment_recovery_rejects_when_bounded_accrual_can_progress_on_prod_code` | 351.55s | PASS | Blocked-segment P-last recovery fails closed without moving vault, capital, or insurance funds while the production accrual planner can still advance a bounded segment. |
 | `proof_insurance_reward_credit_fails_closed_under_reconciliation_on_prod_code` | 33.08s | PASS | Insurance-funded account credit fails closed under h-max/loss-stale reconciliation and preserves accounting otherwise. |
 | `proof_adl_pipeline_books_b_and_schedules_resets_on_prod_code` | 9.53s | PASS | Replaces stale K-residual ADL pipeline proof; production ADL books bankruptcy residual through B and schedules both side resets. |
 | `proof_adl_b_loss_booking_bounded_by_rounded_settlement_effect` | 65.79s | PASS | Replaces the stale ADL K-loss timeout with production B-index residual booking and proves represented settlement loss is bounded by the deficit. |
