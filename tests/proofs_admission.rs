@@ -1766,6 +1766,57 @@ fn v19_speculative_hmax_does_not_mask_prior_positive_pnl_use_on_prod_code() {
 #[kani::proof]
 #[kani::unwind(120)]
 #[kani::solver(cadical)]
+fn v19_phase1_positive_pnl_use_forces_later_phase2_bankruptcy_fail_closed_on_prod_code() {
+    // Production helper proof for the full-keeper ordering edge. Phase 1 uses
+    // the real candidate runner and marks ordinary positive-PnL usability.
+    // A later Phase 2 live touch may enable the speculative h-max guard, but
+    // that guard must not mask the prior ordinary-lane positive-PnL mutation.
+    let mut engine =
+        RiskEngine::new_with_market(same_instruction_bankruptcy_params(), 1, 1_000_000);
+    engine.deposit_not_atomic(0, 1, 1).unwrap();
+    engine.deposit_not_atomic(1, 1, 1).unwrap();
+    engine.vault = U128::new(engine.vault.get() + 10);
+
+    engine.accounts[0].pnl = 10;
+    engine.accounts[0].reserved_pnl = 10;
+    engine.accounts[0].sched_present = 1;
+    engine.accounts[0].sched_remaining_q = 10;
+    engine.accounts[0].sched_anchor_q = 10;
+    engine.accounts[0].sched_start_slot = 0;
+    engine.accounts[0].sched_horizon = 1;
+    engine.accounts[0].sched_release_q = 0;
+    engine.pnl_pos_tot = 10;
+
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_short_q = 1;
+    engine.oi_eff_long_q = 1;
+    engine.adl_coeff_short = -(2 * ADL_ONE as i128 * POS_SCALE as i128);
+
+    let mut ctx = InstructionContext::new_with_admission(1, 10);
+    let candidates = [(0u16, None)];
+    let phase1 =
+        engine.run_keeper_phase1_candidates(&mut ctx, 1, 1_000_000, &candidates, 1, 1, false);
+    assert_eq!(phase1, Ok((0, true)));
+    assert!(ctx.positive_pnl_usability_mutated);
+    assert_eq!(engine.accounts[0].reserved_pnl, 0);
+    assert_eq!(engine.pnl_matured_pos_tot, 10);
+
+    ctx.speculative_hmax_guard_active = true;
+    let loser_touch = engine.touch_account_live_local(1, &mut ctx);
+
+    assert_eq!(loser_touch, Err(RiskError::Undercollateralized));
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    kani::cover!(
+        phase1 == Ok((0, true))
+            && ctx.positive_pnl_usability_mutated
+            && loser_touch == Err(RiskError::Undercollateralized),
+        "production phase1 positive-PnL use makes later phase2 bankruptcy fail closed"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
 fn v19_phase2_replay_latent_bankruptcy_pauses_winner_release_on_prod_code() {
     // Production touch proof for cursor liveness: the Phase 2 replay sequence
     // ordered winner -> latent bankrupt loser makes progress through
