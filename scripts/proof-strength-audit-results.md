@@ -26,6 +26,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_decreases_active_close_rank_on_prod_code` | 36.22s | PASS | Dispatcher active-close branch reduces residual rank before ordinary crank. |
 | `proof_permissionless_progress_dispatcher_reduces_live_catchup_rank_on_prod_code` | 70.65s | PASS | Dispatcher ordinary-crank branch strictly reduces the public progress rank. |
 | `proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_code` | 23.58s | PASS | Dispatcher routes exhausted B-index headroom through public recovery. |
+| `proof_permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_on_prod_code` | 52.03s | PASS | Dispatcher routes global counter overflow through public P-last recovery without using caller raw target or moving vault, capital, or insurance funds. |
 | `proof_permissionless_progress_dispatcher_reduces_resolved_blocker_rank_on_prod_code` | 21.82s | PASS | Dispatcher resolved-cursor branch strictly reduces the public progress rank. |
 | `proof_active_close_recovery_records_residual_before_resolve_on_prod_code` | 8.28s | PASS | Active-close recovery records residual as non-claim loss without minting vault, capital, or insurance funds. |
 | `proof_explicit_loss_recovery_resolves_at_p_last_without_minting_claims_on_prod_code` | 15.51s | PASS | Explicit unallocated-loss recovery resolves at P-last and preserves explicit non-claim loss without minting vault, capital, or insurance funds. |

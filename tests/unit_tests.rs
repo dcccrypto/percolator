@@ -10262,6 +10262,53 @@ fn counter_or_epoch_overflow_recovery_resolves_at_p_last() {
 }
 
 #[test]
+fn permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_at_p_last() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.sweep_generation = u64::MAX;
+
+    let r = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: 1,
+        oracle_price: 1000,
+        authenticated_raw_target_price: 2500,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 10,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        r,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(
+        engine.resolved_price, 1000,
+        "dispatcher recovery must settle at engine P-last, not caller raw target"
+    );
+    assert_eq!(engine.resolved_live_price, 1000);
+}
+
+#[test]
 fn side_epoch_overflow_recovery_resolves_at_p_last_from_canonical_epoch_state() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     mat_regression_account(&mut engine, 0, 100_000, 0);

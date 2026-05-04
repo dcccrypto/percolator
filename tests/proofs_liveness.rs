@@ -892,6 +892,67 @@ fn proof_permissionless_progress_dispatcher_recovers_b_headroom_blocker_on_prod_
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_recovers_counter_or_epoch_overflow_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.sweep_generation = u64::MAX;
+
+    let raw_target: u16 = kani::any();
+    kani::assume(raw_target as u64 != DEFAULT_ORACLE);
+    kani::assume(raw_target != 0);
+    let raw_target = raw_target as u64;
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot: DEFAULT_SLOT + 1,
+        oracle_price: DEFAULT_ORACLE,
+        authenticated_raw_target_price: raw_target,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_price, DEFAULT_ORACLE);
+    assert_eq!(engine.resolved_live_price, DEFAULT_ORACLE);
+    assert_ne!(
+        engine.resolved_price, raw_target,
+        "counter/epoch recovery must ignore caller raw target and settle at P-last"
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::Recovered(
+                RecoveryReason::CounterOrEpochOverflowDeclaredRecovery
+            ))
+            && engine.resolved_price != raw_target
+            && engine.vault.get() == vault_before,
+        "production dispatcher routes global counter overflow to P-last recovery"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_permissionless_account_b_progress_reduces_hinted_account_b_rank_on_prod_code() {
