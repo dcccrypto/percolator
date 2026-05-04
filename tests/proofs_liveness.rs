@@ -971,6 +971,40 @@ fn proof_live_touch_decreases_account_b_rank_on_prod_code() {
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_resolved_terminal_close_rejects_account_b_stale_position_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(idx as usize, -1).unwrap();
+    engine.b_short_num = 3 * SOCIAL_LOSS_DEN;
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+
+    let before = engine.permissionless_account_progress_rank(idx).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+    let basis_before = engine.accounts[idx as usize].position_basis_q;
+    let capital_before = engine.accounts[idx as usize].capital.get();
+    let result = engine.close_resolved_terminal_not_atomic(idx);
+
+    assert_eq!(result, Err(RiskError::Undercollateralized));
+    assert!(engine.is_used(idx as usize));
+    assert_eq!(engine.accounts[idx as usize].position_basis_q, basis_before);
+    assert_eq!(engine.accounts[idx as usize].capital.get(), capital_before);
+    kani::cover!(
+        result == Err(RiskError::Undercollateralized)
+            && before.account_b_remaining_num > 0
+            && engine.is_used(idx as usize),
+        "production terminal close rejects a B-stale resolved account before free/payout"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_resolved_cursor_missing_slots_advance_on_prod_code() {
