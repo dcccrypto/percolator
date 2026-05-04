@@ -246,70 +246,57 @@ fn t11_49_pure_pnl_bankruptcy_path() {
 // ============================================================================
 
 #[kani::proof]
+#[kani::unwind(64)]
 #[kani::solver(cadical)]
-fn t11_53_keeper_crank_quiesces_after_pending_reset() {
-    let mut engine = RiskEngine::new(zero_fee_params());
+fn t11_53_keeper_phase1_stops_after_pending_reset_on_prod_code() {
+    // Spec §9.7: once Phase 1 has an end-of-instruction reset pending, the
+    // candidate loop must stop before processing later candidates. This targets
+    // the private production helper used by keeper_crank_with_request_not_atomic
+    // instead of a model copy of the loop.
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
 
-    engine.last_oracle_price = 100;
-    engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.adl_epoch_long = 0;
-    engine.adl_epoch_short = 0;
+    let later = 2usize;
 
-    let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    let c = add_user_test(&mut engine, 0).unwrap();
+    engine.materialize_at(later as u16, DEFAULT_SLOT).unwrap();
+    engine.set_capital(later, 5).unwrap();
+    engine.vault = U128::new(engine.c_tot.get());
+    engine.set_pnl(later, -3).unwrap();
 
-    // a: long POS_SCALE (entire long side OI), tiny capital → deeply underwater
-    engine.deposit_not_atomic(a, 1, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
+    let later_cap_before = engine.accounts[later].capital.get();
+    let later_pnl_before = engine.accounts[later].pnl;
+    let candidates = [(later as u16, Some(LiquidationPolicy::FullClose))];
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    ctx.pending_reset_long = true;
 
-    // b: short POS_SCALE, well-funded
-    engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = -(POS_SCALE as i128);
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-
-    // c: NO position, just capital (should NOT be touched after pending reset)
-    engine.deposit_not_atomic(c, 10_000_000, 0).unwrap();
-
-    // BALANCED OI: 1 long (a) = PS, 1 short (b) = PS
-    engine.stored_pos_count_long = 1;
-    engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
-
-    // Set K_long very negative → account a is deeply underwater
-    engine.adl_coeff_long = -((ADL_ONE as i128) * 1000);
-
-    let c_cap_before = engine.accounts[c as usize].capital.get();
-    let c_pnl_before = engine.accounts[c as usize].pnl;
-
-    let result = engine.keeper_crank_not_atomic(
+    let result = engine.run_keeper_phase1_candidates(
+        &mut ctx,
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        &candidates,
         1,
-        100,
-        &[(a, Some(LiquidationPolicy::FullClose))],
         1,
-        0i128,
-        0,
-        100,
-        None,
-        0,
+        false,
     );
+
     assert!(result.is_ok());
-
+    let (num_liquidations, protective_progress) = result.unwrap();
+    assert!(num_liquidations == 0);
+    assert!(!protective_progress);
     assert!(
-        engine.accounts[c as usize].capital.get() == c_cap_before,
-        "c's capital must not change — crank must quiesce after pending reset"
+        engine.accounts[later].capital.get() == later_cap_before,
+        "later candidate capital must not change after pending reset"
     );
     assert!(
-        engine.accounts[c as usize].pnl == c_pnl_before,
-        "c's PnL must not change — crank must quiesce after pending reset"
+        engine.accounts[later].pnl == later_pnl_before,
+        "later candidate PnL must not change after pending reset"
+    );
+    assert!(ctx.pending_reset_long);
+    kani::cover!(
+        engine.accounts[later].pnl == later_pnl_before
+            && num_liquidations == 0
+            && !protective_progress,
+        "keeper Phase 1 stops after pending reset before mutating later candidate"
     );
 }
 

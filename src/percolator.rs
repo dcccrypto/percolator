@@ -8561,6 +8561,75 @@ impl RiskEngine {
     }
     }
 
+    test_visible! {
+    fn run_keeper_phase1_candidates(
+        &mut self,
+        ctx: &mut InstructionContext,
+        now_slot: u64,
+        oracle_price: u64,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        max_candidate_inspections: u16,
+        loss_stale_after_accrual: bool,
+    ) -> Result<(u32, bool)> {
+        let mut inspected: u16 = 0;
+        let mut attempts: u16 = 0;
+        let mut num_liquidations: u32 = 0;
+        let mut protective_progress = false;
+
+        for &(candidate_idx, ref hint) in ordered_candidates {
+            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
+                break;
+            }
+            if ctx.pending_reset_long || ctx.pending_reset_short {
+                break;
+            }
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
+                continue;
+            }
+            if candidate_idx as u64 >= self.params.max_accounts {
+                continue;
+            }
+
+            attempts = attempts.checked_add(1).ok_or(RiskError::Overflow)?;
+            let cidx = candidate_idx as usize;
+
+            self.touch_account_live_local(cidx, ctx)?;
+            protective_progress = true;
+
+            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
+                let eff = self.effective_pos_q_checked(cidx, false)?;
+                if eff != 0 {
+                    if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
+                        if let Some(policy) =
+                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
+                        {
+                            match self.liquidate_at_oracle_internal(
+                                candidate_idx,
+                                now_slot,
+                                oracle_price,
+                                policy,
+                                ctx,
+                            ) {
+                                Ok(true) => {
+                                    num_liquidations = num_liquidations
+                                        .checked_add(1)
+                                        .ok_or(RiskError::Overflow)?;
+                                }
+                                Ok(false) => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((num_liquidations, protective_progress))
+    }
+    }
+
     fn try_permissionless_global_recovery(
         &mut self,
         reason: RecoveryReason,
@@ -8854,7 +8923,6 @@ impl RiskEngine {
         let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
 
         // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
-        let mut attempts: u16 = 0;
         let max_candidate_inspections = core::cmp::min(
             MAX_TOUCHED_PER_INSTRUCTION as u16,
             max_candidate_inspections,
@@ -8865,56 +8933,15 @@ impl RiskEngine {
             max_revalidations,
             max_candidate_inspections,
         )?;
-        let mut inspected: u16 = 0;
-        let mut num_liquidations: u32 = 0;
-        let mut protective_progress = false;
-
-        for &(candidate_idx, ref hint) in ordered_candidates {
-            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
-                break;
-            }
-            if ctx.pending_reset_long || ctx.pending_reset_short {
-                break;
-            }
-            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
-                continue;
-            }
-            if candidate_idx as u64 >= self.params.max_accounts {
-                continue;
-            }
-
-            attempts += 1;
-            let cidx = candidate_idx as usize;
-
-            self.touch_account_live_local(cidx, &mut ctx)?;
-            protective_progress = true;
-
-            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
-                let eff = self.effective_pos_q_checked(cidx, false)?;
-                if eff != 0 {
-                    if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                        if let Some(policy) =
-                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
-                        {
-                            match self.liquidate_at_oracle_internal(
-                                candidate_idx,
-                                now_slot,
-                                oracle_price,
-                                policy,
-                                &mut ctx,
-                            ) {
-                                Ok(true) => {
-                                    num_liquidations += 1;
-                                }
-                                Ok(false) => {}
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let (num_liquidations, mut protective_progress) = self.run_keeper_phase1_candidates(
+            &mut ctx,
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+            loss_stale_after_accrual,
+        )?;
 
         // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
         // Runs unconditionally — including when Phase 1 exited early on a

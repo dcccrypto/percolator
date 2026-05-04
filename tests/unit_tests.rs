@@ -8789,6 +8789,49 @@ fn b_settlement_can_trigger_bankruptcy_hmax() {
 }
 
 #[test]
+fn keeper_phase1_stops_after_liquidation_schedules_pending_reset() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1_000_000);
+    mat_regression_account(&mut engine, 0, 1, 0);
+    mat_regression_account(&mut engine, 1, 100, 0);
+    mat_regression_account(&mut engine, 2, 5, 0);
+
+    engine.attach_effective_position(0, 1).unwrap();
+    engine.attach_effective_position(1, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+    engine.set_pnl(0, -2).unwrap();
+    engine.set_pnl(2, -3).unwrap();
+
+    let later_cap_before = engine.accounts[2].capital.get();
+    let later_pnl_before = engine.accounts[2].pnl;
+    let candidates = [
+        (0u16, Some(LiquidationPolicy::FullClose)),
+        (2u16, Some(LiquidationPolicy::FullClose)),
+    ];
+
+    let outcome = engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot: 0,
+            oracle_price: 1_000_000,
+            ordered_candidates: &candidates,
+            max_revalidations: 2,
+            max_candidate_inspections: 2,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 10,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 0,
+            rr_scan_limit: 0,
+        })
+        .unwrap();
+
+    assert_eq!(outcome.num_liquidations, 1);
+    assert_eq!(engine.accounts[2].capital.get(), later_cap_before);
+    assert_eq!(engine.accounts[2].pnl, later_pnl_before);
+    assert_eq!(engine.side_mode_short, SideMode::ResetPending);
+}
+
+#[test]
 fn enqueue_adl_sets_both_reset_flags_on_opp_oi_post_zero_symmetric() {
     // Valid bilateral symmetry. Setup:
     //   liq_side = Short, OI_eff_short = POS_SCALE  (gets decremented)

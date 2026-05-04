@@ -46,6 +46,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_keeper_crank_accepts_negative_boundary_funding_rate_on_prod_code` | 14s | PASS | Production keeper crank accepts the configured negative funding-rate boundary and advances the market slot. |
 | `proof_property_56_raw_initial_margin_predicate_rejects_min_floor_shortfall_on_prod_code` | 2.78s | PASS | Production raw initial-margin predicate rejects a nonzero-position floor shortfall. |
 | `proof_property_56_trade_margin_gate_rejects_raw_im_shortfall_on_prod_code` | 2.50s | PASS | Production post-trade margin gate rejects a risk-increasing raw IM floor shortfall. |
+| `t11_53_keeper_phase1_stops_after_pending_reset_on_prod_code` | 4.14s | PASS | Production keeper Phase 1 candidate helper stops on a pending reset before mutating later candidates. |
 
 The old `proof_adl_pipeline_trade_liquidate_reopen` harness is no longer part
 of the current tree. Its 2026-05-01 failure below is historical: it asserted the
@@ -85,6 +86,12 @@ The old `proof_property_56_exact_raw_im_approval` timeout is no longer part of
 the current tree. It was split into two finishing production-code proofs: one
 for the exact raw initial-margin predicate and one for the post-trade margin
 gate. Both require the rejection path to be reachable through `kani::cover!`.
+
+The old `t11_53_keeper_crank_quiesces_after_pending_reset` timeout is no longer
+part of the current tree. Its broad full-crank harness was split into a
+finishing production-code proof over the keeper Phase 1 helper used by the real
+keeper entrypoint, plus the deterministic full-keeper regression
+`keeper_phase1_stops_after_liquidation_schedules_pending_reset`.
 
 These targeted passes do **not** replace a full proof-strength certification.
 The next authoritative update should rerun `scripts/run_kani_full_audit.sh`
