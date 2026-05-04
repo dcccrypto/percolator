@@ -1345,6 +1345,56 @@ fn proof_resolved_terminal_close_rejects_account_b_stale_position_on_prod_code()
 }
 
 #[kani::proof]
+#[kani::unwind(120)]
+#[kani::solver(cadical)]
+fn proof_reconcile_resolved_settles_account_b_stale_position_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let short = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(short, 100, DEFAULT_SLOT).unwrap();
+    engine
+        .attach_effective_position(short as usize, -1)
+        .unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.oi_eff_short_q = 0;
+    engine.oi_eff_long_q = 0;
+    engine.side_mode_short = SideMode::ResetPending;
+    engine.adl_epoch_short = 1;
+    engine.stale_account_count_short = 1;
+    engine.b_epoch_start_short_num = 3 * SOCIAL_LOSS_DEN;
+
+    let capital_before = engine.accounts[short as usize].capital.get();
+    let vault_before = engine.vault.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let before = engine.permissionless_account_progress_rank(short).unwrap();
+    assert!(before.account_b_remaining_num > 0);
+
+    let result = engine.reconcile_resolved_not_atomic(short);
+
+    assert_eq!(result, Ok(()));
+    assert!(engine.is_used(short as usize));
+    assert_eq!(engine.stale_account_count_short, 0);
+    assert_eq!(engine.accounts[short as usize].position_basis_q, 0);
+    assert_eq!(
+        engine.accounts[short as usize].capital.get(),
+        capital_before - 3
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert!(engine.check_conservation());
+    kani::cover!(
+        result == Ok(())
+            && before.account_b_remaining_num > 0
+            && engine.accounts[short as usize].position_basis_q == 0,
+        "resolved reconcile settles a B-stale account before terminal close"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_resolved_cursor_missing_slots_advance_on_prod_code() {
