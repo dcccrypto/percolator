@@ -516,11 +516,8 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
     engine.adl_coeff_long = 0;
     engine.f_long_num = 0;
 
-    engine.set_position_basis_q(a as usize, 1).unwrap();
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0;
-    engine.accounts[a as usize].f_snap = 0;
-    engine.accounts[a as usize].adl_epoch_snap = engine.adl_epoch_long;
+    let epoch_snap = engine.adl_epoch_long;
+    install_position_test(&mut engine, a as usize, 1, ADL_ONE, 0, epoch_snap).unwrap();
 
     let mut ctx = InstructionContext::new_with_admission(0, 100);
     engine

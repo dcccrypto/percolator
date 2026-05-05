@@ -1455,12 +1455,9 @@ fn v19_floor_to_zero_cleanup_preserves_oi_and_adds_potential_dust() {
     engine.adl_mult_long = 1;
     engine.oi_eff_long_q = 1;
     engine.oi_eff_short_q = 1;
-    engine.stored_pos_count_long = 1;
-    engine.accounts[idx as usize].position_basis_q = 1;
-    engine.accounts[idx as usize].adl_a_basis = 2;
-    engine.accounts[idx as usize].adl_epoch_snap = engine.adl_epoch_long;
-    engine.accounts[idx as usize].adl_k_snap = engine.adl_coeff_long;
-    engine.accounts[idx as usize].f_snap = engine.f_long_num;
+    let k_snap = engine.adl_coeff_long;
+    let epoch_snap = engine.adl_epoch_long;
+    install_position_test(&mut engine, idx as usize, 1, 2, k_snap, epoch_snap).unwrap();
 
     let oi_before = engine.oi_eff_long_q;
     let stored_before = engine.stored_pos_count_long;

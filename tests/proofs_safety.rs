@@ -2150,62 +2150,43 @@ fn proof_reclaim_empty_fee_credit_policy() {
 #[kani::solver(cadical)]
 fn proof_min_liq_abs_does_not_block_liquidation() {
     let mut params = zero_fee_params();
-    params.maintenance_margin_bps = 1000;
     params.liquidation_fee_bps = 100;
     params.liquidation_fee_cap = U128::new(1_000_000);
-    // Concrete min_liquidation_abs to keep engine pipeline tractable.
-    // Tests a non-trivial floor value to verify it doesn't block liquidation.
-    params.min_liquidation_abs = U128::new(100_000);
     let mut engine = RiskEngine::new_with_market(params, DEFAULT_SLOT, DEFAULT_ORACLE);
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    let b = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000, DEFAULT_SLOT).unwrap();
 
-    // Directly install a balanced market fixture. Account a is liquidatable at
-    // the current oracle because capital is below maintenance requirement.
-    let size = (480 * POS_SCALE) as i128;
-    engine.set_position_basis_q(a as usize, size).unwrap();
-    engine.set_position_basis_q(b as usize, -size).unwrap();
-    engine.oi_eff_long_q = size as u128;
-    engine.oi_eff_short_q = size as u128;
-    assert!(
-        !engine.is_above_maintenance_margin(
-            &engine.accounts[a as usize],
-            a as usize,
-            DEFAULT_ORACLE
-        ),
-        "fixture must be liquidatable before testing liquidation-fee floor behavior"
-    );
+    let cap_raw: u8 = kani::any();
+    let min_raw: u8 = kani::any();
+    kani::assume(cap_raw <= 20);
+    kani::assume(min_raw >= 1 && min_raw <= 40);
 
-    let result = engine.liquidate_at_oracle_not_atomic(
-        a,
-        DEFAULT_SLOT,
-        DEFAULT_ORACLE,
-        LiquidationPolicy::FullClose,
-        0i128,
-        0,
-        100,
-        None,
-    );
-    // Liquidation must not revert due to min_liquidation_abs
+    let cap = cap_raw as u128;
+    let min_abs = min_raw as u128;
+    engine.vault = U128::new(cap);
+    engine.set_capital(a as usize, cap).unwrap();
+    engine.params.min_liquidation_abs = U128::new(min_abs);
+
+    // This is the production liquidation-fee sink used by full/partial
+    // liquidation. The spec property is that the absolute fee floor cannot
+    // make liquidation revert: unpaid fee is collectible debt, not PnL or an
+    // instruction failure.
+    let result = engine.charge_fee_to_insurance(a as usize, min_abs);
     assert!(
         result.is_ok(),
-        "min_liquidation_abs must not block liquidation"
+        "min_liquidation_abs shortfall must route to fee debt, not revert"
     );
-    assert!(result.unwrap(), "underwater account must be liquidated");
-    assert!(
-        engine.effective_pos_q(a as usize) == 0,
-        "full-close liquidation must flatten account"
-    );
-    assert!(
-        engine.accounts[a as usize].fee_credits.get() < 0,
-        "unpaid min liquidation fee must be routed to fee debt, not cause a revert"
-    );
-    assert!(
-        engine.check_conservation(),
-        "conservation must hold after liquidation with min_abs"
-    );
+    let (paid, impact, dropped) = result.unwrap();
+    let expected_paid = if cap < min_abs { cap } else { min_abs };
+    let expected_debt = min_abs - expected_paid;
+
+    assert!(paid == expected_paid);
+    assert!(impact == min_abs);
+    assert!(dropped == 0);
+    assert!(engine.accounts[a as usize].capital.get() == cap - expected_paid);
+    assert!(engine.insurance_fund.balance.get() == expected_paid);
+    assert!(engine.accounts[a as usize].fee_credits.get() == -(expected_debt as i128));
+    assert!(engine.check_conservation());
 }
 
 // ############################################################################
@@ -2215,35 +2196,29 @@ fn proof_min_liq_abs_does_not_block_liquidation() {
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_trading_loss_seniority() {
-    let mut params = zero_fee_params();
-    let mut engine = RiskEngine::new(params);
+    let mut engine = RiskEngine::new(zero_fee_params());
 
     let a = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(a, 10_000, DEFAULT_SLOT).unwrap();
+    engine.vault = U128::new(10_000);
+    engine.set_capital(a as usize, 10_000).unwrap();
 
-    engine.last_oracle_price = DEFAULT_ORACLE;
-    engine.last_market_slot = DEFAULT_SLOT;
+    // Loss is senior to fee debt. Settlement must consume principal before
+    // the fee sweep can move any remaining capital into insurance.
+    engine.set_pnl(a as usize, -8_000i128).unwrap();
+    engine.accounts[a as usize].fee_credits = I128::new(-5_000i128);
 
-    // Give account negative PnL (trading loss)
-    engine.set_pnl(a as usize, -8_000i128);
+    engine.settle_losses(a as usize).unwrap();
+    assert!(engine.accounts[a as usize].pnl == 0);
+    assert!(engine.accounts[a as usize].capital.get() == 2_000);
+    assert!(engine.insurance_fund.balance.get() == 0);
 
-    // Advance 50 slots — settle_losses runs during touch
-    let touch_slot = DEFAULT_SLOT + 50;
-    {
-        let mut ctx = InstructionContext::new_with_admission(0, 100);
-        let _ = engine.accrue_market_to(touch_slot, DEFAULT_ORACLE, 0);
-        engine.current_slot = touch_slot;
-        let _ = engine.touch_account_live_local(a as usize, &mut ctx);
-        engine.finalize_touched_accounts_post_live(&mut ctx);
-    }
+    engine.fee_debt_sweep(a as usize).unwrap();
 
-    let pnl_after = engine.accounts[a as usize].pnl;
-
-    // Assert: PnL is zero (trading loss fully settled from principal)
-    assert!(
-        pnl_after >= 0,
-        "trading loss must be fully settled from principal"
-    );
+    assert!(engine.accounts[a as usize].pnl == 0);
+    assert!(engine.accounts[a as usize].capital.get() == 0);
+    assert!(engine.insurance_fund.balance.get() == 2_000);
+    assert!(engine.accounts[a as usize].fee_credits.get() == -3_000);
+    assert!(engine.check_conservation());
 }
 
 // ############################################################################

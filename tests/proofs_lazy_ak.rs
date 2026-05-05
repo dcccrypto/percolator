@@ -303,14 +303,10 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
 
     let pos_mul: u8 = kani::any();
     kani::assume(pos_mul > 0);
-    let pos = (POS_SCALE * (pos_mul as u128)) as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
     let k_snap_val: i8 = kani::any();
     let k_snap = k_snap_val as i128;
-    engine.accounts[idx as usize].adl_k_snap = k_snap;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
+    let pos = (POS_SCALE * (pos_mul as u128)) as i128;
+    install_position_test(&mut engine, idx as usize, pos, ADL_ONE, k_snap, 0).unwrap();
 
     // Use a DIFFERENT k_epoch_start so k_diff is non-trivial (not always 0)
     let k_start_val: i8 = kani::any();
@@ -320,6 +316,7 @@ fn t3_14_epoch_mismatch_forces_terminal_close() {
     engine.adl_epoch_start_k_long = k_epoch_start;
     engine.side_mode_long = SideMode::ResetPending;
     engine.stale_account_count_long = 1;
+    engine.loss_weight_sum_long = 0;
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 
@@ -353,15 +350,10 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
 
-    let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-
     let k_snap_val: i8 = kani::any();
     let k_snap = k_snap_val as i128;
-    engine.accounts[idx as usize].adl_k_snap = k_snap;
+    let pos = POS_SCALE as i128;
+    install_position_test(&mut engine, idx as usize, pos, ADL_ONE, k_snap, 0).unwrap();
 
     let k_diff_val: i8 = kani::any();
     kani::assume(k_diff_val != 0);
@@ -374,6 +366,7 @@ fn t3_14b_epoch_mismatch_with_nonzero_k_diff() {
     engine.adl_epoch_start_k_long = k_epoch_start;
     engine.side_mode_long = SideMode::ResetPending;
     engine.stale_account_count_long = 1;
+    engine.loss_weight_sum_long = 0;
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 
@@ -591,14 +584,17 @@ fn t6_26_full_drain_reset_regression() {
     kani::assume(k_start_val != k_snap_val);
     let k_epoch_start = k_start_val as i128;
 
-    engine.accounts[idx as usize].position_basis_q = (POS_SCALE * (pos_mul as u128)) as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = k_snap;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-
     // Set adl_coeff_long to k_epoch_start so begin_full_drain_reset captures it
     engine.adl_coeff_long = k_epoch_start;
+    install_position_test(
+        &mut engine,
+        idx as usize,
+        (POS_SCALE * (pos_mul as u128)) as i128,
+        ADL_ONE,
+        k_snap,
+        0,
+    )
+    .unwrap();
 
     engine.oi_eff_long_q = 0u128;
     engine.begin_full_drain_reset(Side::Long);
@@ -654,18 +650,13 @@ fn proof_property_43_k_pair_chronology_correctness() {
         .deposit_not_atomic(idx, 1_000_000, DEFAULT_SLOT)
         .unwrap();
 
-    // Set up a long position with k_snap = 100
     let pos = 10 * POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 100;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
     engine.oi_eff_long_q = 10 * POS_SCALE;
     engine.oi_eff_short_q = 10 * POS_SCALE;
 
     // Set k_side > k_snap (price moved up => long should profit)
     engine.adl_coeff_long = 500;
+    install_position_test(&mut engine, idx as usize, pos, ADL_ONE, 100, 0).unwrap();
 
     let pnl_before = engine.accounts[idx as usize].pnl;
 

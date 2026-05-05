@@ -212,6 +212,101 @@ pub fn set_pnl_test(engine: &mut RiskEngine, idx: usize, new_pnl: i128) -> Resul
     }
 }
 
+/// Install a canonical stored position for Kani fixtures that need exact
+/// A/K/epoch snapshots not reachable through `attach_effective_position`.
+///
+/// This is deliberately a test/proof helper: production code must use the
+/// engine attach paths. The helper keeps the B/loss-weight fields canonical so
+/// touched-account shape validation is testing the target behavior, not a
+/// malformed fixture.
+pub fn install_position_test(
+    engine: &mut RiskEngine,
+    idx: usize,
+    basis: i128,
+    a_basis: u128,
+    k_snap: i128,
+    epoch_snap: u64,
+) -> Result<()> {
+    if idx >= MAX_ACCOUNTS || !engine.is_used(idx) || basis == 0 || a_basis == 0 {
+        return Err(RiskError::CorruptState);
+    }
+    if engine.accounts[idx].position_basis_q != 0 {
+        return Err(RiskError::CorruptState);
+    }
+    let side = if basis > 0 { Side::Long } else { Side::Short };
+    let abs_basis = basis.unsigned_abs();
+    let product = abs_basis
+        .checked_mul(SOCIAL_WEIGHT_SCALE)
+        .ok_or(RiskError::Overflow)?;
+    let q = product / a_basis;
+    let r = product % a_basis;
+    let weight = if r == 0 {
+        q
+    } else {
+        q.checked_add(1).ok_or(RiskError::Overflow)?
+    };
+    if weight == 0 || weight > SOCIAL_LOSS_DEN {
+        return Err(RiskError::Overflow);
+    }
+
+    let (epoch_side, b_current, b_epoch_start, f_side) = match side {
+        Side::Long => (
+            engine.adl_epoch_long,
+            engine.b_long_num,
+            engine.b_epoch_start_long_num,
+            engine.f_long_num,
+        ),
+        Side::Short => (
+            engine.adl_epoch_short,
+            engine.b_short_num,
+            engine.b_epoch_start_short_num,
+            engine.f_short_num,
+        ),
+    };
+
+    engine.accounts[idx].position_basis_q = basis;
+    engine.accounts[idx].adl_a_basis = a_basis;
+    engine.accounts[idx].adl_k_snap = k_snap;
+    engine.accounts[idx].f_snap = f_side;
+    engine.accounts[idx].adl_epoch_snap = epoch_snap;
+    engine.accounts[idx].loss_weight = weight;
+    engine.accounts[idx].b_snap = if epoch_snap == epoch_side {
+        b_current
+    } else {
+        b_epoch_start
+    };
+    engine.accounts[idx].b_rem = 0;
+    engine.accounts[idx].b_epoch_snap = epoch_snap;
+
+    match side {
+        Side::Long => {
+            engine.stored_pos_count_long = engine
+                .stored_pos_count_long
+                .checked_add(1)
+                .ok_or(RiskError::Overflow)?;
+            if epoch_snap == engine.adl_epoch_long {
+                engine.loss_weight_sum_long = engine
+                    .loss_weight_sum_long
+                    .checked_add(weight)
+                    .ok_or(RiskError::Overflow)?;
+            }
+        }
+        Side::Short => {
+            engine.stored_pos_count_short = engine
+                .stored_pos_count_short
+                .checked_add(1)
+                .ok_or(RiskError::Overflow)?;
+            if epoch_snap == engine.adl_epoch_short {
+                engine.loss_weight_sum_short = engine
+                    .loss_weight_sum_short
+                    .checked_add(weight)
+                    .ok_or(RiskError::Overflow)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn default_params() -> RiskParams {
     // v12.19.53 envelope: with maint=500, liq=100, max_rate=10_000, max_dt=100:
     //   funding_budget = 10_000 * 100 * 10_000 / 1e9 = 10 bps

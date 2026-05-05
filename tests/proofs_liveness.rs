@@ -350,13 +350,16 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
 
-    // a: the last stale long account — has a position from epoch 0 (stale)
-    engine
-        .set_position_basis_q(a as usize, POS_SCALE as i128)
-        .unwrap();
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0; // mismatches adl_epoch_long=1
+    // a: the last stale long account — has a canonical position from epoch 0.
+    install_position_test(
+        &mut engine,
+        a as usize,
+        POS_SCALE as i128,
+        ADL_ONE,
+        0i128,
+        0,
+    )
+    .unwrap();
 
     // Long side: ResetPending, 1 stale account remaining, OI=0
     engine.side_mode_long = SideMode::ResetPending;
@@ -372,7 +375,7 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     let mut ctx = InstructionContext::new_with_admission(0, 100);
     engine
-        .touch_account_live_local(a as usize, &mut ctx)
+        .settle_side_effects_live(a as usize, &mut ctx)
         .unwrap();
     assert!(
         engine.stale_account_count_long == 0,
@@ -391,9 +394,6 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
         "touch alone must not finalize the reset before end-of-instruction"
     );
 
-    engine
-        .finalize_touched_accounts_post_live(&mut ctx)
-        .unwrap();
     engine.schedule_end_of_instruction_resets(&mut ctx).unwrap();
     engine.finalize_end_of_instruction_resets(&ctx).unwrap();
 

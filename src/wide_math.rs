@@ -1320,6 +1320,11 @@ impl U512 {
             return Some((U256::ZERO, r));
         }
 
+        if self.0[2] == 0 && self.0[3] == 0 {
+            let num = U256::new(self.0[0], self.0[1]);
+            return Some(div_rem_u256(num, den));
+        }
+
         let num_lz = self.leading_zeros();
         let den_lz = den_512.leading_zeros();
 

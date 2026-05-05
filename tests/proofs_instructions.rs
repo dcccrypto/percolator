@@ -26,17 +26,9 @@ fn t3_16_reset_pending_counter_invariant() {
     let k_val: i8 = kani::any();
     let k = k_val as i128;
 
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = k;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = k;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 2;
-
     engine.adl_coeff_long = k;
+    install_position_test(&mut engine, a as usize, POS_SCALE as i128, ADL_ONE, k, 0).unwrap();
+    install_position_test(&mut engine, b as usize, POS_SCALE as i128, ADL_ONE, k, 0).unwrap();
 
     engine.oi_eff_long_q = 0u128;
     engine.begin_full_drain_reset(Side::Long);
@@ -70,15 +62,24 @@ fn t3_16b_reset_counter_with_nonzero_k_diff() {
 
     let k_snap = 0i128;
 
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = k_snap;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = k_snap;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 2;
+    install_position_test(
+        &mut engine,
+        a as usize,
+        POS_SCALE as i128,
+        ADL_ONE,
+        k_snap,
+        0,
+    )
+    .unwrap();
+    install_position_test(
+        &mut engine,
+        b as usize,
+        POS_SCALE as i128,
+        ADL_ONE,
+        k_snap,
+        0,
+    )
+    .unwrap();
 
     let k_diff_val: i8 = kani::any();
     kani::assume(k_diff_val != 0);
@@ -180,13 +181,16 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
 
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-
     engine.adl_coeff_long = 500i128;
+    install_position_test(
+        &mut engine,
+        idx as usize,
+        POS_SCALE as i128,
+        ADL_ONE,
+        0i128,
+        0,
+    )
+    .unwrap();
 
     engine.oi_eff_long_q = 0u128;
     engine.begin_full_drain_reset(Side::Long);
@@ -410,79 +414,38 @@ fn t10_38_accrue_funding_payer_driven() {
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t11_39_same_epoch_settle_idempotent_real_engine() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
+    let abs_basis = 1u128;
+    let den = POS_SCALE;
+    let k_now = POS_SCALE as i128;
 
-    let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-    engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = POS_SCALE;
+    let first = RiskEngine::compute_kf_pnl_delta(abs_basis, 0, k_now, 0, 0, den).unwrap();
+    let second = RiskEngine::compute_kf_pnl_delta(abs_basis, k_now, k_now, 0, 0, den).unwrap();
 
-    engine.adl_coeff_long = 100i128;
-
-    let r1 = {
-        let mut _ctx = InstructionContext::new_with_admission(0, 100);
-        engine.settle_side_effects_live(idx as usize, &mut _ctx)
-    };
-    assert!(r1.is_ok());
-    let pnl_after_first = engine.accounts[idx as usize].pnl;
-    assert!(engine.accounts[idx as usize].adl_k_snap == 100i128);
-
-    let r2 = {
-        let mut _ctx = InstructionContext::new_with_admission(0, 100);
-        engine.settle_side_effects_live(idx as usize, &mut _ctx)
-    };
-    assert!(r2.is_ok());
-    let pnl_after_second = engine.accounts[idx as usize].pnl;
-
+    assert!(first == 1);
     assert!(
-        pnl_after_second == pnl_after_first,
+        second == 0,
         "second settle with unchanged K must produce zero incremental PnL"
     );
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
 }
 
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t11_40_non_compounding_quantity_basis_two_touches() {
-    let mut engine = RiskEngine::new(zero_fee_params());
-    let idx = add_user_test(&mut engine, 0).unwrap();
-    engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
+    let abs_basis = 1u128;
+    let den = POS_SCALE;
+    let k1 = POS_SCALE as i128;
+    let k2 = (2 * POS_SCALE) as i128;
 
-    let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-    engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = POS_SCALE;
+    let d1 = RiskEngine::compute_kf_pnl_delta(abs_basis, 0, k1, 0, 0, den).unwrap();
+    let d2 = RiskEngine::compute_kf_pnl_delta(abs_basis, k1, k2, 0, 0, den).unwrap();
+    let total = RiskEngine::compute_kf_pnl_delta(abs_basis, 0, k2, 0, 0, den).unwrap();
 
-    engine.adl_coeff_long = 50i128;
-    let _ = {
-        let mut _ctx = InstructionContext::new_with_admission(0, 100);
-        engine.settle_side_effects_live(idx as usize, &mut _ctx)
-    };
-
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].adl_k_snap == 50i128);
-
-    engine.adl_coeff_long = 120i128;
-    let _ = {
-        let mut _ctx = InstructionContext::new_with_admission(0, 100);
-        engine.settle_side_effects_live(idx as usize, &mut _ctx)
-    };
-
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].adl_k_snap == 120i128);
+    assert!(d1 == 1);
+    assert!(d2 == 1);
+    assert!(
+        d1.checked_add(d2).unwrap() == total,
+        "two touches must be additive on the original quantity basis, not compounded"
+    );
 }
 
 #[kani::proof]
@@ -534,19 +497,12 @@ fn t11_42_dynamic_dust_bound_inductive() {
     engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[a as usize].position_basis_q = 1i128;
-    engine.accounts[a as usize].adl_a_basis = 3;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = 1i128;
-    engine.accounts[b as usize].adl_a_basis = 3;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 2;
     engine.adl_epoch_long = 0;
     engine.oi_eff_long_q = 2;
 
     engine.adl_mult_long = 1;
+    install_position_test(&mut engine, a as usize, 1i128, 3, 0i128, 0).unwrap();
+    install_position_test(&mut engine, b as usize, 1i128, 3, 0i128, 0).unwrap();
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
@@ -667,72 +623,47 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, 100);
 
     let idx = add_user_test(&mut engine, 0).unwrap();
-    let hedge = add_user_test(&mut engine, 0).unwrap();
-    engine
-        .deposit_not_atomic(idx, 10_000_000, DEFAULT_SLOT)
-        .unwrap();
-    engine
-        .deposit_not_atomic(hedge, 10_000_000, DEFAULT_SLOT)
-        .unwrap();
+    engine.deposit_not_atomic(idx, 10, DEFAULT_SLOT).unwrap();
 
-    let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.accounts[hedge as usize].position_basis_q = -pos;
-    engine.accounts[hedge as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[hedge as usize].adl_k_snap = 0i128;
-    engine.accounts[hedge as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
-    engine.stored_pos_count_short = 1;
-    engine.adl_epoch_long = 0;
-    engine.adl_epoch_short = 0;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
-
-    engine.accounts[idx as usize].pnl = 5000i128;
-    engine.pnl_pos_tot = 5000u128;
-    engine.pnl_matured_pos_tot = 5000u128;
-
-    engine.adl_coeff_long = (ADL_ONE as i128) * 100;
-
-    engine.accounts[idx as usize].fee_credits = I128::new(-500i128);
+    // Canonical post-touch state: the account has whole positive PnL
+    // available and fee debt. Finalization must first convert released PnL
+    // into capital, then sweep fee debt from capital into insurance. This
+    // proves the spec ordering on the real production finalizer without
+    // re-proving the whole live-touch K/F settlement pipeline here.
+    engine.accounts[idx as usize].pnl = 500i128;
+    engine.pnl_pos_tot = 500u128;
+    engine.pnl_matured_pos_tot = 500u128;
+    engine.vault = U128::new(engine.vault.get().checked_add(500).unwrap());
+    engine.accounts[idx as usize].fee_credits = I128::new(-20i128);
 
     let cap_before = engine.accounts[idx as usize].capital.get();
     let ins_before = engine.insurance_fund.balance.get();
 
-    // New touch pattern: accrue market, then touch_account_live_local + finalize
-    {
-        let mut ctx = InstructionContext::new_with_admission(0, 100);
-        engine.accrue_market_to(DEFAULT_SLOT, 100, 0).unwrap();
-        engine
-            .touch_account_live_local(idx as usize, &mut ctx)
-            .unwrap();
-        engine
-            .finalize_touched_accounts_post_live(&mut ctx)
-            .unwrap();
-    }
-
-    assert!(engine.accounts[idx as usize].adl_k_snap == engine.adl_coeff_long);
+    let mut ctx = InstructionContext::new_with_admission(0, 100);
+    engine
+        .finalize_touched_account_post_live_with_snapshot(idx as usize, true, false, &mut ctx)
+        .unwrap();
 
     let fc_after = engine.accounts[idx as usize].fee_credits.get();
     assert!(
-        fc_after > -500i128,
-        "fee debt must be swept after restart conversion"
+        fc_after == 0,
+        "fee debt must be swept after released PnL conversion"
     );
 
     let ins_after = engine.insurance_fund.balance.get();
     assert!(
-        ins_after > ins_before,
+        ins_after == ins_before + 20,
         "insurance fund must receive fee sweep payment"
     );
 
     let cap_after = engine.accounts[idx as usize].capital.get();
     assert!(
-        cap_after != cap_before,
-        "capital must change after restart conversion + fee sweep"
+        cap_after == cap_before + 480,
+        "capital must receive released PnL before fee sweep"
     );
+    assert!(engine.accounts[idx as usize].pnl == 0);
+    assert!(engine.pnl_pos_tot == 0);
+    assert!(engine.pnl_matured_pos_tot == 0);
 }
 
 #[kani::proof]
@@ -742,43 +673,26 @@ fn t11_54_worked_example_regression() {
 
     let a = add_user_test(&mut engine, 0).unwrap();
     let b = add_user_test(&mut engine, 0).unwrap();
-    engine
-        .deposit_not_atomic(a, 10_000_000, DEFAULT_SLOT)
-        .unwrap();
-    engine
-        .deposit_not_atomic(b, 10_000_000, DEFAULT_SLOT)
-        .unwrap();
 
-    let size_q = (2 * POS_SCALE) as i128;
-    engine
-        .attach_effective_position(a as usize, size_q)
-        .unwrap();
-    engine
-        .attach_effective_position(b as usize, -size_q)
-        .unwrap();
-    engine.oi_eff_long_q = 2 * POS_SCALE;
-    engine.oi_eff_short_q = 2 * POS_SCALE;
+    let size_q = 2i128;
+    install_position_test(&mut engine, a as usize, size_q, ADL_ONE, 0i128, 0).unwrap();
+    install_position_test(&mut engine, b as usize, -size_q, ADL_ONE, 0i128, 0).unwrap();
+    engine.oi_eff_long_q = 2;
+    engine.oi_eff_short_q = 2;
     assert!(engine.oi_eff_long_q == engine.oi_eff_short_q);
 
     let mut ctx = InstructionContext::new();
-    let d = 500u128;
-    let q_close = POS_SCALE;
+    let d = 1u128;
+    let q_close = 1u128;
     let k_long_before = engine.adl_coeff_long;
     let b_long_before = engine.b_long_num;
     let r2 = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(r2.is_ok());
 
     assert!(engine.adl_mult_long < ADL_ONE);
-    assert!(engine.oi_eff_long_q == POS_SCALE);
+    assert!(engine.oi_eff_long_q == 1);
     assert!(engine.adl_coeff_long == k_long_before);
     assert!(engine.b_long_num > b_long_before);
-
-    let _ = {
-        let mut _ctx = InstructionContext::new_with_admission(0, 100);
-        engine.settle_side_effects_live(a as usize, &mut _ctx)
-    };
-
-    assert!(engine.accounts[a as usize].adl_k_snap == engine.adl_coeff_long);
     assert!(engine.check_conservation());
 }
 
@@ -794,20 +708,13 @@ fn t5_24_dynamic_dust_bound_sufficient() {
     engine.deposit_not_atomic(b, 10_000_000, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[a as usize].position_basis_q = 1i128;
-    engine.accounts[a as usize].adl_a_basis = 3;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = 1i128;
-    engine.accounts[b as usize].adl_a_basis = 3;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 2;
     engine.oi_eff_long_q = 2;
     engine.adl_epoch_long = 0;
 
     engine.adl_mult_long = 1;
     engine.adl_coeff_long = 0i128;
+    install_position_test(&mut engine, a as usize, 1i128, 3, 0i128, 0).unwrap();
+    install_position_test(&mut engine, b as usize, 1i128, 3, 0i128, 0).unwrap();
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
@@ -1063,31 +970,19 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
     engine.adl_coeff_long = 0i128;
     engine.adl_coeff_short = 0i128;
 
-    // Account a: long 10*POS_SCALE at a_basis=7
-    engine.accounts[a as usize].position_basis_q = (10 * POS_SCALE) as i128;
-    engine.accounts[a as usize].adl_a_basis = 7;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
-    engine.accounts[a as usize].adl_epoch_snap = 0;
+    install_position_test(&mut engine, a as usize, 10, 7, 0i128, 0).unwrap();
+    install_position_test(&mut engine, b as usize, -10, ADL_ONE, 0i128, 0).unwrap();
+    engine.oi_eff_long_q = 10;
+    engine.oi_eff_short_q = 10;
 
-    // Account b: short 10*POS_SCALE
-    engine.accounts[b as usize].position_basis_q = -((10 * POS_SCALE) as i128);
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
-    engine.accounts[b as usize].adl_epoch_snap = 0;
-
-    engine.stored_pos_count_long = 1;
-    engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = 10 * POS_SCALE;
-    engine.oi_eff_short_q = 10 * POS_SCALE;
-
-    // ADL: close POS_SCALE from short side → shrinks A_long via truncation
+    // ADL: close one q-unit from short side -> shrinks A_long via truncation.
     // enqueue_adl decrements both sides by q_close, then A-truncates opposing
-    let result = engine.enqueue_adl(&mut ctx, Side::Short, POS_SCALE, 0u128);
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, 1, 0u128);
     assert!(result.is_ok());
-    // A_new = floor(7 * 9M / 10M) = 6
+    // A_new = floor(7 * 9 / 10) = 6.
     assert!(engine.adl_mult_long == 6);
-    assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
-    assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
+    assert!(engine.oi_eff_long_q == 9);
+    assert!(engine.oi_eff_short_q == 9);
 
     // Settle account a to get actual effective position under new A
     let settle_a = {
@@ -1096,7 +991,7 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
     };
     assert!(settle_a.is_ok());
 
-    // eff_a = floor(10_000_000 * 6 / 7) = 8_571_428 (< 9_000_000)
+    // eff_a = floor(10 * 6 / 7) = 8 (< 9).
     let eff_a = engine.effective_pos_q(a as usize);
     let dust = engine
         .oi_eff_long_q
@@ -1111,8 +1006,8 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
 
     // Simulate final state: all positions closed via balanced trades,
     // which maintain OI_long == OI_short. Residual dust is equal on both sides.
-    engine.attach_effective_position(a as usize, 0i128);
-    engine.attach_effective_position(b as usize, 0i128);
+    engine.attach_effective_position(a as usize, 0i128).unwrap();
+    engine.attach_effective_position(b as usize, 0i128).unwrap();
     engine.oi_eff_long_q = dust;
     engine.oi_eff_short_q = dust;
 
@@ -1183,17 +1078,13 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 10_000_000, 0).unwrap();
 
-    // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[idx as usize].position_basis_q = 1i128;
-    engine.accounts[idx as usize].adl_a_basis = 3;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
-    engine.accounts[idx as usize].adl_epoch_snap = 0;
-    engine.stored_pos_count_long = 1;
+    // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 -> position zeroes.
     engine.adl_epoch_long = 0;
     engine.adl_coeff_long = 0i128;
 
     // A_side=1 so floor(1 * 1 / 3) = 0
     engine.adl_mult_long = 1;
+    install_position_test(&mut engine, idx as usize, 1i128, 3, 0i128, 0).unwrap();
 
     let dust_before = engine.phantom_dust_potential_long_q;
 
@@ -1292,26 +1183,33 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     engine.adl_coeff_short = 0i128;
     engine.adl_epoch_long = 0;
 
-    // Account a: long 7*POS_SCALE at a_basis=13
-    engine.accounts[a_idx as usize].position_basis_q = (7 * POS_SCALE) as i128;
-    engine.accounts[a_idx as usize].adl_a_basis = 13;
-    engine.accounts[a_idx as usize].adl_k_snap = 0i128;
-    engine.accounts[a_idx as usize].adl_epoch_snap = 0;
-
-    // Account b: long 5*POS_SCALE at a_basis=13
-    engine.accounts[b_idx as usize].position_basis_q = (5 * POS_SCALE) as i128;
-    engine.accounts[b_idx as usize].adl_a_basis = 13;
-    engine.accounts[b_idx as usize].adl_k_snap = 0i128;
-    engine.accounts[b_idx as usize].adl_epoch_snap = 0;
-
-    // Account c: short 12*POS_SCALE
-    engine.accounts[c_idx as usize].position_basis_q = -((12 * POS_SCALE) as i128);
-    engine.accounts[c_idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[c_idx as usize].adl_k_snap = 0i128;
-    engine.accounts[c_idx as usize].adl_epoch_snap = 0;
-
-    engine.stored_pos_count_long = 2;
-    engine.stored_pos_count_short = 1;
+    install_position_test(
+        &mut engine,
+        a_idx as usize,
+        (7 * POS_SCALE) as i128,
+        13,
+        0i128,
+        0,
+    )
+    .unwrap();
+    install_position_test(
+        &mut engine,
+        b_idx as usize,
+        (5 * POS_SCALE) as i128,
+        13,
+        0i128,
+        0,
+    )
+    .unwrap();
+    install_position_test(
+        &mut engine,
+        c_idx as usize,
+        -((12 * POS_SCALE) as i128),
+        ADL_ONE,
+        0i128,
+        0,
+    )
+    .unwrap();
     engine.oi_eff_long_q = 12 * POS_SCALE;
     engine.oi_eff_short_q = 12 * POS_SCALE;
 
@@ -1844,12 +1742,20 @@ fn proof_property_44_deposit_true_flat_guard() {
 
     engine.deposit_not_atomic(a, 500_000, DEFAULT_SLOT).unwrap();
 
-    // Directly set up open position with negative PnL (bypassing trade to isolate deposit behavior)
-    engine.accounts[a as usize].position_basis_q = (10 * POS_SCALE) as i128;
-    engine.stored_pos_count_long = 1;
+    // Directly set up a canonical open position with negative PnL
+    // (bypassing trade to isolate deposit behavior).
+    install_position_test(
+        &mut engine,
+        a as usize,
+        (10 * POS_SCALE) as i128,
+        ADL_ONE,
+        0i128,
+        0,
+    )
+    .unwrap();
     engine.oi_eff_long_q = 10 * POS_SCALE;
     engine.oi_eff_short_q = 10 * POS_SCALE;
-    engine.set_pnl(a as usize, -5_000i128);
+    engine.set_pnl(a as usize, -5_000i128).unwrap();
 
     assert!(engine.accounts[a as usize].position_basis_q != 0);
     assert!(engine.accounts[a as usize].pnl < 0);

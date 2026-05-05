@@ -3156,6 +3156,7 @@ impl RiskEngine {
     /// Combined K/F settlement helper (spec §1.6).
     /// floor(abs_basis * ((k_now - k_then) * FUNDING_DEN + (f_now - f_then)) / (den * FUNDING_DEN))
     /// Uses exact 256-bit intermediates. Single floor on the combined numerator.
+    test_visible! {
     fn compute_kf_pnl_delta(
         abs_basis: u128,
         k_snap: i128,
@@ -3232,6 +3233,7 @@ impl RiskEngine {
             }
             Ok(q_u128 as i128)
         }
+    }
     }
 
     /// Wide variant of compute_kf_pnl_delta that accepts I256 for k_now/f_now.
@@ -7111,8 +7113,10 @@ impl RiskEngine {
         Ok(())
     }
 
+    test_visible! {
     fn settle_losses(&mut self, idx: usize) -> Result<()> {
         self.settle_losses_with_context(idx, None)
+    }
     }
 
     /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL
