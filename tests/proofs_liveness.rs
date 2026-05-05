@@ -800,6 +800,80 @@ fn proof_permissionless_progress_dispatcher_recovers_explicit_loss_overflow_on_p
 }
 
 #[kani::proof]
+#[kani::unwind(220)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_dispatcher_recovers_blocked_segment_on_prod_code() {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 10, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 10, DEFAULT_SLOT).unwrap();
+    engine.attach_effective_position(a as usize, 1).unwrap();
+    engine.attach_effective_position(b as usize, -1).unwrap();
+    engine.oi_eff_long_q = 1;
+    engine.oi_eff_short_q = 1;
+
+    let max_future_mark = ADL_ONE * MAX_ORACLE_PRICE as u128;
+    engine.adl_coeff_long = (i128::MAX as u128 - max_future_mark) as i128;
+
+    let now_slot = DEFAULT_SLOT + engine.params.max_accrual_dt_slots;
+    let p_last = engine.last_oracle_price;
+    let raw_target = p_last + 1;
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+
+    let result = engine.permissionless_progress_not_atomic(PermissionlessProgressRequest {
+        now_slot,
+        oracle_price: p_last,
+        authenticated_raw_target_price: raw_target,
+        ordered_candidates: &[],
+        account_hint: None,
+        max_revalidations: 0,
+        max_candidate_inspections: 0,
+        funding_rate_e9: 0,
+        admit_h_min: 1,
+        admit_h_max: 100,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    });
+
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcome::Recovered(
+            RecoveryReason::BlockedSegmentHeadroomOrRepresentability
+        ))
+    );
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert_eq!(engine.resolved_slot, now_slot);
+    assert_eq!(engine.resolved_price, p_last);
+    assert_eq!(engine.resolved_live_price, p_last);
+    assert_ne!(
+        engine.resolved_price, raw_target,
+        "blocked-segment recovery must settle at P_last, not the caller raw target"
+    );
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), capital_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    kani::cover!(
+        result
+            == Ok(PermissionlessProgressOutcome::Recovered(
+                RecoveryReason::BlockedSegmentHeadroomOrRepresentability
+            ))
+            && engine.resolved_price == p_last
+            && engine.resolved_price != raw_target
+            && engine.vault.get() == vault_before
+            && engine.c_tot.get() == capital_before
+            && engine.insurance_fund.balance.get() == insurance_before,
+        "production dispatcher recovers blocked bounded segment at P_last"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code() {

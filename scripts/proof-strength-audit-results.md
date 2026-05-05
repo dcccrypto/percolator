@@ -12,7 +12,7 @@ Updated: 2026-05-04.
 
 This report's **full timing sweep** is still the 2026-05-01 overnight run
 below. It is now stale for the current tree: the parsed proof inventory is
-`414` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
+`415` standard `#[kani::proof]` harnesses, while the recorded overnight sweep
 covered `333`.
 
 Targeted production-code proofs added after the overnight sweep and rerun on
@@ -23,6 +23,7 @@ Targeted production-code proofs added after the overnight sweep and rerun on
 | `proof_permissionless_progress_dispatcher_recovers_b_index_headroom_on_prod_code` | 17.23s | PASS | Dispatcher reaches P-last B-index recovery. |
 | `proof_permissionless_progress_dispatcher_recovers_below_progress_floor_on_prod_code` | 45.20s | PASS | Public permissionless dispatcher routes a price-scale dead zone to P-last recovery, ignores the raw target as settlement price, and preserves vault, capital, and insurance. |
 | `proof_permissionless_progress_dispatcher_recovers_explicit_loss_overflow_on_prod_code` | 18.19s | PASS | Public permissionless dispatcher routes explicit non-claim loss/dust saturation to P-last recovery, ignores the raw target as settlement price, and preserves vault, capital, and insurance. |
+| `proof_permissionless_progress_dispatcher_recovers_blocked_segment_on_prod_code` | 67.44s | PASS | Public permissionless dispatcher routes a blocked bounded accrual segment to P-last recovery, ignores the raw target as settlement price, and preserves vault, capital, and insurance. |
 | `proof_live_insurance_withdraw_fails_closed_when_exposed_or_reconciling_on_prod_code` | 40.89s | PASS | Live insurance withdrawal fails closed under exposure/reconciliation and remains available for empty current markets. |
 | `proof_resolved_insurance_withdraw_requires_empty_market_and_drains_only_insurance_on_prod_code` | 17.20s | PASS | Resolved insurance withdrawal rejects while any account remains and drains exactly terminal insurance once the market is empty. |
 | `proof_permissionless_progress_dispatcher_decreases_live_catchup_rank_on_prod_code` | 61.54s | PASS | Dispatcher ordinary-crank branch reduces live catchup rank. |
