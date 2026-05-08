@@ -757,6 +757,7 @@ fn proof_trade_no_crank_gate() {
         DEFAULT_SLOT,
         size,
         DEFAULT_ORACLE,
+        0u64,
         0,
         100,
         None,

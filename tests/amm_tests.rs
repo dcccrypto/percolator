@@ -19,7 +19,7 @@ fn default_params() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 3000,
         initial_margin_bps: 3500,
-        trading_fee_bps: 10,
+        max_trading_fee_bps: 10,
         max_accounts: 64,
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
@@ -123,6 +123,7 @@ fn test_e2e_complete_user_journey() {
             pos_q(50),
             oracle_price,
             0i128,
+            0u64,
             0,
             100,
             None,
@@ -195,7 +196,7 @@ fn test_e2e_complete_user_journey() {
         // alice_pos > 0 (long), so closing means b buys from a (swap a,b with positive size)
         engine
             .execute_trade_not_atomic(
-                bob, alice, new_price, slot, abs_pos, new_price, 0i128, 0, 100, None,
+                bob, alice, new_price, slot, abs_pos, new_price, 0i128, 0u64, 0, 100, None,
             )
             .unwrap();
     }
@@ -260,6 +261,7 @@ fn test_e2e_funding_complete_cycle() {
             pos_q(100),
             oracle_price,
             0i128,
+            0u64,
             0,
             100,
             None,
@@ -341,6 +343,7 @@ fn test_e2e_funding_complete_cycle() {
             pos_q(200),
             oracle_price,
             0i128,
+            0u64,
             0,
             100,
             None,
@@ -387,6 +390,7 @@ fn test_e2e_negative_funding_rate() {
             pos_q(100),
             oracle_price,
             0i128,
+            0u64,
             0,
             100,
             None,

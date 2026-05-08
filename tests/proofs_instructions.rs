@@ -605,7 +605,7 @@ fn t11_51_execute_trade_slippage_zero_sum() {
     // so no vault/capital movement can be attributed to the trade fee path.
     let params = zero_fee_params();
     let trade_notional = 100u128;
-    let fee = if trade_notional > 0 && params.trading_fee_bps > 0 {
+    let fee = if trade_notional > 0 && params.max_trading_fee_bps > 0 {
         1u128
     } else {
         0u128
@@ -1629,6 +1629,7 @@ fn proof_property_31_trade_rejects_missing_party_a_on_prod_code() {
         POS_SCALE as i128,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,
@@ -1658,6 +1659,7 @@ fn proof_property_31_trade_rejects_missing_party_b_on_prod_code() {
         POS_SCALE as i128,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,
@@ -1667,6 +1669,52 @@ fn proof_property_31_trade_rejects_missing_party_b_on_prod_code() {
     kani::cover!(
         trade_result_b == Err(RiskError::AccountNotFound),
         "execute_trade_not_atomic rejects missing party b"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_dynamic_trade_fee_above_cap_rejects_before_mutation() {
+    let mut params = zero_fee_params();
+    params.max_trading_fee_bps = 10;
+    let mut engine = RiskEngine::new_with_market(params, DEFAULT_SLOT, DEFAULT_ORACLE);
+    let a = add_user_test(&mut engine, 0).unwrap();
+    let b = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(a, 100_000, DEFAULT_SLOT).unwrap();
+    engine.deposit_not_atomic(b, 100_000, DEFAULT_SLOT).unwrap();
+
+    let vault_before = engine.vault.get();
+    let c_tot_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let a_cap_before = engine.accounts[a as usize].capital.get();
+    let b_cap_before = engine.accounts[b as usize].capital.get();
+
+    let trade_result = engine.execute_trade_not_atomic(
+        a,
+        b,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT,
+        POS_SCALE as i128,
+        DEFAULT_ORACLE,
+        0i128,
+        11,
+        0,
+        100,
+        None,
+    );
+
+    assert_eq!(trade_result, Err(RiskError::Overflow));
+    assert_eq!(engine.vault.get(), vault_before);
+    assert_eq!(engine.c_tot.get(), c_tot_before);
+    assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+    assert_eq!(engine.accounts[a as usize].capital.get(), a_cap_before);
+    assert_eq!(engine.accounts[b as usize].capital.get(), b_cap_before);
+    assert_eq!(engine.accounts[a as usize].position_basis_q, 0);
+    assert_eq!(engine.accounts[b as usize].position_basis_q, 0);
+    kani::cover!(
+        engine.is_used(a as usize) && engine.is_used(b as usize),
+        "fee cap rejection is checked on real materialized trade parties"
     );
 }
 

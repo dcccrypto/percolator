@@ -290,6 +290,7 @@ fn proof_e8_position_bound_enforcement() {
         oversize,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,

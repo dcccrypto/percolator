@@ -3897,7 +3897,7 @@ fn proof_audit5_reclaim_rejects_live_capital() {
 // Gap #3: Conservation proof WITH nonzero trading fees
 // ############################################################################
 
-/// Trade conservation must hold when trading_fee_bps > 0.
+/// Trade conservation must hold when max_trading_fee_bps > 0.
 /// Fees flow from accounts to insurance (C decreases, I increases, V unchanged).
 #[kani::proof]
 #[kani::unwind(34)]

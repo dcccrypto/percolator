@@ -96,7 +96,7 @@ Initialization MUST validate ordinary risk/fee/warmup/capacity bounds:
 ```text
 0 < cfg_min_nonzero_mm_req < cfg_min_nonzero_im_req
 0 <= cfg_maintenance_bps <= cfg_initial_bps <= MAX_BPS
-0 <= cfg_trading_fee_bps <= MAX_BPS
+0 <= cfg_max_trading_fee_bps <= MAX_BPS
 0 <= cfg_liquidation_fee_bps <= MAX_BPS
 0 <= cfg_min_liquidation_abs <= cfg_liquidation_fee_cap <= MAX_PROTOCOL_FEE_ABS
 0 <= cfg_h_min <= cfg_h_max <= MAX_WARMUP_SLOTS
@@ -647,7 +647,7 @@ Conversion requires no h-max/B-stale/loss-stale/active-close positive-PnL lock. 
 
 ### 7.3 Trade and liquidation
 
-Trade requires loss-current market state, no active close, current B/K/F settlement for both counterparties, side-mode gating, OI/position bounds, fee-current state, deterministic touch order, candidate-slippage neutralization, and no-positive-credit lanes while h-max/stress is active. It MUST NOT execute while bounded catchup remains incomplete.
+Trade requires loss-current market state, no active close, current B/K/F settlement for both counterparties, side-mode gating, OI/position bounds, fee-current state, deterministic touch order, candidate-slippage neutralization, and no-positive-credit lanes while h-max/stress is active. It MUST NOT execute while bounded catchup remains incomplete. The wrapper supplies the current trade fee; the engine MUST reject `trade_fee_bps > cfg_max_trading_fee_bps`, charge the supplied fee atomically inside the trade transition, and include the resulting fee impact in margin/conservation checks.
 
 Liquidation requires loss-current market state before OI-changing execution. During bounded catchup, keepers may touch/revalidate but MUST NOT execute OI-changing liquidation until catchup completes or recovery resolves. Full-close liquidation that discovers post-principal deficit MUST use the bankrupt close primitive and MUST NOT scan the opposing book. Partial liquidation that would create a post-principal deficit MUST be treated as bankrupt close or rejected.
 
@@ -741,9 +741,10 @@ Positive payout readiness requires zero stale counts, zero stored counts, zero n
 5. Candidate capacity MUST produce partial progress, not rollback because more candidates exist.
 6. If recurring fees are enabled, wrappers MUST sync them after authoritative loss settlement and before health-sensitive checks/payouts; during bounded catchup, nonflat/stale fee anchors are capped at `slot_last`.
 7. Target/effective lag MUST not give users a free option. Extraction-sensitive actions reject or shadow-check; risk-increasing trades use dual-price/no-positive-credit checks.
-8. Wrappers MUST disclose emergency `P_last` recovery semantics when enabled.
-9. Active bankrupt close cannot be bypassed by a different endpoint. Callers must continue it, complete it, or recover.
-10. Protocol/liquidation fee shortfall MUST NOT be included in B residual. Fee shortfall is dropped or forgiven under engine fee policy.
+8. Trade wrappers may compute dynamic fees, but they MUST pass the exact charged `trade_fee_bps` to the engine and MUST NOT use a lower fee for risk/mark influence than the fee charged.
+9. Wrappers MUST disclose emergency `P_last` recovery semantics when enabled.
+10. Active bankrupt close cannot be bypassed by a different endpoint. Callers must continue it, complete it, or recover.
+11. Protocol/liquidation fee shortfall MUST NOT be included in B residual. Fee shortfall is dropped or forgiven under engine fee policy.
 
 ---
 

@@ -14,7 +14,7 @@ fn same_instruction_bankruptcy_params() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 10_000,
         initial_margin_bps: 10_000,
-        trading_fee_bps: 0,
+        max_trading_fee_bps: 0,
         max_accounts: 4,
         liquidation_fee_bps: 0,
         liquidation_fee_cap: U128::ZERO,

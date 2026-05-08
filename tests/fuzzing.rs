@@ -172,7 +172,7 @@ fn params_regime_a() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
-        trading_fee_bps: 10,
+        max_trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
@@ -195,7 +195,7 @@ fn params_regime_b() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
-        trading_fee_bps: 10,
+        max_trading_fee_bps: 10,
         max_accounts: 32, // Small for speed
         liquidation_fee_bps: 50,
         liquidation_fee_cap: U128::new(100_000),
@@ -606,6 +606,7 @@ impl FuzzState {
                     *size,
                     *oracle_price,
                     0i128,
+                    0u64,
                     0,
                     100,
                     None,
@@ -1155,6 +1156,7 @@ fn conservation_after_trade_and_funding_regression() {
             1000,
             DEFAULT_ORACLE,
             0i128,
+            0u64,
             0,
             100,
             None,

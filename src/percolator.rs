@@ -653,7 +653,7 @@ pub struct InsuranceFund {
 pub struct RiskParams {
     pub maintenance_margin_bps: u64,
     pub initial_margin_bps: u64,
-    pub trading_fee_bps: u64,
+    pub max_trading_fee_bps: u64,
     pub max_accounts: u64,
     pub liquidation_fee_bps: u64,
     pub liquidation_fee_cap: U128,
@@ -1616,7 +1616,7 @@ impl RiskEngine {
         }
         if params.maintenance_margin_bps > params.initial_margin_bps
             || params.initial_margin_bps > MAX_MARGIN_BPS
-            || params.trading_fee_bps > MAX_MARGIN_BPS
+            || params.max_trading_fee_bps > MAX_MARGIN_BPS
             || params.liquidation_fee_bps > MAX_MARGIN_BPS
         {
             return Err(RiskError::Overflow);
@@ -7590,6 +7590,7 @@ impl RiskEngine {
         now_slot: u64,
         size_q: i128,
         exec_price: u64,
+        trade_fee_bps: u64,
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
@@ -7601,6 +7602,9 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if trade_fee_bps > self.params.max_trading_fee_bps {
             return Err(RiskError::Overflow);
         }
         // Spec §10.5 step 7: require 0 < size_q <= MAX_TRADE_SIZE_Q
@@ -7647,6 +7651,7 @@ impl RiskEngine {
         size_q: i128,
         exec_price: u64,
         funding_rate_e9: i128,
+        trade_fee_bps: u64,
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
@@ -7658,6 +7663,7 @@ impl RiskEngine {
             now_slot,
             size_q,
             exec_price,
+            trade_fee_bps,
             admit_h_min,
             admit_h_max,
             admit_h_max_consumption_threshold_bps_opt,
@@ -7869,11 +7875,12 @@ impl RiskEngine {
         self.settle_losses_with_context(a as usize, Some(&mut ctx))?;
         self.settle_losses_with_context(b as usize, Some(&mut ctx))?;
 
-        // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
+        // Step 11: charge the wrapper-supplied trade fee (capped at
+        // params.max_trading_fee_bps by validate_execute_trade_entry).
         let trade_notional =
             mul_div_floor_u128(size_q.unsigned_abs(), exec_price as u128, POS_SCALE);
-        let fee = if trade_notional > 0 && self.params.trading_fee_bps > 0 {
-            mul_div_ceil_u128(trade_notional, self.params.trading_fee_bps as u128, 10_000)
+        let fee = if trade_notional > 0 && trade_fee_bps > 0 {
+            mul_div_ceil_u128(trade_notional, trade_fee_bps as u128, 10_000)
         } else {
             0
         };
