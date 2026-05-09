@@ -1297,3 +1297,127 @@ fn proof_force_close_resolved_fee_sweep_conservation() {
 }
 
 // (Maintenance fee proofs removed — maintenance_fee_per_slot feature was deleted)
+
+// ############################################################################
+// ENG-PORT-5a (CRITICAL-9, 2026-05-09): resolve_market_not_atomic terminal-drain invariants
+// ############################################################################
+
+/// INV-1 (Resolved-mode atomicity): a successful `resolve_market_not_atomic`
+/// must produce a fully-Resolved engine state — payout snapshot cleared,
+/// matured-PnL snapshot taken, OI zeroed, phantom-dust zeroed on empty sides,
+/// K-terminal-delta zero on empty-OI sides, and `engine.market_mode ==
+/// Resolved`. Anchors CRITICAL-9 (ENG-PORT-5a). Phantom-dust check uses
+/// fork's single-bound schema per KL-PHANTOM-DUST-SCHEMA-1 (toly's
+/// certified/potential split is absent here).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_resolve_market_terminal_drain() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine
+        .deposit_not_atomic(idx, 100_000, DEFAULT_SLOT)
+        .unwrap();
+
+    // Symbolic dust pre-state: model that fork may carry a non-zero phantom
+    // dust accumulator into resolve. The invariant is that the side's dust
+    // is zeroed when its pre-resolve `stored_pos_count` is 0, regardless of
+    // the prior dust value.
+    let pre_dust_long: u32 = kani::any();
+    let pre_dust_short: u32 = kani::any();
+    engine.phantom_dust_bound_long_q = pre_dust_long as u128;
+    engine.phantom_dust_bound_short_q = pre_dust_short as u128;
+
+    let pre_pnl_pos_tot = engine.pnl_pos_tot;
+    let pre_stored_long = engine.stored_pos_count_long;
+    let pre_stored_short = engine.stored_pos_count_short;
+    let pre_oi_long = engine.oi_eff_long_q;
+    let pre_oi_short = engine.oi_eff_short_q;
+
+    let r = engine.resolve_market_not_atomic(
+        ResolveMode::Ordinary,
+        DEFAULT_ORACLE,
+        DEFAULT_ORACLE,
+        DEFAULT_SLOT + 1,
+        0,
+    );
+
+    if r.is_ok() {
+        // Steps 13 / 14 / 15-16 / 21 post-conditions (all share the
+        // single-engine-call atomicity claim — none of these can be
+        // partially applied).
+        assert!(engine.market_mode == MarketMode::Resolved);
+        assert!(engine.oi_eff_long_q == 0);
+        assert!(engine.oi_eff_short_q == 0);
+        assert!(engine.resolved_payout_h_num == 0);
+        assert!(engine.resolved_payout_h_den == 0);
+        assert!(engine.resolved_payout_ready == 0);
+        assert!(engine.pnl_matured_pos_tot == pre_pnl_pos_tot);
+
+        // ENG-PORT-5a phantom-dust invariant (KL-PHANTOM-DUST-SCHEMA-1).
+        if pre_stored_long == 0 {
+            assert!(engine.phantom_dust_bound_long_q == 0);
+        }
+        if pre_stored_short == 0 {
+            assert!(engine.phantom_dust_bound_short_q == 0);
+        }
+
+        // ENG-PORT-5a K-terminal-delta-zero-on-zero-OI predicate. A side
+        // with no pre-resolve OI cannot accumulate a non-zero terminal
+        // delta — the delta would attribute a settlement shift to
+        // positions that don't exist.
+        if pre_oi_long == 0 {
+            assert!(engine.resolved_k_long_terminal_delta == 0);
+        }
+        if pre_oi_short == 0 {
+            assert!(engine.resolved_k_short_terminal_delta == 0);
+        }
+    }
+}
+
+/// Degenerate-arm twin of `kani_resolve_market_terminal_drain`. Exercises the
+/// same post-conditions through `ResolveMode::Degenerate` where the engine
+/// skips `accrue_market_to` and the trusted-equality (live == P_last,
+/// rate == 0) gates apply.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_resolve_market_terminal_drain_degenerate() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine
+        .deposit_not_atomic(idx, 100_000, DEFAULT_SLOT)
+        .unwrap();
+
+    let pre_dust_long: u32 = kani::any();
+    let pre_dust_short: u32 = kani::any();
+    engine.phantom_dust_bound_long_q = pre_dust_long as u128;
+    engine.phantom_dust_bound_short_q = pre_dust_short as u128;
+
+    let pre_stored_long = engine.stored_pos_count_long;
+    let pre_stored_short = engine.stored_pos_count_short;
+
+    // Degenerate requires `live_oracle_price == self.last_oracle_price` and
+    // `funding_rate_e9 == 0`. Use engine.last_oracle_price as the trusted
+    // equality input.
+    let p_last = engine.last_oracle_price;
+    let r = engine.resolve_market_not_atomic(
+        ResolveMode::Degenerate,
+        p_last.max(1),
+        p_last.max(1),
+        DEFAULT_SLOT + 1,
+        0,
+    );
+
+    if r.is_ok() {
+        assert!(engine.market_mode == MarketMode::Resolved);
+        assert!(engine.oi_eff_long_q == 0);
+        assert!(engine.oi_eff_short_q == 0);
+        if pre_stored_long == 0 {
+            assert!(engine.phantom_dust_bound_long_q == 0);
+        }
+        if pre_stored_short == 0 {
+            assert!(engine.phantom_dust_bound_short_q == 0);
+        }
+    }
+}

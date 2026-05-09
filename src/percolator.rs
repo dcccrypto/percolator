@@ -6593,21 +6593,42 @@ impl RiskEngine {
             }
         }
 
+        // ENG-PORT-5a (CRITICAL-9; aligned with toly-engine:9590-9597):
+        // capture pre-resolve state into locals BEFORE any mutation. The
+        // K-terminal-delta predicate and the drain-finalize gates below all
+        // read these snapshots so per-side decisions reflect the pre-resolve
+        // view. PERCOLATOR-FORK-SPECIFIC: `ensure_no_active_bankrupt_close()`
+        // and `clear_stress_envelope()` are deferred to ENG-PORT-5b — fork
+        // does not have the bankrupt-close + stress-envelope subsystem state
+        // (KL-FORK-ENGINE-BANKRUPT-CLOSE-1 / KL-FORK-ENGINE-STRESS-ENVELOPE-1).
+        let pre_mode_long = self.side_mode_long;
+        let pre_mode_short = self.side_mode_short;
+        let pre_a_long = self.adl_mult_long;
+        let pre_a_short = self.adl_mult_short;
+        let pre_oi_long = self.oi_eff_long_q;
+        let pre_oi_short = self.oi_eff_short_q;
+        let pre_stored_long = self.stored_pos_count_long;
+        let pre_stored_short = self.stored_pos_count_short;
+
         // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
         // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
         // so resolution can succeed even near K headroom (spec §9.7 step 8).
+        // ENG-PORT-5a: a side with no OI must NOT carry a non-zero terminal
+        // delta (toly-engine:9603) — it would attribute a settlement shift to
+        // positions that don't exist. Predicate now: ResetPending OR pre_oi == 0.
         let price_diff = resolved_price as i128 - live_oracle_price as i128;
-        let resolved_k_long_td = if self.side_mode_long == SideMode::ResetPending {
+        let resolved_k_long_td = if pre_mode_long == SideMode::ResetPending || pre_oi_long == 0 {
             0i128
         } else {
-            checked_u128_mul_i128(self.adl_mult_long, price_diff)?
+            checked_u128_mul_i128(pre_a_long, price_diff)?
         };
-        let resolved_k_short_td = if self.side_mode_short == SideMode::ResetPending {
+        let resolved_k_short_td = if pre_mode_short == SideMode::ResetPending || pre_oi_short == 0
+        {
             0i128
         } else {
             // Short side: negative of price_diff
             let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
-            checked_u128_mul_i128(self.adl_mult_short, neg_price_diff)?
+            checked_u128_mul_i128(pre_a_short, neg_price_diff)?
         };
 
         // Steps 8-13: set resolved state
@@ -6631,11 +6652,29 @@ impl RiskEngine {
         self.oi_eff_long_q = 0;
         self.oi_eff_short_q = 0;
 
-        // Steps 17-20: drain/finalize sides
-        if self.side_mode_long != SideMode::ResetPending {
+        // ENG-PORT-5a phantom-dust zero on `pre_stored_<side> == 0`. ADAPTED
+        // to fork's single-bound schema per KL-PHANTOM-DUST-SCHEMA-1: fork has
+        // `phantom_dust_bound_<side>_q` (one field per side), toly has the
+        // certified/potential pair (four fields). Semantically equivalent:
+        // no stored positions ⇒ no dust to track. Aligned with
+        // toly-engine:9637-9644.
+        if pre_stored_long == 0 {
+            self.phantom_dust_bound_long_q = 0;
+        }
+        if pre_stored_short == 0 {
+            self.phantom_dust_bound_short_q = 0;
+        }
+
+        // Steps 17-20: drain/finalize sides. ENG-PORT-5a: gate
+        // `begin_full_drain_reset` on `pre_stored_<side> > 0` so a side that
+        // already had no stored positions never enters the drain path
+        // (toly-engine:9647-9652). The post-drain finalize predicate at the
+        // bottom of the function continues to use live state (live values
+        // change during begin_full_drain_reset).
+        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
             self.begin_full_drain_reset(Side::Long)?;
         }
-        if self.side_mode_short != SideMode::ResetPending {
+        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
             self.begin_full_drain_reset(Side::Short)?;
         }
         if self.side_mode_long == SideMode::ResetPending
