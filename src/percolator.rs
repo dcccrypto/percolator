@@ -5500,8 +5500,17 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Reject if trade would increase OI on a blocked side.
-        self.enforce_side_mode_oi_gate(oi_long_after, oi_short_after)?;
+        // ENG-PORT-4 (CRITICAL-8): reject (a) any aggregate-OI growth on a
+        // blocked side AND (b) any per-account entrant onto a blocked side
+        // even when aggregate OI doesn't grow.
+        self.enforce_side_mode_oi_gate(
+            old_eff_a,
+            new_eff_a,
+            old_eff_b,
+            new_eff_b,
+            oi_long_after,
+            oi_short_after,
+        )?;
 
         // Spec §1.4: per-side active-position cap. Pre-validate the NET
         // delta across BOTH legs so a valid position swap at the cap
@@ -5724,9 +5733,22 @@ impl RiskEngine {
     }
     }
 
+    /// ENG-PORT-4 (CRITICAL-8): aggregate-OI + per-account side-mode gate.
+    ///
+    /// The aggregate OI checks alone miss the maker-replaces-taker case:
+    /// a trade where one counterparty closes long while the other opens
+    /// long net-zeros side OI but still admits a new entrant onto a side
+    /// in DrainOnly/ResetPending. Toly v12.20.6 widened the gate
+    /// (toly-engine:8021-8043) to also check per-account old/new effective
+    /// positions, so any new arrival on a blocked side is rejected even
+    /// when aggregate OI doesn't grow.
     test_visible! {
     fn enforce_side_mode_oi_gate(
         &self,
+        old_eff_a: i128,
+        new_eff_a: i128,
+        old_eff_b: i128,
+        new_eff_b: i128,
         oi_long_after: u128,
         oi_short_after: u128,
     ) -> Result<()> {
@@ -5740,8 +5762,37 @@ impl RiskEngine {
         {
             return Err(RiskError::SideBlocked);
         }
+        self.enforce_side_mode_account_gate(old_eff_a, new_eff_a)?;
+        self.enforce_side_mode_account_gate(old_eff_b, new_eff_b)?;
         Ok(())
     }
+    }
+
+    /// ENG-PORT-4 (CRITICAL-8): per-account side-mode gate.
+    ///
+    /// Catches the maker-replaces-taker case where aggregate OI gating
+    /// misses a trade in which one counterparty closes (releasing OI) while
+    /// the other opens onto the same blocked side (consuming the same OI),
+    /// netting to no aggregate OI change. The per-account predicate
+    /// rejects any new entrant on a blocked side regardless of aggregate
+    /// OI movement (toly-engine:8046-8063).
+    fn enforce_side_mode_account_gate(&self, old_eff: i128, new_eff: i128) -> Result<()> {
+        if new_eff == 0 {
+            return Ok(());
+        }
+        let side = side_of_i128(new_eff).ok_or(RiskError::CorruptState)?;
+        match self.get_side_mode(side) {
+            SideMode::Normal => Ok(()),
+            SideMode::ResetPending => Err(RiskError::SideBlocked),
+            SideMode::DrainOnly => {
+                let old_same_side = side_of_i128(old_eff) == Some(side);
+                if old_same_side && new_eff.unsigned_abs() <= old_eff.unsigned_abs() {
+                    Ok(())
+                } else {
+                    Err(RiskError::SideBlocked)
+                }
+            }
+        }
     }
 
     /// Enforce post-trade margin per spec §10.5 step 29.
