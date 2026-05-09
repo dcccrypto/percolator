@@ -7127,7 +7127,9 @@ impl RiskEngine {
     }
 
     /// Withdraw insurance from a live market. The wrapper owns authorization
-    /// and rate limits; the engine owns canonical accounting.
+    /// and rate limits; the engine owns canonical accounting and loss-current
+    /// safety. Live insurance is withdrawable only from an unexposed,
+    /// fully-current market with no active reconciliation lock.
     pub fn withdraw_live_insurance_not_atomic(
         &mut self,
         amount: u128,
@@ -7141,6 +7143,32 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         self.check_live_accrual_envelope(now_slot)?;
+        // ENG-PORT-1 (CRITICAL-5; aligned with toly-engine:10262-10276):
+        // empty-market gate. Without this check a wrapper that authorizes
+        // withdrawal can drain insurance while positions remain open or
+        // losses are pending — admin-callable insurance siphon.
+        //
+        // Fork ports the SUBSET of toly's 11-condition gate that maps onto
+        // existing fork-engine state (8 of 11). The 3 deferred conditions
+        // are gated by fork-only schema absences:
+        //   - `active_close_present`         — KL-FORK-ENGINE-BANKRUPT-CLOSE-1
+        //   - `stress_consumed_bps_e9_since_envelope` — KL-FORK-ENGINE-STRESS-ENVELOPE-1
+        //   - `bankruptcy_hmax_lock_active`  — KL-FORK-ENGINE-BANKRUPT-CLOSE-1
+        // Until those subsystems land (ENG-PORT-1b, paired with the
+        // ENG-PORT-5b family), the wrapper-side authorization gate
+        // (insurance_operator + cooldown + bps mask in tag 22/23) carries
+        // the residual checks.
+        if self.oi_eff_long_q != 0
+            || self.oi_eff_short_q != 0
+            || self.stored_pos_count_long != 0
+            || self.stored_pos_count_short != 0
+            || self.stale_account_count_long != 0
+            || self.stale_account_count_short != 0
+            || self.neg_pnl_account_count != 0
+            || self.current_slot != self.last_market_slot
+        {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);

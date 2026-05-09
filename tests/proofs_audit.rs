@@ -1421,3 +1421,61 @@ fn kani_resolve_market_terminal_drain_degenerate() {
         }
     }
 }
+
+// ############################################################################
+// ENG-PORT-1 (CRITICAL-5, 2026-05-09): withdraw_live_insurance_not_atomic
+// empty-market gate — admin-callable insurance siphon fix.
+// ############################################################################
+
+/// CRITICAL-5: live insurance is withdrawable only from a fully-unexposed,
+/// fully-current market. This harness asserts every checkable gate field
+/// individually rejects the call AND the empty baseline accepts. The 3
+/// deferred toly conditions (active_close_present, stress envelope,
+/// bankruptcy_hmax_lock) are handled by ENG-PORT-1b once their subsystems
+/// land (KL-FORK-ENGINE-BANKRUPT-CLOSE-1 / KL-FORK-ENGINE-STRESS-ENVELOPE-1).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_withdraw_live_insurance_empty_market_gate() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    // Top up insurance at slot 0 so current_slot stays equal to
+    // last_market_slot (top_up_insurance_fund advances current_slot but not
+    // last_market_slot — using slot 0 keeps both at 0).
+    engine.top_up_insurance_fund(100_000, 0).unwrap();
+
+    // Pick which gate field to corrupt — or pick 8 to leave the engine clean
+    // and assert baseline acceptance.
+    let pick: u8 = kani::any();
+    kani::assume(pick <= 8);
+
+    let now_slot: u64 = if pick == 7 {
+        // For the slot-mismatch case, bump current_slot ahead of
+        // last_market_slot. The envelope still admits dt = 1 (well below
+        // MAX_ACCRUAL_DT_SLOTS), but the gate must reject the mismatch.
+        engine.current_slot = 1;
+        1
+    } else {
+        0
+    };
+
+    match pick {
+        0 => engine.oi_eff_long_q = 1,
+        1 => engine.oi_eff_short_q = 1,
+        2 => engine.stored_pos_count_long = 1,
+        3 => engine.stored_pos_count_short = 1,
+        4 => engine.stale_account_count_long = 1,
+        5 => engine.stale_account_count_short = 1,
+        6 => engine.neg_pnl_account_count = 1,
+        7 => {} // already handled above (current_slot vs last_market_slot)
+        _ => {} // 8 = clean baseline
+    }
+
+    let r = engine.withdraw_live_insurance_not_atomic(1, now_slot);
+    if pick <= 7 {
+        // Each individual nonzero exposure marker MUST cause rejection.
+        assert!(r.is_err());
+    } else {
+        // Empty baseline: 1 unit out of 100_000 must succeed.
+        assert!(r.is_ok());
+    }
+}
