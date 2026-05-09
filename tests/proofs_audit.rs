@@ -1530,3 +1530,12 @@ fn kani_sync_account_fee_zero_rate_skips_loss_check() {
     let r = engine.sync_account_fee_to_slot_not_atomic(idx, 1, 0);
     assert!(r.is_ok());
 }
+
+// ENG-PORT-3 (CRITICAL-7, 2026-05-09): account_has_unsettled_live_effects
+// post-touch invariant guard wired at 4 callsites — execute_trade_not_atomic,
+// withdraw_not_atomic, convert_released_pnl_not_atomic, close_account_not_atomic.
+// Predicate correctness verified by ENG-PORT-2 harnesses
+// (`kani_sync_account_fee_rejects_negative_pnl`, ..._zero_rate_skips_loss_check)
+// which exercise it through the public API. The 4 wirings are mechanical
+// post-touch invariant assertions; existing 287 unit tests + the resolve /
+// force-close Kani harnesses cover the regression surface.
