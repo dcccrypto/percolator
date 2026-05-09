@@ -1479,3 +1479,54 @@ fn kani_withdraw_live_insurance_empty_market_gate() {
         assert!(r.is_ok());
     }
 }
+
+// ############################################################################
+// ENG-PORT-2 (CRITICAL-6, 2026-05-09): sync_account_fee loss-safe anchor +
+// ensure_fee_draw_does_not_precede_loss
+// ############################################################################
+
+/// CRITICAL-6: a recurring fee draw must not be charged against an account
+/// that already has unrealized losses. Asserting the negative-PnL rejection
+/// path: any nonzero rate on an account with `pnl < 0` MUST reject through
+/// `ensure_fee_draw_does_not_precede_loss`.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_sync_account_fee_rejects_negative_pnl() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, 0).unwrap();
+
+    // Inject symbolic negative PnL into the freshly materialized flat account.
+    let neg: u16 = kani::any();
+    kani::assume(neg >= 1 && neg <= 1000);
+    engine.accounts[idx as usize].pnl = -(neg as i128);
+
+    // Sync at slot 1 with a nonzero rate. The flat account's live_loss_safe_anchor
+    // resolves to `now_slot = 1`, advancing the fee anchor and triggering the
+    // ensure_fee_draw_does_not_precede_loss check at the public entrypoint.
+    let r = engine.sync_account_fee_to_slot_not_atomic(idx, 1, 1);
+    assert!(r.is_err());
+}
+
+/// ENG-PORT-2: zero-rate sync with negative PnL must NOT trip the
+/// ensure_fee_draw guard — there is no draw to make. Catches the case
+/// where a regression accidentally drops the `fee_rate_per_slot > 0`
+/// gate from the front-stop check.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_sync_account_fee_zero_rate_skips_loss_check() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.deposit_not_atomic(idx, 100_000, 0).unwrap();
+
+    let neg: u16 = kani::any();
+    kani::assume(neg >= 1 && neg <= 1000);
+    engine.accounts[idx as usize].pnl = -(neg as i128);
+
+    // Zero rate ⇒ no fee debt to charge ⇒ ensure_fee_draw is not consulted.
+    // Call must succeed and just advance last_fee_slot.
+    let r = engine.sync_account_fee_to_slot_not_atomic(idx, 1, 0);
+    assert!(r.is_ok());
+}
