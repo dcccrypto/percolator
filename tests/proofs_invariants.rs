@@ -576,13 +576,17 @@ fn proof_side_mode_gating() {
     engine.oi_eff_short_q = oi;
 
     // DrainOnly blocks OI increases on its side but permits non-increasing candidates.
+    // ENG-PORT-4: signature now takes (old_eff_a, new_eff_a, old_eff_b,
+    // new_eff_b, oi_long_after, oi_short_after). Tests below isolate the
+    // aggregate-OI gate by passing 0 per-account positions — the per-account
+    // gate is a no-op when new_eff == 0.
     engine.side_mode_long = SideMode::DrainOnly;
-    let long_inc = engine.enforce_side_mode_oi_gate(oi + POS_SCALE, oi);
+    let long_inc = engine.enforce_side_mode_oi_gate(0, 0, 0, 0, oi + POS_SCALE, oi);
     assert!(
         long_inc == Err(RiskError::SideBlocked),
         "DrainOnly long side must block long OI increases"
     );
-    let long_same = engine.enforce_side_mode_oi_gate(oi, oi);
+    let long_same = engine.enforce_side_mode_oi_gate(0, 0, 0, 0, oi, oi);
     assert!(
         long_same.is_ok(),
         "DrainOnly long side must permit non-increasing long OI"
@@ -591,12 +595,12 @@ fn proof_side_mode_gating() {
     // ResetPending has the same OI-increase gate.
     engine.side_mode_long = SideMode::Normal;
     engine.side_mode_short = SideMode::ResetPending;
-    let short_inc = engine.enforce_side_mode_oi_gate(oi, oi + POS_SCALE);
+    let short_inc = engine.enforce_side_mode_oi_gate(0, 0, 0, 0, oi, oi + POS_SCALE);
     assert!(
         short_inc == Err(RiskError::SideBlocked),
         "ResetPending short side must block short OI increases"
     );
-    let short_same = engine.enforce_side_mode_oi_gate(oi, oi);
+    let short_same = engine.enforce_side_mode_oi_gate(0, 0, 0, 0, oi, oi);
     assert!(
         short_same.is_ok(),
         "ResetPending short side must permit non-increasing short OI"
@@ -604,7 +608,8 @@ fn proof_side_mode_gating() {
 
     // Normal mode does not block side OI increases at this gate.
     engine.side_mode_short = SideMode::Normal;
-    let normal_inc = engine.enforce_side_mode_oi_gate(oi + POS_SCALE, oi + POS_SCALE);
+    let normal_inc =
+        engine.enforce_side_mode_oi_gate(0, 0, 0, 0, oi + POS_SCALE, oi + POS_SCALE);
     assert!(
         normal_inc.is_ok(),
         "Normal side mode must not block OI increases at the side-mode gate"

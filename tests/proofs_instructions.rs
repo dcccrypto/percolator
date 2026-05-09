@@ -592,8 +592,17 @@ fn t11_50_execute_trade_atomic_oi_update_sign_flip() {
         .unwrap();
     assert!(oi_long_after == POS_SCALE);
     assert!(oi_short_after == POS_SCALE);
+    // ENG-PORT-4: per-account positions threaded for the wider gate.
+    // Same (b,a) order as the bilateral_oi_after call above.
     engine
-        .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+        .enforce_side_mode_oi_gate(
+            old_eff_b,
+            new_eff_b,
+            old_eff_a,
+            new_eff_a,
+            oi_long_after,
+            oi_short_after,
+        )
         .unwrap();
     engine
         .attach_effective_position(b as usize, new_eff_b)

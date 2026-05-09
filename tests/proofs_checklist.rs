@@ -390,7 +390,14 @@ fn proof_g4_drain_only_blocks_oi_increase() {
         "G4 setup must be an OI-increasing long-side trade"
     );
 
-    let result = engine.enforce_side_mode_oi_gate(oi_long_after, oi_short_after);
+    let result = engine.enforce_side_mode_oi_gate(
+        eff_a_before,
+        new_eff_a,
+        eff_b_before,
+        new_eff_b,
+        oi_long_after,
+        oi_short_after,
+    );
     match result {
         Err(RiskError::SideBlocked) => {}
         _ => assert!(
