@@ -2645,7 +2645,7 @@ impl RiskEngine {
             match s {
                 Side::Long => {
                     next_long = next_long.checked_sub(1).ok_or(RiskError::CorruptState)?;
-                    if self.accounts[idx].b_epoch_snap == self.adl_epoch_long {
+                    if self.account_loss_weight_is_counted_in_side_sum(idx, Side::Long) {
                         next_weight_long = next_weight_long
                             .checked_sub(old_weight)
                             .ok_or(RiskError::CorruptState)?;
@@ -2653,7 +2653,7 @@ impl RiskEngine {
                 }
                 Side::Short => {
                     next_short = next_short.checked_sub(1).ok_or(RiskError::CorruptState)?;
-                    if self.accounts[idx].b_epoch_snap == self.adl_epoch_short {
+                    if self.account_loss_weight_is_counted_in_side_sum(idx, Side::Short) {
                         next_weight_short = next_weight_short
                             .checked_sub(old_weight)
                             .ok_or(RiskError::CorruptState)?;
@@ -2896,6 +2896,22 @@ impl RiskEngine {
             Side::Long => self.loss_weight_sum_long = v,
             Side::Short => self.loss_weight_sum_short = v,
         }
+    }
+
+    fn account_loss_weight_is_counted_in_side_sum(&self, idx: usize, side: Side) -> bool {
+        let account = &self.accounts[idx];
+        if account.b_epoch_snap != self.get_epoch_side(side) {
+            return false;
+        }
+        // Counter/epoch-overflow terminal recovery cannot advance the side
+        // epoch past u64::MAX. The side is nevertheless in ResetPending and
+        // its live loss-weight pool was zeroed at recovery; these positioned
+        // accounts are stale reset participants, not current loss-weight
+        // contributors.
+        !(self.market_mode == MarketMode::Resolved
+            && self.get_side_mode(side) == SideMode::ResetPending
+            && self.get_epoch_side(side) == u64::MAX
+            && account.adl_epoch_snap == self.get_epoch_side(side))
     }
 
     fn get_social_remainder(&self, s: Side) -> u128 {
@@ -9825,6 +9841,10 @@ impl RiskEngine {
             let side = side_of_i128(basis).unwrap();
             let epoch_snap = self.accounts[i].adl_epoch_snap;
             let epoch_side = self.get_epoch_side(side);
+            let terminal_epoch_stale = self.market_mode == MarketMode::Resolved
+                && self.get_side_mode(side) == SideMode::ResetPending
+                && epoch_side == u64::MAX
+                && epoch_snap == epoch_side;
 
             // Resolved reconciliation uses K_epoch_start + resolved_k_terminal_delta
             // as the target K (spec §5.4 steps 6-7). F uses F_epoch_start.
@@ -9835,10 +9855,7 @@ impl RiskEngine {
             };
             let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
             let (kf_delta, k_terminal_wide, f_end) = if epoch_snap == epoch_side {
-                if self.get_side_mode(side) != SideMode::ResetPending
-                    || epoch_side != u64::MAX
-                    || self.get_stale_count(side) == 0
-                {
+                if !terminal_epoch_stale || self.get_stale_count(side) == 0 {
                     return Err(RiskError::CorruptState);
                 }
                 let k_terminal_wide = I256::from_i128(self.get_k_epoch_start(side))
@@ -9915,7 +9932,7 @@ impl RiskEngine {
                 self.set_pnl(i, new_pnl)?;
                 self.pnl_matured_pos_tot = self.pnl_pos_tot;
             }
-            if epoch_snap != epoch_side {
+            if epoch_snap != epoch_side || terminal_epoch_stale {
                 if b_current {
                     let old_stale = self.get_stale_count(side);
                     self.set_stale_count(

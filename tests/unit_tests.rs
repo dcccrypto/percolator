@@ -10520,6 +10520,48 @@ fn side_epoch_overflow_recovery_resolves_at_p_last_from_canonical_epoch_state() 
 }
 
 #[test]
+fn terminal_epoch_overflow_recovery_allows_positioned_accounts_to_close() {
+    let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
+    mat_regression_account(&mut engine, 0, 100_000, 0);
+    mat_regression_account(&mut engine, 1, 100_000, 0);
+    engine
+        .attach_effective_position(0, POS_SCALE as i128)
+        .unwrap();
+    engine
+        .attach_effective_position(1, -(POS_SCALE as i128))
+        .unwrap();
+    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_epoch_long = u64::MAX;
+    engine.accounts[0].adl_epoch_snap = u64::MAX;
+    engine.accounts[0].b_epoch_snap = u64::MAX;
+
+    engine
+        .permissionless_recovery_resolve_p_last_not_atomic(
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+            1,
+            0,
+        )
+        .unwrap();
+
+    let long_close = engine.force_close_resolved_not_atomic(0);
+    assert!(
+        long_close.is_ok(),
+        "terminal epoch recovery must not brick the recovered side: {long_close:?}"
+    );
+    assert_eq!(engine.stored_pos_count_long, 0);
+    assert_eq!(engine.stale_account_count_long, 0);
+    assert_eq!(engine.loss_weight_sum_long, 0);
+
+    let short_close = engine.force_close_resolved_not_atomic(1);
+    assert!(
+        short_close.is_ok(),
+        "ordinary counter-side close must still progress: {short_close:?}"
+    );
+    assert!(engine.is_terminal_ready());
+}
+
+#[test]
 fn counter_or_epoch_overflow_recovery_rejects_without_exhausted_counter() {
     let mut engine = RiskEngine::new_with_market(regression_safe_params(), 0, 1000);
     let r = engine.permissionless_recovery_resolve_p_last_not_atomic(
