@@ -7328,6 +7328,28 @@ impl RiskEngine {
     }
     }
 
+    /// Reassign the owner of a used account slot. Distinct from `set_owner`
+    /// which only fills a freshly-allocated slot (rejects if owner != 0).
+    ///
+    /// Authorization is the wrapper layer's job — engine verifies only that:
+    ///   - the slot is used (not free, not OOB)
+    ///   - the new_owner is non-zero (preserves the "claimed iff non-zero"
+    ///     convention; un-claiming via this path would land the slot in an
+    ///     ambiguous state)
+    ///
+    /// All other account state — capital, pnl, position, fees, reserves —
+    /// is preserved bit-for-bit.
+    pub fn transfer_owner(&mut self, idx: u16, new_owner: [u8; 32]) -> Result<()> {
+        if self.validate_used_account_slot(idx as usize).is_err() {
+            return Err(RiskError::Unauthorized);
+        }
+        if new_owner == [0u8; 32] {
+            return Err(RiskError::Unauthorized);
+        }
+        self.accounts[idx as usize].owner = new_owner;
+        Ok(())
+    }
+
     // ========================================================================
     // deposit (spec §9.2)
     // ========================================================================

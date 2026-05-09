@@ -4725,3 +4725,146 @@ fn v19_trade_touch_order_is_ascending() {
     assert_eq!(first, first2);
     assert_eq!(second, second2);
 }
+
+// ############################################################################
+// transfer_owner: invariant proofs
+// ############################################################################
+
+/// transfer_owner modifies only the owner field of the target slot; every
+/// other field (capital, pnl, reserved_pnl, position_basis_q, adl_a_basis,
+/// adl_k_snap, f_snap, adl_epoch_snap, matcher_program, matcher_context,
+/// fee_credits, last_fee_slot, sched_*, pending_*) is preserved bit-for-bit.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_transfer_owner_only_owner_changes() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+
+    // Give the slot a non-zero initial owner so transfer_owner has something to replace.
+    engine.set_owner(idx, [1u8; 32]).unwrap();
+
+    // Snapshot the entire account before the transfer.
+    let snap_before = engine.accounts[idx as usize];
+
+    let new_owner: [u8; 32] = kani::any();
+    kani::assume(new_owner != [0u8; 32]);
+
+    engine.transfer_owner(idx, new_owner).unwrap();
+
+    let acc = &engine.accounts[idx as usize];
+
+    // Every field except owner must be bit-identical.
+    assert_eq!(acc.capital,            snap_before.capital);
+    assert_eq!(acc.kind,               snap_before.kind);
+    assert_eq!(acc.pnl,                snap_before.pnl);
+    assert_eq!(acc.reserved_pnl,       snap_before.reserved_pnl);
+    assert_eq!(acc.position_basis_q,   snap_before.position_basis_q);
+    assert_eq!(acc.adl_a_basis,        snap_before.adl_a_basis);
+    assert_eq!(acc.adl_k_snap,         snap_before.adl_k_snap);
+    assert_eq!(acc.f_snap,             snap_before.f_snap);
+    assert_eq!(acc.adl_epoch_snap,     snap_before.adl_epoch_snap);
+    assert_eq!(acc.matcher_program,    snap_before.matcher_program);
+    assert_eq!(acc.matcher_context,    snap_before.matcher_context);
+    assert_eq!(acc.fee_credits,        snap_before.fee_credits);
+    assert_eq!(acc.last_fee_slot,      snap_before.last_fee_slot);
+    assert_eq!(acc.sched_present,      snap_before.sched_present);
+    assert_eq!(acc.sched_remaining_q,  snap_before.sched_remaining_q);
+    assert_eq!(acc.sched_anchor_q,     snap_before.sched_anchor_q);
+    assert_eq!(acc.sched_start_slot,   snap_before.sched_start_slot);
+    assert_eq!(acc.sched_horizon,      snap_before.sched_horizon);
+    assert_eq!(acc.sched_release_q,    snap_before.sched_release_q);
+    assert_eq!(acc.pending_present,    snap_before.pending_present);
+    assert_eq!(acc.pending_remaining_q, snap_before.pending_remaining_q);
+    assert_eq!(acc.pending_horizon,    snap_before.pending_horizon);
+    assert_eq!(acc.pending_created_slot, snap_before.pending_created_slot);
+
+    // Owner must be the new value.
+    assert_eq!(acc.owner, new_owner);
+}
+
+/// transfer_owner on slot idx_a does not touch any field (including owner)
+/// of a distinct slot idx_b.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_transfer_owner_other_accounts_unchanged() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx_a = add_user_test(&mut engine, 0).unwrap();
+    let idx_b = add_user_test(&mut engine, 0).unwrap();
+
+    // Distinct slots guaranteed by sequential allocation.
+    kani::assume(idx_a != idx_b);
+
+    // Give both slots a non-zero owner.
+    engine.set_owner(idx_a, [1u8; 32]).unwrap();
+    engine.set_owner(idx_b, [2u8; 32]).unwrap();
+
+    // Snapshot idx_b before the transfer.
+    let snap_b = engine.accounts[idx_b as usize];
+
+    let new_owner: [u8; 32] = kani::any();
+    kani::assume(new_owner != [0u8; 32]);
+
+    engine.transfer_owner(idx_a, new_owner).unwrap();
+
+    // idx_b must be completely unchanged.
+    assert_eq!(engine.accounts[idx_b as usize], snap_b);
+}
+
+/// transfer_owner rejects a zero new_owner — preserves the "claimed iff
+/// non-zero" convention; writing zero would put the slot into an ambiguous
+/// unclaimed-but-used state.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_transfer_owner_rejects_zero_new_owner() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.set_owner(idx, [1u8; 32]).unwrap();
+
+    let result = engine.transfer_owner(idx, [0u8; 32]);
+    assert!(result.is_err(), "transfer_owner must reject a zero new_owner");
+
+    // Owner must be unchanged after rejection.
+    assert_eq!(engine.accounts[idx as usize].owner, [1u8; 32]);
+}
+
+/// transfer_owner rejects any idx that is not a used slot (free or OOB).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_transfer_owner_rejects_unused_slot() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    // Engine starts with all slots free; do not materialize any.
+    // Pick a symbolic idx that is within the MAX_ACCOUNTS bound but unused.
+    let idx: u16 = kani::any();
+    kani::assume((idx as usize) < MAX_ACCOUNTS);
+    // Slot must be free (no materialization).
+    kani::assume(!engine.is_used(idx as usize));
+
+    let new_owner = [3u8; 32];
+    let result = engine.transfer_owner(idx, new_owner);
+    assert!(result.is_err(), "transfer_owner must reject a free slot");
+}
+
+/// transfer_owner does not alter engine.c_tot.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_transfer_owner_preserves_c_tot() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.set_owner(idx, [1u8; 32]).unwrap();
+
+    let c_tot_before = engine.c_tot.get();
+
+    let new_owner: [u8; 32] = kani::any();
+    kani::assume(new_owner != [0u8; 32]);
+
+    engine.transfer_owner(idx, new_owner).unwrap();
+
+    assert_eq!(engine.c_tot.get(), c_tot_before,
+        "transfer_owner must not alter engine.c_tot");
+}
