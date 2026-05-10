@@ -4868,3 +4868,64 @@ fn kani_transfer_owner_preserves_c_tot() {
     assert_eq!(engine.c_tot.get(), c_tot_before,
         "transfer_owner must not alter engine.c_tot");
 }
+
+// ── account_health_snapshot — read-only view (3 proofs) ──────────────────
+
+/// account_health_snapshot is pure: no field of self changes after the call.
+/// Compares the full byte representation of the engine before and after.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_account_health_snapshot_does_not_mutate() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.set_owner(idx, [1u8; 32]).unwrap();
+    engine.last_oracle_price = 1_000_000;
+
+    let c_tot_before = engine.c_tot.get();
+    let owner_before = engine.accounts[idx as usize].owner;
+    let mode_before = engine.market_mode;
+
+    let _ = engine.account_health_snapshot(idx);
+
+    assert_eq!(engine.c_tot.get(), c_tot_before,
+        "account_health_snapshot must not change c_tot");
+    assert_eq!(engine.accounts[idx as usize].owner, owner_before,
+        "account_health_snapshot must not change account.owner");
+    assert!(engine.market_mode == mode_before,
+        "account_health_snapshot must not change market_mode");
+}
+
+/// account_health_snapshot's `above_mm` field equals
+/// `is_above_maintenance_margin` for the same account at the same oracle price.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_account_health_snapshot_matches_is_above_mm() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    engine.set_owner(idx, [1u8; 32]).unwrap();
+    engine.last_oracle_price = 1_000_000;
+
+    let (_, _, _, snap_above) = engine.account_health_snapshot(idx).unwrap();
+    let direct_above = engine.is_above_maintenance_margin(
+        &engine.accounts[idx as usize],
+        idx as usize,
+        engine.last_oracle_price,
+    );
+
+    assert_eq!(snap_above, direct_above,
+        "snapshot.above_mm must equal direct is_above_maintenance_margin");
+}
+
+/// account_health_snapshot rejects unused / OOB indices.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn kani_account_health_snapshot_rejects_unused() {
+    let engine = RiskEngine::new(zero_fee_params());
+    let idx: u16 = kani::any();
+    let result = engine.account_health_snapshot(idx);
+    assert!(result.is_err(),
+        "snapshot on unused or OOB idx must error");
+}

@@ -5773,6 +5773,52 @@ impl RiskEngine {
     }
     }
 
+    /// Read-only margin snapshot for one engine account.
+    ///
+    /// Returns `(eq_raw, mm_req, im_req, above_mm)`:
+    /// - `eq_raw`   — raw maintenance equity, signed (i128)
+    /// - `mm_req`   — maintenance margin requirement (u128)
+    /// - `im_req`   — initial margin requirement (u128)
+    /// - `above_mm` — `is_above_maintenance_margin` for this account
+    ///
+    /// Spec §9.1: a flat account (effective position == 0) has
+    /// `mm_req = im_req = 0`; matches the short-circuit inside
+    /// `is_above_maintenance_margin`.
+    ///
+    /// Pure: never mutates engine state. Intended for CPI-callable view
+    /// instructions in wrapper programs and for off-chain risk dashboards.
+    pub fn account_health_snapshot(&self, idx: u16) -> Result<(i128, u128, u128, bool)> {
+        let i = idx as usize;
+        if i >= MAX_ACCOUNTS || !self.is_used(i) {
+            return Err(RiskError::Unauthorized);
+        }
+        let oracle_price = if self.market_mode == MarketMode::Resolved {
+            self.resolved_price
+        } else {
+            self.last_oracle_price
+        };
+        let account = &self.accounts[i];
+        let eq_raw = self.account_equity_maint_raw(account);
+
+        let eff = self.effective_pos_q_checked(i, false).unwrap_or(0);
+        let (mm_req, im_req) = if eff == 0 {
+            (0u128, 0u128)
+        } else {
+            let not = self.notional_checked(i, oracle_price, false).unwrap_or(0);
+            let prop_mm =
+                mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000);
+            let prop_im =
+                mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
+            (
+                core::cmp::max(prop_mm, self.params.min_nonzero_mm_req),
+                core::cmp::max(prop_im, self.params.min_nonzero_im_req),
+            )
+        };
+
+        let above_mm = self.is_above_maintenance_margin(account, i, oracle_price);
+        Ok((eq_raw, mm_req, im_req, above_mm))
+    }
+
     /// is_above_initial_margin (spec §9.1): exact Eq_init_raw_i >= IM_req_i
     /// Per spec §9.1: if eff == 0 then IM_req = 0; else IM_req = max(proportional, MIN_NONZERO_IM_REQ)
     /// Per spec §3.4: MUST use exact raw equity, not clamped Eq_init_net_i,
