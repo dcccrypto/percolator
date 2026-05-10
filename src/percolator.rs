@@ -133,6 +133,28 @@ pub const STRESS_CONSUMPTION_SCALE: u128 = 1_000_000_000;
 /// real slot value compares strictly less.
 pub const NO_SLOT: u64 = u64::MAX;
 
+/// Active bankrupt-close residual continuation phase (toly:161-162).
+///
+/// Wave 5b / KL-FORK-ENGINE-BANKRUPT-CLOSE-1: state-machine schema port.
+/// `ACTIVE_CLOSE_PHASE_RESIDUAL_B` is the only non-NONE phase toly defines
+/// today; reserved for future extension.
+pub const ACTIVE_CLOSE_PHASE_NONE: u8 = 0;
+pub const ACTIVE_CLOSE_PHASE_RESIDUAL_B: u8 = 1;
+
+/// Active-close side encoding (toly:166-168). Plain `u8` avoids
+/// enum-discriminant zero-copy hazards for persisted state — invalid
+/// discriminants would be UB on a raw slab cast through `&*(ptr as
+/// *const Account)`.
+pub const ACTIVE_CLOSE_SIDE_NONE: u8 = 0;
+pub const ACTIVE_CLOSE_SIDE_LONG: u8 = 1;
+pub const ACTIVE_CLOSE_SIDE_SHORT: u8 = 2;
+
+/// Hard cap on public active-close residual B booking attempts before the
+/// permissionless P-last recovery path must record the remainder as
+/// non-claim audit loss and resolve (toly:174). Wave 5b-ii integrates
+/// this bound into the `book_or_record_bankruptcy_residual_to_side` path.
+pub const ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS: u64 = 1;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -678,6 +700,47 @@ pub struct RiskEngine {
     pub bankruptcy_hmax_lock_active: bool,
     pub active_close_present: u8,
 
+    /// Wave 5b / KL-FORK-ENGINE-BANKRUPT-CLOSE-1: state-machine schema fields.
+    ///
+    /// Toly engine v12.20.6 (toly:843-852) tracks 9 fields beyond the
+    /// gate-only `active_close_present` to drive the residual-close
+    /// continuation: phase enum, the bankrupt account index, the opposing
+    /// side, the close price/slot snapshot, the q close basis, three
+    /// running residual counters, and a chunks-booked counter capped at
+    /// `ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS`.
+    ///
+    /// Path A2 scope (this wave): SCHEMA + structural helpers
+    /// (`encode_active_close_side`, `decode_active_close_side`,
+    /// `clear_active_bankrupt_close_state`,
+    /// `validate_active_bankrupt_close_shape`). NO state transitions, NO
+    /// integration into trade/accrue/resolve paths. The setters
+    /// (`start_active_bankrupt_close_residual`,
+    /// `continue_active_bankrupt_close_*`,
+    /// `book_or_start_active_close_residual_to_side`,
+    /// `complete_active_bankrupt_close_for_recovery`) and the integration
+    /// call sites land in Wave 5b-ii.
+    ///
+    /// Field ordering matches toly's. Layout below `active_close_present`
+    /// (u8) consumes the 6 bytes of struct-alignment padding Wave 4a left
+    /// before `rr_cursor_position`:
+    ///   u8 (phase) + u16 (idx) + u8 (opp_side) = 4 bytes
+    ///   2 bytes padding to u64 boundary (was 6, now 2 after the 4 above)
+    ///   2× u64 (close_price, close_slot) = 16 bytes
+    ///   4× u128 (q_close_q + 3 residual_*) = 64 bytes
+    ///   1× u64 (b_chunks_booked) = 8 bytes
+    /// Net delta: replaces Wave 4a's 6 bytes of padding with 96 bytes of
+    /// useful state. RiskEngine grows by +88 bytes from the cluster.
+    pub active_close_phase: u8,
+    pub active_close_account_idx: u16,
+    pub active_close_opp_side: u8,
+    pub active_close_close_price: u64,
+    pub active_close_close_slot: u64,
+    pub active_close_q_close_q: u128,
+    pub active_close_residual_remaining: u128,
+    pub active_close_residual_booked: u128,
+    pub active_close_residual_recorded: u128,
+    pub active_close_b_chunks_booked: u64,
+
     /// Round-robin sweep cursor (spec §2.2, v12.19).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
     /// `0 <= rr_cursor_position < params.max_accounts`. Wraps (and
@@ -740,6 +803,19 @@ pub struct RiskEngine {
     /// keeper has wrapped past the envelope's opening generation. Toly
     /// v12.20.6:830.
     pub stress_envelope_start_generation: u64,
+
+    /// Wave 5b: auxiliary stress-envelope timing (toly:832).
+    ///
+    /// Last slot at which `sweep_generation` advanced. `NO_SLOT` means
+    /// the generation has never advanced (fresh market). Used in Wave
+    /// 5b-ii by `apply_stress_envelope_progress` to gate at-most-one
+    /// generation advance per slot — the spec invariant that prevents a
+    /// single stress event from exhausting the generation counter.
+    ///
+    /// Path A2: schema only. No setter on this branch; the field stays
+    /// at NO_SLOT forever and `apply_stress_envelope_progress` (deferred
+    /// to Wave 5b-ii) will be the lone reader/writer.
+    pub last_sweep_generation_advance_slot: u64,
 
     /// Wave 1 / ENG-PORT-C: external-oracle target tracking.
     ///
@@ -1483,6 +1559,20 @@ impl RiskEngine {
             // init: no active continuation at market genesis.
             bankruptcy_hmax_lock_active: false,
             active_close_present: 0,
+            // Wave 5b: bankrupt-close state-machine schema. Path A2 — no
+            // setter on this branch; fields stay at sentinel-defaults
+            // (PHASE_NONE / SIDE_NONE / u16::MAX / 0). Wave 5b-ii adds
+            // `start_active_bankrupt_close_residual` etc.
+            active_close_phase: ACTIVE_CLOSE_PHASE_NONE,
+            active_close_account_idx: u16::MAX,
+            active_close_opp_side: ACTIVE_CLOSE_SIDE_NONE,
+            active_close_close_price: 0,
+            active_close_close_slot: 0,
+            active_close_q_close_q: 0,
+            active_close_residual_remaining: 0,
+            active_close_residual_booked: 0,
+            active_close_residual_recorded: 0,
+            active_close_b_chunks_booked: 0,
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
@@ -1494,6 +1584,10 @@ impl RiskEngine {
             stress_envelope_remaining_indices: 0,
             stress_envelope_start_slot: NO_SLOT,
             stress_envelope_start_generation: NO_SLOT,
+            // Wave 5b: auxiliary stress timing — see init_in_place for
+            // rationale. Path A2: NO_SLOT means generation has never
+            // advanced.
+            last_sweep_generation_advance_slot: NO_SLOT,
             // Wave 1 / ENG-PORT-C: oracle target init — see init_in_place
             // for the matching rationale comment.
             oracle_target_price_e6: 0,
@@ -1593,6 +1687,19 @@ impl RiskEngine {
         // adds the state-machine setters that flip these to active.
         self.bankruptcy_hmax_lock_active = false;
         self.active_close_present = 0;
+        // Wave 5b: bankrupt-close state-machine schema init to
+        // no-continuation defaults. See struct field block for the Path
+        // A2 rationale (no setter on this branch).
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_NONE;
+        self.active_close_account_idx = u16::MAX;
+        self.active_close_opp_side = ACTIVE_CLOSE_SIDE_NONE;
+        self.active_close_close_price = 0;
+        self.active_close_close_slot = 0;
+        self.active_close_q_close_q = 0;
+        self.active_close_residual_remaining = 0;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
         self.rr_cursor_position = 0;
         self.sweep_generation = 0;
         self.price_move_consumed_bps_this_generation = 0;
@@ -1602,6 +1709,9 @@ impl RiskEngine {
         self.stress_envelope_remaining_indices = 0;
         self.stress_envelope_start_slot = NO_SLOT;
         self.stress_envelope_start_generation = NO_SLOT;
+        // Wave 5b: auxiliary stress timing — see field block. NO_SLOT
+        // means the generation counter has never advanced (fresh market).
+        self.last_sweep_generation_advance_slot = NO_SLOT;
         // Wave 1 / ENG-PORT-C: oracle target init. At market genesis the
         // wrapper's first `read_price_clamped` will populate these from
         // the live oracle observation; init to (0, 0) signals "no target
@@ -5161,6 +5271,117 @@ impl RiskEngine {
         self.stress_envelope_start_slot = NO_SLOT;
         self.stress_envelope_start_generation = NO_SLOT;
         self.bankruptcy_hmax_lock_active = false;
+    }
+
+    /// Wave 5b / KL-FORK-ENGINE-BANKRUPT-CLOSE-1: state-machine
+    /// structural helpers (Path A2 schema+helpers).
+    ///
+    /// `Side ↔ ACTIVE_CLOSE_SIDE_*` codec. Mirrors toly-engine
+    /// `encode_active_close_side` / `decode_active_close_side`
+    /// (toly-engine src/percolator.rs:2962-2975). The encoding is the
+    /// persisted shape on the slab — Plain `u8` instead of an enum
+    /// avoids invalid-discriminant UB on raw zero-copy reads.
+    pub fn encode_active_close_side(side: Side) -> u8 {
+        match side {
+            Side::Long => ACTIVE_CLOSE_SIDE_LONG,
+            Side::Short => ACTIVE_CLOSE_SIDE_SHORT,
+        }
+    }
+
+    pub fn decode_active_close_side(encoded: u8) -> Result<Side> {
+        match encoded {
+            ACTIVE_CLOSE_SIDE_LONG => Ok(Side::Long),
+            ACTIVE_CLOSE_SIDE_SHORT => Ok(Side::Short),
+            _ => Err(RiskError::CorruptState),
+        }
+    }
+
+    /// Reset all 11 bankrupt-close state-machine fields to their
+    /// no-continuation defaults. Mirrors toly-engine
+    /// `clear_active_bankrupt_close_state` (toly:2977-2989).
+    ///
+    /// Path A2: callable but no caller exists on this branch — fields
+    /// already start at these defaults from `init_in_place` /
+    /// `new_with_market`. Wave 5b-ii adds the call sites (terminal
+    /// resolution paths in `complete_active_bankrupt_close_for_recovery`
+    /// and post-trigger paths after `start_active_bankrupt_close_residual`
+    /// completes its accounting).
+    pub fn clear_active_bankrupt_close_state(&mut self) {
+        self.active_close_present = 0;
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_NONE;
+        self.active_close_account_idx = u16::MAX;
+        self.active_close_opp_side = ACTIVE_CLOSE_SIDE_NONE;
+        self.active_close_close_price = 0;
+        self.active_close_close_slot = 0;
+        self.active_close_q_close_q = 0;
+        self.active_close_residual_remaining = 0;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
+    }
+
+    /// Read-only structural validator for the bankrupt-close
+    /// state-machine block. Returns `Err(CorruptState)` if any of the
+    /// invariants below are violated:
+    ///
+    /// * `active_close_present` is either 0 or 1 (no other encoding)
+    /// * **inactive form** (`active_close_present == 0`): every other
+    ///   active-close field at its no-continuation default
+    ///   (`PHASE_NONE`, `u16::MAX`, `SIDE_NONE`, all zeros)
+    /// * **active form** (`active_close_present == 1`): market is Live;
+    ///   `bankruptcy_hmax_lock_active` is set; phase is `RESIDUAL_B`;
+    ///   `account_idx` either `u16::MAX` (terminal recovery) or in the
+    ///   `[0, params.max_accounts)` range; `close_price` in
+    ///   `(0, MAX_ORACLE_PRICE]`; `close_slot <= current_slot`; non-zero
+    ///   `residual_remaining`; `b_chunks_booked` within
+    ///   `ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS`; `opp_side` is a valid
+    ///   encoded side; `residual_booked + residual_recorded` doesn't
+    ///   overflow u128.
+    ///
+    /// Path A2: read-only — does not mutate state. Wave 5b-ii will
+    /// invoke this on every entry/exit of `continue_active_bankrupt_close_*`
+    /// to defense-in-depth catch state-machine bugs against persisted
+    /// slab state. Mirrors toly-engine
+    /// `validate_active_bankrupt_close_shape` (toly:3064-3103).
+    pub fn validate_active_bankrupt_close_shape(&self) -> Result<()> {
+        if self.active_close_present > 1 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.active_close_present == 0 {
+            if self.active_close_phase != ACTIVE_CLOSE_PHASE_NONE
+                || self.active_close_account_idx != u16::MAX
+                || self.active_close_opp_side != ACTIVE_CLOSE_SIDE_NONE
+                || self.active_close_close_price != 0
+                || self.active_close_close_slot != 0
+                || self.active_close_q_close_q != 0
+                || self.active_close_residual_remaining != 0
+                || self.active_close_residual_booked != 0
+                || self.active_close_residual_recorded != 0
+                || self.active_close_b_chunks_booked != 0
+            {
+                return Err(RiskError::CorruptState);
+            }
+            return Ok(());
+        }
+
+        if self.market_mode != MarketMode::Live
+            || !self.bankruptcy_hmax_lock_active
+            || self.active_close_phase != ACTIVE_CLOSE_PHASE_RESIDUAL_B
+            || (self.active_close_account_idx != u16::MAX
+                && self.active_close_account_idx as u64 >= self.params.max_accounts)
+            || self.active_close_close_price == 0
+            || self.active_close_close_price > MAX_ORACLE_PRICE
+            || self.active_close_close_slot > self.current_slot
+            || self.active_close_residual_remaining == 0
+            || self.active_close_b_chunks_booked > ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS
+        {
+            return Err(RiskError::CorruptState);
+        }
+        Self::decode_active_close_side(self.active_close_opp_side)?;
+        self.active_close_residual_booked
+            .checked_add(self.active_close_residual_recorded)
+            .ok_or(RiskError::CorruptState)?;
+        Ok(())
     }
 
     // ========================================================================

@@ -950,3 +950,145 @@ fn proof_stress_envelope_clear_and_init() {
 
     kani::cover!(true, "stress-envelope clear lands at sentinel defaults");
 }
+
+// ############################################################################
+// Wave 5b: bankrupt-close state-machine schema invariants
+// ############################################################################
+
+/// Wave 5b / KL-FORK-ENGINE-BANKRUPT-CLOSE-1: state-machine schema and
+/// structural helpers (Path A2 schema+helpers).
+///
+/// `clear_active_bankrupt_close_state` MUST:
+///   - zero `active_close_present`
+///   - reset `active_close_phase` to `ACTIVE_CLOSE_PHASE_NONE`
+///   - reset `active_close_account_idx` to `u16::MAX`
+///   - reset `active_close_opp_side` to `ACTIVE_CLOSE_SIDE_NONE`
+///   - zero the 5 numeric fields (close_price, close_slot, q_close_q,
+///     all 3 residual_*, b_chunks_booked)
+///   - leave `bankruptcy_hmax_lock_active` untouched (it's owned by
+///     `clear_stress_envelope`, not this helper)
+///   - preserve `check_conservation` (the cleared fields are pure
+///     metadata that don't enter the conservation aggregate)
+///
+/// `validate_active_bankrupt_close_shape` MUST:
+///   - return `Ok(())` for the post-init / post-clear default state
+///     (active_close_present == 0, all fields at defaults)
+///   - return `Err(CorruptState)` when active_close_present == 0 but
+///     ANY companion field disagrees with the no-continuation default
+///   - return `Err(CorruptState)` when active_close_present > 1
+///   - leave engine state unchanged (read-only predicate)
+///
+/// Codec round-trip: `decode(encode(side)) == Ok(side)` for both Long
+/// and Short. `decode(SIDE_NONE)` and `decode` of any other byte value
+/// returns `Err(CorruptState)`.
+///
+/// Path A2 schema-only port: setters
+/// (`start_active_bankrupt_close_residual`, etc.) and integration into
+/// trade/accrue/resolve paths defer to Wave 5b-ii. The fields stay at
+/// init defaults forever on this branch; the validator's "active form"
+/// branch is exercised only by Kani's symbolic-write probes.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_bankrupt_close_state_machine_schema() {
+    let mut engine =
+        RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    // Init places every state-machine field at the inactive default.
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.active_close_phase, ACTIVE_CLOSE_PHASE_NONE);
+    assert_eq!(engine.active_close_account_idx, u16::MAX);
+    assert_eq!(engine.active_close_opp_side, ACTIVE_CLOSE_SIDE_NONE);
+    assert_eq!(engine.active_close_close_price, 0);
+    assert_eq!(engine.active_close_close_slot, 0);
+    assert_eq!(engine.active_close_q_close_q, 0);
+    assert_eq!(engine.active_close_residual_remaining, 0);
+    assert_eq!(engine.active_close_residual_booked, 0);
+    assert_eq!(engine.active_close_residual_recorded, 0);
+    assert_eq!(engine.active_close_b_chunks_booked, 0);
+    // Validator accepts the default state.
+    assert!(engine.validate_active_bankrupt_close_shape().is_ok());
+    assert!(engine.check_conservation());
+
+    // Symbolic write: poison every active-close field with arbitrary
+    // values. `clear_active_bankrupt_close_state` MUST land back at the
+    // defaults regardless of the prior state.
+    engine.active_close_present = kani::any();
+    engine.active_close_phase = kani::any();
+    engine.active_close_account_idx = kani::any();
+    engine.active_close_opp_side = kani::any();
+    engine.active_close_close_price = kani::any();
+    engine.active_close_close_slot = kani::any();
+    engine.active_close_q_close_q = kani::any();
+    engine.active_close_residual_remaining = kani::any();
+    engine.active_close_residual_booked = kani::any();
+    engine.active_close_residual_recorded = kani::any();
+    engine.active_close_b_chunks_booked = kani::any();
+    engine.clear_active_bankrupt_close_state();
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.active_close_phase, ACTIVE_CLOSE_PHASE_NONE);
+    assert_eq!(engine.active_close_account_idx, u16::MAX);
+    assert_eq!(engine.active_close_opp_side, ACTIVE_CLOSE_SIDE_NONE);
+    assert_eq!(engine.active_close_close_price, 0);
+    assert_eq!(engine.active_close_close_slot, 0);
+    assert_eq!(engine.active_close_q_close_q, 0);
+    assert_eq!(engine.active_close_residual_remaining, 0);
+    assert_eq!(engine.active_close_residual_booked, 0);
+    assert_eq!(engine.active_close_residual_recorded, 0);
+    assert_eq!(engine.active_close_b_chunks_booked, 0);
+    assert!(engine.validate_active_bankrupt_close_shape().is_ok());
+    assert!(engine.check_conservation());
+
+    // Validator rejects an inactive-form record with a non-default field.
+    engine.clear_active_bankrupt_close_state();
+    assert!(engine.validate_active_bankrupt_close_shape().is_ok());
+    let bogus_idx: u16 = kani::any();
+    kani::assume(bogus_idx != u16::MAX);
+    engine.active_close_account_idx = bogus_idx;
+    assert_eq!(
+        engine.validate_active_bankrupt_close_shape(),
+        Err(RiskError::CorruptState)
+    );
+    // Reset and confirm validator is happy again.
+    engine.active_close_account_idx = u16::MAX;
+    assert!(engine.validate_active_bankrupt_close_shape().is_ok());
+
+    // Validator rejects active_close_present > 1.
+    let two_or_more: u8 = kani::any();
+    kani::assume(two_or_more > 1);
+    engine.active_close_present = two_or_more;
+    assert_eq!(
+        engine.validate_active_bankrupt_close_shape(),
+        Err(RiskError::CorruptState)
+    );
+    engine.active_close_present = 0;
+
+    // Side codec round-trip.
+    assert_eq!(
+        RiskEngine::decode_active_close_side(RiskEngine::encode_active_close_side(Side::Long)),
+        Ok(Side::Long)
+    );
+    assert_eq!(
+        RiskEngine::decode_active_close_side(RiskEngine::encode_active_close_side(Side::Short)),
+        Ok(Side::Short)
+    );
+    // Decoder rejects SIDE_NONE.
+    assert_eq!(
+        RiskEngine::decode_active_close_side(ACTIVE_CLOSE_SIDE_NONE),
+        Err(RiskError::CorruptState)
+    );
+    // Decoder rejects any other byte.
+    let bogus_side: u8 = kani::any();
+    kani::assume(
+        bogus_side != ACTIVE_CLOSE_SIDE_LONG && bogus_side != ACTIVE_CLOSE_SIDE_SHORT,
+    );
+    assert_eq!(
+        RiskEngine::decode_active_close_side(bogus_side),
+        Err(RiskError::CorruptState)
+    );
+
+    kani::cover!(
+        true,
+        "bankrupt-close state-machine schema clear/validate/codec invariants"
+    );
+}
