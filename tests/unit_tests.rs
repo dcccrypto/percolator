@@ -4638,6 +4638,51 @@ fn keeper_crank_bounded_stale_catchup_advances_one_segment() {
 }
 
 #[test]
+fn phase1_liquidates_local_current_candidate_during_global_loss_stale_catchup() {
+    let (mut engine, a, b) =
+        setup_two_users_with_params(100_000, 100_000, wide_price_move_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    let size_q = make_size_q(250);
+    engine
+        .execute_trade_not_atomic(
+            a, b, oracle, slot, size_q, oracle, 0i128, 0u64, 1, 100, None,
+        )
+        .unwrap();
+
+    let now_slot = slot + engine.params.max_accrual_dt_slots + 50;
+    let outcome = engine
+        .keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price: 750,
+            ordered_candidates: &[(a, Some(LiquidationPolicy::FullClose))],
+            max_revalidations: 1,
+            max_candidate_inspections: 1,
+            funding_rate_e9: 0,
+            admit_h_min: 1,
+            admit_h_max: 100,
+            admit_h_max_consumption_threshold_bps_opt: None,
+            rr_touch_limit: 1,
+            rr_scan_limit: 1,
+        })
+        .unwrap();
+
+    assert!(
+        engine.last_market_slot < engine.current_slot,
+        "one bounded segment should leave later catchup segments pending"
+    );
+    assert_eq!(
+        outcome.num_liquidations, 1,
+        "locally current below-maintenance Phase 1 candidate must not be deferred solely by global loss-stale catchup"
+    );
+    assert_eq!(
+        engine.accounts[a as usize].position_basis_q, 0,
+        "FullClose candidate should be closed in the same crank that made it locally current"
+    );
+    assert!(engine.check_conservation());
+}
+
+#[test]
 fn honest_cranker_repeatedly_reduces_stale_gap_while_scanning_empty_slots() {
     let (mut engine, a, b) =
         setup_two_users_with_params(1_000_000, 1_000_000, wide_price_move_params());

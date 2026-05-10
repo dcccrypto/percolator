@@ -1791,8 +1791,7 @@ fn v19_phase1_positive_pnl_use_forces_later_phase2_bankruptcy_fail_closed_on_pro
 
     let mut ctx = InstructionContext::new_with_admission(1, 10);
     let candidates = [(0u16, None)];
-    let phase1 =
-        engine.run_keeper_phase1_candidates(&mut ctx, 1, 1_000_000, &candidates, 1, 1, false);
+    let phase1 = engine.run_keeper_phase1_candidates(&mut ctx, 1, 1_000_000, &candidates, 1, 1);
     assert_eq!(phase1, Ok((0, true)));
     assert!(ctx.positive_pnl_usability_mutated);
     assert_eq!(engine.accounts[0].reserved_pnl, 0);

@@ -276,7 +276,6 @@ fn t11_53_keeper_phase1_stops_after_pending_reset_on_prod_code() {
         &candidates,
         1,
         1,
-        false,
     );
 
     assert!(result.is_ok());

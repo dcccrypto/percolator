@@ -8597,7 +8597,6 @@ impl RiskEngine {
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
         max_candidate_inspections: u16,
-        loss_stale_after_accrual: bool,
     ) -> Result<(u32, bool)> {
         let mut inspected: u16 = 0;
         let mut attempts: u16 = 0;
@@ -8625,7 +8624,10 @@ impl RiskEngine {
             self.touch_account_live_local(cidx, ctx)?;
             protective_progress = true;
 
-            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
+            if !ctx.pending_reset_long
+                && !ctx.pending_reset_short
+                && !self.account_has_unsettled_live_effects(cidx)?
+            {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
@@ -8968,7 +8970,6 @@ impl RiskEngine {
             oracle_price,
             funding_rate_e9,
         )?;
-        let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
 
         // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
         let max_candidate_inspections = core::cmp::min(
@@ -8988,7 +8989,6 @@ impl RiskEngine {
             ordered_candidates,
             max_revalidations,
             max_candidate_inspections,
-            loss_stale_after_accrual,
         )?;
 
         // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
