@@ -816,3 +816,68 @@ fn proof_oracle_target_init_zero_and_persistence() {
         "non-zero target observation persists and conservation is preserved"
     );
 }
+
+// ############################################################################
+// Wave 4a: bankrupt-close gate invariant
+// ############################################################################
+
+/// Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED, gate-only).
+///
+/// `ensure_no_active_bankrupt_close` MUST:
+///   - return Err(RecoveryRequired) iff `active_close_present != 0`
+///   - return Ok(()) iff `active_close_present == 0`
+///   - leave engine state unchanged (read-only predicate)
+///   - preserve `check_conservation` invariant
+///
+/// Also asserts the schema additions (`active_close_present: u8` and
+/// `bankruptcy_hmax_lock_active: bool`) are init-zeroed at market
+/// genesis, are well-formed (writable + readable through symbolic
+/// values), and are pure metadata — they don't enter the conservation
+/// aggregate.
+///
+/// Path A gate-only port: there is no setter on this branch that
+/// flips `active_close_present` to a non-zero value. The fields stay
+/// at init defaults forever, so the gate always passes for live
+/// markets. Wave 5b adds the state machine setters that actually
+/// drive the recovery flow.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_bankrupt_close_gate_init_and_predicate() {
+    let mut engine =
+        RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    // Init zeros both gate variables.
+    assert_eq!(engine.active_close_present, 0);
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    // Predicate accepts the no-active-close state.
+    assert!(engine.ensure_no_active_bankrupt_close().is_ok());
+    assert!(engine.check_conservation());
+
+    // Symbolic write: when active_close_present is set, the gate
+    // rejects with RecoveryRequired.
+    let active: u8 = kani::any();
+    kani::assume(active != 0);
+    engine.active_close_present = active;
+    assert_eq!(
+        engine.ensure_no_active_bankrupt_close(),
+        Err(RiskError::RecoveryRequired)
+    );
+    // Conservation still holds — gate fields are pure metadata.
+    assert!(engine.check_conservation());
+
+    // Reset to 0 and the gate passes again.
+    engine.active_close_present = 0;
+    assert!(engine.ensure_no_active_bankrupt_close().is_ok());
+
+    // bankruptcy_hmax_lock_active is independent of the gate predicate
+    // (toly uses it for hmax-lock decisions, not the recovery
+    // continuation gate). Setting it doesn't toggle the gate.
+    engine.bankruptcy_hmax_lock_active = true;
+    assert!(engine.ensure_no_active_bankrupt_close().is_ok());
+
+    kani::cover!(
+        active > 0,
+        "bankrupt-close gate fires when active_close_present is non-zero"
+    );
+}
