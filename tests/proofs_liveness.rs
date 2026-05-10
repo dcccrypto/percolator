@@ -426,7 +426,7 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
 
     // Phantom dust: OI == dust bound (should clear)
     let dust = 42u128;
-    engine.phantom_dust_bound_long_q = dust;
+    engine.phantom_dust_potential_long_q = dust;
     engine.oi_eff_long_q = dust; // OI <= dust bound
     engine.oi_eff_short_q = dust; // balanced (required by spec)
 

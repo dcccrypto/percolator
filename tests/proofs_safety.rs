@@ -746,7 +746,7 @@ fn t5_23_dust_clearance_guard_safe() {
     let max_total_dust_base = max_total_dust_fp / (S_POS_SCALE as u16);
     assert!(
         max_total_dust_base < n as u16,
-        "total OI dust < phantom_dust_bound"
+        "total OI dust < phantom_dust_potential"
     );
     assert!(dust_bound == n, "dust_bound tracks exact zeroing count");
 }
@@ -2361,8 +2361,8 @@ fn proof_audit4_init_in_place_canonical() {
     engine.stored_pos_count_short = 11;
     engine.stale_account_count_long = 3;
     engine.stale_account_count_short = 4;
-    engine.phantom_dust_bound_long_q = 50;
-    engine.phantom_dust_bound_short_q = 60;
+    engine.phantom_dust_potential_long_q = 50;
+    engine.phantom_dust_potential_short_q = 60;
     engine.num_used_accounts = 10;
     engine.materialized_account_count = 5;
     engine.last_oracle_price = 9999;
@@ -2405,8 +2405,8 @@ fn proof_audit4_init_in_place_canonical() {
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.stale_account_count_long == 0);
     assert!(engine.stale_account_count_short == 0);
-    assert!(engine.phantom_dust_bound_long_q == 0);
-    assert!(engine.phantom_dust_bound_short_q == 0);
+    assert!(engine.phantom_dust_potential_long_q == 0);
+    assert!(engine.phantom_dust_potential_short_q == 0);
 
     // ---- Account tracking ----
     assert!(engine.num_used_accounts == 0);

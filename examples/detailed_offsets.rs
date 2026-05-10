@@ -62,8 +62,8 @@ fn main() {
     println!("stored_pos_count_short:{}", offset_of!(RiskEngine, stored_pos_count_short));
     println!("stale_account_count_long:{}", offset_of!(RiskEngine, stale_account_count_long));
     println!("stale_account_count_short:{}", offset_of!(RiskEngine, stale_account_count_short));
-    println!("phantom_dust_bound_long_q:{}", offset_of!(RiskEngine, phantom_dust_bound_long_q));
-    println!("phantom_dust_bound_short_q:{}", offset_of!(RiskEngine, phantom_dust_bound_short_q));
+    println!("phantom_dust_potential_long_q:{}", offset_of!(RiskEngine, phantom_dust_potential_long_q));
+    println!("phantom_dust_potential_short_q:{}", offset_of!(RiskEngine, phantom_dust_potential_short_q));
     println!("materialized_account_count:{}", offset_of!(RiskEngine, materialized_account_count));
     println!("neg_pnl_account_count:{}", offset_of!(RiskEngine, neg_pnl_account_count));
     println!("last_oracle_price:{}", offset_of!(RiskEngine, last_oracle_price));
