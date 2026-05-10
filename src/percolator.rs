@@ -655,6 +655,28 @@ pub struct RiskEngine {
     /// `admit_h_max_consumption_threshold_bps_opt = Some(t)`.
     pub price_move_consumed_bps_this_generation: u128,
 
+    /// Wave 1 / ENG-PORT-C: external-oracle target tracking.
+    ///
+    /// Latest target observation seen via the wrapper's `read_price_clamped`
+    /// path. The "target" is the raw external price the next admin/keeper
+    /// progress should clamp toward; the "effective" price (mark / index)
+    /// is allowed to staircase toward this target over multiple slots
+    /// (per `params.max_price_move_bps_per_slot * dt_slots`).
+    ///
+    /// Engine-side rather than wrapper-side: this is the canonical source
+    /// of truth for per-market oracle target state. Wrappers consume it
+    /// via `read_price_clamped` (no-mutation form) and
+    /// `read_price_and_stamp` (strictly-advanced form).
+    /// Toly carries these on MarketConfig (wrapper-side); fork hosts them
+    /// on RiskEngine to keep state-shape validation + Kani invariants
+    /// uniform.
+    pub oracle_target_price_e6: u64,
+    /// Publish time of the latest target observation (Pyth/Chainlink
+    /// `publish_time` field). Used by `read_price_and_stamp` to gate
+    /// `last_good_oracle_slot` advancement on strictly-advanced timestamps
+    /// (defeats publish-time replay).
+    pub oracle_target_publish_time: i64,
+
     /// Last oracle price used in accrue_market_to (P_last, spec §5.5)
     pub last_oracle_price: u64,
     /// Last funding-sample price (fund_px_last, spec §5.5 step 11)
@@ -1364,6 +1386,10 @@ impl RiskEngine {
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
+            // Wave 1 / ENG-PORT-C: oracle target init — see init_in_place
+            // for the matching rationale comment.
+            oracle_target_price_e6: 0,
+            oracle_target_publish_time: 0,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
@@ -1457,6 +1483,13 @@ impl RiskEngine {
         self.rr_cursor_position = 0;
         self.sweep_generation = 0;
         self.price_move_consumed_bps_this_generation = 0;
+        // Wave 1 / ENG-PORT-C: oracle target init. At market genesis the
+        // wrapper's first `read_price_clamped` will populate these from
+        // the live oracle observation; init to (0, 0) signals "no target
+        // observed yet" so the strictly-advanced gate accepts the first
+        // observation unconditionally.
+        self.oracle_target_price_e6 = 0;
+        self.oracle_target_publish_time = 0;
         self.last_oracle_price = init_oracle_price;
         self.fund_px_last = init_oracle_price;
         self.last_market_slot = init_slot;
@@ -6830,6 +6863,58 @@ impl RiskEngine {
         }
 
         // Phase 2: terminal close
+        let capital = self.close_resolved_terminal_not_atomic(idx)?;
+        Ok(ResolvedCloseResult::Closed(capital))
+    }
+
+    /// Wave 1 / ENG-PORT-B: force-close a resolved account with optional
+    /// recurring maintenance fee charged at the resolved-slot anchor.
+    ///
+    /// Mirrors toly engine src/percolator.rs:9688-9716. Reverses the prior
+    /// FEATURE-DIVERGENCE decision (see comment in
+    /// `force_close_resolved_not_atomic` above) where fork deliberately
+    /// skipped the maintenance-fee charge. With this method, wrappers that
+    /// run with `maintenance_fee_per_slot > 0` can pay the fee at terminal
+    /// close — keeping fee accounting consistent with the live-market path
+    /// (where `sync_account_fee_to_slot_not_atomic` is the canonical sync
+    /// primitive).
+    ///
+    /// Wrappers that don't enable maintenance fees can keep calling
+    /// `force_close_resolved_not_atomic` (zero-fee path); both paths share
+    /// the same Phase 1 reconcile + Phase 2 terminal close. The only
+    /// difference is the `sync_account_fee_to_slot` call between phases.
+    pub fn force_close_resolved_with_fee_not_atomic(
+        &mut self,
+        idx: u16,
+        fee_rate_per_slot: u128,
+    ) -> Result<ResolvedCloseResult> {
+        // Phase 1: always reconcile (persists on success, idempotent).
+        self.reconcile_resolved_not_atomic(idx)?;
+
+        let i = idx as usize;
+
+        // Finalize any sides that are fully ready for reopening.
+        self.maybe_finalize_ready_reset_sides();
+        if self.accounts[i].position_basis_q != 0 {
+            return Ok(ResolvedCloseResult::ProgressOnly);
+        }
+        // Charge recurring maintenance fees at the resolved-slot anchor
+        // BEFORE the terminal close so capital seen by the close path is
+        // post-fee. No-op when fee_rate_per_slot == 0.
+        self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
+        self.assert_public_postconditions()?;
+
+        // pnl <= 0: can close immediately (loser/zero — no payout gate)
+        // pnl > 0: needs terminal readiness for payout
+        if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
+            // Reconciled but not yet payable. Progress persisted.
+            return Ok(ResolvedCloseResult::ProgressOnly);
+        }
+
+        // Phase 2: terminal close. Existing fork helper closes without
+        // re-charging fees (we already synced above). Wrappers that need
+        // the fee charge call this method; wrappers that don't can keep
+        // using `force_close_resolved_not_atomic`.
         let capital = self.close_resolved_terminal_not_atomic(idx)?;
         Ok(ResolvedCloseResult::Closed(capital))
     }

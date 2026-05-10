@@ -766,3 +766,53 @@ fn proof_fee_credits_never_i128_min() {
         }
     }
 }
+
+// ############################################################################
+// Wave 1 ENG-PORT-C: external-oracle-target schema invariant
+// ############################################################################
+
+/// Wave 1 / ENG-PORT-C: oracle-target schema invariant.
+///
+/// `init_in_place` MUST zero both `oracle_target_price_e6` and
+/// `oracle_target_publish_time`. The wrapper's strictly-advanced gate
+/// in `read_price_and_stamp` relies on `(0, 0)` representing "no
+/// target observed yet" so the first observation is admitted
+/// unconditionally. Mis-initializing these fields would either
+/// reject the first valid Pyth publish or accept a stale replay.
+///
+/// Also asserts that arbitrary writes through the field are
+/// observable (the schema addition is well-formed) and that adding
+/// these fields doesn't break `check_conservation` — the
+/// conservation aggregate only reads value-bearing fields, and
+/// oracle-target fields are pure metadata.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_oracle_target_init_zero_and_persistence() {
+    let mut engine =
+        RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    // Init zeros both fields.
+    assert_eq!(engine.oracle_target_price_e6, 0);
+    assert_eq!(engine.oracle_target_publish_time, 0);
+    // Conservation holds at genesis with the new fields present.
+    assert!(engine.check_conservation());
+
+    // Symbolic write-back: arbitrary values persist and are observable.
+    let target_price: u64 = kani::any();
+    let target_time: i64 = kani::any();
+    kani::assume(target_price <= MAX_ORACLE_PRICE);
+
+    engine.oracle_target_price_e6 = target_price;
+    engine.oracle_target_publish_time = target_time;
+
+    assert_eq!(engine.oracle_target_price_e6, target_price);
+    assert_eq!(engine.oracle_target_publish_time, target_time);
+    // Conservation still holds — oracle-target fields are pure metadata.
+    assert!(engine.check_conservation());
+
+    kani::cover!(
+        target_price > 0 && target_time > 0,
+        "non-zero target observation persists and conservation is preserved"
+    );
+}

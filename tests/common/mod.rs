@@ -125,6 +125,17 @@ pub fn zero_fee_params() -> RiskParams {
     }
 }
 
+/// Test helper: shrink the account tier of `zero_fee_params` for Kani proofs
+/// that need to model a small market. Mirrors toly's helper of the same name
+/// (Wave 1 ENG-PORT-A harness needs `small_zero_fee_params(4)` to bound the
+/// state space without changing solvency-envelope calibration).
+pub fn small_zero_fee_params(max_accounts: u64) -> RiskParams {
+    let mut params = zero_fee_params();
+    params.max_accounts = max_accounts;
+    params.max_active_positions_per_side = max_accounts;
+    params
+}
+
 /// Test helper: materialize a user account via deposit_not_atomic (spec §10.2).
 ///
 /// v12.18.1 removed add_user / add_lp / materialize_with_fee. The sole
