@@ -4903,6 +4903,40 @@ impl RiskEngine {
 
     }
 
+    test_visible! {
+    /// PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant predicate.
+    /// Returns `Ok(true)` if the account at `idx` carries a non-zero position
+    /// basis whose epoch / A / K / F snapshots disagree with the side's
+    /// current aggregates — i.e., touch_account_live_local left the account
+    /// stale and any downstream mutation (trade, withdraw, close, convert)
+    /// would operate on inconsistent state.
+    ///
+    /// ADAPTED port (KL-FORK-ENGINE-B-TRACKING-1): toly's 5th predicate
+    /// (`b_snap`/`b_epoch_snap` mismatch via `b_target_for_account`) is
+    /// SKIPPED here — fork has no B-tracking subsystem. The 4 retained
+    /// predicates (epoch / A / K / F) catch K/F/A_basis/epoch staleness in
+    /// every path; the residual narrow case (B drift only, with epoch/A/K/F
+    /// in sync) is documented in KL-FORK-ENGINE-B-TRACKING-1 as a bounded
+    /// gap that closes when the B-tracking subsystem ports.
+    ///
+    /// Cross-ref: ENGINE_BODY_DIFF.md §execute_trade_not_atomic Hunk 2;
+    /// AUDIT_WORK_PRESERVATION.md row 3.
+    fn account_has_unsettled_live_effects(&self, idx: usize) -> Result<bool> {
+        let account = &self.accounts[idx];
+        if account.position_basis_q == 0 {
+            return Ok(false);
+        }
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
+        if account.adl_epoch_snap != self.get_epoch_side(side) {
+            return Ok(true);
+        }
+        Ok(account.adl_a_basis != self.get_a_side(side)
+            || account.adl_k_snap != self.get_k_side(side)
+            || account.f_snap != self.get_f_side(side))
+    }
+
+    }
+
     // ========================================================================
     // Account Management
     // ========================================================================
