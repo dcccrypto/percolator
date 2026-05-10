@@ -1906,6 +1906,7 @@ fn proof_property_56_exact_raw_im_approval() {
         tiny_size,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,
@@ -2768,7 +2769,7 @@ fn proof_audit5_reclaim_rejects_live_capital() {
 // Gap #3: Conservation proof WITH nonzero trading fees
 // ############################################################################
 
-/// Trade conservation must hold when trading_fee_bps > 0.
+/// Trade conservation must hold when max_trading_fee_bps > 0.
 /// Fees flow from accounts to insurance (C decreases, I increases, V unchanged).
 #[kani::proof]
 #[kani::unwind(34)]

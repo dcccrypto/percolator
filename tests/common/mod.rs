@@ -107,7 +107,7 @@ pub fn zero_fee_params() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
-        trading_fee_bps: 0,
+        max_max_max_trading_fee_bps: 0,
         max_accounts: MAX_ACCOUNTS as u64,
         liquidation_fee_bps: 0,
         liquidation_fee_cap: U128::ZERO,
@@ -207,7 +207,7 @@ pub fn default_params() -> RiskParams {
     RiskParams {
         maintenance_margin_bps: 500,
         initial_margin_bps: 1000,
-        trading_fee_bps: 10,
+        max_max_max_trading_fee_bps: 10,
         max_accounts: MAX_ACCOUNTS as u64,
         liquidation_fee_bps: 100,
         liquidation_fee_cap: U128::new(1_000_000),

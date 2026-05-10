@@ -637,7 +637,7 @@ fn t11_51_execute_trade_slippage_zero_sum() {
     // so no vault/capital movement can be attributed to the trade fee path.
     let params = zero_fee_params();
     let trade_notional = 100u128;
-    let fee = if trade_notional > 0 && params.trading_fee_bps > 0 {
+    let fee = if trade_notional > 0 && params.max_trading_fee_bps > 0 {
         1u128
     } else {
         0u128
@@ -1665,6 +1665,7 @@ fn proof_property_31_missing_account_safety() {
         POS_SCALE as i128,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,
@@ -1683,6 +1684,7 @@ fn proof_property_31_missing_account_safety() {
         POS_SCALE as i128,
         DEFAULT_ORACLE,
         0i128,
+        0u64,
         0,
         100,
         None,
