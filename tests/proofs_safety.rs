@@ -3008,6 +3008,72 @@ fn proof_close_account_fee_forgiveness_bounded() {
 }
 
 // ############################################################################
+// Wave 1 ENG-PORT-A: withdraw_resolved_insurance_not_atomic invariants
+// ############################################################################
+
+/// Wave 1 / ENG-PORT-A: empty-market-after-resolve invariant.
+///
+/// `withdraw_resolved_insurance_not_atomic` MUST:
+///   - reject if any account remains used (positions / capital still live)
+///   - on empty market: drain only the insurance fund, leave c_tot == 0,
+///     and never decrement vault by more than insurance_before
+///   - preserve MarketMode::Resolved post-call
+///   - preserve check_conservation
+///
+/// Harness mirrors toly-engine `proof_resolved_insurance_withdraw_requires_empty_market_and_drains_only_insurance_on_prod_code`
+/// (toly tests/proofs_safety.rs:362-410), now reachable in fork because
+/// `withdraw_resolved_insurance_not_atomic` is byte-equivalent to toly's.
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_resolved_insurance_withdraw_requires_empty_market_and_drains_only_insurance_on_prod_code(
+) {
+    let mut engine =
+        RiskEngine::new_with_market(small_zero_fee_params(4), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let nonempty: bool = kani::any();
+    if nonempty {
+        engine.deposit_not_atomic(0, 10, DEFAULT_SLOT).unwrap();
+    }
+    engine.top_up_insurance_fund(50, DEFAULT_SLOT).unwrap();
+    engine.market_mode = MarketMode::Resolved;
+    engine.current_slot = DEFAULT_SLOT;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+
+    let vault_before = engine.vault.get();
+    let capital_before = engine.c_tot.get();
+    let insurance_before = engine.insurance_fund.balance.get();
+    let used_before = engine.num_used_accounts;
+
+    let result = engine.withdraw_resolved_insurance_not_atomic();
+
+    if nonempty {
+        assert_eq!(result, Err(RiskError::Unauthorized));
+        assert_eq!(engine.vault.get(), vault_before);
+        assert_eq!(engine.c_tot.get(), capital_before);
+        assert_eq!(engine.insurance_fund.balance.get(), insurance_before);
+        assert_eq!(engine.num_used_accounts, used_before);
+    } else {
+        assert_eq!(result, Ok(insurance_before));
+        assert_eq!(engine.vault.get(), vault_before - insurance_before);
+        assert_eq!(engine.c_tot.get(), 0);
+        assert_eq!(engine.insurance_fund.balance.get(), 0);
+        assert_eq!(engine.num_used_accounts, 0);
+    }
+    assert_eq!(engine.market_mode, MarketMode::Resolved);
+    assert!(engine.check_conservation());
+    kani::cover!(
+        nonempty && result == Err(RiskError::Unauthorized),
+        "resolved insurance withdrawal rejects while any account remains"
+    );
+    kani::cover!(
+        !nonempty && result == Ok(insurance_before) && engine.vault.get() == 0,
+        "resolved insurance withdrawal drains only terminal insurance after market is empty"
+    );
+}
+
+// ############################################################################
 // Gap #11 (Weakness): Symbolic trade size for conservation
 // ############################################################################
 
