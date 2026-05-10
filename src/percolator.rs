@@ -6682,21 +6682,39 @@ impl RiskEngine {
             }
         }
 
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 2): pre-state snapshot.
+        // Capture the pre-resolve view BEFORE any mutation. The K-terminal-delta
+        // gate, phantom-dust zero predicate, and drain-finalize gates below all
+        // read these snapshots so per-side decisions reflect the pre-resolve
+        // state, not the in-mutation state.
+        let pre_mode_long = self.side_mode_long;
+        let pre_mode_short = self.side_mode_short;
+        let pre_a_long = self.adl_mult_long;
+        let pre_a_short = self.adl_mult_short;
+        let pre_oi_long = self.oi_eff_long_q;
+        let pre_oi_short = self.oi_eff_short_q;
+        let pre_stored_long = self.stored_pos_count_long;
+        let pre_stored_short = self.stored_pos_count_short;
+
         // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
         // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
         // so resolution can succeed even near K headroom (spec §9.7 step 8).
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 3): K-terminal-delta zero-on-zero-OI.
+        // A side with no pre-resolve OI cannot accumulate a non-zero terminal delta —
+        // it would attribute a settlement shift to non-existent positions. Forces
+        // the delta to 0 when pre_oi_<side> == 0, regardless of side mode.
         let price_diff = resolved_price as i128 - live_oracle_price as i128;
-        let resolved_k_long_td = if self.side_mode_long == SideMode::ResetPending {
+        let resolved_k_long_td = if pre_mode_long == SideMode::ResetPending || pre_oi_long == 0 {
             0i128
         } else {
-            checked_u128_mul_i128(self.adl_mult_long, price_diff)?
+            checked_u128_mul_i128(pre_a_long, price_diff)?
         };
-        let resolved_k_short_td = if self.side_mode_short == SideMode::ResetPending {
+        let resolved_k_short_td = if pre_mode_short == SideMode::ResetPending || pre_oi_short == 0 {
             0i128
         } else {
             // Short side: negative of price_diff
             let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
-            checked_u128_mul_i128(self.adl_mult_short, neg_price_diff)?
+            checked_u128_mul_i128(pre_a_short, neg_price_diff)?
         };
 
         // Steps 8-13: set resolved state
@@ -6720,11 +6738,31 @@ impl RiskEngine {
         self.oi_eff_long_q = 0;
         self.oi_eff_short_q = 0;
 
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 5): phantom-dust zero on
+        // pre_stored_<side> == 0. ADAPTED to fork's single-bound phantom_dust
+        // schema per KL-PHANTOM-DUST-SCHEMA-1 (toly uses the certified+potential
+        // pair phantom_dust_certified_<side>_q + phantom_dust_potential_<side>_q;
+        // fork uses the single-bound phantom_dust_bound_<side>_q). Semantically
+        // equivalent: no stored positions ⇒ no dust to track.
+        // Without this, fork-resolved markets carry stale phantom-dust into the
+        // resolved-payout-h-num/den ratio.
+        if pre_stored_long == 0 {
+            self.phantom_dust_bound_long_q = 0u128;
+        }
+        if pre_stored_short == 0 {
+            self.phantom_dust_bound_short_q = 0u128;
+        }
+
         // Steps 17-20: drain/finalize sides
-        if self.side_mode_long != SideMode::ResetPending {
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 6): drain-reset pre_stored guard.
+        // Only enter drain reset when pre_stored_<side> > 0 — i.e. there are
+        // positions to drain. The pre-port code unconditionally entered drain
+        // even on sides with zero stored positions, performing spurious side-mode
+        // transitions and bumping sweep_generation.
+        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
             self.begin_full_drain_reset(Side::Long)?;
         }
-        if self.side_mode_short != SideMode::ResetPending {
+        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
             self.begin_full_drain_reset(Side::Short)?;
         }
         if self.side_mode_long == SideMode::ResetPending
