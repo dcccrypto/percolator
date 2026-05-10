@@ -6802,6 +6802,24 @@ impl RiskEngine {
 
         // Finalize any sides that are fully ready for reopening
         self.maybe_finalize_ready_reset_sides();
+
+        // PORT (ENG-PORT-6 / Port 6 — SF guard): position-basis early-return.
+        // Refuse to attempt terminal close when the account still has non-zero
+        // position_basis_q after reconcile_resolved_not_atomic ran — guards
+        // against the case where reconcile partially progressed (e.g., social
+        // loss spread didn't fully unwind basis). Without this, the next call
+        // (close_resolved_terminal_not_atomic) expects basis == 0 and may fail
+        // later in a less recoverable way, OR silently mis-account because the
+        // close path zeros basis without realizing the residual.
+        // The matching toly-side fee-charging line
+        // (sync_account_fee_to_slot(i, resolved_slot, fee_rate_per_slot))
+        // is FEATURE-DIVERGENCE — fork doesn't charge maintenance fees at
+        // resolved close. SKIP per ENGINE_BODY_DIFF §force_close_resolved_not_atomic
+        // Hunk 3 (FEATURE-DIVERGENCE MEDIUM).
+        if self.accounts[i].position_basis_q != 0 {
+            return Ok(ResolvedCloseResult::ProgressOnly);
+        }
+
         self.assert_public_postconditions()?;
 
         // pnl <= 0: can close immediately (loser/zero — no payout gate)
