@@ -5121,6 +5121,14 @@ impl RiskEngine {
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Withdraw must reject if the account's snaps disagree with the side's
+        // current aggregates after touch — finalize_touched would otherwise
+        // sweep fees against capital based on stale K/F.
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Finalize touched (whole-only conversion + fee sweep)
         self.finalize_touched_accounts_post_live(&ctx)?;
 
@@ -5334,6 +5342,16 @@ impl RiskEngine {
         let (first, second) = if a <= b { (a, b) } else { (b, a) };
         self.touch_account_live_local(first as usize, &mut ctx)?;
         self.touch_account_live_local(second as usize, &mut ctx)?;
+
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Verify both counterparties are settled (epoch / A / K / F snaps
+        // match side aggregates) before any trade-body mutation. ADAPTED
+        // 4-predicate form per KL-FORK-ENGINE-B-TRACKING-1.
+        if self.account_has_unsettled_live_effects(a as usize)?
+            || self.account_has_unsettled_live_effects(b as usize)?
+        {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Step 12a: flush dust-only empty sides before computing
         // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
@@ -6410,6 +6428,13 @@ impl RiskEngine {
         // Step 3: live local touch (no auto-convert, no finalize yet)
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Reject if convert would mutate released-PnL bookkeeping based on
+        // stale K/F/A_basis/epoch.
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Steps 4-10 happen before finalize so auto-convert cannot consume
         // the user's released PnL before they can request it.
         self.convert_released_pnl_core(idx as usize, x_req, oracle_price)?;
@@ -6458,6 +6483,15 @@ impl RiskEngine {
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Close must reject if effective_pos_q would be computed from stale
+        // A_basis/K/F (the next line uses effective_pos_q_checked which derives
+        // from those snaps).
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+
         self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Position must be zero
