@@ -1386,6 +1386,10 @@ impl RiskEngine {
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
+            // Wave 1 / ENG-PORT-C: oracle target init — see init_in_place
+            // for the matching rationale comment.
+            oracle_target_price_e6: 0,
+            oracle_target_publish_time: 0,
             last_oracle_price: init_oracle_price,
             fund_px_last: init_oracle_price,
             last_market_slot: init_slot,
