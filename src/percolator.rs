@@ -665,9 +665,27 @@ pub struct RiskEngine {
     pub stale_account_count_long: u64,
     pub stale_account_count_short: u64,
 
-    /// Dynamic phantom dust bounds (spec §4.6, §5.7)
-    pub phantom_dust_bound_long_q: u128,
-    pub phantom_dust_bound_short_q: u128,
+    /// Wave 6a / KL-PHANTOM-DUST-SCHEMA-1 (REVOKED): adopt toly's 4-field
+    /// phantom-dust schema (certified + potential per side, toly:783-786).
+    ///
+    /// `potential_<side>_q` is the upper bound — the maximum representable
+    /// dust on `<side>` given account-floor slack and the OI-cap math.
+    /// Semantically identical to the fork's prior `phantom_dust_bound_<side>_q`
+    /// (renamed; see `inc_phantom_dust_potential` / `_by`).
+    ///
+    /// `certified_<side>_q` is the lower bound — dust that's been certified
+    /// by the B-tracking-aware liquidation step 7 (toly:5030-5118). The fork
+    /// hasn't ported B-tracking, so `certified_<side>_q` is always 0 on this
+    /// branch: it exists purely for wire-format alignment with toly + NFT
+    /// vendored-bytes mirroring (Wave 6c). When B-tracking is ported in a
+    /// future wave, the certified field will start receiving non-zero values
+    /// from the new liquidation logic with no schema break.
+    ///
+    /// Spec §4.6, §5.7. Toly engine ref: src/percolator.rs:783-786.
+    pub phantom_dust_certified_long_q: u128,
+    pub phantom_dust_certified_short_q: u128,
+    pub phantom_dust_potential_long_q: u128,
+    pub phantom_dust_potential_short_q: u128,
 
     /// Materialized account count (spec §2.2)
     pub materialized_account_count: u64,
@@ -1550,8 +1568,12 @@ impl RiskEngine {
             stored_pos_count_short: 0,
             stale_account_count_long: 0,
             stale_account_count_short: 0,
-            phantom_dust_bound_long_q: 0u128,
-            phantom_dust_bound_short_q: 0u128,
+            // Wave 6a: 4-field phantom-dust schema. `certified` always 0 on
+            // this branch (no B-tracking-aware certification logic).
+            phantom_dust_certified_long_q: 0u128,
+            phantom_dust_certified_short_q: 0u128,
+            phantom_dust_potential_long_q: 0u128,
+            phantom_dust_potential_short_q: 0u128,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
             // Wave 4a: bankrupt-close gate variables — see init_in_place
@@ -1678,8 +1700,11 @@ impl RiskEngine {
         self.stored_pos_count_short = 0;
         self.stale_account_count_long = 0;
         self.stale_account_count_short = 0;
-        self.phantom_dust_bound_long_q = 0;
-        self.phantom_dust_bound_short_q = 0;
+        // Wave 6a: 4-field phantom-dust schema. See struct comment.
+        self.phantom_dust_certified_long_q = 0;
+        self.phantom_dust_certified_short_q = 0;
+        self.phantom_dust_potential_long_q = 0;
+        self.phantom_dust_potential_short_q = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
         // Wave 4a: bankrupt-close gate variables init to no-active state.
@@ -2503,7 +2528,7 @@ impl RiskEngine {
                             let rem = p.checked_rem(U256::from_u128(a_basis));
                             if let Some(r) = rem {
                                 if !r.is_zero() {
-                                    self.inc_phantom_dust_bound(old_side)?;
+                                    self.inc_phantom_dust_potential(old_side)?;
                                 }
                             }
                         }
@@ -2823,18 +2848,23 @@ impl RiskEngine {
         }
     }
 
-    /// Spec §4.6: increment phantom dust bound by 1 q-unit (checked).
-    fn inc_phantom_dust_bound(&mut self, s: Side) -> Result<()> {
+    /// Spec §4.6: increment phantom dust potential by 1 q-unit (checked).
+    ///
+    /// Wave 6a (KL-PHANTOM-DUST-SCHEMA-1 REVOKED): renamed from
+    /// `inc_phantom_dust_bound`. Semantically identical; the field rename
+    /// is `phantom_dust_bound_<side>_q` → `phantom_dust_potential_<side>_q`.
+    /// Mirrors toly `inc_phantom_dust_potential` (toly:3335-3352).
+    fn inc_phantom_dust_potential(&mut self, s: Side) -> Result<()> {
         match s {
             Side::Long => {
-                self.phantom_dust_bound_long_q = self
-                    .phantom_dust_bound_long_q
+                self.phantom_dust_potential_long_q = self
+                    .phantom_dust_potential_long_q
                     .checked_add(1u128)
                     .ok_or(RiskError::Overflow)?;
             }
             Side::Short => {
-                self.phantom_dust_bound_short_q = self
-                    .phantom_dust_bound_short_q
+                self.phantom_dust_potential_short_q = self
+                    .phantom_dust_potential_short_q
                     .checked_add(1u128)
                     .ok_or(RiskError::Overflow)?;
             }
@@ -2842,23 +2872,64 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Spec §4.6.1: increment phantom dust bound by amount_q (checked).
-    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
+    /// Spec §4.6.1: increment phantom dust potential by amount_q (checked).
+    ///
+    /// Wave 6a: renamed from `inc_phantom_dust_bound_by`. Fork-only helper —
+    /// toly does the equivalent inline in liquidation step 10 (toly:5099).
+    /// Kept as a helper because the fork's liquidation step 10 formula
+    /// (`global_a_dust_bound = N_opp + ceil((OI + N_opp) / A_old)`) differs
+    /// from toly's `aggregate_gap + account_floor_bound` formula and reuses
+    /// this helper at one call site (try_close_position_at_oracle).
+    fn inc_phantom_dust_potential_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
         match s {
             Side::Long => {
-                self.phantom_dust_bound_long_q = self
-                    .phantom_dust_bound_long_q
+                self.phantom_dust_potential_long_q = self
+                    .phantom_dust_potential_long_q
                     .checked_add(amount_q)
                     .ok_or(RiskError::Overflow)?;
             }
             Side::Short => {
-                self.phantom_dust_bound_short_q = self
-                    .phantom_dust_bound_short_q
+                self.phantom_dust_potential_short_q = self
+                    .phantom_dust_potential_short_q
                     .checked_add(amount_q)
                     .ok_or(RiskError::Overflow)?;
             }
         }
         Ok(())
+    }
+
+    /// Wave 6a / KL-PHANTOM-DUST-SCHEMA-1 (REVOKED): toly get/set helpers
+    /// for the 4-field schema. Mirrors toly:3353-3378.
+    ///
+    /// `certified` is always 0 on this branch (see field doc); the setters
+    /// exist so future B-tracking liquidation logic can be ported in place
+    /// without re-shaping helper call sites.
+    fn get_phantom_dust_certified(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.phantom_dust_certified_long_q,
+            Side::Short => self.phantom_dust_certified_short_q,
+        }
+    }
+
+    fn set_phantom_dust_certified(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.phantom_dust_certified_long_q = v,
+            Side::Short => self.phantom_dust_certified_short_q = v,
+        }
+    }
+
+    fn get_phantom_dust_potential(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.phantom_dust_potential_long_q,
+            Side::Short => self.phantom_dust_potential_short_q,
+        }
+    }
+
+    fn set_phantom_dust_potential(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.phantom_dust_potential_long_q = v,
+            Side::Short => self.phantom_dust_potential_short_q = v,
+        }
     }
 
     // ========================================================================
@@ -2962,7 +3033,7 @@ impl RiskEngine {
             self.set_pnl_with_reserve(idx, new_pnl, ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared), Some(ctx))?;
 
             if q_eff_new == 0 {
-                self.inc_phantom_dust_bound(side)?;
+                self.inc_phantom_dust_potential(side)?;
                 self.set_position_basis_q(idx, 0i128)?;
                 self.accounts[idx].adl_a_basis = ADL_ONE;
                 self.accounts[idx].adl_k_snap = 0i128;
@@ -3588,7 +3659,7 @@ impl RiskEngine {
                 let global_a_dust_bound = n_opp_u256.checked_add(ceil_term)
                     .unwrap_or(U256::MAX);
                 let bound_u128 = global_a_dust_bound.try_into_u128().unwrap_or(u128::MAX);
-                self.inc_phantom_dust_bound_by(opp, bound_u128)?;
+                self.inc_phantom_dust_potential_by(opp, bound_u128)?;
             }
             if a_new < MIN_A_SIDE {
                 self.set_side_mode(opp, SideMode::DrainOnly);
@@ -3672,10 +3743,17 @@ impl RiskEngine {
         let spc = self.get_stored_pos_count(side);
         self.set_stale_count(side, spc);
 
-        // phantom_dust_bound_side_q = 0 (spec §2.5 step 6)
+        // phantom_dust = 0 on full-drain side reset (spec §2.5 step 6).
+        // Wave 6a: zero both certified and potential for the 4-field schema.
         match side {
-            Side::Long => self.phantom_dust_bound_long_q = 0u128,
-            Side::Short => self.phantom_dust_bound_short_q = 0u128,
+            Side::Long => {
+                self.phantom_dust_certified_long_q = 0u128;
+                self.phantom_dust_potential_long_q = 0u128;
+            }
+            Side::Short => {
+                self.phantom_dust_certified_short_q = 0u128;
+                self.phantom_dust_potential_short_q = 0u128;
+            }
         }
 
         // mode = ResetPending
@@ -3709,15 +3787,21 @@ impl RiskEngine {
 
     test_visible! {
     fn schedule_end_of_instruction_resets(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+        // Wave 6a: OI-cap uses `phantom_dust_potential_<side>_q` (the upper
+        // bound) — renamed from `phantom_dust_bound_<side>_q`, semantically
+        // identical. `certified_<side>_q` is the lower bound and is always 0
+        // on this branch (no B-tracking-aware certification), so it doesn't
+        // participate in the cap.
+        //
         // §5.7.A: Bilateral-empty dust clearance
         if self.stored_pos_count_long == 0 && self.stored_pos_count_short == 0 {
-            let clear_bound_q = self.phantom_dust_bound_long_q
-                .checked_add(self.phantom_dust_bound_short_q)
+            let clear_bound_q = self.phantom_dust_potential_long_q
+                .checked_add(self.phantom_dust_potential_short_q)
                 .ok_or(RiskError::CorruptState)?;
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_long_q != 0
-                || self.phantom_dust_bound_short_q != 0;
+                || self.phantom_dust_potential_long_q != 0
+                || self.phantom_dust_potential_short_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
@@ -3736,12 +3820,12 @@ impl RiskEngine {
         else if self.stored_pos_count_long == 0 && self.stored_pos_count_short > 0 {
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_long_q != 0;
+                || self.phantom_dust_potential_long_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
                 }
-                if self.oi_eff_long_q <= self.phantom_dust_bound_long_q {
+                if self.oi_eff_long_q <= self.phantom_dust_potential_long_q {
                     self.oi_eff_long_q = 0u128;
                     self.oi_eff_short_q = 0u128;
                     ctx.pending_reset_long = true;
@@ -3755,12 +3839,12 @@ impl RiskEngine {
         else if self.stored_pos_count_short == 0 && self.stored_pos_count_long > 0 {
             let has_residual = self.oi_eff_long_q != 0
                 || self.oi_eff_short_q != 0
-                || self.phantom_dust_bound_short_q != 0;
+                || self.phantom_dust_potential_short_q != 0;
             if has_residual {
                 if self.oi_eff_long_q != self.oi_eff_short_q {
                     return Err(RiskError::CorruptState);
                 }
-                if self.oi_eff_short_q <= self.phantom_dust_bound_short_q {
+                if self.oi_eff_short_q <= self.phantom_dust_potential_short_q {
                     self.oi_eff_long_q = 0u128;
                     self.oi_eff_short_q = 0u128;
                     ctx.pending_reset_long = true;
@@ -4350,6 +4434,19 @@ impl RiskEngine {
             return Err(RiskError::CorruptState);
         }
         if self.market_mode == MarketMode::Live && self.pnl_pos_tot > MAX_PNL_POS_TOT {
+            return Err(RiskError::CorruptState);
+        }
+        // Wave 6a / KL-PHANTOM-DUST-SCHEMA-1 (REVOKED): certified is a lower
+        // bound, potential is the upper bound; certified must never exceed
+        // potential on either side. On this branch certified is always 0
+        // (see field doc), so the invariant is `0 <= potential` — trivially
+        // true — but the explicit check grounds the get helpers and matches
+        // toly's defense-in-depth posture once B-tracking lands.
+        if self.get_phantom_dust_certified(Side::Long)
+            > self.get_phantom_dust_potential(Side::Long)
+            || self.get_phantom_dust_certified(Side::Short)
+                > self.get_phantom_dust_potential(Side::Short)
+        {
             return Err(RiskError::CorruptState);
         }
         if self.materialized_account_count > self.params.max_accounts {
@@ -7170,18 +7267,17 @@ impl RiskEngine {
         self.oi_eff_short_q = 0;
 
         // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 5): phantom-dust zero on
-        // pre_stored_<side> == 0. ADAPTED to fork's single-bound phantom_dust
-        // schema per KL-PHANTOM-DUST-SCHEMA-1 (toly uses the certified+potential
-        // pair phantom_dust_certified_<side>_q + phantom_dust_potential_<side>_q;
-        // fork uses the single-bound phantom_dust_bound_<side>_q). Semantically
-        // equivalent: no stored positions ⇒ no dust to track.
-        // Without this, fork-resolved markets carry stale phantom-dust into the
-        // resolved-payout-h-num/den ratio.
+        // pre_stored_<side> == 0. Wave 6a (KL-PHANTOM-DUST-SCHEMA-1 REVOKED):
+        // now clears all 4 fields of the toly-aligned schema (certified +
+        // potential per side, toly:9637-9644). Without this, resolved markets
+        // carry stale phantom-dust into the resolved-payout h-num/den ratio.
         if pre_stored_long == 0 {
-            self.phantom_dust_bound_long_q = 0u128;
+            self.set_phantom_dust_certified(Side::Long, 0);
+            self.set_phantom_dust_potential(Side::Long, 0);
         }
         if pre_stored_short == 0 {
-            self.phantom_dust_bound_short_q = 0u128;
+            self.set_phantom_dust_certified(Side::Short, 0);
+            self.set_phantom_dust_potential(Side::Short, 0);
         }
 
         // Steps 17-20: drain/finalize sides

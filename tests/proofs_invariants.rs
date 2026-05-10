@@ -1092,3 +1092,59 @@ fn proof_bankrupt_close_state_machine_schema() {
         "bankrupt-close state-machine schema clear/validate/codec invariants"
     );
 }
+
+// ============================================================================
+// Wave 6a — phantom-dust 4-field schema (KL-PHANTOM-DUST-SCHEMA-1 REVOKED)
+// ============================================================================
+
+/// Schema-level invariant `certified <= potential` holds at market genesis
+/// and is consumed by `assert_public_postconditions`. On this branch
+/// `certified_<side>_q` is always 0 (no B-tracking-aware liquidation logic),
+/// so the gate trivially passes; when B-tracking lands, this harness will
+/// detect any setter that violates the lower-bound ≤ upper-bound contract.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_phantom_dust_certified_le_potential_at_genesis() {
+    let engine = RiskEngine::new(zero_fee_params());
+
+    assert!(engine.phantom_dust_certified_long_q <= engine.phantom_dust_potential_long_q);
+    assert!(engine.phantom_dust_certified_short_q <= engine.phantom_dust_potential_short_q);
+
+    // On this branch certified is always 0 at genesis.
+    assert_eq!(engine.phantom_dust_certified_long_q, 0);
+    assert_eq!(engine.phantom_dust_certified_short_q, 0);
+
+    assert!(engine.assert_public_postconditions().is_ok());
+}
+
+/// `assert_public_postconditions` rejects any state where certified exceeds
+/// potential on either side. Forward-looking: once B-tracking sets
+/// `certified` from liquidation step 7, this guards against off-by-one or
+/// step-ordering bugs.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_phantom_dust_certified_gt_potential_rejects() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let side: u8 = kani::any();
+    kani::assume(side < 2);
+
+    let certified: u8 = kani::any();
+    let potential: u8 = kani::any();
+    kani::assume(certified as u128 > potential as u128);
+
+    if side == 0 {
+        engine.phantom_dust_certified_long_q = certified as u128;
+        engine.phantom_dust_potential_long_q = potential as u128;
+    } else {
+        engine.phantom_dust_certified_short_q = certified as u128;
+        engine.phantom_dust_potential_short_q = potential as u128;
+    }
+
+    assert_eq!(
+        engine.assert_public_postconditions(),
+        Err(RiskError::CorruptState)
+    );
+}
