@@ -4937,6 +4937,28 @@ impl RiskEngine {
 
     }
 
+    test_visible! {
+    /// PORT (ENG-PORT-2 / CRITICAL-6): rejects a fee-draw that would rank
+    /// senior to an unrealized loss on the same account. Two checks:
+    /// (a) account already has realized negative PnL — fees must wait,
+    /// (b) on Live, the account has unsettled K/F/A_basis/epoch state —
+    ///     a fee draw at the current cursor would assume settled losses
+    ///     that haven't yet been booked.
+    ///
+    /// Pure SF port — no schema dependency. Toly source: toly-engine
+    /// (within sync_account_fee_to_slot_not_atomic body).
+    fn ensure_fee_draw_does_not_precede_loss(&self, idx: usize) -> Result<()> {
+        if self.accounts[idx].pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        if self.market_mode == MarketMode::Live && self.account_has_unsettled_live_effects(idx)? {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
+    }
+
     // ========================================================================
     // Account Management
     // ========================================================================
@@ -7286,22 +7308,47 @@ impl RiskEngine {
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
+        // PORT (ENG-PORT-2 / CRITICAL-6): loss-safe fee anchor.
+        // When market is Live, now_slot is ahead of last_market_slot, and the
+        // account holds a non-zero position basis, the fee draw must use
+        // last_market_slot (not now_slot) as its shape/anchor — otherwise the
+        // fee would charge for slots the market hasn't accrued through, ranking
+        // ahead of unrealized losses on those same slots.
+        let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
+            && now_slot > self.last_market_slot
+            && (idx as usize) < MAX_ACCOUNTS
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            self.last_market_slot
+        } else {
+            now_slot
+        };
         let shape_anchor = match self.market_mode {
-            MarketMode::Live => now_slot,
+            MarketMode::Live => live_loss_safe_anchor,
             MarketMode::Resolved => self.resolved_slot,
         };
         self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
+        // PORT (ENG-PORT-2 / CRITICAL-6): loss-juniority guard.
+        // Whenever the fee cursor would advance past the account's last_fee_slot
+        // and we're charging a non-zero rate, refuse if the account holds either
+        // realized negative PnL OR (on Live) unsettled K/F/A_basis/epoch state.
+        if fee_rate_per_slot > 0 && shape_anchor > self.accounts[idx as usize].last_fee_slot {
+            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
+        }
         // Reject time jumps that would brick subsequent accrue_market_to.
         // Only meaningful on Live; on Resolved the envelope is moot because
         // accrue_market_to is no longer reachable, but the check is safe
         // (last_market_slot is frozen to resolved_slot).
-        if self.market_mode == MarketMode::Live {
+        // PORT: gate the envelope check on now_slot > current_slot — if no
+        // time advance, no envelope to check (avoids a redundant call when
+        // sync_account_fee is invoked at the same slot multiple times).
+        if self.market_mode == MarketMode::Live && now_slot > self.current_slot {
             self.check_live_accrual_envelope(now_slot)?;
         }
         let anchor = match self.market_mode {
             MarketMode::Live => {
                 self.current_slot = now_slot;
-                self.current_slot
+                live_loss_safe_anchor
             }
             MarketMode::Resolved => {
                 // Resolved fee sync is anchored at resolution.
