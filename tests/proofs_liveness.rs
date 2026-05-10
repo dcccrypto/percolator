@@ -66,7 +66,8 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
 
     assert!(
         engine
-            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            // ENG-PORT-4 fixup: 6-arg signature. Per-account positions in scope.
+            .enforce_side_mode_oi_gate(old_a, new_a, old_b, new_b, oi_long_after, oi_short_after)
             .is_err(),
         "ready ResetPending side must block OI increase before preflight finalization"
     );
@@ -76,7 +77,7 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     assert!(engine.side_mode_long == SideMode::Normal);
     assert!(
         engine
-            .enforce_side_mode_oi_gate(oi_long_after, oi_short_after)
+            .enforce_side_mode_oi_gate(old_a, new_a, old_b, new_b, oi_long_after, oi_short_after)
             .is_ok(),
         "trade preflight must reopen a fully ready ResetPending side before OI gating"
     );

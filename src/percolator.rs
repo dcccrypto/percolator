@@ -4903,6 +4903,62 @@ impl RiskEngine {
 
     }
 
+    test_visible! {
+    /// PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant predicate.
+    /// Returns `Ok(true)` if the account at `idx` carries a non-zero position
+    /// basis whose epoch / A / K / F snapshots disagree with the side's
+    /// current aggregates — i.e., touch_account_live_local left the account
+    /// stale and any downstream mutation (trade, withdraw, close, convert)
+    /// would operate on inconsistent state.
+    ///
+    /// ADAPTED port (KL-FORK-ENGINE-B-TRACKING-1): toly's 5th predicate
+    /// (`b_snap`/`b_epoch_snap` mismatch via `b_target_for_account`) is
+    /// SKIPPED here — fork has no B-tracking subsystem. The 4 retained
+    /// predicates (epoch / A / K / F) catch K/F/A_basis/epoch staleness in
+    /// every path; the residual narrow case (B drift only, with epoch/A/K/F
+    /// in sync) is documented in KL-FORK-ENGINE-B-TRACKING-1 as a bounded
+    /// gap that closes when the B-tracking subsystem ports.
+    ///
+    /// Cross-ref: ENGINE_BODY_DIFF.md §execute_trade_not_atomic Hunk 2;
+    /// AUDIT_WORK_PRESERVATION.md row 3.
+    fn account_has_unsettled_live_effects(&self, idx: usize) -> Result<bool> {
+        let account = &self.accounts[idx];
+        if account.position_basis_q == 0 {
+            return Ok(false);
+        }
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
+        if account.adl_epoch_snap != self.get_epoch_side(side) {
+            return Ok(true);
+        }
+        Ok(account.adl_a_basis != self.get_a_side(side)
+            || account.adl_k_snap != self.get_k_side(side)
+            || account.f_snap != self.get_f_side(side))
+    }
+
+    }
+
+    test_visible! {
+    /// PORT (ENG-PORT-2 / CRITICAL-6): rejects a fee-draw that would rank
+    /// senior to an unrealized loss on the same account. Two checks:
+    /// (a) account already has realized negative PnL — fees must wait,
+    /// (b) on Live, the account has unsettled K/F/A_basis/epoch state —
+    ///     a fee draw at the current cursor would assume settled losses
+    ///     that haven't yet been booked.
+    ///
+    /// Pure SF port — no schema dependency. Toly source: toly-engine
+    /// (within sync_account_fee_to_slot_not_atomic body).
+    fn ensure_fee_draw_does_not_precede_loss(&self, idx: usize) -> Result<()> {
+        if self.accounts[idx].pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        if self.market_mode == MarketMode::Live && self.account_has_unsettled_live_effects(idx)? {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
+    }
+
     // ========================================================================
     // Account Management
     // ========================================================================
@@ -5064,6 +5120,14 @@ impl RiskEngine {
 
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Withdraw must reject if the account's snaps disagree with the side's
+        // current aggregates after touch — finalize_touched would otherwise
+        // sweep fees against capital based on stale K/F.
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
 
         // Finalize touched (whole-only conversion + fee sweep)
         self.finalize_touched_accounts_post_live(&ctx)?;
@@ -5279,6 +5343,16 @@ impl RiskEngine {
         self.touch_account_live_local(first as usize, &mut ctx)?;
         self.touch_account_live_local(second as usize, &mut ctx)?;
 
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Verify both counterparties are settled (epoch / A / K / F snaps
+        // match side aggregates) before any trade-body mutation. ADAPTED
+        // 4-predicate form per KL-FORK-ENGINE-B-TRACKING-1.
+        if self.account_has_unsettled_live_effects(a as usize)?
+            || self.account_has_unsettled_live_effects(b as usize)?
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 12a: flush dust-only empty sides before computing
         // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
         // branch zeros the account basis and decrements stored_pos_count
@@ -5373,8 +5447,18 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Reject if trade would increase OI on a blocked side.
-        self.enforce_side_mode_oi_gate(oi_long_after, oi_short_after)?;
+        // Reject if trade would increase OI on a blocked side OR land a fresh
+        // entrant on a gated side. PORT (ENG-PORT-4 / CRITICAL-8) — widened
+        // 6-arg signature threads per-account positions through to the
+        // account-gate, closing the maker-replaces-taker hazard.
+        self.enforce_side_mode_oi_gate(
+            old_eff_a,
+            new_eff_a,
+            old_eff_b,
+            new_eff_b,
+            oi_long_after,
+            oi_short_after,
+        )?;
 
         // Spec §1.4: per-side active-position cap. Pre-validate the NET
         // delta across BOTH legs so a valid position swap at the cap
@@ -5598,8 +5682,46 @@ impl RiskEngine {
     }
 
     test_visible! {
+    /// PORT (ENG-PORT-4 / CRITICAL-8): per-account side-mode entrant gate.
+    /// Rejects any new entrant onto a ResetPending side regardless of OI
+    /// movement; on DrainOnly, rejects unless the account is reducing its
+    /// existing same-side basis. Closes the maker-replaces-taker hazard
+    /// where aggregate OI is flat but a fresh OI lands on a gated side.
+    fn enforce_side_mode_account_gate(&self, old_eff: i128, new_eff: i128) -> Result<()> {
+        if new_eff == 0 {
+            return Ok(());
+        }
+        let side = side_of_i128(new_eff).ok_or(RiskError::CorruptState)?;
+        match self.get_side_mode(side) {
+            SideMode::Normal => Ok(()),
+            SideMode::ResetPending => Err(RiskError::SideBlocked),
+            SideMode::DrainOnly => {
+                let old_same_side = side_of_i128(old_eff) == Some(side);
+                if old_same_side && new_eff.unsigned_abs() <= old_eff.unsigned_abs() {
+                    Ok(())
+                } else {
+                    Err(RiskError::SideBlocked)
+                }
+            }
+        }
+    }
+    }
+
+    test_visible! {
+    /// PORT (ENG-PORT-4 / CRITICAL-8): widened to 6-arg signature with
+    /// per-account positions. The pre-port aggregate-OI gate alone admits
+    /// a trade where one counterparty closes long (releasing OI) while
+    /// the other opens long (consuming the same OI) — net aggregate OI
+    /// change is zero, so the side-mode (DrainOnly / ResetPending) check
+    /// passes, even though a NEW account just landed on a side mid-reset.
+    /// Threading per-account old/new effective positions into the gate
+    /// closes that hazard via enforce_side_mode_account_gate.
     fn enforce_side_mode_oi_gate(
         &self,
+        old_eff_a: i128,
+        new_eff_a: i128,
+        old_eff_b: i128,
+        new_eff_b: i128,
         oi_long_after: u128,
         oi_short_after: u128,
     ) -> Result<()> {
@@ -5613,6 +5735,8 @@ impl RiskEngine {
         {
             return Err(RiskError::SideBlocked);
         }
+        self.enforce_side_mode_account_gate(old_eff_a, new_eff_a)?;
+        self.enforce_side_mode_account_gate(old_eff_b, new_eff_b)?;
         Ok(())
     }
     }
@@ -6354,6 +6478,13 @@ impl RiskEngine {
         // Step 3: live local touch (no auto-convert, no finalize yet)
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Reject if convert would mutate released-PnL bookkeeping based on
+        // stale K/F/A_basis/epoch.
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Steps 4-10 happen before finalize so auto-convert cannot consume
         // the user's released PnL before they can request it.
         self.convert_released_pnl_core(idx as usize, x_req, oracle_price)?;
@@ -6402,6 +6533,15 @@ impl RiskEngine {
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
         self.touch_account_live_local(idx as usize, &mut ctx)?;
+
+        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
+        // Close must reject if effective_pos_q would be computed from stale
+        // A_basis/K/F (the next line uses effective_pos_q_checked which derives
+        // from those snaps).
+        if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+
         self.finalize_touched_accounts_post_live(&ctx)?;
 
         // Position must be zero
@@ -6542,21 +6682,39 @@ impl RiskEngine {
             }
         }
 
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 2): pre-state snapshot.
+        // Capture the pre-resolve view BEFORE any mutation. The K-terminal-delta
+        // gate, phantom-dust zero predicate, and drain-finalize gates below all
+        // read these snapshots so per-side decisions reflect the pre-resolve
+        // state, not the in-mutation state.
+        let pre_mode_long = self.side_mode_long;
+        let pre_mode_short = self.side_mode_short;
+        let pre_a_long = self.adl_mult_long;
+        let pre_a_short = self.adl_mult_short;
+        let pre_oi_long = self.oi_eff_long_q;
+        let pre_oi_short = self.oi_eff_short_q;
+        let pre_stored_long = self.stored_pos_count_long;
+        let pre_stored_short = self.stored_pos_count_short;
+
         // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
         // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
         // so resolution can succeed even near K headroom (spec §9.7 step 8).
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 3): K-terminal-delta zero-on-zero-OI.
+        // A side with no pre-resolve OI cannot accumulate a non-zero terminal delta —
+        // it would attribute a settlement shift to non-existent positions. Forces
+        // the delta to 0 when pre_oi_<side> == 0, regardless of side mode.
         let price_diff = resolved_price as i128 - live_oracle_price as i128;
-        let resolved_k_long_td = if self.side_mode_long == SideMode::ResetPending {
+        let resolved_k_long_td = if pre_mode_long == SideMode::ResetPending || pre_oi_long == 0 {
             0i128
         } else {
-            checked_u128_mul_i128(self.adl_mult_long, price_diff)?
+            checked_u128_mul_i128(pre_a_long, price_diff)?
         };
-        let resolved_k_short_td = if self.side_mode_short == SideMode::ResetPending {
+        let resolved_k_short_td = if pre_mode_short == SideMode::ResetPending || pre_oi_short == 0 {
             0i128
         } else {
             // Short side: negative of price_diff
             let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
-            checked_u128_mul_i128(self.adl_mult_short, neg_price_diff)?
+            checked_u128_mul_i128(pre_a_short, neg_price_diff)?
         };
 
         // Steps 8-13: set resolved state
@@ -6580,11 +6738,31 @@ impl RiskEngine {
         self.oi_eff_long_q = 0;
         self.oi_eff_short_q = 0;
 
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 5): phantom-dust zero on
+        // pre_stored_<side> == 0. ADAPTED to fork's single-bound phantom_dust
+        // schema per KL-PHANTOM-DUST-SCHEMA-1 (toly uses the certified+potential
+        // pair phantom_dust_certified_<side>_q + phantom_dust_potential_<side>_q;
+        // fork uses the single-bound phantom_dust_bound_<side>_q). Semantically
+        // equivalent: no stored positions ⇒ no dust to track.
+        // Without this, fork-resolved markets carry stale phantom-dust into the
+        // resolved-payout-h-num/den ratio.
+        if pre_stored_long == 0 {
+            self.phantom_dust_bound_long_q = 0u128;
+        }
+        if pre_stored_short == 0 {
+            self.phantom_dust_bound_short_q = 0u128;
+        }
+
         // Steps 17-20: drain/finalize sides
-        if self.side_mode_long != SideMode::ResetPending {
+        // PORT (ENG-PORT-5a / CRITICAL-9 — Hunk 6): drain-reset pre_stored guard.
+        // Only enter drain reset when pre_stored_<side> > 0 — i.e. there are
+        // positions to drain. The pre-port code unconditionally entered drain
+        // even on sides with zero stored positions, performing spurious side-mode
+        // transitions and bumping sweep_generation.
+        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
             self.begin_full_drain_reset(Side::Long)?;
         }
-        if self.side_mode_short != SideMode::ResetPending {
+        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
             self.begin_full_drain_reset(Side::Short)?;
         }
         if self.side_mode_long == SideMode::ResetPending
@@ -6624,6 +6802,24 @@ impl RiskEngine {
 
         // Finalize any sides that are fully ready for reopening
         self.maybe_finalize_ready_reset_sides();
+
+        // PORT (ENG-PORT-6 / Port 6 — SF guard): position-basis early-return.
+        // Refuse to attempt terminal close when the account still has non-zero
+        // position_basis_q after reconcile_resolved_not_atomic ran — guards
+        // against the case where reconcile partially progressed (e.g., social
+        // loss spread didn't fully unwind basis). Without this, the next call
+        // (close_resolved_terminal_not_atomic) expects basis == 0 and may fail
+        // later in a less recoverable way, OR silently mis-account because the
+        // close path zeros basis without realizing the residual.
+        // The matching toly-side fee-charging line
+        // (sync_account_fee_to_slot(i, resolved_slot, fee_rate_per_slot))
+        // is FEATURE-DIVERGENCE — fork doesn't charge maintenance fees at
+        // resolved close. SKIP per ENGINE_BODY_DIFF §force_close_resolved_not_atomic
+        // Hunk 3 (FEATURE-DIVERGENCE MEDIUM).
+        if self.accounts[i].position_basis_q != 0 {
+            return Ok(ResolvedCloseResult::ProgressOnly);
+        }
+
         self.assert_public_postconditions()?;
 
         // pnl <= 0: can close immediately (loser/zero — no payout gate)
@@ -7051,6 +7247,26 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         self.check_live_accrual_envelope(now_slot)?;
+        // PORT (ENG-PORT-1 / CRITICAL-5 — empty-market gate): toly upstream
+        // refuses live-insurance withdrawal unless the market is provably
+        // empty + fully accrued. ADAPTED port — the 3 toly-only conditions
+        // (active_close_present, stress_consumed_bps_e9_since_envelope,
+        // bankruptcy_hmax_lock_active) are SKIPPED per
+        // KL-FORK-ENGINE-BANKRUPT-CLOSE-1 + KL-FORK-ENGINE-STRESS-ENVELOPE-1
+        // — fork has no such fields. The 8 surviving conditions all map to
+        // existing fork fields and prove the same empty-market invariant
+        // for fork's narrower schema.
+        if self.oi_eff_long_q != 0
+            || self.oi_eff_short_q != 0
+            || self.stored_pos_count_long != 0
+            || self.stored_pos_count_short != 0
+            || self.stale_account_count_long != 0
+            || self.stale_account_count_short != 0
+            || self.neg_pnl_account_count != 0
+            || self.current_slot != self.last_market_slot
+        {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);
@@ -7232,22 +7448,47 @@ impl RiskEngine {
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
+        // PORT (ENG-PORT-2 / CRITICAL-6): loss-safe fee anchor.
+        // When market is Live, now_slot is ahead of last_market_slot, and the
+        // account holds a non-zero position basis, the fee draw must use
+        // last_market_slot (not now_slot) as its shape/anchor — otherwise the
+        // fee would charge for slots the market hasn't accrued through, ranking
+        // ahead of unrealized losses on those same slots.
+        let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
+            && now_slot > self.last_market_slot
+            && (idx as usize) < MAX_ACCOUNTS
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            self.last_market_slot
+        } else {
+            now_slot
+        };
         let shape_anchor = match self.market_mode {
-            MarketMode::Live => now_slot,
+            MarketMode::Live => live_loss_safe_anchor,
             MarketMode::Resolved => self.resolved_slot,
         };
         self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
+        // PORT (ENG-PORT-2 / CRITICAL-6): loss-juniority guard.
+        // Whenever the fee cursor would advance past the account's last_fee_slot
+        // and we're charging a non-zero rate, refuse if the account holds either
+        // realized negative PnL OR (on Live) unsettled K/F/A_basis/epoch state.
+        if fee_rate_per_slot > 0 && shape_anchor > self.accounts[idx as usize].last_fee_slot {
+            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
+        }
         // Reject time jumps that would brick subsequent accrue_market_to.
         // Only meaningful on Live; on Resolved the envelope is moot because
         // accrue_market_to is no longer reachable, but the check is safe
         // (last_market_slot is frozen to resolved_slot).
-        if self.market_mode == MarketMode::Live {
+        // PORT: gate the envelope check on now_slot > current_slot — if no
+        // time advance, no envelope to check (avoids a redundant call when
+        // sync_account_fee is invoked at the same slot multiple times).
+        if self.market_mode == MarketMode::Live && now_slot > self.current_slot {
             self.check_live_accrual_envelope(now_slot)?;
         }
         let anchor = match self.market_mode {
             MarketMode::Live => {
                 self.current_slot = now_slot;
-                self.current_slot
+                live_loss_safe_anchor
             }
             MarketMode::Resolved => {
                 // Resolved fee sync is anchored at resolution.
