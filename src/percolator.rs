@@ -539,7 +539,12 @@ pub struct InsuranceFund {
 pub struct RiskParams {
     pub maintenance_margin_bps: u64,
     pub initial_margin_bps: u64,
-    pub trading_fee_bps: u64,
+    /// Wave 6b / KL-DYNAMIC-TRADE-FEE-1 (REVOKED): renamed from
+    /// `trading_fee_bps`. Now the upper bound on per-trade fees —
+    /// `execute_trade_not_atomic` accepts a `trade_fee_bps` argument
+    /// and rejects if it exceeds this value. Wire format unchanged
+    /// (u64 at the same byte offset).
+    pub max_trading_fee_bps: u64,
     pub max_accounts: u64,
     pub liquidation_fee_bps: u64,
     pub liquidation_fee_cap: U128,
@@ -1444,7 +1449,7 @@ impl RiskEngine {
         }
         if params.maintenance_margin_bps > params.initial_margin_bps
             || params.initial_margin_bps > MAX_MARGIN_BPS
-            || params.trading_fee_bps > MAX_MARGIN_BPS
+            || params.max_trading_fee_bps > MAX_MARGIN_BPS
             || params.liquidation_fee_bps > MAX_MARGIN_BPS
         {
             return Err(RiskError::Overflow);
@@ -5772,6 +5777,7 @@ impl RiskEngine {
         now_slot: u64,
         size_q: i128,
         exec_price: u64,
+        trade_fee_bps: u64,
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
@@ -5783,6 +5789,11 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         if exec_price == 0 || exec_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        // Wave 6b / KL-DYNAMIC-TRADE-FEE-1 (REVOKED): per-call fee must
+        // not exceed the configured `max_trading_fee_bps`. Toly:7607-7609.
+        if trade_fee_bps > self.params.max_trading_fee_bps {
             return Err(RiskError::Overflow);
         }
         // Spec §10.5 step 7: require 0 < size_q <= MAX_TRADE_SIZE_Q
@@ -5829,6 +5840,9 @@ impl RiskEngine {
         size_q: i128,
         exec_price: u64,
         funding_rate_e9: i128,
+        // Wave 6b / KL-DYNAMIC-TRADE-FEE-1 (REVOKED): per-trade fee bps,
+        // capped at `params.max_trading_fee_bps`. Toly:7651.
+        trade_fee_bps: u64,
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
@@ -5840,6 +5854,7 @@ impl RiskEngine {
             now_slot,
             size_q,
             exec_price,
+            trade_fee_bps,
             admit_h_min,
             admit_h_max,
             admit_h_max_consumption_threshold_bps_opt,
@@ -6056,11 +6071,15 @@ impl RiskEngine {
         self.settle_losses(a as usize)?;
         self.settle_losses(b as usize)?;
 
-        // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
+        // Step 11: charge the wrapper-supplied trade fee (Wave 6b /
+        // KL-DYNAMIC-TRADE-FEE-1 REVOKED). Capped at
+        // `params.max_trading_fee_bps` by `validate_execute_trade_entry`;
+        // the wrapper may pass any value in `[0, max_trading_fee_bps]` to
+        // implement per-trade fee schedules. Spec §10.4 step 19, §8.1.
         let trade_notional =
             mul_div_floor_u128(size_q.unsigned_abs(), exec_price as u128, POS_SCALE);
-        let fee = if trade_notional > 0 && self.params.trading_fee_bps > 0 {
-            mul_div_ceil_u128(trade_notional, self.params.trading_fee_bps as u128, 10_000)
+        let fee = if trade_notional > 0 && trade_fee_bps > 0 {
+            mul_div_ceil_u128(trade_notional, trade_fee_bps as u128, 10_000)
         } else {
             0
         };
