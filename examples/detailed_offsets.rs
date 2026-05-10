@@ -41,11 +41,11 @@ fn main() {
     println!("resolved_k_long_terminal_delta:{}", offset_of!(RiskEngine, resolved_k_long_terminal_delta));
     println!("resolved_k_short_terminal_delta:{}", offset_of!(RiskEngine, resolved_k_short_terminal_delta));
     println!("resolved_live_price:{}", offset_of!(RiskEngine, resolved_live_price));
-    println!("last_crank_slot:{}", offset_of!(RiskEngine, last_crank_slot));
+    // last_crank_slot was renamed → see last_market_slot lower in this file.
+    // gc_cursor was retired in v12.1 (84a9293 "Simplify ADL: replace windowed crank with full-scan").
     println!("c_tot:{}", offset_of!(RiskEngine, c_tot));
     println!("pnl_pos_tot:{}", offset_of!(RiskEngine, pnl_pos_tot));
     println!("pnl_matured_pos_tot:{}", offset_of!(RiskEngine, pnl_matured_pos_tot));
-    println!("gc_cursor:{}", offset_of!(RiskEngine, gc_cursor));
     println!("adl_mult_long:{}", offset_of!(RiskEngine, adl_mult_long));
     println!("adl_mult_short:{}", offset_of!(RiskEngine, adl_mult_short));
     println!("adl_coeff_long:{}", offset_of!(RiskEngine, adl_coeff_long));
