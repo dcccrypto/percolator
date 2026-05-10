@@ -634,6 +634,31 @@ pub struct RiskEngine {
     /// Count of accounts with PNL < 0 (spec §4.7).
     pub neg_pnl_account_count: u64,
 
+    /// Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED): bankrupt-close
+    /// subsystem gate fields (Path A minimal gate-only port).
+    ///
+    /// Toly engine spec v12.20.6 introduces a "bankrupt close" continuation
+    /// state machine: when a public full-close has frozen/removed a
+    /// bankrupt account's exposure but residual opposing-side B-loss
+    /// remains, the engine sets `active_close_present = 1` and gates
+    /// post-resolve flows on `ensure_no_active_bankrupt_close`. The full
+    /// state machine has 11 `active_close_*` fields plus stress-envelope
+    /// couplings and is deferred to Wave 5b (combined with stress-envelope
+    /// which it depends on per `start_active_bankrupt_close_residual`'s
+    /// internals at toly-engine src/percolator.rs:2982-3019).
+    ///
+    /// This wave (4a) lands ONLY the two gate variables + the
+    /// `ensure_no_active_bankrupt_close` helper that reads them. The
+    /// fields have no setter on this branch — they stay 0/false for the
+    /// life of every market — so `ensure_no_active_bankrupt_close`
+    /// always passes. The schema growth (+8 bytes after struct
+    /// alignment: bool + u8 + 6 bytes padding before next u64) gives the
+    /// wrapper-side `EngineRecoveryRequired` integration a real engine
+    /// surface to gate on, and gives Wave 5b a no-cost extension point
+    /// to add the state-machine setters without re-shaping bytes.
+    pub bankruptcy_hmax_lock_active: bool,
+    pub active_close_present: u8,
+
     /// Round-robin sweep cursor (spec §2.2, v12.19).
     /// Persistent cursor walked by `keeper_crank` Phase 2. Bounded by
     /// `0 <= rr_cursor_position < params.max_accounts`. Wraps (and
@@ -719,6 +744,15 @@ pub enum RiskError {
     AccountNotFound,
     SideBlocked,
     CorruptState,
+    /// Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED): returned by
+    /// `ensure_no_active_bankrupt_close` when the engine has an active
+    /// bankrupt-close continuation in flight. Public flows that touch
+    /// post-resolve state (resolve_market_not_atomic,
+    /// withdraw_live_insurance_not_atomic, sync_account_fee_to_slot_not_atomic)
+    /// MUST refuse to advance until the keeper drives the continuation
+    /// through `force_close_resolved_with_fee_not_atomic` to completion.
+    /// Mirrors toly engine's RiskError::RecoveryRequired (toly:893).
+    RecoveryRequired,
 }
 
 pub type Result<T> = core::result::Result<T, RiskError>;
@@ -1383,6 +1417,11 @@ impl RiskEngine {
             phantom_dust_bound_short_q: 0u128,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
+            // Wave 4a: bankrupt-close gate variables — see init_in_place
+            // for rationale. Test-only constructor mirrors the production
+            // init: no active continuation at market genesis.
+            bankruptcy_hmax_lock_active: false,
+            active_close_present: 0,
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
@@ -1480,6 +1519,11 @@ impl RiskEngine {
         self.phantom_dust_bound_short_q = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
+        // Wave 4a: bankrupt-close gate variables init to no-active state.
+        // No setter exists on this branch (Path A gate-only port); Wave 5b
+        // adds the state-machine setters that flip these to active.
+        self.bankruptcy_hmax_lock_active = false;
+        self.active_close_present = 0;
         self.rr_cursor_position = 0;
         self.sweep_generation = 0;
         self.price_move_consumed_bps_this_generation = 0;
@@ -4992,6 +5036,34 @@ impl RiskEngine {
 
     }
 
+    /// Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED, gate-only).
+    /// Refuse any post-resolve flow that touches engine state while a
+    /// bankrupt-close continuation is in flight (`active_close_present
+    /// != 0`). Public flows that toly gates on this helper:
+    ///   - `resolve_market_not_atomic`
+    ///   - `withdraw_live_insurance_not_atomic`
+    ///   - `sync_account_fee_to_slot_not_atomic`
+    ///
+    /// Path A (gate-only): the wrapper-side `EngineRecoveryRequired`
+    /// integration now has a real engine surface to gate on. The
+    /// state-machine that would set `active_close_present = 1` is
+    /// deferred to Wave 5b (combined with stress-envelope which
+    /// `start_active_bankrupt_close_residual` writes to per
+    /// toly-engine src/percolator.rs:2982-3019). For markets on this
+    /// branch, `active_close_present` stays 0 forever and this helper
+    /// always returns Ok(()) — but the schema bytes + helper signature
+    /// + error variant are in place so Wave 5b can wire the setters
+    /// without re-shaping bytes or breaking ABI.
+    ///
+    /// Mirrors toly engine `ensure_no_active_bankrupt_close`
+    /// (toly-engine src/percolator.rs:2975-2980).
+    pub fn ensure_no_active_bankrupt_close(&self) -> Result<()> {
+        if self.active_close_present != 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+        Ok(())
+    }
+
     // ========================================================================
     // Account Management
     // ========================================================================
@@ -6655,6 +6727,12 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        // Wave 4a (gate-only): refuse to advance into Resolved while a
+        // bankrupt-close continuation is in flight. With the gate-only
+        // port, `active_close_present` is always 0 on this branch so
+        // this is a no-op for live markets — but the gate is the seam
+        // Wave 5b's state machine wires into.
+        self.ensure_no_active_bankrupt_close()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
@@ -7327,6 +7405,11 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        // Wave 4a (gate-only): refuse live-insurance withdrawal while a
+        // bankrupt-close continuation is in flight. Path A port — the
+        // gate variable is always 0 on this branch, but the seam exists
+        // for Wave 5b's state machine.
+        self.ensure_no_active_bankrupt_close()?;
         self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
@@ -7334,13 +7417,15 @@ impl RiskEngine {
         self.check_live_accrual_envelope(now_slot)?;
         // PORT (ENG-PORT-1 / CRITICAL-5 — empty-market gate): toly upstream
         // refuses live-insurance withdrawal unless the market is provably
-        // empty + fully accrued. ADAPTED port — the 3 toly-only conditions
-        // (active_close_present, stress_consumed_bps_e9_since_envelope,
-        // bankruptcy_hmax_lock_active) are SKIPPED per
-        // KL-FORK-ENGINE-BANKRUPT-CLOSE-1 + KL-FORK-ENGINE-STRESS-ENVELOPE-1
-        // — fork has no such fields. The 8 surviving conditions all map to
-        // existing fork fields and prove the same empty-market invariant
-        // for fork's narrower schema.
+        // empty + fully accrued. ADAPTED port — the 2 toly-only conditions
+        // (`stress_consumed_bps_e9_since_envelope`,
+        //  remaining stress-envelope checks) are SKIPPED per
+        // KL-FORK-ENGINE-STRESS-ENVELOPE-1 — fork has no such fields.
+        // The `active_close_present` / `bankruptcy_hmax_lock_active` legs
+        // are now covered by the `ensure_no_active_bankrupt_close` call
+        // above (Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 REVOKED).
+        // The 8 surviving conditions all map to existing fork fields and
+        // prove the same empty-market invariant for fork's narrower schema.
         if self.oi_eff_long_q != 0
             || self.oi_eff_short_q != 0
             || self.stored_pos_count_long != 0
@@ -7530,6 +7615,12 @@ impl RiskEngine {
         now_slot: u64,
         fee_rate_per_slot: u128,
     ) -> Result<()> {
+        // Wave 4a (gate-only): refuse fee sync while a bankrupt-close
+        // continuation is in flight. Per toly's spec §6.1.4, fees are
+        // junior to bankrupt-close residual booking — sync would
+        // double-credit the recovery flow. Always Ok(()) on Path A
+        // (active_close_present is never set); seam for Wave 5b.
+        self.ensure_no_active_bankrupt_close()?;
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
         }
