@@ -114,6 +114,25 @@ pub const FUNDING_DEN: u128 = 1_000_000_000;
 /// PRICE_MOVE_CONSUMPTION_SCALE = 1e9 (spec §1.4 / §5.3)
 pub const PRICE_MOVE_CONSUMPTION_SCALE: u128 = 1_000_000_000;
 
+/// STRESS_CONSUMPTION_SCALE = 1e9 (spec §1.4 / §5.3, toly v12.20.6 src/percolator.rs:142).
+///
+/// Wave 5a / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (REVOKED, schema-only).
+/// Same numeric value as `PRICE_MOVE_CONSUMPTION_SCALE` because both are
+/// "consumed bps × 1e9" gates against the same fixed-point envelope. Kept
+/// distinct from `PRICE_MOVE_CONSUMPTION_SCALE` for spec-traceability —
+/// toly engine references the two separately at §5.3 (price-move consumed
+/// per generation) and §1.4 (stress consumed per envelope).
+pub const STRESS_CONSUMPTION_SCALE: u128 = 1_000_000_000;
+
+/// NO_SLOT sentinel (toly v12.20.6 src/percolator.rs:205).
+///
+/// Wave 5a marker: `stress_envelope_start_slot` and
+/// `stress_envelope_start_generation` are set to `NO_SLOT` to signal "no
+/// stress envelope is currently active". Functionally equivalent to
+/// "uninitialized" / "no observation yet"; chosen as `u64::MAX` so any
+/// real slot value compares strictly less.
+pub const NO_SLOT: u64 = u64::MAX;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -679,6 +698,48 @@ pub struct RiskEngine {
     /// `admit_fresh_reserve_h_lock` step 2 when the wrapper supplies
     /// `admit_h_max_consumption_threshold_bps_opt = Some(t)`.
     pub price_move_consumed_bps_this_generation: u128,
+
+    /// Wave 5a / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (REVOKED, schema-only port).
+    ///
+    /// Toly engine v12.20.6 (src/percolator.rs:824-830) tracks a
+    /// stress-envelope subsystem distinct from `price_move_consumed_*`:
+    /// while the price-move counter consumes once per generation and resets
+    /// atomically on cursor wrap, the stress envelope persists across
+    /// generations until an explicit reconciliation sweep clears it. The
+    /// envelope is opened by `start_post_stress_recovery_envelope` (called
+    /// from social-loss / bankruptcy paths) and cleared by
+    /// `apply_stress_envelope_progress` after sufficient indices have been
+    /// authenticated.
+    ///
+    /// Path A scope (this wave): SCHEMA + helper + constants only. Fork
+    /// engine has no setter for any of these fields on this branch —
+    /// `stress_consumed_bps_e9_since_envelope` stays 0, the two start-slot
+    /// fields stay `NO_SLOT`, and the remaining-indices counter stays 0
+    /// forever. `clear_stress_envelope` is callable but has no effect on a
+    /// fresh market (idempotent zero/NO_SLOT).
+    ///
+    /// Setters arrive in Wave 5b combined with the bankrupt-close state
+    /// machine (the two subsystems couple in toly's
+    /// `start_active_bankrupt_close_residual` at toly:2982-3019, where
+    /// recording residual exposure also opens a stress envelope).
+    ///
+    /// Field order matches toly's u128-then-u64×3 packing for a clean
+    /// 40-byte block at u128 alignment (no padding required since
+    /// `price_move_consumed_bps_this_generation: u128` ends at a 16-byte
+    /// boundary, and the trailing u64 sits at an 8-byte boundary feeding
+    /// directly into `oracle_target_price_e6: u64`).
+    pub stress_consumed_bps_e9_since_envelope: u128,
+    /// Authenticated index advances still required before the stress
+    /// envelope can clear. Toly v12.20.6:826.
+    pub stress_envelope_remaining_indices: u64,
+    /// Slot at which the current stress envelope opened. `NO_SLOT` means
+    /// no envelope is active. Toly v12.20.6:828.
+    pub stress_envelope_start_slot: u64,
+    /// Sweep generation at envelope open. `NO_SLOT` means no envelope is
+    /// active. Used by Wave 5b reconciliation logic to decide whether the
+    /// keeper has wrapped past the envelope's opening generation. Toly
+    /// v12.20.6:830.
+    pub stress_envelope_start_generation: u64,
 
     /// Wave 1 / ENG-PORT-C: external-oracle target tracking.
     ///
@@ -1425,6 +1486,14 @@ impl RiskEngine {
             rr_cursor_position: 0,
             sweep_generation: 0,
             price_move_consumed_bps_this_generation: 0,
+            // Wave 5a: stress-envelope schema init. Path A — no setter on
+            // this branch; envelope stays inactive (NO_SLOT) for the life
+            // of every market. Wave 5b adds setters that flip these to
+            // active values.
+            stress_consumed_bps_e9_since_envelope: 0,
+            stress_envelope_remaining_indices: 0,
+            stress_envelope_start_slot: NO_SLOT,
+            stress_envelope_start_generation: NO_SLOT,
             // Wave 1 / ENG-PORT-C: oracle target init — see init_in_place
             // for the matching rationale comment.
             oracle_target_price_e6: 0,
@@ -1527,6 +1596,12 @@ impl RiskEngine {
         self.rr_cursor_position = 0;
         self.sweep_generation = 0;
         self.price_move_consumed_bps_this_generation = 0;
+        // Wave 5a: stress-envelope schema init. See struct field block
+        // above for the Path A rationale (no setter on this branch).
+        self.stress_consumed_bps_e9_since_envelope = 0;
+        self.stress_envelope_remaining_indices = 0;
+        self.stress_envelope_start_slot = NO_SLOT;
+        self.stress_envelope_start_generation = NO_SLOT;
         // Wave 1 / ENG-PORT-C: oracle target init. At market genesis the
         // wrapper's first `read_price_clamped` will populate these from
         // the live oracle observation; init to (0, 0) signals "no target
@@ -5062,6 +5137,30 @@ impl RiskEngine {
             return Err(RiskError::RecoveryRequired);
         }
         Ok(())
+    }
+
+    /// Wave 5a / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (REVOKED, schema-only).
+    /// Reset the stress envelope to "no active envelope" — zero
+    /// consumption, zero remaining indices, NO_SLOT for both start
+    /// markers. Also clears `bankruptcy_hmax_lock_active` because the
+    /// post-stress-recovery envelope and the bankruptcy h-max lock share
+    /// the same fixed-point reconciliation channel (toly engine
+    /// src/percolator.rs:6263-6269).
+    ///
+    /// Path A (this wave): the helper is callable but no caller exists on
+    /// this branch — Wave 5b adds the call sites in social-loss /
+    /// reconciliation paths once the corresponding setters are ported.
+    /// On a fresh market every field already starts at NO_SLOT/0/false so
+    /// the helper is a structural no-op for this branch.
+    ///
+    /// Mirrors toly engine `clear_stress_envelope`
+    /// (toly-engine src/percolator.rs:6263-6269).
+    pub fn clear_stress_envelope(&mut self) {
+        self.stress_consumed_bps_e9_since_envelope = 0;
+        self.stress_envelope_remaining_indices = 0;
+        self.stress_envelope_start_slot = NO_SLOT;
+        self.stress_envelope_start_generation = NO_SLOT;
+        self.bankruptcy_hmax_lock_active = false;
     }
 
     // ========================================================================
