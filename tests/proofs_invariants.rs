@@ -881,3 +881,72 @@ fn proof_bankrupt_close_gate_init_and_predicate() {
         "bankrupt-close gate fires when active_close_present is non-zero"
     );
 }
+
+// ############################################################################
+// Wave 5a: stress-envelope schema invariant
+// ############################################################################
+
+/// Wave 5a / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (REVOKED, schema-only).
+///
+/// `clear_stress_envelope` MUST:
+///   - zero `stress_consumed_bps_e9_since_envelope`
+///   - zero `stress_envelope_remaining_indices`
+///   - reset `stress_envelope_start_slot` to NO_SLOT
+///   - reset `stress_envelope_start_generation` to NO_SLOT
+///   - clear `bankruptcy_hmax_lock_active` (the post-stress envelope and
+///     the bankruptcy h-max lock share the same reconciliation channel
+///     per toly engine src/percolator.rs:6263-6269)
+///   - preserve `check_conservation` (the cleared fields are pure metadata
+///     that don't enter the conservation aggregate)
+///
+/// Also asserts that fresh-market init places all four envelope fields at
+/// their inactive defaults (NO_SLOT / 0) and that `clear_stress_envelope`
+/// is idempotent — calling it twice from any starting state lands at the
+/// same sentinel-values fixed point.
+///
+/// Path A schema-only port: there is no setter on this branch that opens
+/// a stress envelope. Wave 5b will add the setters
+/// (`start_post_stress_recovery_envelope`,
+/// `apply_stress_envelope_progress`) once the bankrupt-close state
+/// machine ports — both subsystems couple per toly:2982-3019.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_stress_envelope_clear_and_init() {
+    let mut engine =
+        RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    // Init places envelope at the inactive sentinel defaults.
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
+    assert_eq!(engine.stress_envelope_start_slot, NO_SLOT);
+    assert_eq!(engine.stress_envelope_start_generation, NO_SLOT);
+    assert!(engine.check_conservation());
+
+    // Symbolic write: any combination of envelope state.
+    engine.stress_consumed_bps_e9_since_envelope = kani::any();
+    engine.stress_envelope_remaining_indices = kani::any();
+    engine.stress_envelope_start_slot = kani::any();
+    engine.stress_envelope_start_generation = kani::any();
+    engine.bankruptcy_hmax_lock_active = kani::any();
+    // Cleared envelope and lock land at the documented defaults regardless
+    // of the prior values — tests the postcondition unconditionally.
+    engine.clear_stress_envelope();
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
+    assert_eq!(engine.stress_envelope_start_slot, NO_SLOT);
+    assert_eq!(engine.stress_envelope_start_generation, NO_SLOT);
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    // Conservation still holds — envelope fields are pure metadata.
+    assert!(engine.check_conservation());
+
+    // Idempotence: a second call yields the same state.
+    engine.clear_stress_envelope();
+    assert_eq!(engine.stress_consumed_bps_e9_since_envelope, 0);
+    assert_eq!(engine.stress_envelope_remaining_indices, 0);
+    assert_eq!(engine.stress_envelope_start_slot, NO_SLOT);
+    assert_eq!(engine.stress_envelope_start_generation, NO_SLOT);
+    assert!(!engine.bankruptcy_hmax_lock_active);
+
+    kani::cover!(true, "stress-envelope clear lands at sentinel defaults");
+}
