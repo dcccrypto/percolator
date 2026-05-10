@@ -7051,6 +7051,26 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         self.check_live_accrual_envelope(now_slot)?;
+        // PORT (ENG-PORT-1 / CRITICAL-5 — empty-market gate): toly upstream
+        // refuses live-insurance withdrawal unless the market is provably
+        // empty + fully accrued. ADAPTED port — the 3 toly-only conditions
+        // (active_close_present, stress_consumed_bps_e9_since_envelope,
+        // bankruptcy_hmax_lock_active) are SKIPPED per
+        // KL-FORK-ENGINE-BANKRUPT-CLOSE-1 + KL-FORK-ENGINE-STRESS-ENVELOPE-1
+        // — fork has no such fields. The 8 surviving conditions all map to
+        // existing fork fields and prove the same empty-market invariant
+        // for fork's narrower schema.
+        if self.oi_eff_long_q != 0
+            || self.oi_eff_short_q != 0
+            || self.stored_pos_count_long != 0
+            || self.stored_pos_count_short != 0
+            || self.stale_account_count_long != 0
+            || self.stale_account_count_short != 0
+            || self.neg_pnl_account_count != 0
+            || self.current_slot != self.last_market_slot
+        {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);
