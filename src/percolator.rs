@@ -5447,8 +5447,18 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
-        // Reject if trade would increase OI on a blocked side.
-        self.enforce_side_mode_oi_gate(oi_long_after, oi_short_after)?;
+        // Reject if trade would increase OI on a blocked side OR land a fresh
+        // entrant on a gated side. PORT (ENG-PORT-4 / CRITICAL-8) — widened
+        // 6-arg signature threads per-account positions through to the
+        // account-gate, closing the maker-replaces-taker hazard.
+        self.enforce_side_mode_oi_gate(
+            old_eff_a,
+            new_eff_a,
+            old_eff_b,
+            new_eff_b,
+            oi_long_after,
+            oi_short_after,
+        )?;
 
         // Spec §1.4: per-side active-position cap. Pre-validate the NET
         // delta across BOTH legs so a valid position swap at the cap
@@ -5672,8 +5682,46 @@ impl RiskEngine {
     }
 
     test_visible! {
+    /// PORT (ENG-PORT-4 / CRITICAL-8): per-account side-mode entrant gate.
+    /// Rejects any new entrant onto a ResetPending side regardless of OI
+    /// movement; on DrainOnly, rejects unless the account is reducing its
+    /// existing same-side basis. Closes the maker-replaces-taker hazard
+    /// where aggregate OI is flat but a fresh OI lands on a gated side.
+    fn enforce_side_mode_account_gate(&self, old_eff: i128, new_eff: i128) -> Result<()> {
+        if new_eff == 0 {
+            return Ok(());
+        }
+        let side = side_of_i128(new_eff).ok_or(RiskError::CorruptState)?;
+        match self.get_side_mode(side) {
+            SideMode::Normal => Ok(()),
+            SideMode::ResetPending => Err(RiskError::SideBlocked),
+            SideMode::DrainOnly => {
+                let old_same_side = side_of_i128(old_eff) == Some(side);
+                if old_same_side && new_eff.unsigned_abs() <= old_eff.unsigned_abs() {
+                    Ok(())
+                } else {
+                    Err(RiskError::SideBlocked)
+                }
+            }
+        }
+    }
+    }
+
+    test_visible! {
+    /// PORT (ENG-PORT-4 / CRITICAL-8): widened to 6-arg signature with
+    /// per-account positions. The pre-port aggregate-OI gate alone admits
+    /// a trade where one counterparty closes long (releasing OI) while
+    /// the other opens long (consuming the same OI) — net aggregate OI
+    /// change is zero, so the side-mode (DrainOnly / ResetPending) check
+    /// passes, even though a NEW account just landed on a side mid-reset.
+    /// Threading per-account old/new effective positions into the gate
+    /// closes that hazard via enforce_side_mode_account_gate.
     fn enforce_side_mode_oi_gate(
         &self,
+        old_eff_a: i128,
+        new_eff_a: i128,
+        old_eff_b: i128,
+        new_eff_b: i128,
         oi_long_after: u128,
         oi_short_after: u128,
     ) -> Result<()> {
@@ -5687,6 +5735,8 @@ impl RiskEngine {
         {
             return Err(RiskError::SideBlocked);
         }
+        self.enforce_side_mode_account_gate(old_eff_a, new_eff_a)?;
+        self.enforce_side_mode_account_gate(old_eff_b, new_eff_b)?;
         Ok(())
     }
     }
