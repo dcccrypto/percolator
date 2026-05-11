@@ -1727,3 +1727,139 @@ fn proof_recovery_reason_validators_reject_non_live_market() {
         Err(RiskError::Unauthorized)
     );
 }
+
+// ############################################################################
+// Wave 11d — bankrupt-close setter integration (Phase 1)
+// ############################################################################
+
+/// Wave 11d / KL-FORK-ENGINE-BANKRUPT-CLOSE-1.
+///
+/// `enqueue_adl` arms the bankruptcy h_max lock at Step 2 whenever a non-
+/// zero deficit `d` is observed, regardless of whether the insurance buffer
+/// covers the full amount. Mirrors toly:4980-4982. The lock writer also
+/// stamps `ctx.bankruptcy_hmax_candidate_active` + `ctx.stress_envelope_restarted`
+/// so downstream stress paths observe the restart.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_enqueue_adl_arms_bankruptcy_lock_when_d_positive() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let mut ctx = InstructionContext::new();
+
+    // Symbolic OI configuration with both sides at zero; q_close = 0 + d > 0
+    // reaches Step 2 via the no-OI fast path. The lock fires before
+    // `use_insurance_buffer` regardless of insurance balance.
+    let d: u32 = kani::any();
+    kani::assume(d > 0);
+
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(!ctx.bankruptcy_hmax_candidate_active);
+    assert!(!ctx.stress_envelope_restarted);
+
+    let res = engine.enqueue_adl(&mut ctx, Side::Long, 0u128, d as u128);
+    assert!(res.is_ok());
+
+    // Lock fields stamped by `trigger_bankruptcy_hmax_lock(ctx)`.
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert!(ctx.bankruptcy_hmax_candidate_active);
+    assert!(ctx.stress_envelope_restarted);
+    assert_eq!(engine.stress_envelope_remaining_indices, engine.params.max_accounts);
+    assert_eq!(engine.stress_envelope_start_slot, DEFAULT_SLOT);
+}
+
+/// Wave 11d / KL-FORK-ENGINE-BANKRUPT-CLOSE-1.
+///
+/// `enqueue_adl` MUST NOT touch the bankruptcy h_max lock when `d == 0`.
+/// The lock fires only on actual deficits; pure quantity-only ADL leaves
+/// the envelope untouched.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_enqueue_adl_leaves_bankruptcy_lock_when_d_zero() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let mut ctx = InstructionContext::new();
+
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(!ctx.bankruptcy_hmax_candidate_active);
+
+    // q_close = 0 + d = 0 reaches Step 4 via the no-OI fast path with no
+    // mutations to the lock fields.
+    let res = engine.enqueue_adl(&mut ctx, Side::Long, 0u128, 0u128);
+    assert!(res.is_ok());
+
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(!ctx.bankruptcy_hmax_candidate_active);
+    assert!(!ctx.stress_envelope_restarted);
+}
+
+/// Wave 11d / KL-FORK-ENGINE-BANKRUPT-CLOSE-1.
+///
+/// `settle_losses_with_context(idx, Some(ctx))` MUST arm the bankruptcy
+/// h_max lock when a Live account exhausts its capital while still carrying
+/// negative PnL. Mirrors toly:7103-7112.
+///
+/// The `_without_context` (1-arg) form arms the lock via the contextless
+/// writer (same on-engine state mutation, no `ctx.*` mutations).
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_settle_losses_with_context_arms_lock_when_capital_exhausted() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    let i = idx as usize;
+
+    // Live + negative PnL + zero capital: the post-settle predicate
+    // (`pnl < 0 && capital == 0`) fires and the lock setter runs.
+    let _ = set_pnl_test(&mut engine, i, -1_000i128);
+    engine.accounts[i].capital = U128::ZERO;
+
+    let mut ctx = InstructionContext::new();
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(!ctx.bankruptcy_hmax_candidate_active);
+
+    let res = engine.settle_losses_with_context(i, Some(&mut ctx));
+    assert!(res.is_ok());
+
+    // With capital already 0, the body's `if pay > 0` skips. The post-body
+    // predicate still observes `Live && pnl < 0 && capital == 0` and arms
+    // the lock through the with-ctx path.
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert!(ctx.bankruptcy_hmax_candidate_active);
+    assert!(ctx.stress_envelope_restarted);
+}
+
+/// Wave 11d / KL-FORK-ENGINE-BANKRUPT-CLOSE-1.
+///
+/// `resolve_flat_negative_with_context(idx, Some(ctx))` MUST arm the
+/// bankruptcy h_max lock BEFORE absorbing the protocol loss in a Live
+/// market. Mirrors toly:7138-7144. The order matters: the lock observes
+/// the pre-absorb engine state, so subsequent envelope-aware gates inside
+/// the same instruction see the lock armed against the unreduced equity.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_resolve_flat_negative_with_context_arms_lock_before_absorb() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.top_up_insurance_fund(1_000_000u128, DEFAULT_SLOT).unwrap();
+    let idx = add_user_test(&mut engine, 0).unwrap();
+    let i = idx as usize;
+
+    // Flat (effective_pos_q == 0 via default basis=0, A=ADL_ONE) + negative
+    // PnL: the body reaches `absorb_protocol_loss(loss)` and `set_pnl(0)`.
+    let _ = set_pnl_test(&mut engine, i, -500i128);
+    let ins_before = engine.insurance_fund.balance.get();
+
+    let mut ctx = InstructionContext::new();
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(!ctx.bankruptcy_hmax_candidate_active);
+
+    let res = engine.resolve_flat_negative_with_context(i, Some(&mut ctx));
+    assert!(res.is_ok());
+
+    // Lock fields stamped by `trigger_bankruptcy_hmax_lock(ctx)`.
+    assert!(engine.bankruptcy_hmax_lock_active);
+    assert!(ctx.bankruptcy_hmax_candidate_active);
+    // Protocol loss absorbed.
+    assert!(engine.accounts[i].pnl == 0);
+    assert!(engine.insurance_fund.balance.get() < ins_before);
+}
