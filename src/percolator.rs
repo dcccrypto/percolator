@@ -1244,6 +1244,20 @@ pub struct BResidualChunkPlan {
     pub records_explicit: bool,
 }
 
+/// Wave 11a-ii-C / KL-FORK-ENGINE-B-TRACKING-1 (REVOKED): per-segment
+/// accrual snapshot produced by `plan_accrual_segment`. The plan-then-
+/// apply split lets the recovery validators (`validate_permissionless_*`)
+/// detect "blocked segment" conditions purely from a read-only probe.
+/// Mirrors toly engine `AccrualSegmentPlan` (toly:1018-1024).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccrualSegmentPlan {
+    k_long: i128,
+    k_short: i128,
+    f_long: i128,
+    f_short: i128,
+    consumed_this_step: u128,
+}
+
 /// Determine which side a signed position is on. Positive = long, negative = short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -4222,6 +4236,75 @@ impl RiskEngine {
     }
     }
 
+    /// Wave 11a-ii-C: terminal epoch-exhaustion reset. Triggered by the
+    /// `CounterOrEpochOverflowDeclaredRecovery` recovery resolver when
+    /// `adl_epoch_<side>` has saturated at `u64::MAX`; the engine cannot
+    /// increment the epoch anymore, so the only safe path is to zero
+    /// the epoch state entirely and start over. Quarantines any
+    /// outstanding social-loss remainder before flipping
+    /// `loss_weight_sum` to 0 — without this the next attach on the
+    /// side would corrupt loss accounting.
+    ///
+    /// Differs from `begin_full_drain_reset` by:
+    /// * requiring `epoch == u64::MAX` (not bumping; *replacing*),
+    /// * snapshotting `b_epoch_start_<side> = b_<side>` and zeroing B
+    ///   tracking,
+    /// * zeroing phantom-dust certified/potential alongside the rest,
+    /// * leaving the epoch counter pinned at `u64::MAX` (the caller's
+    ///   `resolve_counter_or_epoch_overflow_recovery_not_atomic`
+    ///   resolves the market immediately afterwards).
+    ///
+    /// Mirrors toly engine `begin_terminal_epoch_exhaustion_reset`
+    /// (toly:5239-5286).
+    fn begin_terminal_epoch_exhaustion_reset(&mut self, side: Side) -> Result<()> {
+        if self.get_oi_eff(side) != 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.get_side_mode(side) == SideMode::ResetPending {
+            return Err(RiskError::CorruptState);
+        }
+        if self.get_epoch_side(side) != u64::MAX {
+            return Err(RiskError::CorruptState);
+        }
+        self.validate_persistent_global_signed_shape()?;
+
+        let k = self.get_k_side(side);
+        match side {
+            Side::Long => self.adl_epoch_start_k_long = k,
+            Side::Short => self.adl_epoch_start_k_short = k,
+        }
+        match side {
+            Side::Long => self.f_epoch_start_long_num = self.f_long_num,
+            Side::Short => self.f_epoch_start_short_num = self.f_short_num,
+        }
+
+        self.quarantine_social_remainder_before_weight_change(side)?;
+        self.set_b_epoch_start(side, self.get_b_side(side));
+        self.set_b_side(side, 0);
+        self.set_social_remainder(side, 0);
+        self.set_loss_weight_sum(side, 0);
+
+        match side {
+            Side::Long => {
+                self.adl_coeff_long = 0;
+                self.f_long_num = 0;
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+            }
+            Side::Short => {
+                self.adl_coeff_short = 0;
+                self.f_short_num = 0;
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+            }
+        }
+
+        self.set_a_side(side, ADL_ONE);
+        self.set_stale_count(side, self.get_stored_pos_count(side));
+        self.set_side_mode(side, SideMode::ResetPending);
+        Ok(())
+    }
+
     test_visible! {
     fn finalize_side_reset(&mut self, side: Side) -> Result<()> {
         if self.get_side_mode(side) != SideMode::ResetPending {
@@ -5979,6 +6062,627 @@ impl RiskEngine {
         self.validate_b_tracking_shape()?;
         self.validate_active_bankrupt_close_shape()?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Wave 11a-ii-C — recovery-resolver dependency tail
+    // KL-FORK-ENGINE-B-TRACKING-1 (recovery resolvers REVOKED).
+    // KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (recovery resolvers REVOKED).
+    //
+    // Mirrors toly engine `bounded_price_step_*` / `plan_accrual_segment`
+    // / `keeper_*` / `pretrigger_bankruptcy_hmax_*` / recovery validators
+    // (toly:3982-4318, 6724-6774). All read-only or transient; the
+    // mutating recovery resolvers wrap them.
+    // ========================================================================
+
+    /// `true` iff this market has any open interest on either side. Used by
+    /// recovery validators to gate "BelowProgressFloor" /
+    /// "BlockedSegmentHeadroomOrRepresentability" branches: a market
+    /// with no OI cannot be stuck on a price-move headroom condition.
+    /// Mirrors toly engine `exposed_market_has_oi` (toly:4000-4002).
+    fn exposed_market_has_oi(&self) -> bool {
+        self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0
+    }
+
+    /// Maximum absolute price step the next bounded accrual segment can
+    /// take from `self.last_oracle_price`, given the configured
+    /// `max_price_move_bps_per_slot` and the residual dt up to the
+    /// per-call `max_accrual_dt_slots` cap. Used by the
+    /// `BlockedSegmentHeadroomOrRepresentability` validator to detect
+    /// when the engine cannot move the price without overflowing the
+    /// future KF headroom invariants.
+    /// Mirrors toly engine `bounded_price_step_cap_abs` (toly:4004-4024).
+    fn bounded_price_step_cap_abs(&self, now_slot: u64) -> Result<u128> {
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let segment_dt = core::cmp::min(remaining_dt, self.params.max_accrual_dt_slots);
+        if segment_dt == 0 {
+            return Ok(0);
+        }
+        U256::from_u128(self.last_oracle_price as u128)
+            .checked_mul(U256::from_u128(
+                self.params.max_price_move_bps_per_slot as u128,
+            ))
+            .and_then(|v| v.checked_mul(U256::from_u128(segment_dt as u128)))
+            .and_then(|v| v.checked_div(U256::from_u128(10_000u128)))
+            .ok_or(RiskError::Overflow)?
+            .try_into_u128()
+            .ok_or(RiskError::Overflow)
+    }
+
+    /// Accrual slot that would be visited by a single bounded segment from
+    /// `last_market_slot`. Differs from `now_slot` only when the residual
+    /// dt exceeds `params.max_accrual_dt_slots`. Used by the
+    /// `BlockedSegmentHeadroomOrRepresentability` validator to drive its
+    /// read-only `plan_accrual_segment` probe.
+    /// Mirrors toly engine `bounded_accrual_slot_for_now` (toly:4026-4037).
+    fn bounded_accrual_slot_for_now(&self, now_slot: u64) -> Result<u64> {
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let segment_dt = core::cmp::min(remaining_dt, self.params.max_accrual_dt_slots);
+        self.last_market_slot
+            .checked_add(segment_dt)
+            .ok_or(RiskError::Overflow)
+    }
+
+    /// Compute the effective price the engine would arrive at after one
+    /// bounded staircase step from `self.last_oracle_price` toward the
+    /// wrapper-authenticated raw target. Used by recovery validators to
+    /// detect "raw target arrived but staircase is stuck" conditions.
+    /// Mirrors toly engine `bounded_price_step_toward_raw_target`
+    /// (toly:4039-4070).
+    fn bounded_price_step_toward_raw_target(
+        &self,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<u64> {
+        if authenticated_raw_target_price == 0
+            || authenticated_raw_target_price > MAX_ORACLE_PRICE
+            || self.last_oracle_price == 0
+            || self.last_oracle_price > MAX_ORACLE_PRICE
+        {
+            return Err(RiskError::Overflow);
+        }
+        let cap_abs = self.bounded_price_step_cap_abs(now_slot)?;
+        let p_last = self.last_oracle_price;
+        if authenticated_raw_target_price > p_last {
+            let raw_delta = authenticated_raw_target_price
+                .checked_sub(p_last)
+                .ok_or(RiskError::Overflow)? as u128;
+            let step = core::cmp::min(raw_delta, cap_abs);
+            p_last
+                .checked_add(step.try_into().map_err(|_| RiskError::Overflow)?)
+                .ok_or(RiskError::Overflow)
+        } else {
+            let raw_delta = p_last
+                .checked_sub(authenticated_raw_target_price)
+                .ok_or(RiskError::Overflow)? as u128;
+            let step = core::cmp::min(raw_delta, cap_abs);
+            p_last
+                .checked_sub(step.try_into().map_err(|_| RiskError::Overflow)?)
+                .ok_or(RiskError::Overflow)
+        }
+    }
+
+    /// Verify post-step `K_side` still leaves room for one full
+    /// `MAX_ORACLE_PRICE * adl_mult_side` mark before saturating
+    /// `i128::MAX`. Used by `plan_accrual_segment` to ensure the
+    /// recovery validators can detect a blocked segment via overflow
+    /// rather than mid-mutation panic.
+    /// Mirrors toly engine `validate_k_future_headroom` (toly:6724-6738).
+    fn validate_k_future_headroom(a: u128, k: i128) -> Result<()> {
+        if a == 0 || a > ADL_ONE {
+            return Err(RiskError::CorruptState);
+        }
+        let mark = U256::from_u128(a)
+            .checked_mul(U256::from_u128(MAX_ORACLE_PRICE as u128))
+            .ok_or(RiskError::Overflow)?;
+        let used = U256::from_u128(k.unsigned_abs())
+            .checked_add(mark)
+            .ok_or(RiskError::Overflow)?;
+        if used > U256::from_u128(i128::MAX as u128) {
+            return Err(RiskError::Overflow);
+        }
+        Ok(())
+    }
+
+    /// Verify post-step `F_side` still leaves room for one full
+    /// `MAX_ORACLE_PRICE * max_abs_funding_e9_per_slot *
+    /// max_accrual_dt_slots * adl_mult_side` funding update before
+    /// saturating `i128::MAX`. Companion to `validate_k_future_headroom`.
+    /// Mirrors toly engine `validate_f_future_headroom` (toly:6740-6760).
+    fn validate_f_future_headroom(&self, a: u128, f: i128) -> Result<()> {
+        if a == 0 || a > ADL_ONE {
+            return Err(RiskError::CorruptState);
+        }
+        let headroom = U256::from_u128(a)
+            .checked_mul(U256::from_u128(MAX_ORACLE_PRICE as u128))
+            .and_then(|v| {
+                v.checked_mul(U256::from_u128(
+                    self.params.max_abs_funding_e9_per_slot as u128,
+                ))
+            })
+            .and_then(|v| v.checked_mul(U256::from_u128(self.params.max_accrual_dt_slots as u128)))
+            .ok_or(RiskError::Overflow)?;
+        let used = U256::from_u128(f.unsigned_abs())
+            .checked_add(headroom)
+            .ok_or(RiskError::Overflow)?;
+        if used > U256::from_u128(i128::MAX as u128) {
+            return Err(RiskError::Overflow);
+        }
+        Ok(())
+    }
+
+    /// Combined K+F future-headroom probe for both sides. Plan_accrual_
+    /// segment calls this on the post-segment scratch state before
+    /// returning success.
+    /// Mirrors toly engine `validate_live_kf_future_headroom`
+    /// (toly:6762-6774).
+    fn validate_live_kf_future_headroom(
+        &self,
+        k_long: i128,
+        k_short: i128,
+        f_long: i128,
+        f_short: i128,
+    ) -> Result<()> {
+        Self::validate_k_future_headroom(self.adl_mult_long, k_long)?;
+        Self::validate_k_future_headroom(self.adl_mult_short, k_short)?;
+        self.validate_f_future_headroom(self.adl_mult_long, f_long)?;
+        self.validate_f_future_headroom(self.adl_mult_short, f_short)?;
+        Ok(())
+    }
+
+    /// Plan a single bounded accrual segment WITHOUT mutating state.
+    /// Used by the `BlockedSegmentHeadroomOrRepresentability` recovery
+    /// validator to detect markets that cannot make accrual progress
+    /// without overflowing future KF headroom — those markets need to
+    /// be force-resolved permissionlessly. The actual accrual path
+    /// (`accrue_market_to`) computes the same K/F/consumption math
+    /// inline; this helper exposes only the read-only probe.
+    ///
+    /// The consumed-bps-e9 figure uses `STRESS_CONSUMPTION_SCALE` to
+    /// match toly's recovery accounting. Fork's
+    /// `PRICE_MOVE_CONSUMPTION_SCALE` is the same numeric value (1e9);
+    /// the two constants are kept distinct for spec traceability —
+    /// `STRESS_CONSUMPTION_SCALE` is used by the stress-envelope /
+    /// recovery surface and `PRICE_MOVE_CONSUMPTION_SCALE` by the
+    /// runtime accrual path.
+    ///
+    /// Mirrors toly engine `plan_accrual_segment` (toly:4544-4664).
+    fn plan_accrual_segment(
+        &self,
+        accrual_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<AccrualSegmentPlan> {
+        let long_live = self.oi_eff_long_q != 0;
+        let short_live = self.oi_eff_short_q != 0;
+
+        let total_dt = accrual_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+
+        let funding_active =
+            funding_rate_e9 != 0 && long_live && short_live && self.fund_px_last > 0;
+        let price_move_active = self.last_oracle_price > 0
+            && oracle_price != self.last_oracle_price
+            && (long_live || short_live);
+        if (funding_active || price_move_active) && total_dt > self.params.max_accrual_dt_slots {
+            return Err(RiskError::Overflow);
+        }
+
+        let mut price_consumed_bps_e9: u128 = 0;
+        if price_move_active {
+            let abs_dp = (oracle_price as i128 - self.last_oracle_price as i128).unsigned_abs();
+            let lhs = abs_dp.checked_mul(10_000u128).ok_or(RiskError::Overflow)?;
+            let rhs = U256::from_u128(self.params.max_price_move_bps_per_slot as u128)
+                .checked_mul(U256::from_u128(total_dt as u128))
+                .and_then(|v| v.checked_mul(U256::from_u128(self.last_oracle_price as u128)))
+                .ok_or(RiskError::Overflow)?;
+            if U256::from_u128(lhs) > rhs {
+                return Err(RiskError::Overflow);
+            }
+
+            let consumed_wide = U256::from_u128(lhs)
+                .checked_mul(U256::from_u128(STRESS_CONSUMPTION_SCALE))
+                .ok_or(RiskError::Overflow)?
+                .checked_div(U256::from_u128(self.last_oracle_price as u128))
+                .ok_or(RiskError::Overflow)?;
+            price_consumed_bps_e9 = consumed_wide.try_into_u128().unwrap_or(u128::MAX);
+        }
+        let mut funding_consumed_bps_e9: u128 = 0;
+        if funding_active && total_dt > 0 {
+            let funding_wide = U256::from_u128(funding_rate_e9.unsigned_abs())
+                .checked_mul(U256::from_u128(total_dt as u128))
+                .and_then(|v| v.checked_mul(U256::from_u128(10_000u128)))
+                .unwrap_or(U256::MAX);
+            funding_consumed_bps_e9 = funding_wide.try_into_u128().unwrap_or(u128::MAX);
+        }
+        let consumed_this_step = price_consumed_bps_e9.saturating_add(funding_consumed_bps_e9);
+
+        let mut k_long = self.adl_coeff_long;
+        let mut k_short = self.adl_coeff_short;
+
+        let current_price = self.last_oracle_price;
+        let delta_p = (oracle_price as i128)
+            .checked_sub(current_price as i128)
+            .ok_or(RiskError::Overflow)?;
+        if delta_p != 0 {
+            let delta_p_wide = I256::from_i128(delta_p);
+            if long_live {
+                let dk_wide = I256::from_u128(self.adl_mult_long)
+                    .checked_mul_i256(delta_p_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let k_long_wide = I256::from_i128(k_long)
+                    .checked_add(dk_wide)
+                    .ok_or(RiskError::Overflow)?;
+                k_long = Self::try_into_non_min_i128(k_long_wide)?;
+            }
+            if short_live {
+                let dk_wide = I256::from_u128(self.adl_mult_short)
+                    .checked_mul_i256(delta_p_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let k_short_wide = I256::from_i128(k_short)
+                    .checked_sub(dk_wide)
+                    .ok_or(RiskError::Overflow)?;
+                k_short = Self::try_into_non_min_i128(k_short_wide)?;
+            }
+        }
+
+        let mut f_long = self.f_long_num;
+        let mut f_short = self.f_short_num;
+        if funding_rate_e9 != 0 && total_dt > 0 && long_live && short_live {
+            let fund_px_0 = self.fund_px_last;
+            if fund_px_0 > 0 {
+                let fund_num_total_wide = I256::from_u128(fund_px_0 as u128)
+                    .checked_mul_i256(I256::from_i128(funding_rate_e9))
+                    .ok_or(RiskError::Overflow)?
+                    .checked_mul_i256(I256::from_u128(total_dt as u128))
+                    .ok_or(RiskError::Overflow)?;
+
+                let df_long_wide = I256::from_u128(self.adl_mult_long)
+                    .checked_mul_i256(fund_num_total_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let f_long_wide = I256::from_i128(f_long)
+                    .checked_sub(df_long_wide)
+                    .ok_or(RiskError::Overflow)?;
+                f_long = Self::try_into_non_min_i128(f_long_wide)?;
+
+                let df_short_wide = I256::from_u128(self.adl_mult_short)
+                    .checked_mul_i256(fund_num_total_wide)
+                    .ok_or(RiskError::Overflow)?;
+                let f_short_wide = I256::from_i128(f_short)
+                    .checked_add(df_short_wide)
+                    .ok_or(RiskError::Overflow)?;
+                f_short = Self::try_into_non_min_i128(f_short_wide)?;
+            }
+        }
+
+        self.validate_live_kf_future_headroom(k_long, k_short, f_long, f_short)?;
+
+        Ok(AccrualSegmentPlan {
+            k_long,
+            k_short,
+            f_long,
+            f_short,
+            consumed_this_step,
+        })
+    }
+
+    /// `true` iff the next accrual call would produce an equity-active
+    /// segment (price-move or funding actually drains equity). Used by
+    /// `keeper_crank_with_request_not_atomic` to decide whether the
+    /// dt envelope must clamp.
+    /// Mirrors toly engine `keeper_accrual_is_equity_active`
+    /// (toly:3982-3998).
+    fn keeper_accrual_is_equity_active(
+        &self,
+        now_slot: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> bool {
+        let total_dt = now_slot.saturating_sub(self.last_market_slot);
+        let has_any_oi = self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0;
+        let price_move_active =
+            self.last_oracle_price > 0 && oracle_price != self.last_oracle_price && has_any_oi;
+        let funding_active = total_dt > 0
+            && funding_rate_e9 != 0
+            && self.oi_eff_long_q != 0
+            && self.oi_eff_short_q != 0
+            && self.fund_px_last > 0;
+        price_move_active || funding_active
+    }
+
+    /// Pure structural probe — does the current request have any
+    /// candidate that *could* drive protective progress? Used by the
+    /// keeper crank to surface `Undercollateralized` immediately when
+    /// the crank would otherwise be a no-op. Read-only.
+    /// Mirrors toly engine `keeper_has_possible_protective_progress`
+    /// (toly:4197-4236).
+    fn keeper_has_possible_protective_progress(
+        &self,
+        _now_slot: u64,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        max_candidate_inspections: u16,
+        rr_touch_limit: u64,
+        rr_scan_limit: u64,
+    ) -> Result<bool> {
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            max_candidate_inspections,
+        );
+        let mut inspected: u16 = 0;
+        if max_revalidations > 0 && max_candidate_inspections > 0 {
+            for &(candidate_idx, _) in ordered_candidates {
+                if inspected >= max_candidate_inspections {
+                    break;
+                }
+                inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+                let cidx = candidate_idx as usize;
+                if cidx >= MAX_ACCOUNTS || !self.is_used(cidx) {
+                    continue;
+                }
+                if candidate_idx as u64 >= self.params.max_accounts {
+                    continue;
+                }
+                return Ok(true);
+            }
+        }
+
+        if rr_touch_limit == 0 || rr_scan_limit == 0 {
+            return Ok(false);
+        }
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(core::cmp::min(rr_scan_limit, wrap_bound) > 0)
+    }
+
+    /// `true` iff the named account holds a bankruptcy-tail position
+    /// (negative pnl whose magnitude exceeds capital). Predicate used
+    /// by the pretrigger-hmax helpers below.
+    /// Mirrors toly engine `account_has_existing_bankruptcy_tail`
+    /// (toly:4238-4248).
+    fn account_has_existing_bankruptcy_tail(&self, idx: usize) -> Result<bool> {
+        self.validate_touched_account_shape(idx)?;
+        let pnl = self.accounts[idx].pnl;
+        if pnl >= 0 {
+            return Ok(false);
+        }
+        if pnl == i128::MIN {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(self.accounts[idx].capital.get() < pnl.unsigned_abs())
+    }
+
+    /// Walk the keeper-supplied candidate list, triggering
+    /// `bankruptcy_hmax_lock_active` if any candidate has a bankruptcy
+    /// tail. Used by the keeper-crank dispatcher to pre-arm the lock
+    /// before the segment runs.
+    /// Mirrors toly engine `pretrigger_bankruptcy_hmax_for_candidates`
+    /// (toly:4250-4285).
+    fn pretrigger_bankruptcy_hmax_for_candidates(
+        &mut self,
+        ctx: &mut InstructionContext,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        max_candidate_inspections: u16,
+    ) -> Result<()> {
+        if self.bankruptcy_hmax_lock_active || max_revalidations == 0 {
+            return Ok(());
+        }
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            max_candidate_inspections,
+        );
+        let mut inspected = 0u16;
+        let mut attempts = 0u16;
+        for &(candidate_idx, _) in ordered_candidates {
+            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
+                break;
+            }
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            let idx = candidate_idx as usize;
+            if idx >= MAX_ACCOUNTS || !self.is_used(idx) {
+                continue;
+            }
+            if candidate_idx as u64 >= self.params.max_accounts {
+                continue;
+            }
+            attempts = attempts.checked_add(1).ok_or(RiskError::Overflow)?;
+            if self.account_has_existing_bankruptcy_tail(idx)? {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk the engine's RR cursor window, triggering
+    /// `bankruptcy_hmax_lock_active` if any in-window account has a
+    /// bankruptcy tail. Companion to
+    /// `pretrigger_bankruptcy_hmax_for_candidates` for the cursor scan
+    /// phase.
+    /// Mirrors toly engine `pretrigger_bankruptcy_hmax_for_phase2`
+    /// (toly:4287-4320).
+    fn pretrigger_bankruptcy_hmax_for_phase2(
+        &mut self,
+        ctx: &mut InstructionContext,
+        inspected: u64,
+    ) -> Result<()> {
+        if self.bankruptcy_hmax_lock_active || inspected == 0 {
+            return Ok(());
+        }
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        let mut i = self.rr_cursor_position;
+        let mut replayed = 0u64;
+        while replayed < inspected {
+            if i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let idx = i as usize;
+            if self.is_used(idx) && self.account_has_existing_bankruptcy_tail(idx)? {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                break;
+            }
+            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
+            replayed = replayed.checked_add(1).ok_or(RiskError::Overflow)?;
+            if i == wrap_bound {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that a given `RecoveryReason` is actually triggered by
+    /// engine state right now. Returns `Ok(())` if the reason is
+    /// authorised (permissionless-progress may proceed via the
+    /// matching P_last resolver), `Err(Unauthorized)` if not, and
+    /// errors for input shape violations. Mirrors toly engine
+    /// `validate_permissionless_p_last_recovery_reason`
+    /// (toly:4073-4161).
+    test_visible! {
+    fn validate_permissionless_p_last_recovery_reason(
+        &self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if authenticated_raw_target_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        match reason {
+            RecoveryReason::BelowProgressFloor => {
+                if authenticated_raw_target_price == 0
+                    || authenticated_raw_target_price == self.last_oracle_price
+                    || !self.exposed_market_has_oi()
+                {
+                    return Err(RiskError::Unauthorized);
+                }
+                if self.bounded_price_step_cap_abs(now_slot)? != 0 {
+                    return Err(RiskError::Unauthorized);
+                }
+                Ok(())
+            }
+            RecoveryReason::BIndexHeadroomExhausted => {
+                if self.b_long_num == u128::MAX || self.b_short_num == u128::MAX {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::BlockedSegmentHeadroomOrRepresentability => {
+                if authenticated_raw_target_price == 0
+                    || authenticated_raw_target_price == self.last_oracle_price
+                    || !self.exposed_market_has_oi()
+                    || self.bounded_price_step_cap_abs(now_slot)? == 0
+                {
+                    return Err(RiskError::Unauthorized);
+                }
+
+                let accrual_slot = self.bounded_accrual_slot_for_now(now_slot)?;
+                let effective_price =
+                    self.bounded_price_step_toward_raw_target(now_slot, authenticated_raw_target_price)?;
+                if effective_price == self.last_oracle_price {
+                    return Err(RiskError::Unauthorized);
+                }
+
+                match self.plan_accrual_segment(accrual_slot, effective_price, 0) {
+                    Err(RiskError::Overflow) => Ok(()),
+                    Err(e) => Err(e),
+                    Ok(_) => Err(RiskError::Unauthorized),
+                }
+            }
+            RecoveryReason::AccountBSettlementCannotProgress => Err(RiskError::Unauthorized),
+            RecoveryReason::ActiveBankruptCloseCannotProgress => {
+                if self.active_bankrupt_close_recovery_required()? {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::OracleOrTargetUnavailableByAuthenticatedPolicy => {
+                Err(RiskError::Unauthorized)
+            }
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery => {
+                if self.sweep_generation == u64::MAX
+                    || self.adl_epoch_long == u64::MAX
+                    || self.adl_epoch_short == u64::MAX
+                {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+            RecoveryReason::ExplicitLossOrDustAuditOverflow => {
+                if self.explicit_unallocated_loss_saturated != 0 {
+                    Ok(())
+                } else {
+                    Err(RiskError::Unauthorized)
+                }
+            }
+        }
+    }
+    }
+
+    /// Account-specific recovery validator: authorises the per-account
+    /// "B-settlement cannot progress" reason for the given account
+    /// index. Returns Ok iff the production B planner agrees the
+    /// settlement is genuinely stuck.
+    /// Mirrors toly engine `validate_permissionless_account_b_recovery_reason`
+    /// (toly:4164-4195).
+    test_visible! {
+    fn validate_permissionless_account_b_recovery_reason(
+        &self,
+        idx: usize,
+        now_slot: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        self.validate_touched_account_shape(idx)?;
+
+        let account = &self.accounts[idx];
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::Unauthorized)?;
+        let target = self.b_target_for_account(idx, side)?;
+        if account.b_snap >= target {
+            return Err(RiskError::Unauthorized);
+        }
+
+        match self.plan_account_b_chunk_to_target(
+            idx,
+            target,
+            PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS,
+        ) {
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => Ok(()),
+            Err(e) => Err(e),
+            Ok((delta_b, _, _, _)) if delta_b > 0 => Err(RiskError::Unauthorized),
+            Ok(_) => Err(RiskError::CorruptState),
+        }
+    }
     }
 
     // ========================================================================
@@ -8888,11 +9592,12 @@ impl RiskEngine {
     /// in-engine.
     ///
     /// Mirrors toly engine `permissionless_progress_not_atomic`
-    /// (toly:8754-8845) at the dispatcher level; recovery branches
-    /// (toly:8787-8829) are intentionally deferred. The KeeperCrank
-    /// wrapper port (Wave 7c) can land without the recovery semantics
-    /// because the wrapper's only behavioral dependence on the outcome
-    /// is the `Cranked(_)` match.
+    /// (toly:8754-8845) end-to-end as of Wave 11a-ii-C: dispatcher routes
+    /// through resolved cursor, active-close continuation/recovery,
+    /// account-B dispatch, 5-reason global recovery loop, and ordinary
+    /// keeper crank. The KeeperCrank wrapper port (Wave 7c) keeps its
+    /// `Cranked(_)` match — every other outcome is now genuinely
+    /// reachable.
     pub fn permissionless_progress_not_atomic(
         &mut self,
         req: PermissionlessProgressRequest<'_>,
@@ -8900,9 +9605,9 @@ impl RiskEngine {
         let PermissionlessProgressRequest {
             now_slot,
             oracle_price,
-            authenticated_raw_target_price: _,
+            authenticated_raw_target_price,
             ordered_candidates,
-            account_hint: _,
+            account_hint,
             max_revalidations,
             max_candidate_inspections,
             funding_rate_e9,
@@ -8926,15 +9631,68 @@ impl RiskEngine {
             return Err(RiskError::Unauthorized);
         }
 
-        // Bankrupt-close continuation + recovery branches deferred to a
-        // future wave alongside `permissionless_recovery_resolve_p_last_not_atomic`
-        // + the 5-reason global recovery validator. On this branch the
-        // Wave 11a-ii-A bankrupt-close setters are landed but have no
-        // production caller, so `active_close_present` is always 0 in
-        // practice. Defense-in-depth: surface a stable error if any path
-        // ever does open a bankrupt-close before recovery lands.
+        // Wave 11a-ii-C / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED):
+        // bankrupt-close continuation + the
+        // ActiveBankruptCloseCannotProgress recovery branch. Either the
+        // engine can progress the state machine one step
+        // (`continue_active_bankrupt_close_not_atomic`) or the recovery
+        // gate is open (`active_bankrupt_close_recovery_required`), in
+        // which case the matching P_last resolver settles the market.
         if self.active_close_present != 0 {
-            return Err(RiskError::RecoveryRequired);
+            if self.active_bankrupt_close_recovery_required()? {
+                self.permissionless_recovery_resolve_p_last_not_atomic(
+                    RecoveryReason::ActiveBankruptCloseCannotProgress,
+                    now_slot,
+                    authenticated_raw_target_price,
+                )?;
+                return Ok(PermissionlessProgressOutcome::Recovered(
+                    RecoveryReason::ActiveBankruptCloseCannotProgress,
+                ));
+            }
+            self.continue_active_bankrupt_close_not_atomic(now_slot)?;
+            return Ok(PermissionlessProgressOutcome::ActiveCloseContinued);
+        }
+
+        // Wave 11a-ii-C / KL-FORK-ENGINE-B-TRACKING-1 (REVOKED):
+        // per-account hint dispatch — settle a specific account's
+        // B-tracking or surface its recovery branch.
+        if let Some(idx) = account_hint {
+            if let Some(outcome) = self.try_permissionless_account_b_dispatch(
+                idx,
+                now_slot,
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            )? {
+                return Ok(outcome);
+            }
+        }
+
+        // Wave 11a-ii-C: 5-reason global recovery loop. The validators
+        // gate each reason to its specific engine state; an
+        // authoritative `Unauthorized` from any reason falls through
+        // to the next. The keeper crank runs only when no recovery
+        // path applies.
+        //
+        // Priority order matches toly (toly:8814-8820). Higher-priority
+        // reasons are checked first so a market that triggers multiple
+        // reasons converges on the same outcome regardless of when
+        // recovery is invoked.
+        const GLOBAL_RECOVERY_PRIORITY: [RecoveryReason; 5] = [
+            RecoveryReason::CounterOrEpochOverflowDeclaredRecovery,
+            RecoveryReason::BIndexHeadroomExhausted,
+            RecoveryReason::ExplicitLossOrDustAuditOverflow,
+            RecoveryReason::BelowProgressFloor,
+            RecoveryReason::BlockedSegmentHeadroomOrRepresentability,
+        ];
+        for reason in GLOBAL_RECOVERY_PRIORITY {
+            if let Some(outcome) = self.try_permissionless_global_recovery(
+                reason,
+                now_slot,
+                authenticated_raw_target_price,
+            )? {
+                return Ok(outcome);
+            }
         }
 
         let outcome = self.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
@@ -8951,6 +9709,267 @@ impl RiskEngine {
             rr_scan_limit,
         })?;
         Ok(PermissionlessProgressOutcome::Cranked(outcome))
+    }
+
+    /// Wave 11a-ii-C: per-account B-tracking dispatch. Attempts a
+    /// settlement step against the named account; falls back to its
+    /// account-specific recovery resolver if the settlement is blocked
+    /// by the production planner. Returns `Ok(None)` when the account
+    /// has no work for this caller — the dispatcher then falls through
+    /// to the global recovery loop or the keeper crank.
+    /// Mirrors toly engine `try_permissionless_account_b_dispatch`
+    /// (toly:8718-8744).
+    fn try_permissionless_account_b_dispatch(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<Option<PermissionlessProgressOutcome>> {
+        if self.try_permissionless_account_b_progress(
+            idx,
+            now_slot,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+        )? {
+            return Ok(Some(PermissionlessProgressOutcome::AccountBProgress(idx)));
+        }
+        match self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot) {
+            Ok(()) => {
+                self.permissionless_recovery_resolve_account_b_p_last_not_atomic(idx, now_slot)?;
+                Ok(Some(PermissionlessProgressOutcome::AccountBRecovered(idx)))
+            }
+            Err(RiskError::Unauthorized) | Err(RiskError::AccountNotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Account-B settlement progress step. Touches the named account
+    /// through `touch_account_live_local`, drains any pending B chunk
+    /// up to `PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS`, and finalises
+    /// touched accounts. Returns `true` iff the planner agreed there
+    /// was work; `false` if the account is already at target or
+    /// invalid in a recoverable way.
+    /// Mirrors toly engine `try_permissionless_account_b_progress`
+    /// (toly:8662-8714).
+    fn try_permissionless_account_b_progress(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    ) -> Result<bool> {
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        self.assert_public_postconditions()?;
+
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        let i = idx as usize;
+        match self.validate_touched_account_shape(i) {
+            Ok(()) => {}
+            Err(RiskError::AccountNotFound) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        let side = match side_of_i128(self.accounts[i].position_basis_q) {
+            Some(side) => side,
+            None => return Ok(false),
+        };
+        let target = self.b_target_for_account(i, side)?;
+        if self.accounts[i].b_snap >= target {
+            return Ok(false);
+        }
+        match self.plan_account_b_chunk_to_target(i, target, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS)
+        {
+            Ok((delta_b, _, _, _)) if delta_b > 0 => {}
+            Ok(_) => return Err(RiskError::CorruptState),
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+        );
+        self.touch_account_live_local(i, &mut ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx)?;
+        self.assert_public_postconditions()?;
+        Ok(true)
+    }
+
+    /// Wave 11a-ii-C: 5-reason global recovery wrapper. Validates the
+    /// given reason against engine state; on success calls the P_last
+    /// resolver to settle the market deterministically. Returns
+    /// `Ok(None)` when the reason is not authorised for the current
+    /// engine state (fall through to the next reason / keeper crank).
+    /// Mirrors toly engine `try_permissionless_global_recovery`
+    /// (toly:8637-8659).
+    fn try_permissionless_global_recovery(
+        &mut self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<Option<PermissionlessProgressOutcome>> {
+        match self.validate_permissionless_p_last_recovery_reason(
+            reason,
+            now_slot,
+            authenticated_raw_target_price,
+        ) {
+            Ok(()) => {
+                self.permissionless_recovery_resolve_p_last_not_atomic(
+                    reason,
+                    now_slot,
+                    authenticated_raw_target_price,
+                )?;
+                Ok(Some(PermissionlessProgressOutcome::Recovered(reason)))
+            }
+            Err(RiskError::Unauthorized) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Deterministic terminal-recovery settler used by every
+    /// global-recovery branch of the dispatcher. Validates the reason
+    /// once more (defence-in-depth), handles the special-case
+    /// branches, and finally calls
+    /// `resolve_market_not_atomic(Degenerate, p_last, p_last, ..., 0)`
+    /// to terminate the market at the engine's last accepted oracle
+    /// price.
+    /// Mirrors toly engine `permissionless_recovery_resolve_p_last_not_atomic`
+    /// (toly:9400-9420).
+    fn permissionless_recovery_resolve_p_last_not_atomic(
+        &mut self,
+        reason: RecoveryReason,
+        now_slot: u64,
+        authenticated_raw_target_price: u64,
+    ) -> Result<()> {
+        self.assert_public_postconditions()?;
+        self.validate_permissionless_p_last_recovery_reason(
+            reason,
+            now_slot,
+            authenticated_raw_target_price,
+        )?;
+        if reason == RecoveryReason::ActiveBankruptCloseCannotProgress {
+            self.complete_active_bankrupt_close_for_recovery()?;
+        }
+        if reason == RecoveryReason::CounterOrEpochOverflowDeclaredRecovery {
+            return self.resolve_counter_or_epoch_overflow_recovery_not_atomic(now_slot);
+        }
+        let p_last = self.last_oracle_price;
+        self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
+
+    /// Account-specific terminal recovery used by the account-B
+    /// dispatch when the production planner reports the settlement
+    /// can't progress. Settles the market at the engine's last
+    /// accepted oracle price after a final validator pass.
+    /// Mirrors toly engine `permissionless_recovery_resolve_account_b_p_last_not_atomic`
+    /// (toly:9504-9514).
+    fn permissionless_recovery_resolve_account_b_p_last_not_atomic(
+        &mut self,
+        idx: u16,
+        now_slot: u64,
+    ) -> Result<()> {
+        self.assert_public_postconditions()?;
+        self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot)?;
+        let p_last = self.last_oracle_price;
+        self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
+
+    /// Specialised resolver for the
+    /// `CounterOrEpochOverflowDeclaredRecovery` reason. Saturated
+    /// `sweep_generation` / `adl_epoch_<side>` counters cannot
+    /// continue ordinary accrual; the resolver flips to Resolved at
+    /// `p_last` while running `begin_terminal_epoch_exhaustion_reset`
+    /// (when the saturated epoch is `u64::MAX`) instead of
+    /// `begin_full_drain_reset`.
+    /// Mirrors toly engine `resolve_counter_or_epoch_overflow_recovery_not_atomic`
+    /// (toly:9423-9497).
+    fn resolve_counter_or_epoch_overflow_recovery_not_atomic(
+        &mut self,
+        now_slot: u64,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        self.ensure_no_active_bankrupt_close()?;
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        let p_last = self.last_oracle_price;
+        if p_last == 0 || p_last > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+
+        let pre_mode_long = self.side_mode_long;
+        let pre_mode_short = self.side_mode_short;
+        let pre_stored_long = self.stored_pos_count_long;
+        let pre_stored_short = self.stored_pos_count_short;
+
+        self.current_slot = now_slot;
+        self.last_market_slot = now_slot;
+        self.market_mode = MarketMode::Resolved;
+        self.resolved_price = p_last;
+        self.resolved_live_price = p_last;
+        self.resolved_slot = now_slot;
+        self.resolved_k_long_terminal_delta = 0;
+        self.resolved_k_short_terminal_delta = 0;
+        self.clear_stress_envelope();
+        self.resolved_payout_h_num = 0;
+        self.resolved_payout_h_den = 0;
+        self.resolved_payout_ready = 0;
+        self.pnl_matured_pos_tot = self.pnl_pos_tot;
+        self.oi_eff_long_q = 0;
+        self.oi_eff_short_q = 0;
+        if pre_stored_long == 0 {
+            self.phantom_dust_certified_long_q = 0;
+            self.phantom_dust_potential_long_q = 0;
+        }
+        if pre_stored_short == 0 {
+            self.phantom_dust_certified_short_q = 0;
+            self.phantom_dust_potential_short_q = 0;
+        }
+
+        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
+            if self.adl_epoch_long == u64::MAX {
+                self.begin_terminal_epoch_exhaustion_reset(Side::Long)?;
+            } else {
+                self.begin_full_drain_reset(Side::Long)?;
+            }
+        }
+        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
+            if self.adl_epoch_short == u64::MAX {
+                self.begin_terminal_epoch_exhaustion_reset(Side::Short)?;
+            } else {
+                self.begin_full_drain_reset(Side::Short)?;
+            }
+        }
+        if self.side_mode_long == SideMode::ResetPending
+            && self.stale_account_count_long == 0
+            && self.stored_pos_count_long == 0
+        {
+            self.finalize_side_reset(Side::Long)?;
+        }
+        if self.side_mode_short == SideMode::ResetPending
+            && self.stale_account_count_short == 0
+            && self.stored_pos_count_short == 0
+        {
+            self.finalize_side_reset(Side::Short)?;
+        }
+
+        self.assert_public_postconditions()?;
+        Ok(())
     }
 
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,
