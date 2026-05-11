@@ -1200,3 +1200,162 @@ fn proof_b_tracking_loss_weight_sum_overflow_rejects() {
         Err(RiskError::CorruptState)
     );
 }
+
+// ============================================================================
+// Wave 11a-ii-A — B-tracking helpers + bankrupt-close state machine
+// KL-FORK-ENGINE-B-TRACKING-1 (state machine portion REVOKED)
+// KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (state machine portion REVOKED)
+// ============================================================================
+
+/// `assert_public_postconditions` (which delegates to
+/// `validate_b_tracking_shape`) rejects any side whose
+/// `social_loss_remainder_<side>_num` equals or exceeds `SOCIAL_LOSS_DEN`.
+/// Forward-looking: once Wave 11a-ii-A's
+/// `book_bankruptcy_residual_chunk_to_side` writes
+/// `set_social_remainder(side, plan.rem_new)`, this catches a wrap or
+/// off-by-one that would push the numerator into invalid range.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_b_tracking_shape_rejects_social_remainder_at_or_above_denominator() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let pick_long: bool = kani::any();
+    if pick_long {
+        engine.social_loss_remainder_long_num = SOCIAL_LOSS_DEN;
+    } else {
+        engine.social_loss_remainder_short_num = SOCIAL_LOSS_DEN;
+    }
+
+    assert_eq!(
+        engine.assert_public_postconditions(),
+        Err(RiskError::CorruptState)
+    );
+}
+
+/// `assert_public_postconditions` rejects any side whose
+/// `social_loss_dust_<side>_num` equals or exceeds `SOCIAL_LOSS_DEN`.
+/// Forward-looking: catches a future writer of
+/// `transfer_scaled_dust_side` that fails to flush the post-mod dust
+/// correctly.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_b_tracking_shape_rejects_social_dust_at_or_above_denominator() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let pick_long: bool = kani::any();
+    if pick_long {
+        engine.social_loss_dust_long_num = SOCIAL_LOSS_DEN;
+    } else {
+        engine.social_loss_dust_short_num = SOCIAL_LOSS_DEN;
+    }
+
+    assert_eq!(
+        engine.assert_public_postconditions(),
+        Err(RiskError::CorruptState)
+    );
+}
+
+/// `assert_public_postconditions` rejects an
+/// `explicit_unallocated_loss_saturated` flag set to anything other than
+/// 0 or 1. Wave 11a-ii-A's `add_explicit_unallocated_loss_side` and
+/// `record_uninsured_protocol_loss` both pin it at `1` only on
+/// `checked_add` overflow; this harness catches any future writer that
+/// might store an out-of-range value.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_b_tracking_shape_rejects_saturated_flag_out_of_range() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let bad: u8 = kani::any();
+    kani::assume(bad > 1);
+    engine.explicit_unallocated_loss_saturated = bad;
+
+    assert_eq!(
+        engine.assert_public_postconditions(),
+        Err(RiskError::CorruptState)
+    );
+}
+
+/// Round-trip: `encode_active_close_side` followed by
+/// `decode_active_close_side` is the identity for both `Side::Long` and
+/// `Side::Short`. Pins the bidirectional contract that Wave 11a-ii-A's
+/// state-machine setters (`start_active_bankrupt_close_residual` writes
+/// the encoded byte; `continue_active_bankrupt_close_core` reads it back)
+/// depend on for end-to-end correctness.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_encode_decode_active_close_side_roundtrip() {
+    let pick_long: bool = kani::any();
+    let s = if pick_long { Side::Long } else { Side::Short };
+
+    let encoded = RiskEngine::encode_active_close_side(s);
+    let decoded = RiskEngine::decode_active_close_side(encoded).unwrap();
+    assert_eq!(encoded == ACTIVE_CLOSE_SIDE_LONG, pick_long);
+    assert_eq!(encoded == ACTIVE_CLOSE_SIDE_SHORT, !pick_long);
+    match (s, decoded) {
+        (Side::Long, Side::Long) | (Side::Short, Side::Short) => {}
+        _ => panic!("encode/decode roundtrip failed"),
+    }
+}
+
+/// `decode_active_close_side` rejects any byte that is not
+/// `ACTIVE_CLOSE_SIDE_LONG` (1) or `ACTIVE_CLOSE_SIDE_SHORT` (2). This
+/// is the inverse-direction safety net: if persisted slab state ever
+/// shows `active_close_present = 1` but `opp_side` is `0` (NONE) or any
+/// other byte, the decoder MUST surface `CorruptState`.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_decode_active_close_side_rejects_invalid_byte() {
+    let byte: u8 = kani::any();
+    kani::assume(byte != ACTIVE_CLOSE_SIDE_LONG && byte != ACTIVE_CLOSE_SIDE_SHORT);
+
+    assert_eq!(
+        RiskEngine::decode_active_close_side(byte),
+        Err(RiskError::CorruptState)
+    );
+}
+
+/// `clear_active_bankrupt_close_state` zeros all 11 state-machine fields
+/// regardless of starting state. Wave 11a-ii-A's
+/// `continue_active_bankrupt_close_core` calls this when the residual
+/// hits zero, and `complete_active_bankrupt_close_for_recovery` calls it
+/// in the recovery terminal — both paths rely on the clear being
+/// total.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_clear_active_bankrupt_close_state_zeros_all_fields() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    engine.active_close_present = kani::any();
+    engine.active_close_phase = kani::any();
+    engine.active_close_account_idx = kani::any();
+    engine.active_close_opp_side = kani::any();
+    engine.active_close_close_price = kani::any();
+    engine.active_close_close_slot = kani::any();
+    engine.active_close_q_close_q = kani::any();
+    engine.active_close_residual_remaining = kani::any();
+    engine.active_close_residual_booked = kani::any();
+    engine.active_close_residual_recorded = kani::any();
+    engine.active_close_b_chunks_booked = kani::any();
+
+    engine.clear_active_bankrupt_close_state();
+
+    assert_eq!(engine.active_close_present, 0);
+    assert_eq!(engine.active_close_phase, ACTIVE_CLOSE_PHASE_NONE);
+    assert_eq!(engine.active_close_account_idx, u16::MAX);
+    assert_eq!(engine.active_close_opp_side, ACTIVE_CLOSE_SIDE_NONE);
+    assert_eq!(engine.active_close_close_price, 0);
+    assert_eq!(engine.active_close_close_slot, 0);
+    assert_eq!(engine.active_close_q_close_q, 0);
+    assert_eq!(engine.active_close_residual_remaining, 0);
+    assert_eq!(engine.active_close_residual_booked, 0);
+    assert_eq!(engine.active_close_residual_recorded, 0);
+    assert_eq!(engine.active_close_b_chunks_booked, 0);
+    assert!(engine.validate_active_bankrupt_close_shape().is_ok());
+}
