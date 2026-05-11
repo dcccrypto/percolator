@@ -3992,7 +3992,17 @@ impl RiskEngine {
             self.set_oi_eff(liq_side, new_oi);
         }
 
-        // Step 2 (§5.6 step 2): insurance-first deficit coverage
+        // Step 2 (§5.6 step 2): insurance-first deficit coverage.
+        //
+        // Wave 11d (Phase 1): when a bankruptcy deficit is observed, arm the
+        // bankruptcy h_max lock so the wider stress envelope reconciles the
+        // remainder. Mirrors toly engine `enqueue_adl` (toly:4980-4982). The
+        // lock is purely defense-in-depth metadata + envelope reset; it
+        // doesn't change the use_insurance_buffer / K-adjust / record_uninsured
+        // routing fork performs below.
+        if d > 0 {
+            self.trigger_bankruptcy_hmax_lock(ctx)?;
+        }
         let d_rem = if d > 0 { self.use_insurance_buffer(d) } else { 0u128 };
 
         // Step 3: read opposing OI
@@ -5649,8 +5659,20 @@ impl RiskEngine {
     // Loss settlement and profit conversion (spec §7)
     // ========================================================================
 
-    /// settle_losses (spec §7.1): settle negative PnL from principal
-    fn settle_losses(&mut self, idx: usize) -> Result<()> {
+    /// settle_losses (spec §7.1): settle negative PnL from principal.
+    ///
+    /// The `_with_context` variant arms the bankruptcy h_max lock when a Live
+    /// account exhausts its capital without zeroing PnL — mirrors toly engine
+    /// `settle_losses_with_context` (toly:7079-7114). Pass `Some(ctx)` to
+    /// route through `trigger_bankruptcy_hmax_lock(ctx)` (which enforces the
+    /// `positive_pnl_usability_mutated` admission gate); pass `None` from
+    /// internal/contextless call sites to use the unguarded
+    /// `_without_context` writer.
+    fn settle_losses_with_context(
+        &mut self,
+        idx: usize,
+        ctx: Option<&mut InstructionContext>,
+    ) -> Result<()> {
         let pnl = self.accounts[idx].pnl;
         if pnl >= 0 {
             return Ok(());
@@ -5670,11 +5692,36 @@ impl RiskEngine {
             }
             self.set_pnl(idx, new_pnl)?;
         }
+        if self.market_mode == MarketMode::Live
+            && self.accounts[idx].pnl < 0
+            && self.accounts[idx].capital.get() == 0
+        {
+            if let Some(ctx) = ctx {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+            } else {
+                self.trigger_bankruptcy_hmax_lock_without_context();
+            }
+        }
         Ok(())
     }
 
-    /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL
-    fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
+    fn settle_losses(&mut self, idx: usize) -> Result<()> {
+        self.settle_losses_with_context(idx, None)
+    }
+
+    /// resolve_flat_negative (spec §7.3): for flat accounts with negative PnL.
+    ///
+    /// The `_with_context` variant arms the bankruptcy h_max lock when a Live
+    /// market is about to absorb a flat-negative remainder into the protocol
+    /// loss bucket — mirrors toly engine `resolve_flat_negative_with_context`
+    /// (toly:7123-7149). The lock fires BEFORE `absorb_protocol_loss` so the
+    /// envelope sees the pre-loss equity (so subsequent gates inside the same
+    /// instruction observe the lock).
+    fn resolve_flat_negative_with_context(
+        &mut self,
+        idx: usize,
+        ctx: Option<&mut InstructionContext>,
+    ) -> Result<()> {
         let eff = self.effective_pos_q_checked(idx, false)?;
         if eff != 0 {
             return Ok(()); // Not flat
@@ -5685,10 +5732,21 @@ impl RiskEngine {
                 return Err(RiskError::CorruptState);
             }
             let loss = pnl.unsigned_abs();
+            if self.market_mode == MarketMode::Live {
+                if let Some(ctx) = ctx {
+                    self.trigger_bankruptcy_hmax_lock(ctx)?;
+                } else {
+                    self.trigger_bankruptcy_hmax_lock_without_context();
+                }
+            }
             self.absorb_protocol_loss(loss);
             self.set_pnl(idx, 0i128)?;
         }
         Ok(())
+    }
+
+    fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
+        self.resolve_flat_negative_with_context(idx, None)
     }
 
     /// fee_debt_sweep (spec §7.5): after any capital increase, sweep fee debt
@@ -5742,12 +5800,17 @@ impl RiskEngine {
         // Step 5: settle side effects with H_lock for reserve routing
         self.settle_side_effects_live(idx, ctx)?;
 
-        // Step 6: settle losses from principal
-        self.settle_losses(idx)?;
+        // Step 6: settle losses from principal — pass Some(ctx) so a Live
+        // account that exhausts capital while still negative-PnL arms the
+        // bankruptcy h_max lock via `trigger_bankruptcy_hmax_lock(ctx)`
+        // (mirrors toly:7210).
+        self.settle_losses_with_context(idx, Some(ctx))?;
 
-        // Step 7: resolve flat negative
+        // Step 7: resolve flat negative — pass Some(ctx) so a Live flat-and-
+        // negative account arms the lock before the protocol-loss absorb
+        // (mirrors toly:7214).
         if self.effective_pos_q_checked(idx, false)? == 0 && self.accounts[idx].pnl < 0 {
-            self.resolve_flat_negative(idx)?;
+            self.resolve_flat_negative_with_context(idx, Some(ctx))?;
         }
 
         // Steps 8-9: MUST NOT auto-convert, MUST NOT fee-sweep
@@ -8085,8 +8148,11 @@ impl RiskEngine {
 
         // Step 10: settle post-trade losses from principal for both accounts (spec §10.4 step 18)
         // Loss seniority: losses MUST be settled before explicit fees (spec §0 item 14)
-        self.settle_losses(a as usize)?;
-        self.settle_losses(b as usize)?;
+        // Pass Some(&mut ctx) so a Live counterparty that exhausts capital
+        // while still negative-PnL arms the bankruptcy h_max lock via
+        // `trigger_bankruptcy_hmax_lock(ctx)` (mirrors toly:7869-7870).
+        self.settle_losses_with_context(a as usize, Some(&mut ctx))?;
+        self.settle_losses_with_context(b as usize, Some(&mut ctx))?;
 
         // Step 11: charge the wrapper-supplied trade fee (Wave 6b /
         // KL-DYNAMIC-TRADE-FEE-1 REVOKED). Capped at
@@ -8573,8 +8639,11 @@ impl RiskEngine {
                 // Step 7-8: close q_close_q at oracle, attach new position
                 self.attach_effective_position(idx as usize, new_eff)?;
 
-                // Step 9: settle realized losses from principal
-                self.settle_losses(idx as usize)?;
+                // Step 9: settle realized losses from principal. Pass Some(ctx)
+                // so a Live partial liquidation that exhausts capital while
+                // still negative-PnL arms the bankruptcy h_max lock via
+                // `trigger_bankruptcy_hmax_lock(ctx)` (mirrors toly:8364).
+                self.settle_losses_with_context(idx as usize, Some(ctx))?;
 
                 // Step 10-11: charge liquidation fee on quantity closed
                 let liq_fee = {
@@ -8611,8 +8680,11 @@ impl RiskEngine {
                 // Close entire position at oracle
                 self.attach_effective_position(idx as usize, 0i128)?;
 
-                // Settle losses from principal
-                self.settle_losses(idx as usize)?;
+                // Settle losses from principal. Pass Some(ctx) so a Live full-
+                // close liquidation that exhausts capital while still negative-
+                // PnL arms the bankruptcy h_max lock via
+                // `trigger_bankruptcy_hmax_lock(ctx)` (mirrors toly:8402).
+                self.settle_losses_with_context(idx as usize, Some(ctx))?;
 
                 // Charge liquidation fee (spec §8.3)
                 let liq_fee = if q_close_q == 0 {
