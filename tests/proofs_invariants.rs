@@ -1482,3 +1482,54 @@ fn proof_force_close_resolved_cursor_rejects_zero_scan_limit() {
         Err(RiskError::Overflow)
     );
 }
+
+// ============================================================================
+// Wave 10 / PORT-13 — validate_engine_state_shape aggregator
+// ============================================================================
+
+/// `validate_engine_state_shape` holds on a freshly initialised engine.
+/// Genesis state has every B-tracking and bankrupt-close field at the
+/// no-continuation default, so the aggregator must accept.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_validate_engine_state_shape_holds_at_genesis() {
+    let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    assert!(engine.validate_engine_state_shape().is_ok());
+}
+
+/// `validate_engine_state_shape` rejects when the embedded B-tracking
+/// validator would reject (e.g., `loss_weight_sum` out of range). This
+/// pins the aggregator's delegation contract — if anyone removes the
+/// `validate_b_tracking_shape` call from inside the aggregator, Kani
+/// catches it.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_validate_engine_state_shape_delegates_to_b_tracking() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.loss_weight_sum_long = SOCIAL_LOSS_DEN + 1;
+
+    assert_eq!(
+        engine.validate_engine_state_shape(),
+        Err(RiskError::CorruptState)
+    );
+}
+
+/// `validate_engine_state_shape` rejects when the bankrupt-close
+/// state-machine validator would reject (e.g., active_close_present > 1).
+/// Pins the second delegation arm of the aggregator.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_validate_engine_state_shape_delegates_to_bankrupt_close() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let two_or_more: u8 = kani::any();
+    kani::assume(two_or_more > 1);
+    engine.active_close_present = two_or_more;
+
+    assert_eq!(
+        engine.validate_engine_state_shape(),
+        Err(RiskError::CorruptState)
+    );
+}
