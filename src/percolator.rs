@@ -155,6 +155,27 @@ pub const ACTIVE_CLOSE_SIDE_SHORT: u8 = 2;
 /// this bound into the `book_or_record_bankruptcy_residual_to_side` path.
 pub const ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS: u64 = 1;
 
+/// Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (partially REVOKED, schema-only).
+///
+/// Denominator for the B-index social-loss accounting (spec §1.2,
+/// v12.20.6). Per-account loss weights and side `loss_weight_sum_<side>`
+/// values are stored as numerators with this implicit denominator; the
+/// per-side weight sum is bounded by `SOCIAL_LOSS_DEN` (1e21). The
+/// dust/remainder fields (`social_loss_*_dust_*_num`,
+/// `social_loss_remainder_*_num`) are strictly less than `SOCIAL_LOSS_DEN`.
+///
+/// Toly engine ref: src/percolator.rs:147-148.
+pub const SOCIAL_LOSS_DEN: u128 = 1_000_000_000_000_000_000_000;
+
+/// Wave 11a: budget per public B-residual booking chunk. Bounds the
+/// `book_bankruptcy_residual_chunk_to_side` worst-case per call so one
+/// honest cranker can't be left holding an unbounded loss attribution.
+/// `PUBLIC_B_CHUNK_ATOMS = MAX_VAULT_TVL` matches toly engine
+/// (src/percolator.rs:152). The `PUBLIC_B_CHUNK_ATOMS * SOCIAL_LOSS_DEN`
+/// product fits in u128 (1e16 × 1e21 = 1e37 < 2^128 ≈ 3.4e38), which the
+/// fast-path of `plan_bankruptcy_residual_chunk_to_side` requires.
+pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -443,6 +464,24 @@ pub struct Account {
     /// Side epoch snapshot
     pub adl_epoch_snap: u64,
 
+    /// Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (PARTIALLY REVOKED, schema-only).
+    ///
+    /// Per-account B-index loss-weight + snapshot state (spec §2.1,
+    /// v12.20.6; toly engine src/percolator.rs:550-554). Each holder of a
+    /// non-zero `position_basis_q` accumulates a `loss_weight` (numerator
+    /// over `SOCIAL_LOSS_DEN`); `b_snap` is the side's B-target at last
+    /// loss-weight write; `b_rem` is the sub-`SOCIAL_LOSS_DEN` carry held
+    /// for the next settlement; `b_epoch_snap` is the side epoch at last
+    /// touch (used by `account_has_unsettled_b`).
+    ///
+    /// Path A2: all four fields stay at zero on this branch (no writer is
+    /// wired). Future waves will set them during liquidation / trade /
+    /// fee-sync hot paths.
+    pub loss_weight: u128,
+    pub b_snap: u128,
+    pub b_rem: u128,
+    pub b_epoch_snap: u64,
+
     /// Wrapper-owned matching-engine bindings (spec §2.1.1, non-normative).
     /// Opaque payload stored by the engine but never read for any
     /// spec-normative decision. Typical use: CPI routing by the wrapper's
@@ -508,6 +547,11 @@ fn empty_account() -> Account {
         adl_k_snap: 0i128,
         f_snap: 0i128,
         adl_epoch_snap: 0,
+        // Wave 11a: per-account B-tracking schema (writer wired in 11a-ii).
+        loss_weight: 0u128,
+        b_snap: 0u128,
+        b_rem: 0u128,
+        b_epoch_snap: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
         owner: [0; 32],
@@ -691,6 +735,50 @@ pub struct RiskEngine {
     pub phantom_dust_certified_short_q: u128,
     pub phantom_dust_potential_long_q: u128,
     pub phantom_dust_potential_short_q: u128,
+
+    /// Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (PARTIALLY REVOKED, schema-only).
+    ///
+    /// B-index bankruptcy-residual subsystem state (spec §2.2, v12.20.6;
+    /// toly engine src/percolator.rs:788-803). Stores the per-side
+    /// running B-target (`b_<side>_num`), the side's start-of-epoch B
+    /// snapshot for stale-account settlement (`b_epoch_start_<side>_num`),
+    /// the sum of per-account `loss_weight` over the side (denominator =
+    /// `SOCIAL_LOSS_DEN`), the sub-denominator remainder carried across
+    /// chunks (`social_loss_remainder_<side>_num`), the dust accumulator
+    /// per side (`social_loss_dust_<side>_num`), and three explicit
+    /// non-claim loss buckets (`explicit_unallocated_loss_<side>`,
+    /// `explicit_unallocated_protocol_loss`, and an
+    /// `explicit_unallocated_loss_saturated` flag that records whether
+    /// any bucket hit `u128::MAX`).
+    ///
+    /// Path A: this wave (11a-i) adds the fields + get/set accessors only
+    /// — all helpers that READ these fields to drive social-loss
+    /// settlement (`plan/book_bankruptcy_residual_chunk_to_side`,
+    /// `b_target_for_account`, `account_has_unsettled_b`,
+    /// `record_uninsured_protocol_loss`, `trigger_bankruptcy_hmax_lock`)
+    /// are deferred to Wave 11a-ii. On this branch every field stays at
+    /// zero (no writer is wired); the accessor surface is in place so
+    /// Wave 11a-ii can wire the writers without re-shaping bytes or
+    /// breaking ABI.
+    ///
+    /// Bankrupt-close state-machine setters (Wave 5b-ii) depend on
+    /// `book_or_start_active_close_residual_to_side`, which in turn
+    /// depends on `book_bankruptcy_residual_chunk_to_side` — so the
+    /// state-machine setters land with Wave 11a-ii, not earlier.
+    pub b_long_num: u128,
+    pub b_short_num: u128,
+    pub b_epoch_start_long_num: u128,
+    pub b_epoch_start_short_num: u128,
+    pub loss_weight_sum_long: u128,
+    pub loss_weight_sum_short: u128,
+    pub social_loss_remainder_long_num: u128,
+    pub social_loss_remainder_short_num: u128,
+    pub social_loss_dust_long_num: u128,
+    pub social_loss_dust_short_num: u128,
+    pub explicit_unallocated_loss_long: U128,
+    pub explicit_unallocated_loss_short: U128,
+    pub explicit_unallocated_protocol_loss: U128,
+    pub explicit_unallocated_loss_saturated: u8,
 
     /// Materialized account count (spec §2.2)
     pub materialized_account_count: u64,
@@ -1579,6 +1667,23 @@ impl RiskEngine {
             phantom_dust_certified_short_q: 0u128,
             phantom_dust_potential_long_q: 0u128,
             phantom_dust_potential_short_q: 0u128,
+            // Wave 11a: B-tracking subsystem schema. All fields stay at 0
+            // until 11a-ii wires the writers (plan/book_bankruptcy_residual,
+            // record_uninsured_protocol_loss, etc.).
+            b_long_num: 0u128,
+            b_short_num: 0u128,
+            b_epoch_start_long_num: 0u128,
+            b_epoch_start_short_num: 0u128,
+            loss_weight_sum_long: 0u128,
+            loss_weight_sum_short: 0u128,
+            social_loss_remainder_long_num: 0u128,
+            social_loss_remainder_short_num: 0u128,
+            social_loss_dust_long_num: 0u128,
+            social_loss_dust_short_num: 0u128,
+            explicit_unallocated_loss_long: U128::ZERO,
+            explicit_unallocated_loss_short: U128::ZERO,
+            explicit_unallocated_protocol_loss: U128::ZERO,
+            explicit_unallocated_loss_saturated: 0,
             materialized_account_count: 0,
             neg_pnl_account_count: 0,
             // Wave 4a: bankrupt-close gate variables — see init_in_place
@@ -1710,6 +1815,21 @@ impl RiskEngine {
         self.phantom_dust_certified_short_q = 0;
         self.phantom_dust_potential_long_q = 0;
         self.phantom_dust_potential_short_q = 0;
+        // Wave 11a: B-tracking schema. See struct comment.
+        self.b_long_num = 0;
+        self.b_short_num = 0;
+        self.b_epoch_start_long_num = 0;
+        self.b_epoch_start_short_num = 0;
+        self.loss_weight_sum_long = 0;
+        self.loss_weight_sum_short = 0;
+        self.social_loss_remainder_long_num = 0;
+        self.social_loss_remainder_short_num = 0;
+        self.social_loss_dust_long_num = 0;
+        self.social_loss_dust_short_num = 0;
+        self.explicit_unallocated_loss_long = U128::ZERO;
+        self.explicit_unallocated_loss_short = U128::ZERO;
+        self.explicit_unallocated_protocol_loss = U128::ZERO;
+        self.explicit_unallocated_loss_saturated = 0;
         self.materialized_account_count = 0;
         self.neg_pnl_account_count = 0;
         // Wave 4a: bankrupt-close gate variables init to no-active state.
@@ -2935,6 +3055,139 @@ impl RiskEngine {
             Side::Long => self.phantom_dust_potential_long_q = v,
             Side::Short => self.phantom_dust_potential_short_q = v,
         }
+    }
+
+    // ========================================================================
+    // Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (PARTIALLY REVOKED, schema-only)
+    // ------------------------------------------------------------------------
+    // B-tracking get/set accessors. Mirrors toly engine
+    // src/percolator.rs:2859-2926 (`get_b_side`, `set_b_side`,
+    // `get_b_epoch_start`, `set_b_epoch_start`, `get_loss_weight_sum`,
+    // `set_loss_weight_sum`, `get_social_remainder`, `set_social_remainder`,
+    // `get_social_dust`, `set_social_dust`).
+    //
+    // No writer exists on this branch — Wave 11a-ii lands the helpers
+    // (`plan_bankruptcy_residual_chunk_to_side`,
+    // `book_bankruptcy_residual_chunk_to_side`, etc.) that actually drive
+    // these fields. The accessors are forward-looking infrastructure so
+    // 11a-ii can wire writers against a stable surface without touching
+    // bytes.
+    // ========================================================================
+
+    #[allow(dead_code)]
+    fn get_b_side(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.b_long_num,
+            Side::Short => self.b_short_num,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_b_side(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.b_long_num = v,
+            Side::Short => self.b_short_num = v,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_b_epoch_start(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.b_epoch_start_long_num,
+            Side::Short => self.b_epoch_start_short_num,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_b_epoch_start(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.b_epoch_start_long_num = v,
+            Side::Short => self.b_epoch_start_short_num = v,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_loss_weight_sum(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.loss_weight_sum_long,
+            Side::Short => self.loss_weight_sum_short,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_loss_weight_sum(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.loss_weight_sum_long = v,
+            Side::Short => self.loss_weight_sum_short = v,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_social_remainder(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.social_loss_remainder_long_num,
+            Side::Short => self.social_loss_remainder_short_num,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_social_remainder(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.social_loss_remainder_long_num = v,
+            Side::Short => self.social_loss_remainder_short_num = v,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn get_social_dust(&self, s: Side) -> u128 {
+        match s {
+            Side::Long => self.social_loss_dust_long_num,
+            Side::Short => self.social_loss_dust_short_num,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_social_dust(&mut self, s: Side, v: u128) {
+        match s {
+            Side::Long => self.social_loss_dust_long_num = v,
+            Side::Short => self.social_loss_dust_short_num = v,
+        }
+    }
+
+    /// Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (PARTIALLY REVOKED, schema-only).
+    /// Defense-in-depth shape check on the B-tracking subsystem fields.
+    /// Returns `Err(CorruptState)` if any of the invariants below break:
+    ///
+    /// * `loss_weight_sum_<side> <= SOCIAL_LOSS_DEN` (spec §1.2)
+    /// * `social_loss_remainder_<side>_num < SOCIAL_LOSS_DEN`
+    /// * `social_loss_dust_<side>_num < SOCIAL_LOSS_DEN`
+    /// * `explicit_unallocated_loss_saturated <= 1`
+    ///
+    /// Path A2: on this branch all fields stay at zero so this helper
+    /// trivially returns `Ok`. Wave 11a-ii will start writing the fields
+    /// from the social-loss / bankruptcy-residual paths; this invariant
+    /// then becomes a meaningful gate.
+    #[allow(dead_code)]
+    fn validate_b_tracking_shape(&self) -> Result<()> {
+        if self.loss_weight_sum_long > SOCIAL_LOSS_DEN
+            || self.loss_weight_sum_short > SOCIAL_LOSS_DEN
+        {
+            return Err(RiskError::CorruptState);
+        }
+        if self.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
+            || self.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
+        {
+            return Err(RiskError::CorruptState);
+        }
+        if self.social_loss_dust_long_num >= SOCIAL_LOSS_DEN
+            || self.social_loss_dust_short_num >= SOCIAL_LOSS_DEN
+        {
+            return Err(RiskError::CorruptState);
+        }
+        if self.explicit_unallocated_loss_saturated > 1 {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -4454,6 +4707,11 @@ impl RiskEngine {
         {
             return Err(RiskError::CorruptState);
         }
+        // Wave 11a / KL-FORK-ENGINE-B-TRACKING-1 (PARTIALLY REVOKED): defense-in-depth
+        // shape check on the B-tracking subsystem. Trivially holds while no writer
+        // exists on this branch (all fields are 0); when Wave 11a-ii lands the
+        // writers this gate catches loss_weight_sum / remainder / dust violations.
+        self.validate_b_tracking_shape()?;
         if self.materialized_account_count > self.params.max_accounts {
             return Err(RiskError::CorruptState);
         }
