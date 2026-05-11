@@ -176,6 +176,13 @@ pub const SOCIAL_LOSS_DEN: u128 = 1_000_000_000_000_000_000_000;
 /// fast-path of `plan_bankruptcy_residual_chunk_to_side` requires.
 pub const PUBLIC_B_CHUNK_ATOMS: u128 = MAX_VAULT_TVL;
 
+/// Wave 11a-ii: ceiling on the per-account B-settlement loss recorded in
+/// `plan_account_b_chunk_to_target`. Bounds the worst-case single-chunk
+/// loss a public caller can be made to absorb when settling an account
+/// against the current B-target. `PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS
+/// = MAX_VAULT_TVL` matches toly engine (src/percolator.rs:158).
+pub const PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS: u128 = MAX_VAULT_TVL;
+
 /// MAX_ABS_FUNDING_E9_PER_SLOT = 10_000 (spec §1.4, parts-per-billion).
 ///
 /// Engine-wide ceiling on the wrapper-supplied funding rate. Deliberately
@@ -303,6 +310,36 @@ pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 256;
 pub struct InstructionContext {
     pub pending_reset_long: bool,
     pub pending_reset_short: bool,
+    /// Wave 11a-ii / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (state machine).
+    /// Instruction-local bankruptcy h-max candidate. Set before commit when
+    /// the instruction discovers a live post-principal loss tail. Read by
+    /// `real_stress_gate_active` (toly engine src/percolator.rs:3949-3954).
+    pub bankruptcy_hmax_candidate_active: bool,
+    /// Wave 11a-ii / KL-FORK-ENGINE-B-TRACKING-1 (state machine).
+    /// True once this instruction has used ordinary positive-PnL lanes. If
+    /// a later bankruptcy candidate appears, `trigger_bankruptcy_hmax_lock`
+    /// must fail rather than commit stale h-min / release / conversion
+    /// decisions. Set by `mark_positive_pnl_usability` (toly engine
+    /// src/percolator.rs:471-473).
+    pub positive_pnl_usability_mutated: bool,
+    /// Wave 11a-ii / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (state machine).
+    /// True once this instruction starts or restarts the stress/h-max
+    /// envelope. Same-instruction Phase 2 inspections must not reduce the
+    /// new envelope. Set by `trigger_bankruptcy_hmax_lock` (toly engine
+    /// src/percolator.rs:3974).
+    pub stress_envelope_restarted: bool,
+    /// Wave 11a-ii / KL-FORK-ENGINE-STRESS-ENVELOPE-1 (state machine).
+    /// Phase 2-local conservative guard. Blocks positive-PnL usability
+    /// before replaying a cursor window that may discover a latent
+    /// bankruptcy, but is not itself a real stress/h-max event. Read by
+    /// `stress_gate_active` (toly engine src/percolator.rs:3956-3960).
+    pub speculative_hmax_guard_active: bool,
+    /// Wave 11a-ii / KL-FORK-ENGINE-B-TRACKING-1 (state machine).
+    /// Account-local B settlement made only partial progress in this
+    /// instruction. Positive-PnL usability stays h-max / no-positive-credit
+    /// until the account reaches its B target in a later bounded touch.
+    /// Read by `stress_gate_active`.
+    pub partial_b_settlement_active: bool,
     /// Shared admission pair for this instruction
     pub admit_h_min_shared: u64,
     pub admit_h_max_shared: u64,
@@ -328,6 +365,11 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: 0,
             admit_h_max_shared: 0,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -341,6 +383,11 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: None,
@@ -359,6 +406,11 @@ impl InstructionContext {
         Self {
             pending_reset_long: false,
             pending_reset_short: false,
+            bankruptcy_hmax_candidate_active: false,
+            positive_pnl_usability_mutated: false,
+            stress_envelope_restarted: false,
+            speculative_hmax_guard_active: false,
+            partial_b_settlement_active: false,
             admit_h_min_shared: admit_h_min,
             admit_h_max_shared: admit_h_max,
             admit_h_max_consumption_threshold_bps_opt_shared: threshold_opt.map(|t| {
@@ -369,6 +421,17 @@ impl InstructionContext {
             touched_count: 0,
             h_max_sticky_bitmap: [0; BITMAP_WORDS],
         }
+    }
+
+    /// Wave 11a-ii: mark that the current instruction has consumed
+    /// positive-PnL lanes. Once set, `trigger_bankruptcy_hmax_lock` refuses
+    /// to commit a same-instruction bankruptcy candidate unless a real
+    /// stress/h-max event is already active — preventing stale h-min /
+    /// release / conversion decisions from being committed alongside a
+    /// later-discovered bankruptcy tail (toly engine
+    /// src/percolator.rs:471-473).
+    pub fn mark_positive_pnl_usability(&mut self) {
+        self.positive_pnl_usability_mutated = true;
     }
 
     /// Check if account is in sticky set. O(1) bitmap test.
@@ -1054,6 +1117,28 @@ pub struct CrankOutcome {
 // ============================================================================
 // Small Helpers
 // ============================================================================
+
+/// Wave 11a-ii / KL-FORK-ENGINE-B-TRACKING-1 (state machine).
+///
+/// Return value for `plan_bankruptcy_residual_chunk_to_side`. Records what
+/// a single B-residual booking chunk would do without applying it. The
+/// fields are:
+/// - `booked`: residual atoms this chunk is willing to absorb in [0, residual_remaining].
+/// - `delta_b`: increment to the side's B target (numerator over `SOCIAL_LOSS_DEN`).
+/// - `rem_new`: post-write social-loss remainder for this side
+///   (numerator, strictly < `SOCIAL_LOSS_DEN`).
+/// - `records_explicit`: `true` iff the booking is recorded as explicit
+///   unallocated loss instead of advancing B (happens when the side's
+///   `loss_weight_sum` is zero — no holders to absorb).
+///
+/// Mirrors toly engine `BResidualChunkPlan` (src/percolator.rs:1026-1032).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BResidualChunkPlan {
+    pub booked: u128,
+    pub delta_b: u128,
+    pub rem_new: u128,
+    pub records_explicit: bool,
+}
 
 /// Determine which side a signed position is on. Positive = long, negative = short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3656,24 +3741,38 @@ impl RiskEngine {
         loss - pay
     }
 
-    /// record_uninsured_protocol_loss (spec §4.17): bookkeeping no-op.
+    /// Wave 11a-ii: durable audit-only protocol-loss writer (spec §2.3 /
+    /// §4.3). Accumulates into `explicit_unallocated_protocol_loss`; on
+    /// overflow the bucket pins at `u128::MAX` and the
+    /// `explicit_unallocated_loss_saturated` flag fires.
     ///
-    /// After insurance is drained, any remaining uninsured loss is already
-    /// implicitly represented by the junior haircut mechanism: the forgiven
-    /// negative PnL leaves the matched positive PnL (matured_pos_tot) as an
-    /// unchanged claim against Residual = V - C_tot - I. When
-    /// matured_pos_tot > Residual, payouts scale by h = Residual/matured.
+    /// MUST NOT mutate V / C / I / PNL or create new liabilities — the
+    /// post-resolve junior-haircut mechanism already handles the
+    /// realized-shortfall consequence (forgiven negative PnL leaves
+    /// matured_pos_tot as an unchanged claim against Residual = V - C_tot
+    /// - I; payouts scale by h = Residual/matured when matured >
+    /// Residual). Intuition: Alice +100, Bob -100, V = 50, insurance = 0.
+    /// Forgiving Bob leaves matured = 100, residual = 50 → h = 0.5, Alice
+    /// gets 50. If we also drained V by 50, residual would drop to 0 →
+    /// Alice gets 0.
     ///
-    /// MUST NOT drain V here — doing so would shrink Residual below its
-    /// natural post-forgiveness value and double-penalize junior holders
-    /// (first via h < 1, again via V reduction).
-    ///
-    /// Intuition: Alice +100, Bob -100, V = 50, insurance = 0. Forgiving Bob
-    /// leaves matured = 100, residual = 50 → h = 0.5, Alice gets 50. If we
-    /// also drained V by 50, residual would drop to 0 → Alice gets 0.
-    #[allow(unused_variables)]
+    /// Replaces the prior Wave 11a-i stub. Mirrors toly engine
+    /// `record_uninsured_protocol_loss` (toly:4823-4840).
     fn record_uninsured_protocol_loss(&mut self, loss: u128) {
-        // Intentional no-op. See doc comment.
+        if loss == 0 {
+            return;
+        }
+        match self
+            .explicit_unallocated_protocol_loss
+            .get()
+            .checked_add(loss)
+        {
+            Some(v) => self.explicit_unallocated_protocol_loss = U128::new(v),
+            None => {
+                self.explicit_unallocated_protocol_loss = U128::new(u128::MAX);
+                self.explicit_unallocated_loss_saturated = 1;
+            }
+        }
     }
 
     /// absorb_protocol_loss (spec §4.17): use_insurance_buffer then
@@ -5533,13 +5632,16 @@ impl RiskEngine {
     /// stale and any downstream mutation (trade, withdraw, close, convert)
     /// would operate on inconsistent state.
     ///
-    /// ADAPTED port (KL-FORK-ENGINE-B-TRACKING-1): toly's 5th predicate
-    /// (`b_snap`/`b_epoch_snap` mismatch via `b_target_for_account`) is
-    /// SKIPPED here — fork has no B-tracking subsystem. The 4 retained
-    /// predicates (epoch / A / K / F) catch K/F/A_basis/epoch staleness in
-    /// every path; the residual narrow case (B drift only, with epoch/A/K/F
-    /// in sync) is documented in KL-FORK-ENGINE-B-TRACKING-1 as a bounded
-    /// gap that closes when the B-tracking subsystem ports.
+    /// Wave 11a-ii: 5-predicate form — restores the B-snap / b_epoch_snap
+    /// drift predicates now that the B-tracking subsystem is wired
+    /// (Wave 11a-i schema + Wave 11a-ii helpers). The 4 epoch/A/K/F
+    /// predicates catch the same staleness the prior form did; the two
+    /// new predicates (b_snap mismatch and b_epoch_snap divergence) close
+    /// the residual narrow case (B drift only, with epoch/A/K/F in sync)
+    /// that was a documented gap under KL-FORK-ENGINE-B-TRACKING-1.
+    ///
+    /// Mirrors toly engine `account_has_unsettled_live_effects`
+    /// (toly:4868-4883).
     ///
     /// Cross-ref: ENGINE_BODY_DIFF.md §execute_trade_not_atomic Hunk 2;
     /// AUDIT_WORK_PRESERVATION.md row 3.
@@ -5552,9 +5654,12 @@ impl RiskEngine {
         if account.adl_epoch_snap != self.get_epoch_side(side) {
             return Ok(true);
         }
+        let b_target = self.b_target_for_account(idx, side)?;
         Ok(account.adl_a_basis != self.get_a_side(side)
             || account.adl_k_snap != self.get_k_side(side)
-            || account.f_snap != self.get_f_side(side))
+            || account.f_snap != self.get_f_side(side)
+            || account.b_snap != b_target
+            || account.b_epoch_snap != account.adl_epoch_snap)
     }
 
     }
@@ -5742,6 +5847,824 @@ impl RiskEngine {
             .checked_add(self.active_close_residual_recorded)
             .ok_or(RiskError::CorruptState)?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Wave 11a-ii: B-index social-loss helpers
+    // KL-FORK-ENGINE-B-TRACKING-1 (state machine portion REVOKED).
+    // ========================================================================
+
+    /// Add `atoms` to the side's `explicit_unallocated_loss_<side>` bucket.
+    /// On overflow, the bucket is pinned at `u128::MAX` and the
+    /// `explicit_unallocated_loss_saturated` flag is set — both signals are
+    /// durable audit-only state and never feed into V/C/I/PNL arithmetic
+    /// (spec §2.3 / §4.3).
+    ///
+    /// Mirrors toly engine `add_explicit_unallocated_loss_side`
+    /// (toly:2929-2944).
+    fn add_explicit_unallocated_loss_side(&mut self, s: Side, atoms: u128) {
+        if atoms == 0 {
+            return;
+        }
+        let bucket = match s {
+            Side::Long => &mut self.explicit_unallocated_loss_long,
+            Side::Short => &mut self.explicit_unallocated_loss_short,
+        };
+        match bucket.get().checked_add(atoms) {
+            Some(v) => *bucket = U128::new(v),
+            None => {
+                *bucket = U128::new(u128::MAX);
+                self.explicit_unallocated_loss_saturated = 1;
+            }
+        }
+    }
+
+    /// Transfer a sub-denominator remainder `rem_to_transfer` into the
+    /// side's `social_loss_dust_<side>` accumulator, then split into whole
+    /// atoms (flushed to `explicit_unallocated_loss_<side>`) and a leftover
+    /// dust < `SOCIAL_LOSS_DEN`.
+    ///
+    /// Invariant: `rem_to_transfer < SOCIAL_LOSS_DEN` (caller's
+    /// responsibility — we double-check defensively).
+    ///
+    /// Mirrors toly engine `transfer_scaled_dust_side` (toly:3089-3105).
+    fn transfer_scaled_dust_side(&mut self, s: Side, rem_to_transfer: u128) -> Result<()> {
+        if rem_to_transfer == 0 {
+            return Ok(());
+        }
+        if rem_to_transfer >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let total = self
+            .get_social_dust(s)
+            .checked_add(rem_to_transfer)
+            .ok_or(RiskError::Overflow)?;
+        let atoms = total / SOCIAL_LOSS_DEN;
+        let dust = total % SOCIAL_LOSS_DEN;
+        self.set_social_dust(s, dust);
+        self.add_explicit_unallocated_loss_side(s, atoms);
+        Ok(())
+    }
+
+    /// Quarantine the side's `social_loss_remainder_<side>` before a
+    /// `loss_weight_sum_<side>` change. The remainder is the post-write
+    /// numerator carried into the next chunk; if the denominator (= weight
+    /// sum) is about to change, the carried numerator is meaningless and
+    /// must be flushed via `transfer_scaled_dust_side`.
+    ///
+    /// Mirrors toly engine `quarantine_social_remainder_before_weight_change`
+    /// (toly:3107-3115).
+    #[allow(dead_code)]
+    fn quarantine_social_remainder_before_weight_change(&mut self, s: Side) -> Result<()> {
+        let rem = self.get_social_remainder(s);
+        if rem == 0 {
+            return Ok(());
+        }
+        self.transfer_scaled_dust_side(s, rem)?;
+        self.set_social_remainder(s, 0);
+        Ok(())
+    }
+
+    /// Compute the B target an account on `side` should be at right now.
+    ///
+    /// Two cases:
+    /// - same epoch as the side: the live `b_<side>_num` target applies
+    ///   (with a Resolved-mode special: a ResetPending side at sentinel
+    ///   epoch reads the start-of-epoch snapshot instead, because the
+    ///   live counter is being torn down).
+    /// - one epoch behind the side AND side is ResetPending: the
+    ///   start-of-epoch snapshot is the right target (account got snapped
+    ///   pre-reset, side rolled).
+    ///
+    /// Any other configuration is corrupt state.
+    ///
+    /// Mirrors toly engine `b_target_for_account` (toly:3426-3449).
+    fn b_target_for_account(&self, idx: usize, side: Side) -> Result<u128> {
+        let account = &self.accounts[idx];
+        if account.b_epoch_snap != account.adl_epoch_snap {
+            return Err(RiskError::CorruptState);
+        }
+        let epoch_side = self.get_epoch_side(side);
+        if account.adl_epoch_snap == epoch_side {
+            if self.market_mode == MarketMode::Resolved
+                && self.get_side_mode(side) == SideMode::ResetPending
+                && epoch_side == u64::MAX
+            {
+                Ok(self.get_b_epoch_start(side))
+            } else {
+                Ok(self.get_b_side(side))
+            }
+        } else {
+            if self.get_side_mode(side) != SideMode::ResetPending
+                || account.adl_epoch_snap.checked_add(1) != Some(epoch_side)
+            {
+                return Err(RiskError::CorruptState);
+            }
+            Ok(self.get_b_epoch_start(side))
+        }
+    }
+
+    /// Helper: compute `(loss, rem)` where
+    /// `loss = floor((weight * delta_b + b_rem) / SOCIAL_LOSS_DEN)` and
+    /// `rem = (weight * delta_b + b_rem) mod SOCIAL_LOSS_DEN`.
+    ///
+    /// Uses U256 wide math because `weight <= SOCIAL_LOSS_DEN ≈ 1e21` and
+    /// `delta_b <= u128::MAX ≈ 3.4e38`, so the product overruns u128.
+    ///
+    /// Mirrors toly engine `compute_b_loss_and_rem` (toly:3451-3467).
+    fn compute_b_loss_and_rem(weight: u128, b_rem: u128, delta_b: u128) -> Result<(u128, u128)> {
+        if weight == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let num = U256::from_u128(weight)
+            .checked_mul(U256::from_u128(delta_b))
+            .and_then(|v| v.checked_add(U256::from_u128(b_rem)))
+            .ok_or(RiskError::Overflow)?;
+        let (loss, rem) = wide_math::div_rem_u256(num, U256::from_u128(SOCIAL_LOSS_DEN));
+        Ok((
+            loss.try_into_u128().ok_or(RiskError::Overflow)?,
+            rem.try_into_u128().ok_or(RiskError::Overflow)?,
+        ))
+    }
+
+    /// Plan how much B-delta to apply to account `idx` while respecting
+    /// `target` (per side `b_target_for_account`) and a per-chunk loss
+    /// limit. Pure / read-only.
+    ///
+    /// Returns `(delta_b, loss, rem_new, reached_target)`:
+    /// - `delta_b`: increment to the account's `b_snap` (0 if nothing to do).
+    /// - `loss`: atoms charged to the account this chunk (≤ capped limit).
+    /// - `rem_new`: post-write account `b_rem` (strictly < `SOCIAL_LOSS_DEN`).
+    /// - `reached_target`: `true` iff `b_snap + delta_b == target`.
+    ///
+    /// Returns `RecoveryRequired` if no representable bounded chunk exists
+    /// at this account state (caller's responsibility to escalate).
+    ///
+    /// Mirrors toly engine `plan_account_b_chunk_to_target` (toly:3469-3516).
+    #[allow(dead_code)]
+    fn plan_account_b_chunk_to_target(
+        &self,
+        idx: usize,
+        target: u128,
+        loss_limit: u128,
+    ) -> Result<(u128, u128, u128, bool)> {
+        let account = &self.accounts[idx];
+        if account.loss_weight == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if account.b_snap > target || account.b_rem >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let remaining_delta = target - account.b_snap;
+        if remaining_delta == 0 {
+            return Ok((0, 0, account.b_rem, true));
+        }
+
+        let capped_loss_limit = core::cmp::min(loss_limit, PUBLIC_ACCOUNT_B_SETTLEMENT_LOSS_ATOMS);
+        let max_num = capped_loss_limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(RiskError::Overflow)?;
+        if account.b_rem > max_num {
+            return Err(RiskError::RecoveryRequired);
+        }
+        let max_delta_by_loss = max_num
+            .checked_sub(account.b_rem)
+            .ok_or(RiskError::Overflow)?
+            .checked_div(account.loss_weight)
+            .ok_or(RiskError::CorruptState)?;
+        let delta_b = core::cmp::min(remaining_delta, max_delta_by_loss);
+        if delta_b == 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+
+        let (loss, rem) =
+            Self::compute_b_loss_and_rem(account.loss_weight, account.b_rem, delta_b)?;
+        if loss > capped_loss_limit {
+            return Err(RiskError::Overflow);
+        }
+        let new_snap = account
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(RiskError::Overflow)?;
+        Ok((delta_b, loss, rem, new_snap == target))
+    }
+
+    test_visible! {
+    /// Apply one bounded B-settlement chunk to account `idx`. Returns
+    /// `(loss_atoms, reached_target)`.
+    ///
+    /// Mirrors toly engine `settle_account_b_chunk_to_target`
+    /// (toly:3519-3539).
+    fn settle_account_b_chunk_to_target(
+        &mut self,
+        idx: usize,
+        _side: Side,
+        target: u128,
+        loss_limit: u128,
+    ) -> Result<(u128, bool)> {
+        let (delta_b, loss, rem, current) =
+            self.plan_account_b_chunk_to_target(idx, target, loss_limit)?;
+        if delta_b == 0 {
+            return Ok((loss, current));
+        }
+        let new_snap = self.accounts[idx]
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(RiskError::Overflow)?;
+        self.accounts[idx].b_snap = new_snap;
+        self.accounts[idx].b_rem = rem;
+        Ok((loss, current))
+    }
+    }
+
+    // ========================================================================
+    // Wave 11a-ii: Stress / bankruptcy gate helpers
+    // ========================================================================
+
+    /// True iff the consumption-threshold gate has fired this instruction
+    /// (spec §4.7 / v12.20.6, toly engine src/percolator.rs:3838-3843).
+    fn threshold_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+        match ctx.admit_h_max_consumption_threshold_bps_opt_shared {
+            Some(threshold) => self.stress_consumed_bps_e9_since_envelope >= threshold,
+            None => false,
+        }
+    }
+
+    /// True iff a live post-principal loss tail is structurally locking the
+    /// positive-PnL lanes (spec §5.3 / v12.20.6, toly engine
+    /// src/percolator.rs:3845-3849).
+    fn loss_stale_positive_pnl_lock_active(&self) -> bool {
+        self.market_mode == MarketMode::Live
+            && self.last_market_slot < self.current_slot
+            && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
+    }
+
+    /// True iff this market is under a live reconciliation lock — used by
+    /// callers that must refuse normal positive-PnL settlement. Combines
+    /// active bankrupt-close, hmax lock, stress consumption, neg-pnl
+    /// account count, and the stale positive-PnL lock (toly engine
+    /// src/percolator.rs:3851-3857).
+    #[allow(dead_code)]
+    fn live_reconciliation_lock_active(&self) -> bool {
+        self.active_close_present != 0
+            || self.bankruptcy_hmax_lock_active
+            || self.stress_consumed_bps_e9_since_envelope != 0
+            || self.neg_pnl_account_count != 0
+            || self.loss_stale_positive_pnl_lock_active()
+    }
+
+    /// "Real" stress gate: any non-speculative reason a bankruptcy h-max
+    /// lock or stress envelope is active. Used by
+    /// `trigger_bankruptcy_hmax_lock` to admit a same-instruction
+    /// bankruptcy candidate alongside positive-PnL usability only when an
+    /// existing real stress condition is already gating the lanes. Toly
+    /// engine src/percolator.rs:3949-3954.
+    fn real_stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+        self.threshold_stress_gate_active(ctx)
+            || self.bankruptcy_hmax_lock_active
+            || ctx.bankruptcy_hmax_candidate_active
+            || self.loss_stale_positive_pnl_lock_active()
+    }
+
+    /// Full stress gate including the Phase-2 speculative guard and the
+    /// account-local partial-B-settlement guard. Toly engine
+    /// src/percolator.rs:3956-3960.
+    #[allow(dead_code)]
+    fn stress_gate_active(&self, ctx: &InstructionContext) -> bool {
+        self.real_stress_gate_active(ctx)
+            || ctx.speculative_hmax_guard_active
+            || ctx.partial_b_settlement_active
+    }
+
+    /// Refuse a position-change at the current cursor if the stale
+    /// positive-PnL lock is active. Toly engine
+    /// src/percolator.rs:3962-3967.
+    #[allow(dead_code)]
+    fn ensure_loss_current_for_position_change(&self) -> Result<()> {
+        if self.loss_stale_positive_pnl_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
+        Ok(())
+    }
+
+    /// Trigger the bankruptcy h-max lock. Refuses to commit if the
+    /// instruction has already used ordinary positive-PnL lanes without a
+    /// pre-existing real stress event (would leak stale h-min / release /
+    /// conversion decisions alongside the new bankruptcy).
+    ///
+    /// Side effects:
+    /// - Sets `ctx.bankruptcy_hmax_candidate_active` and
+    ///   `ctx.stress_envelope_restarted`.
+    /// - Sets `bankruptcy_hmax_lock_active = true`.
+    /// - (Re)starts the stress envelope: `remaining_indices = max_accounts`,
+    ///   `start_slot = current_slot`, `start_generation = sweep_generation`.
+    ///
+    /// Mirrors toly engine `trigger_bankruptcy_hmax_lock` (toly:3969-3980).
+    fn trigger_bankruptcy_hmax_lock(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+        if ctx.positive_pnl_usability_mutated && !self.real_stress_gate_active(ctx) {
+            return Err(RiskError::Undercollateralized);
+        }
+        ctx.bankruptcy_hmax_candidate_active = true;
+        ctx.stress_envelope_restarted = true;
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+        Ok(())
+    }
+
+    /// Context-less variant of `trigger_bankruptcy_hmax_lock` for
+    /// internal call sites that don't carry an `InstructionContext` (e.g.,
+    /// settlement paths that are already past positive-PnL admission and
+    /// only need to refresh the envelope). No positive-PnL guard fires
+    /// because no instruction context exists to mutate.
+    ///
+    /// Mirrors toly engine `trigger_bankruptcy_hmax_lock_without_context`
+    /// (toly:7072-7077).
+    #[allow(dead_code)]
+    fn trigger_bankruptcy_hmax_lock_without_context(&mut self) {
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+    }
+
+    // ========================================================================
+    // Wave 11a-ii: B-residual booking helpers
+    // ========================================================================
+
+    /// Plan one bounded B-residual booking chunk for `side`. Pure /
+    /// read-only.
+    ///
+    /// Special cases:
+    /// - `residual_remaining == 0`: empty plan.
+    /// - `loss_weight_sum_<side> == 0`: no holders to absorb → the whole
+    ///   `residual_remaining` is recorded as explicit unallocated loss
+    ///   (caller does the write).
+    /// - Fast path: compute one bounded chunk capped at `PUBLIC_B_CHUNK_ATOMS`
+    ///   that fits u128 (`PUBLIC_B_CHUNK_ATOMS * SOCIAL_LOSS_DEN ≈ 1e37`).
+    /// - Boundary fallback: when B is near `u128::MAX` headroom is
+    ///   exhausted, fall back to U256 search for a smaller representable
+    ///   chunk. Under Kani we shortcut to `RecoveryRequired` to keep
+    ///   proofs tractable.
+    ///
+    /// Mirrors toly engine `plan_bankruptcy_residual_chunk_to_side`
+    /// (toly:3541-3641).
+    fn plan_bankruptcy_residual_chunk_to_side(
+        &self,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<BResidualChunkPlan> {
+        if residual_remaining == 0 {
+            return Ok(BResidualChunkPlan {
+                booked: 0,
+                delta_b: 0,
+                rem_new: 0,
+                records_explicit: false,
+            });
+        }
+        let w = self.get_loss_weight_sum(side);
+        if w == 0 {
+            return Ok(BResidualChunkPlan {
+                booked: residual_remaining,
+                delta_b: 0,
+                rem_new: 0,
+                records_explicit: true,
+            });
+        }
+        if w > SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let rem_old = self.get_social_remainder(side);
+        if rem_old >= SOCIAL_LOSS_DEN {
+            return Err(RiskError::CorruptState);
+        }
+        let b = self.get_b_side(side);
+        let headroom = u128::MAX.checked_sub(b).ok_or(RiskError::CorruptState)?;
+        let chunk_cap = core::cmp::max(1, core::cmp::min(chunk_budget, PUBLIC_B_CHUNK_ATOMS));
+        let fast_chunk = core::cmp::min(residual_remaining, chunk_cap);
+        let fast_scaled = fast_chunk
+            .checked_mul(SOCIAL_LOSS_DEN)
+            .and_then(|v| v.checked_add(rem_old))
+            .ok_or(RiskError::Overflow)?;
+        let fast_delta_b = fast_scaled / w;
+        let fast_rem_new = fast_scaled % w;
+        if fast_delta_b != 0 && fast_delta_b <= headroom && fast_rem_new < SOCIAL_LOSS_DEN {
+            return Ok(BResidualChunkPlan {
+                booked: fast_chunk,
+                delta_b: fast_delta_b,
+                rem_new: fast_rem_new,
+                records_explicit: false,
+            });
+        }
+
+        // Boundary fallback. Production deployments take the fast path
+        // because `PUBLIC_B_CHUNK_ATOMS * SOCIAL_LOSS_DEN` fits in u128.
+        #[cfg(kani)]
+        {
+            return Err(RiskError::RecoveryRequired);
+        }
+        #[cfg(not(kani))]
+        {
+            let max_scaled = U256::from_u128(headroom)
+                .checked_mul(U256::from_u128(w))
+                .ok_or(RiskError::Overflow)?;
+            let rem_old_u = U256::from_u128(rem_old);
+            if max_scaled < rem_old_u {
+                return Err(RiskError::RecoveryRequired);
+            }
+            let available_scaled = max_scaled
+                .checked_sub(rem_old_u)
+                .ok_or(RiskError::Overflow)?;
+            let max_chunk_by_b = available_scaled
+                .checked_div(U256::from_u128(SOCIAL_LOSS_DEN))
+                .ok_or(RiskError::Overflow)?
+                .try_into_u128()
+                .unwrap_or(u128::MAX);
+            let engine_chunk = core::cmp::min(residual_remaining, max_chunk_by_b);
+            if engine_chunk == 0 {
+                return Err(RiskError::RecoveryRequired);
+            }
+            let chunk = if engine_chunk > chunk_cap {
+                chunk_cap
+            } else {
+                engine_chunk
+            };
+            let scaled = U256::from_u128(chunk)
+                .checked_mul(U256::from_u128(SOCIAL_LOSS_DEN))
+                .and_then(|v| v.checked_add(U256::from_u128(rem_old)))
+                .ok_or(RiskError::Overflow)?;
+            let (delta_b_u, rem_new_u) = wide_math::div_rem_u256(scaled, U256::from_u128(w));
+            let delta_b = delta_b_u.try_into_u128().ok_or(RiskError::Overflow)?;
+            let rem_new = rem_new_u.try_into_u128().ok_or(RiskError::Overflow)?;
+            if delta_b == 0 || rem_new >= SOCIAL_LOSS_DEN {
+                return Err(RiskError::RecoveryRequired);
+            }
+            Ok(BResidualChunkPlan {
+                booked: chunk,
+                delta_b,
+                rem_new,
+                records_explicit: false,
+            })
+        }
+    }
+
+    test_visible! {
+    /// Book one bounded B-residual chunk. Triggers the bankruptcy h-max
+    /// lock first (raising stress envelope guards). Either writes a B
+    /// advance + remainder, OR records explicit unallocated loss when
+    /// `loss_weight_sum == 0`. Mirrors toly engine
+    /// `book_bankruptcy_residual_chunk_to_side` (toly:3644-3674).
+    fn book_bankruptcy_residual_chunk_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<u128> {
+        if residual_remaining == 0 {
+            return Ok(0);
+        }
+        self.trigger_bankruptcy_hmax_lock(ctx)?;
+        let plan =
+            self.plan_bankruptcy_residual_chunk_to_side(side, residual_remaining, chunk_budget)?;
+        if plan.booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        if plan.records_explicit {
+            self.add_explicit_unallocated_loss_side(side, plan.booked);
+            return Ok(plan.booked);
+        }
+        if plan.booked == 0 || plan.delta_b == 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+        let new_b = self
+            .get_b_side(side)
+            .checked_add(plan.delta_b)
+            .ok_or(RiskError::Overflow)?;
+        self.set_b_side(side, new_b);
+        self.set_social_remainder(side, plan.rem_new);
+        Ok(plan.booked)
+    }
+    }
+
+    test_visible! {
+    /// Book one chunk via `book_bankruptcy_residual_chunk_to_side`; on
+    /// `RecoveryRequired` / `Overflow`, fall back to recording the entire
+    /// `residual_remaining` as explicit unallocated loss for the side.
+    /// Returns `(booked, recorded)`.
+    ///
+    /// This is the safety-net dispatcher: the spec permits explicit
+    /// non-claim loss recording when no bounded representable B-advance
+    /// exists, preventing one honest cranker from being made to depend on
+    /// an impossible write.
+    ///
+    /// Mirrors toly engine `book_or_record_bankruptcy_residual_to_side`
+    /// (toly:3678-3716).
+    fn book_or_record_bankruptcy_residual_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        side: Side,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<(u128, u128)> {
+        if residual_remaining == 0 {
+            return Ok((0, 0));
+        }
+
+        let booked = match self.book_bankruptcy_residual_chunk_to_side(
+            ctx,
+            side,
+            residual_remaining,
+            chunk_budget,
+        ) {
+            Ok(booked) => booked,
+            // If a B write cannot make bounded representable progress,
+            // the spec permits explicit non-claim loss recording. This
+            // avoids making one honest cranker depend on an unbounded or
+            // impossible B-index write.
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        let recorded = residual_remaining
+            .checked_sub(booked)
+            .ok_or(RiskError::CorruptState)?;
+        if recorded > 0 {
+            self.add_explicit_unallocated_loss_side(side, recorded);
+        }
+        Ok((booked, recorded))
+    }
+    }
+
+    // ========================================================================
+    // Wave 11a-ii: Bankrupt-close state machine (state-machine setters)
+    // KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (state machine portion REVOKED).
+    // ========================================================================
+
+    /// Open an active bankrupt-close residual. Refuses re-entry if a close
+    /// is already in flight. Validates `account_idx`, `close_price`, and
+    /// `close_slot` against engine bounds; records `(account_idx, opp_side,
+    /// close_price, close_slot, q_close_q, residual_remaining)` and
+    /// arms the bankruptcy h-max lock + stress envelope.
+    ///
+    /// Mirrors toly engine `start_active_bankrupt_close_residual`
+    /// (toly:2982-3022).
+    fn start_active_bankrupt_close_residual(
+        &mut self,
+        account_idx: u16,
+        opp_side: Side,
+        close_price: u64,
+        close_slot: u64,
+        q_close_q: u128,
+        residual_remaining: u128,
+    ) -> Result<()> {
+        if residual_remaining == 0 {
+            return Ok(());
+        }
+        if self.active_close_present != 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+        if account_idx != u16::MAX && account_idx as u64 >= self.params.max_accounts {
+            return Err(RiskError::CorruptState);
+        }
+        if close_price == 0 || close_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::CorruptState);
+        }
+        if close_slot > self.current_slot {
+            return Err(RiskError::CorruptState);
+        }
+        self.active_close_present = 1;
+        self.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+        self.active_close_account_idx = account_idx;
+        self.active_close_opp_side = Self::encode_active_close_side(opp_side);
+        self.active_close_close_price = close_price;
+        self.active_close_close_slot = close_slot;
+        self.active_close_q_close_q = q_close_q;
+        self.active_close_residual_remaining = residual_remaining;
+        self.active_close_residual_booked = 0;
+        self.active_close_residual_recorded = 0;
+        self.active_close_b_chunks_booked = 0;
+        self.bankruptcy_hmax_lock_active = true;
+        self.stress_envelope_remaining_indices = self.params.max_accounts;
+        self.stress_envelope_start_slot = self.current_slot;
+        self.stress_envelope_start_generation = self.sweep_generation;
+        Ok(())
+    }
+
+    test_visible! {
+    /// Book one chunk of residual via `book_bankruptcy_residual_chunk_to_side`;
+    /// if the chunk completes the residual, returns
+    /// `(booked, 0)`. Otherwise opens an active bankrupt-close with the
+    /// unbooked remainder via `start_active_bankrupt_close_residual`.
+    ///
+    /// Special case: if `booked == 0` and a remainder exists, the residual
+    /// is recorded as explicit unallocated loss directly and no active
+    /// close is opened (this is the all-or-nothing fallback for cases
+    /// where bounded progress is impossible from this state).
+    ///
+    /// Mirrors toly engine `book_or_start_active_close_residual_to_side`
+    /// (toly:3720-3770).
+    fn book_or_start_active_close_residual_to_side(
+        &mut self,
+        ctx: &mut InstructionContext,
+        account_idx: u16,
+        side: Side,
+        close_price: u64,
+        close_slot: u64,
+        q_close_q: u128,
+        residual_remaining: u128,
+        chunk_budget: u128,
+    ) -> Result<(u128, u128)> {
+        if residual_remaining == 0 {
+            return Ok((0, 0));
+        }
+
+        let booked = match self.book_bankruptcy_residual_chunk_to_side(
+            ctx,
+            side,
+            residual_remaining,
+            chunk_budget,
+        ) {
+            Ok(booked) => booked,
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => {
+                self.trigger_bankruptcy_hmax_lock(ctx)?;
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if booked > residual_remaining {
+            return Err(RiskError::CorruptState);
+        }
+        let remainder = residual_remaining
+            .checked_sub(booked)
+            .ok_or(RiskError::CorruptState)?;
+        if remainder == 0 {
+            return Ok((booked, 0));
+        }
+        if booked == 0 {
+            self.add_explicit_unallocated_loss_side(side, remainder);
+            return Ok((0, remainder));
+        }
+        self.start_active_bankrupt_close_residual(
+            account_idx,
+            side,
+            close_price,
+            close_slot,
+            q_close_q,
+            remainder,
+        )?;
+        Ok((booked, 0))
+    }
+    }
+
+    /// Inner continuation step for an active bankrupt-close residual.
+    /// Books one chunk against the opp-side, advances counters, and clears
+    /// the state machine when residual hits zero.
+    ///
+    /// Refuses when no active close is present, when slot monotonicity is
+    /// violated, when `ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS` is exhausted, or
+    /// when the book made zero progress (signalling recovery).
+    ///
+    /// Mirrors toly engine `continue_active_bankrupt_close_core`
+    /// (toly:3773-3809).
+    fn continue_active_bankrupt_close_core(
+        &mut self,
+        now_slot: u64,
+        ctx: &mut InstructionContext,
+    ) -> Result<bool> {
+        self.validate_active_bankrupt_close_shape()?;
+        if self.active_close_present == 0 {
+            return Err(RiskError::Unauthorized);
+        }
+        if now_slot < self.current_slot || now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if self.active_close_b_chunks_booked >= ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS {
+            return Err(RiskError::RecoveryRequired);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        let before = self.active_close_residual_remaining;
+        let booked =
+            self.book_bankruptcy_residual_chunk_to_side(ctx, side, before, PUBLIC_B_CHUNK_ATOMS)?;
+        if booked == 0 || booked > before {
+            return Err(RiskError::RecoveryRequired);
+        }
+        self.active_close_residual_remaining =
+            before.checked_sub(booked).ok_or(RiskError::CorruptState)?;
+        self.active_close_residual_booked = self
+            .active_close_residual_booked
+            .checked_add(booked)
+            .ok_or(RiskError::Overflow)?;
+        self.active_close_b_chunks_booked = self
+            .active_close_b_chunks_booked
+            .checked_add(1)
+            .ok_or(RiskError::Overflow)?;
+        if self.active_close_residual_remaining == 0 {
+            self.clear_active_bankrupt_close_state();
+        }
+        Ok(true)
+    }
+
+    test_visible! {
+    /// Public-callable continuation of an active bankrupt-close. Builds
+    /// its own `InstructionContext` from current params and runs the
+    /// core; wrapped with pre/post `assert_public_postconditions` so the
+    /// public boundary cannot land in a half-state. Returns `true` iff a
+    /// chunk was booked.
+    ///
+    /// Mirrors toly engine `continue_active_bankrupt_close_not_atomic`
+    /// (toly:3812-3818).
+    fn continue_active_bankrupt_close_not_atomic(&mut self, now_slot: u64) -> Result<bool> {
+        self.assert_public_postconditions()?;
+        let mut ctx = InstructionContext::new_with_admission(self.params.h_max, self.params.h_max);
+        let progressed = self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
+        self.assert_public_postconditions()?;
+        Ok(progressed)
+    }
+    }
+
+    /// Complete an active bankrupt-close by recording all remaining
+    /// residual as explicit unallocated loss for the opp side, then
+    /// clearing the state machine. Refuses if the close is not in a
+    /// "recovery required" terminal — i.e., either no active close or
+    /// active close that could still make bounded progress.
+    ///
+    /// Mirrors toly engine `complete_active_bankrupt_close_for_recovery`
+    /// (toly:3821-3836).
+    #[allow(dead_code)]
+    fn complete_active_bankrupt_close_for_recovery(&mut self) -> Result<()> {
+        self.validate_active_bankrupt_close_shape()?;
+        if !self.active_bankrupt_close_recovery_required()? {
+            return Err(RiskError::Unauthorized);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        let residual = self.active_close_residual_remaining;
+        self.add_explicit_unallocated_loss_side(side, residual);
+        self.active_close_residual_recorded = self
+            .active_close_residual_recorded
+            .checked_add(residual)
+            .ok_or(RiskError::Overflow)?;
+        self.active_close_residual_remaining = 0;
+        self.clear_active_bankrupt_close_state();
+        Ok(())
+    }
+
+    /// True iff the active bankrupt-close is in a terminal state requiring
+    /// `complete_active_bankrupt_close_for_recovery`. Two recovery
+    /// triggers:
+    /// - `active_close_b_chunks_booked >= ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS`
+    ///   (budget exhausted)
+    /// - `plan_bankruptcy_residual_chunk_to_side` cannot make non-zero
+    ///   progress or returns `RecoveryRequired` / `Overflow`.
+    ///
+    /// Read-only. Mirrors toly engine
+    /// `active_bankrupt_close_recovery_required` (toly:3024-3046).
+    fn active_bankrupt_close_recovery_required(&self) -> Result<bool> {
+        self.validate_active_bankrupt_close_shape()?;
+        if self.active_close_present == 0 {
+            return Ok(false);
+        }
+        if self.active_close_residual_remaining == 0 {
+            return Ok(false);
+        }
+        if self.active_close_b_chunks_booked >= ACTIVE_CLOSE_MAX_RESIDUAL_B_CHUNKS {
+            return Ok(true);
+        }
+        let side = Self::decode_active_close_side(self.active_close_opp_side)?;
+        match self.plan_bankruptcy_residual_chunk_to_side(
+            side,
+            self.active_close_residual_remaining,
+            PUBLIC_B_CHUNK_ATOMS,
+        ) {
+            Ok(plan) if plan.booked > 0 => Ok(false),
+            Ok(_) => Ok(true),
+            Err(RiskError::RecoveryRequired) | Err(RiskError::Overflow) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// True iff `idx` has an outstanding B-snapshot drift against the
+    /// side's current B target. The "B has drifted but A/K/F/epoch are
+    /// settled" case (toly engine src/percolator.rs:4885-4892).
+    fn account_has_unsettled_b(&self, idx: usize) -> Result<bool> {
+        let account = &self.accounts[idx];
+        if account.position_basis_q == 0 {
+            return Ok(false);
+        }
+        let side = side_of_i128(account.position_basis_q).ok_or(RiskError::CorruptState)?;
+        Ok(account.b_snap != self.b_target_for_account(idx, side)?)
     }
 
     // ========================================================================
