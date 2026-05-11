@@ -1148,3 +1148,55 @@ fn proof_phantom_dust_certified_gt_potential_rejects() {
         Err(RiskError::CorruptState)
     );
 }
+
+// ============================================================================
+// Wave 11a — B-tracking subsystem (KL-FORK-ENGINE-B-TRACKING-1 PARTIALLY REVOKED)
+// ============================================================================
+
+/// At market genesis the B-tracking fields are all zero and the
+/// `validate_b_tracking_shape` invariant holds. On this branch no writer
+/// exists yet (Wave 11a-i is schema-only); the harness pins the
+/// init-time predicate so future Wave 11a-ii writers can't silently
+/// regress the genesis state.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_b_tracking_shape_holds_at_genesis() {
+    let engine = RiskEngine::new(zero_fee_params());
+
+    assert_eq!(engine.b_long_num, 0);
+    assert_eq!(engine.b_short_num, 0);
+    assert_eq!(engine.loss_weight_sum_long, 0);
+    assert_eq!(engine.loss_weight_sum_short, 0);
+    assert_eq!(engine.social_loss_remainder_long_num, 0);
+    assert_eq!(engine.social_loss_remainder_short_num, 0);
+    assert_eq!(engine.social_loss_dust_long_num, 0);
+    assert_eq!(engine.social_loss_dust_short_num, 0);
+    assert_eq!(engine.explicit_unallocated_loss_saturated, 0);
+
+    assert!(engine.assert_public_postconditions().is_ok());
+}
+
+/// `assert_public_postconditions` rejects out-of-range
+/// `loss_weight_sum_<side>` (must be `<= SOCIAL_LOSS_DEN`). Forward-
+/// looking: once Wave 11a-ii's `book_bankruptcy_residual_chunk_to_side`
+/// starts incrementing loss_weight_sum, this catches off-by-one and
+/// overflow-style regressions.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_b_tracking_loss_weight_sum_overflow_rejects() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+
+    let pick_long: bool = kani::any();
+    if pick_long {
+        engine.loss_weight_sum_long = SOCIAL_LOSS_DEN + 1;
+    } else {
+        engine.loss_weight_sum_short = SOCIAL_LOSS_DEN + 1;
+    }
+
+    assert_eq!(
+        engine.assert_public_postconditions(),
+        Err(RiskError::CorruptState)
+    );
+}
