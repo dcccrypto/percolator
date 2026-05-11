@@ -1114,6 +1114,110 @@ pub struct CrankOutcome {
     pub num_liquidations: u32,
 }
 
+/// Wave 11a-ii-B: declared reason a permissionless terminal recovery was
+/// requested. Reasons are validated by
+/// `validate_permissionless_p_last_recovery_reason` before the recovery
+/// path mutates state. Mirrors toly engine `RecoveryReason`
+/// (src/percolator.rs:270-302).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryReason {
+    /// Exposed market has an authenticated raw target away from `P_last`,
+    /// but the configured bounded step floors to zero.
+    BelowProgressFloor = 0,
+    /// A B index has no remaining representable headroom.
+    BIndexHeadroomExhausted = 1,
+    /// Explicit non-claim audit state saturated; public progress must not
+    /// depend on widening that audit bucket in-place.
+    ExplicitLossOrDustAuditOverflow = 2,
+    /// The next deterministic bounded price segment is within the
+    /// configured movement cap, but the resulting K/F state cannot
+    /// satisfy persistent representability or future-headroom checks.
+    BlockedSegmentHeadroomOrRepresentability = 3,
+    /// A specific account has unsettled B-index loss and the production
+    /// account-local settlement planner cannot produce a positive
+    /// bounded chunk.
+    AccountBSettlementCannotProgress = 4,
+    /// Durable active bankrupt-close continuation could not make another
+    /// bounded B-booking step; permissionless terminal recovery records
+    /// the remaining residual as non-claim audit loss before P-last
+    /// resolve.
+    ActiveBankruptCloseCannotProgress = 5,
+    /// Wrapper-authenticated oracle/raw-target unavailability. The bare
+    /// engine cannot validate this policy proof, so this reason fails
+    /// closed here.
+    OracleOrTargetUnavailableByAuthenticatedPolicy = 6,
+    /// Engine counters or side epochs reached their representable
+    /// terminal value. Permissionless P-last terminal recovery is
+    /// allowed so ordinary bounded progress can advance.
+    CounterOrEpochOverflowDeclaredRecovery = 7,
+}
+
+/// Wave 11a-ii-B: dispatcher outcome of `permissionless_progress_not_atomic`.
+/// The wrapper matches on `Cranked(_)` to gate post-crank fee logic;
+/// other variants short-circuit the fee path. Mirrors toly engine
+/// `PermissionlessProgressOutcome` (src/percolator.rs:950-958).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionlessProgressOutcome {
+    Cranked(CrankOutcome),
+    ResolvedClose(ResolvedCloseResult),
+    ActiveCloseContinued,
+    AccountBProgress(u16),
+    Recovered(RecoveryReason),
+    AccountBRecovered(u16),
+}
+
+/// Wave 11a-ii-B: stable keeper-crank request object. Used by the
+/// `keeper_crank_with_request_not_atomic` adapter so new crank policy
+/// fields can be added without churning positional call sites.
+/// Mirrors toly engine `KeeperCrankRequest` (src/percolator.rs:1036-1050).
+#[derive(Clone, Copy, Debug)]
+pub struct KeeperCrankRequest<'a> {
+    pub now_slot: u64,
+    pub oracle_price: u64,
+    pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
+    pub max_revalidations: u16,
+    /// Toly-only: cap on candidates inspected pre-touch. Unused by the
+    /// fork's existing keeper_crank_not_atomic — the adapter silently
+    /// ignores values that exceed `MAX_TOUCHED_PER_INSTRUCTION` (the
+    /// fork's keeper applies the same cap inside).
+    pub max_candidate_inspections: u16,
+    pub funding_rate_e9: i128,
+    pub admit_h_min: u64,
+    pub admit_h_max: u64,
+    pub admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    /// Toly-only: Phase-2 cursor-window touch budget. Maps to the fork's
+    /// existing `rr_window_size` positional arg.
+    pub rr_touch_limit: u64,
+    /// Toly-only: Phase-2 cursor-window scan budget. Currently ignored
+    /// by the adapter — the fork's keeper applies its own scan bound.
+    /// Kept on the request shape for forward compatibility with toly.
+    pub rr_scan_limit: u64,
+}
+
+/// Wave 11a-ii-B: one-call public progress request for permissionless
+/// markets. `oracle_price` is the effective engine price used for
+/// ordinary bounded keeper catchup; `authenticated_raw_target_price` is
+/// recovery evidence only — permissionless terminal recovery still
+/// settles at engine `P_last`. Mirrors toly engine
+/// `PermissionlessProgressRequest` (src/percolator.rs:1057-1073).
+pub struct PermissionlessProgressRequest<'a> {
+    pub now_slot: u64,
+    pub oracle_price: u64,
+    pub authenticated_raw_target_price: u64,
+    pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
+    pub account_hint: Option<u16>,
+    pub max_revalidations: u16,
+    pub max_candidate_inspections: u16,
+    pub funding_rate_e9: i128,
+    pub admit_h_min: u64,
+    pub admit_h_max: u64,
+    pub admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+    pub rr_touch_limit: u64,
+    pub rr_scan_limit: u64,
+    pub resolved_scan_limit: u64,
+    pub resolved_fee_rate_per_slot: u128,
+}
+
 // ============================================================================
 // Small Helpers
 // ============================================================================
@@ -8611,6 +8715,214 @@ impl RiskEngine {
         // using `force_close_resolved_not_atomic`.
         let capital = self.close_resolved_terminal_not_atomic(idx)?;
         Ok(ResolvedCloseResult::Closed(capital))
+    }
+
+    /// Wave 11a-ii-B: bounded resolved-close cursor progress with optional
+    /// per-slot fee. Missing-slot scans advance the durable cursor; the
+    /// first materialized account in the bounded window is reconciled /
+    /// closed through `force_close_resolved_with_fee_not_atomic`.
+    ///
+    /// Returns `ResolvedCloseResult::ProgressOnly` if the scan window
+    /// contained no materialized accounts (cursor advanced; no close
+    /// performed). Otherwise returns the inner result of the first
+    /// reconcile/close.
+    ///
+    /// Mirrors toly engine `force_close_resolved_cursor_with_fee_not_atomic`
+    /// (toly:9731-9774). Used by `permissionless_progress_not_atomic`'s
+    /// Resolved branch.
+    pub fn force_close_resolved_cursor_with_fee_not_atomic(
+        &mut self,
+        scan_limit: u64,
+        fee_rate_per_slot: u128,
+    ) -> Result<ResolvedCloseResult> {
+        if self.market_mode != MarketMode::Resolved {
+            return Err(RiskError::Unauthorized);
+        }
+        if scan_limit == 0 {
+            return Err(RiskError::Overflow);
+        }
+        self.assert_public_postconditions()?;
+
+        let wrap_bound = self.params.max_accounts;
+        if wrap_bound == 0 || self.rr_cursor_position >= wrap_bound {
+            return Err(RiskError::CorruptState);
+        }
+        let scan_cap = core::cmp::min(scan_limit, wrap_bound);
+        let mut cursor = self.rr_cursor_position;
+
+        for _ in 0..scan_cap {
+            if cursor >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let advanced = cursor.checked_add(1).ok_or(RiskError::Overflow)?;
+            if advanced > wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let next = if advanced == wrap_bound { 0 } else { advanced };
+            if self.is_used(cursor as usize) {
+                let result = self.force_close_resolved_with_fee_not_atomic(
+                    cursor as u16,
+                    fee_rate_per_slot,
+                )?;
+                self.rr_cursor_position = next;
+                self.assert_public_postconditions()?;
+                return Ok(result);
+            }
+            cursor = next;
+        }
+
+        self.rr_cursor_position = cursor;
+        self.assert_public_postconditions()?;
+        Ok(ResolvedCloseResult::ProgressOnly)
+    }
+
+    /// Wave 11a-ii-B: zero-fee variant convenience for parity with toly.
+    /// Delegates to `force_close_resolved_cursor_with_fee_not_atomic`
+    /// with `fee_rate_per_slot = 0`. Mirrors toly engine
+    /// `force_close_resolved_cursor_not_atomic` (toly:9719-9724).
+    #[allow(dead_code)]
+    pub fn force_close_resolved_cursor_not_atomic(
+        &mut self,
+        scan_limit: u64,
+    ) -> Result<ResolvedCloseResult> {
+        self.force_close_resolved_cursor_with_fee_not_atomic(scan_limit, 0)
+    }
+
+    /// Wave 11a-ii-B: request-object adapter around the existing fork
+    /// `keeper_crank_not_atomic`. Unpacks the request and dispatches to
+    /// the positional-arg keeper. New toly-side fields not consumed by
+    /// the fork's keeper (`max_candidate_inspections`, `rr_scan_limit`)
+    /// are forwarded structurally but ignored — the fork's keeper
+    /// applies its own internal caps and scan-bound logic.
+    ///
+    /// Mirrors toly engine `keeper_crank_with_request_not_atomic`
+    /// (toly:8848-9069) at the request-shape level. Used by
+    /// `permissionless_progress_not_atomic`'s Live default branch.
+    pub fn keeper_crank_with_request_not_atomic(
+        &mut self,
+        req: KeeperCrankRequest<'_>,
+    ) -> Result<CrankOutcome> {
+        let KeeperCrankRequest {
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections: _,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit: _,
+        } = req;
+        self.keeper_crank_not_atomic(
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+        )
+    }
+
+    /// Wave 11a-ii-B: engine-owned permissionless progress dispatcher.
+    ///
+    /// The minimal public API a wrapper can call after supplying
+    /// authenticated time / oracle / raw-target inputs. The engine
+    /// picks the safe progress branch:
+    ///   - Resolved: forward bounded cursor work via
+    ///     `force_close_resolved_cursor_with_fee_not_atomic`.
+    ///   - Live: dispatch to `keeper_crank_with_request_not_atomic`.
+    ///
+    /// Recovery branches (active-close continuation / account-B
+    /// dispatch / global recovery loop) are stubbed in this wave: they
+    /// would require porting `try_permissionless_account_b_dispatch`,
+    /// `try_permissionless_global_recovery`, and
+    /// `permissionless_recovery_resolve_*_not_atomic` from toly, plus
+    /// the price-step / accrual-segment helpers those depend on. On
+    /// this branch:
+    ///   - If `active_close_present != 0` (would only happen if some
+    ///     other path opened a bankrupt-close — Wave 11a-ii-A landed
+    ///     the setters but production callers don't reach them yet),
+    ///     we return `RecoveryRequired` so the caller surfaces a
+    ///     stable error instead of attempting unreachable recovery.
+    ///   - `account_hint` is ignored.
+    ///   - The 5-reason global recovery loop is skipped.
+    ///
+    /// The wrapper only branches on `Cranked(_)` for post-crank fee
+    /// logic; other outcomes route differently. Stubbing the recovery
+    /// paths is therefore safe — the only observable difference is
+    /// that recovery-eligible markets surface a stable
+    /// `RecoveryRequired` error instead of being terminally recovered
+    /// in-engine.
+    ///
+    /// Mirrors toly engine `permissionless_progress_not_atomic`
+    /// (toly:8754-8845) at the dispatcher level; recovery branches
+    /// (toly:8787-8829) are intentionally deferred. The KeeperCrank
+    /// wrapper port (Wave 7c) can land without the recovery semantics
+    /// because the wrapper's only behavioral dependence on the outcome
+    /// is the `Cranked(_)` match.
+    pub fn permissionless_progress_not_atomic(
+        &mut self,
+        req: PermissionlessProgressRequest<'_>,
+    ) -> Result<PermissionlessProgressOutcome> {
+        let PermissionlessProgressRequest {
+            now_slot,
+            oracle_price,
+            authenticated_raw_target_price: _,
+            ordered_candidates,
+            account_hint: _,
+            max_revalidations,
+            max_candidate_inspections,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit,
+            resolved_scan_limit,
+            resolved_fee_rate_per_slot,
+        } = req;
+
+        if self.market_mode == MarketMode::Resolved {
+            let result = self.force_close_resolved_cursor_with_fee_not_atomic(
+                resolved_scan_limit,
+                resolved_fee_rate_per_slot,
+            )?;
+            return Ok(PermissionlessProgressOutcome::ResolvedClose(result));
+        }
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+
+        // Bankrupt-close continuation + recovery branches deferred to a
+        // future wave alongside `permissionless_recovery_resolve_p_last_not_atomic`
+        // + the 5-reason global recovery validator. On this branch the
+        // Wave 11a-ii-A bankrupt-close setters are landed but have no
+        // production caller, so `active_close_present` is always 0 in
+        // practice. Defense-in-depth: surface a stable error if any path
+        // ever does open a bankrupt-close before recovery lands.
+        if self.active_close_present != 0 {
+            return Err(RiskError::RecoveryRequired);
+        }
+
+        let outcome = self.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit,
+        })?;
+        Ok(PermissionlessProgressOutcome::Cranked(outcome))
     }
 
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,

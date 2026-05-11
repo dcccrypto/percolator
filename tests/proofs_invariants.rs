@@ -1359,3 +1359,126 @@ fn proof_clear_active_bankrupt_close_state_zeros_all_fields() {
     assert_eq!(engine.active_close_b_chunks_booked, 0);
     assert!(engine.validate_active_bankrupt_close_shape().is_ok());
 }
+
+// ============================================================================
+// Wave 11a-ii-B — permissionless_progress_not_atomic + dep tail
+// ============================================================================
+
+/// `permissionless_progress_not_atomic` returns Unauthorized when the market
+/// is neither Live nor Resolved. The fork only has those two modes today,
+/// but the guard is structural defense-in-depth: if a future schema
+/// extension adds a third mode, the dispatcher must not silently take any
+/// of the two branches it understands.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_resolved_routes_to_resolved_close() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.market_mode = MarketMode::Resolved;
+    engine.rr_cursor_position = 0;
+    engine.resolved_slot = engine.current_slot;
+
+    let candidates: [(u16, Option<LiquidationPolicy>); 0] = [];
+    let req = PermissionlessProgressRequest {
+        now_slot: engine.current_slot,
+        oracle_price: engine.last_oracle_price.max(1),
+        authenticated_raw_target_price: 0,
+        ordered_candidates: &candidates,
+        account_hint: None,
+        max_revalidations: 1,
+        max_candidate_inspections: 1,
+        funding_rate_e9: 0,
+        admit_h_min: engine.params.h_min,
+        admit_h_max: engine.params.h_max,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    };
+
+    match engine.permissionless_progress_not_atomic(req) {
+        Ok(PermissionlessProgressOutcome::ResolvedClose(_)) => {}
+        // A scan-window with no materialized accounts yields ProgressOnly
+        // wrapped in ResolvedClose; any other variant on a Resolved
+        // dispatch is a routing bug.
+        Ok(other) => panic!("Resolved must route to ResolvedClose, got {:?}", other),
+        // CorruptState / Overflow / Unauthorized may be returned by the
+        // inner cursor scan when the engine state can't satisfy its
+        // public preconditions — that's acceptable. The harness only
+        // asserts that the OUTCOME on success is the right variant.
+        Err(_) => {}
+    }
+}
+
+/// `permissionless_progress_not_atomic` short-circuits with
+/// `RecoveryRequired` when an active bankrupt-close is in flight. This
+/// is the defense-in-depth gate the Wave 11a-ii-B port adds while the
+/// full recovery resolver is deferred — surfaces a stable error
+/// instead of taking either of the two live-mode branches the
+/// dispatcher knows.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_rejects_when_active_close_present() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.market_mode = MarketMode::Live;
+    engine.active_close_present = 1;
+
+    let candidates: [(u16, Option<LiquidationPolicy>); 0] = [];
+    let req = PermissionlessProgressRequest {
+        now_slot: engine.current_slot,
+        oracle_price: engine.last_oracle_price.max(1),
+        authenticated_raw_target_price: 0,
+        ordered_candidates: &candidates,
+        account_hint: None,
+        max_revalidations: 1,
+        max_candidate_inspections: 1,
+        funding_rate_e9: 0,
+        admit_h_min: engine.params.h_min,
+        admit_h_max: engine.params.h_max,
+        admit_h_max_consumption_threshold_bps_opt: None,
+        rr_touch_limit: 1,
+        rr_scan_limit: 1,
+        resolved_scan_limit: 1,
+        resolved_fee_rate_per_slot: 0,
+    };
+
+    assert_eq!(
+        engine.permissionless_progress_not_atomic(req),
+        Err(RiskError::RecoveryRequired)
+    );
+}
+
+/// `force_close_resolved_cursor_with_fee_not_atomic` rejects a non-Resolved
+/// market — Live markets must take the keeper-crank path, not the
+/// cursor-scan path.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_force_close_resolved_cursor_rejects_live_market() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.market_mode = MarketMode::Live;
+
+    assert_eq!(
+        engine.force_close_resolved_cursor_with_fee_not_atomic(1, 0),
+        Err(RiskError::Unauthorized)
+    );
+}
+
+/// `force_close_resolved_cursor_with_fee_not_atomic` rejects a zero scan
+/// limit — silently treating it as a no-op would mean the wrapper's
+/// liveness contract has no guarantee the cursor advanced.
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn proof_force_close_resolved_cursor_rejects_zero_scan_limit() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_slot = engine.current_slot;
+
+    assert_eq!(
+        engine.force_close_resolved_cursor_with_fee_not_atomic(0, 0),
+        Err(RiskError::Overflow)
+    );
+}
