@@ -225,9 +225,8 @@ pub use i128::{I128, U128};
 // ============================================================================
 pub mod wide_math;
 use wide_math::{
-    ceil_div_positive_checked, fee_debt_u128_checked, mul_div_ceil_u128, mul_div_floor_u128,
-    mul_div_floor_u256_with_rem, wide_mul_div_ceil_u128_or_over_i128max, wide_mul_div_floor_u128,
-    OverI128Magnitude, I256, U256,
+    ceil_div_positive_checked, fee_debt_u128_checked, mul_div_ceil_u128, mul_div_ceil_u256,
+    mul_div_floor_u128, mul_div_floor_u256_with_rem, wide_mul_div_floor_u128, I256, U256,
 };
 
 // ============================================================================
@@ -1349,6 +1348,43 @@ impl RiskEngine {
         a.checked_mul(b)?
             .checked_add(d.checked_sub(1)?)?
             .checked_div(d)
+    }
+
+    /// Kani-visible ceil(a * b / d) with U256 overflow fallback.
+    ///
+    /// Returns `Err(RiskError::Overflow)` when `d == 0` or when the wide
+    /// product overflows u128 even after the U256 path. Under `cfg(kani)`
+    /// the U256 fallback is skipped (returns `Err` on u128 overflow) to
+    /// keep harness time bounded.
+    ///
+    /// Mirrors toly engine `ceil_mul_div_u128_or_wide` (toly:3398-3424).
+    /// Used by `enqueue_adl` Step 7 (`d_phantom` certified-share split).
+    fn ceil_mul_div_u128_or_wide(a: u128, b: u128, d: u128) -> Result<u128> {
+        if d == 0 {
+            return Err(RiskError::Overflow);
+        }
+        if a == 0 || b == 0 {
+            return Ok(0);
+        }
+        if let Some(prod) = a.checked_mul(b) {
+            let q = prod / d;
+            let r = prod % d;
+            return if r == 0 {
+                Ok(q)
+            } else {
+                q.checked_add(1).ok_or(RiskError::Overflow)
+            };
+        }
+        #[cfg(kani)]
+        {
+            Err(RiskError::Overflow)
+        }
+        #[cfg(not(kani))]
+        {
+            mul_div_ceil_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d))
+                .try_into_u128()
+                .ok_or(RiskError::Overflow)
+        }
     }
 
     #[cfg(not(kani))]
@@ -3200,32 +3236,6 @@ impl RiskEngine {
         Ok(())
     }
 
-    /// Spec §4.6.1: increment phantom dust potential by amount_q (checked).
-    ///
-    /// Wave 6a: renamed from `inc_phantom_dust_bound_by`. Fork-only helper —
-    /// toly does the equivalent inline in liquidation step 10 (toly:5099).
-    /// Kept as a helper because the fork's liquidation step 10 formula
-    /// (`global_a_dust_bound = N_opp + ceil((OI + N_opp) / A_old)`) differs
-    /// from toly's `aggregate_gap + account_floor_bound` formula and reuses
-    /// this helper at one call site (try_close_position_at_oracle).
-    fn inc_phantom_dust_potential_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
-        match s {
-            Side::Long => {
-                self.phantom_dust_potential_long_q = self
-                    .phantom_dust_potential_long_q
-                    .checked_add(amount_q)
-                    .ok_or(RiskError::Overflow)?;
-            }
-            Side::Short => {
-                self.phantom_dust_potential_short_q = self
-                    .phantom_dust_potential_short_q
-                    .checked_add(amount_q)
-                    .ok_or(RiskError::Overflow)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Wave 6a / KL-PHANTOM-DUST-SCHEMA-1 (REVOKED): toly get/set helpers
     /// for the 4-field schema. Mirrors toly:3353-3378.
     ///
@@ -4032,6 +4042,10 @@ impl RiskEngine {
             }
             self.set_oi_eff(opp, oi_post);
             if oi_post == 0 {
+                // Wave 11e: mirror toly:5012-5013 — fully drained side zeroes
+                // both phantom-dust accumulators (certified + potential).
+                self.set_phantom_dust_certified(opp, 0);
+                self.set_phantom_dust_potential(opp, 0);
                 // Unconditionally reset the drained opp side (fixes phantom dust revert).
                 set_pending_reset(ctx, opp);
                 // Also reset liq_side only if it too has zero OI
@@ -4047,65 +4061,52 @@ impl RiskEngine {
             return Err(RiskError::CorruptState);
         }
 
-        let a_old = self.get_a_side(opp);
         let oi_post = oi.checked_sub(q_close_q).ok_or(RiskError::Overflow)?;
+        let old_certified = core::cmp::min(self.get_phantom_dust_certified(opp), oi);
+        let old_potential = core::cmp::min(self.get_phantom_dust_potential(opp), oi);
+        let uncertified_potential = old_potential.saturating_sub(old_certified);
 
-        // Step 7 (§5.6 step 7): handle D_rem > 0 (quote deficit after insurance)
-        // Fused delta_K_abs = ceil(D_rem * A_old * POS_SCALE / OI)
-        // Per §1.5 Rule 14: if the quotient doesn't fit in i128, route to
-        // record_uninsured_protocol_loss instead of panicking.
+        // Step 7 (Wave 11e: v12.20.6 B-residual routing).
+        //
+        // K is no longer adjusted for bankruptcy residual; instead the deficit
+        // splits into a phantom-share (proportional to certified phantom dust)
+        // and a social-share. The phantom-share routes to non-claim audit loss
+        // (phantom-dust units cannot absorb claims). The social-share routes
+        // to the bankrupt-close residual state machine when the certified mass
+        // is pinned (uncertified_potential == 0), otherwise to uninsured loss
+        // (the certified mass isn't pinned, so socialization would be unfair).
+        //
+        // Mirrors toly engine `enqueue_adl` Step 7 (toly:5034-5069).
         if d_rem != 0 {
-            let a_ps = a_old.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-            match wide_mul_div_ceil_u128_or_over_i128max(d_rem, a_ps, oi) {
-                Ok(delta_k_abs) => {
-                    let delta_k = -(delta_k_abs as i128);
-                    let k_opp = self.get_k_side(opp);
-                    // Two-step headroom check (spec §5.6 clause 7):
-                    //   (a) the K add itself must fit i128 (checked_add)
-                    //   (b) the resulting K must leave room for any valid
-                    //       future mark-to-market step at MAX_ORACLE_PRICE
-                    //       on the same side: for side s with multiplier A_s,
-                    //           |new_k| + A_s * MAX_ORACLE_PRICE <= i128::MAX
-                    //       Without (b), a K value technically inside i128
-                    //       can still make the next accrue_market_to overflow
-                    //       when the oracle moves, bricking live accrual.
-                    //   A_s cannot grow post-ADL (new A <= old A), so using
-                    //   a_old for the headroom budget is conservative.
-                    let headroom_ok = match k_opp.checked_add(delta_k) {
-                        Some(new_k) => {
-                            let max_mark = U256::from_u128(a_old)
-                                .checked_mul(U256::from_u128(MAX_ORACLE_PRICE as u128));
-                            match max_mark {
-                                Some(mark) => {
-                                    // i128::MAX - |new_k| must be >= mark.
-                                    let abs_new_k = U256::from_u128(new_k.unsigned_abs());
-                                    let i128_max_u = U256::from_u128(i128::MAX as u128);
-                                    match i128_max_u.checked_sub(abs_new_k) {
-                                        Some(budget) => {
-                                            if mark <= budget { Some(new_k) } else { None }
-                                        }
-                                        None => None,
-                                    }
-                                }
-                                None => None,
-                            }
-                        }
-                        None => None,
-                    };
-                    match headroom_ok {
-                        Some(new_k) => {
-                            self.set_k_side(opp, new_k)?;
-                        }
-                        None => {
-                            // K-space overflow OR insufficient future mark headroom:
-                            // route D_rem through record_uninsured (spec §1.7 clause 12).
-                            self.record_uninsured_protocol_loss(d_rem);
-                        }
-                    }
+            let d_social = if old_certified >= oi {
+                self.record_uninsured_protocol_loss(d_rem);
+                0
+            } else {
+                let d_phantom = if old_certified == 0 {
+                    0
+                } else {
+                    Self::ceil_mul_div_u128_or_wide(d_rem, old_certified, oi)?
+                };
+                let d_phantom = core::cmp::min(d_phantom, d_rem);
+                if d_phantom > 0 {
+                    self.record_uninsured_protocol_loss(d_phantom);
                 }
-                Err(OverI128Magnitude) => {
-                    // Quotient overflow: route D_rem through record_uninsured (spec §1.7 clause 12).
-                    self.record_uninsured_protocol_loss(d_rem);
+                d_rem - d_phantom
+            };
+            if d_social != 0 {
+                if uncertified_potential != 0 {
+                    self.record_uninsured_protocol_loss(d_social);
+                } else {
+                    let (_booked, _recorded) = self.book_or_start_active_close_residual_to_side(
+                        ctx,
+                        u16::MAX,
+                        opp,
+                        self.last_oracle_price,
+                        self.current_slot,
+                        q_close_q,
+                        d_social,
+                        PUBLIC_B_CHUNK_ATOMS,
+                    )?;
                 }
             }
         }
@@ -4113,12 +4114,16 @@ impl RiskEngine {
         // Step 8 (§5.6 step 8): if OI_post == 0, both flags are set.
         if oi_post == 0 {
             self.set_oi_eff(opp, 0u128);
+            // Wave 11e: zero phantom-dust on full drain (toly:5074-5075).
+            self.set_phantom_dust_certified(opp, 0);
+            self.set_phantom_dust_potential(opp, 0);
             set_pending_reset(ctx, opp);
             set_pending_reset(ctx, liq_side);
             return Ok(());
         }
 
         // Steps 8-9: compute A_candidate and A_trunc_rem using U256 intermediates
+        let a_old = self.get_a_side(opp);
         let a_old_u256 = U256::from_u128(a_old);
         let oi_post_u256 = U256::from_u128(oi_post);
         let oi_u256 = U256::from_u128(oi);
@@ -4133,18 +4138,43 @@ impl RiskEngine {
             let a_new = a_candidate_u256.try_into_u128().ok_or(RiskError::Overflow)?;
             self.set_a_side(opp, a_new);
             self.set_oi_eff(opp, oi_post);
-            // Spec §5.6 step 10: increment phantom dust when OI actually decreased
-            if oi_post < oi {
-                let n_opp = self.get_stored_pos_count(opp) as u128;
-                let n_opp_u256 = U256::from_u128(n_opp);
-                // global_a_dust_bound = N_opp + ceil((OI_before + N_opp) / A_old)
-                let oi_plus_n = oi_u256.checked_add(n_opp_u256).unwrap_or(U256::MAX);
-                let ceil_term = ceil_div_positive_checked(oi_plus_n, a_old_u256);
-                let global_a_dust_bound = n_opp_u256.checked_add(ceil_term)
-                    .unwrap_or(U256::MAX);
-                let bound_u128 = global_a_dust_bound.try_into_u128().unwrap_or(u128::MAX);
-                self.inc_phantom_dust_potential_by(opp, bound_u128)?;
-            }
+            // Wave 11e (v12.20.6): maintain phantom-dust certified+potential
+            // via represented_after / aggregate_gap arithmetic (toly:5097-5120).
+            //
+            // represented_source_lower = oi - old_potential  (lower bound on
+            //   represented mass before this step).
+            // represented_after = floor(represented_source_lower * a_new / a_old)
+            //   (mass surviving the A shrink, clamped to oi_post).
+            // aggregate_gap = oi_post - represented_after (worst-case
+            //   uncertified mass remaining).
+            // post_potential = min(oi_post, aggregate_gap + N_opp)  (account-floor
+            //   bound applied so the bound shrinks with stored_pos_count_opp).
+            // post_certified = min(oi_post, old_certified - q_close_q)
+            //   (close pinned mass first, never above oi_post).
+            let represented_source_lower = oi
+                .checked_sub(old_potential)
+                .ok_or(RiskError::CorruptState)?;
+            let represented_after = U256::from_u128(represented_source_lower)
+                .checked_mul(U256::from_u128(a_new))
+                .ok_or(RiskError::Overflow)?
+                .checked_div(U256::from_u128(a_old))
+                .ok_or(RiskError::Overflow)?
+                .try_into_u128()
+                .ok_or(RiskError::Overflow)?;
+            let represented_after = core::cmp::min(oi_post, represented_after);
+            let aggregate_gap = oi_post
+                .checked_sub(represented_after)
+                .ok_or(RiskError::CorruptState)?;
+            let account_floor_bound = self.get_stored_pos_count(opp) as u128;
+            let post_potential = core::cmp::min(
+                oi_post,
+                aggregate_gap
+                    .checked_add(account_floor_bound)
+                    .ok_or(RiskError::Overflow)?,
+            );
+            let post_certified = core::cmp::min(oi_post, old_certified.saturating_sub(q_close_q));
+            self.set_phantom_dust_certified(opp, post_certified);
+            self.set_phantom_dust_potential(opp, post_potential);
             if a_new < MIN_A_SIDE {
                 self.set_side_mode(opp, SideMode::DrainOnly);
             }
@@ -4154,6 +4184,11 @@ impl RiskEngine {
         // Step 11: precision exhaustion terminal drain
         self.set_oi_eff(opp, 0u128);
         self.set_oi_eff(liq_side, 0u128);
+        // Wave 11e: zero phantom-dust on terminal drain (toly:5130-5133).
+        self.set_phantom_dust_certified(opp, 0);
+        self.set_phantom_dust_potential(opp, 0);
+        self.set_phantom_dust_certified(liq_side, 0);
+        self.set_phantom_dust_potential(liq_side, 0);
         set_pending_reset(ctx, opp);
         set_pending_reset(ctx, liq_side);
 
@@ -4936,6 +4971,7 @@ impl RiskEngine {
         Ok(())
     }
 
+    test_visible! {
     fn assert_public_postconditions(&self) -> Result<()> {
         self.assert_public_postconditions_fast()?;
         #[cfg(all(
@@ -4944,6 +4980,7 @@ impl RiskEngine {
         ))]
         self.validate_public_account_postconditions()?;
         Ok(())
+    }
     }
 
     fn assert_public_postconditions_fast(&self) -> Result<()> {
@@ -5668,6 +5705,7 @@ impl RiskEngine {
     /// `positive_pnl_usability_mutated` admission gate); pass `None` from
     /// internal/contextless call sites to use the unguarded
     /// `_without_context` writer.
+    test_visible! {
     fn settle_losses_with_context(
         &mut self,
         idx: usize,
@@ -5704,6 +5742,7 @@ impl RiskEngine {
         }
         Ok(())
     }
+    }
 
     fn settle_losses(&mut self, idx: usize) -> Result<()> {
         self.settle_losses_with_context(idx, None)
@@ -5717,6 +5756,7 @@ impl RiskEngine {
     /// (toly:7123-7149). The lock fires BEFORE `absorb_protocol_loss` so the
     /// envelope sees the pre-loss equity (so subsequent gates inside the same
     /// instruction observe the lock).
+    test_visible! {
     fn resolve_flat_negative_with_context(
         &mut self,
         idx: usize,
@@ -5743,6 +5783,7 @@ impl RiskEngine {
             self.set_pnl(idx, 0i128)?;
         }
         Ok(())
+    }
     }
 
     fn resolve_flat_negative(&mut self, idx: usize) -> Result<()> {
