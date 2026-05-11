@@ -3356,7 +3356,6 @@ impl RiskEngine {
     /// trivially returns `Ok`. Wave 11a-ii will start writing the fields
     /// from the social-loss / bankruptcy-residual paths; this invariant
     /// then becomes a meaningful gate.
-    #[allow(dead_code)]
     fn validate_b_tracking_shape(&self) -> Result<()> {
         if self.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || self.loss_weight_sum_short > SOCIAL_LOSS_DEN
@@ -5950,6 +5949,35 @@ impl RiskEngine {
         self.active_close_residual_booked
             .checked_add(self.active_close_residual_recorded)
             .ok_or(RiskError::CorruptState)?;
+        Ok(())
+    }
+
+    /// Wave 10 / PORT-13: aggregator state-shape validator.
+    ///
+    /// Performs every cheap structural invariant the engine knows how to
+    /// check, in one call. Intended for callers that already hold a
+    /// `&RiskEngine` and want a single defense-in-depth gate before
+    /// trusting the slab (or after a mutating sequence, before yielding
+    /// back to a public surface).
+    ///
+    /// Bundles:
+    /// * `validate_b_tracking_shape` (B-snap / social-loss buckets,
+    ///   Wave 11a-i).
+    /// * `validate_active_bankrupt_close_shape` (bankrupt-close
+    ///   state-machine form, Wave 5b).
+    ///
+    /// This is the structural counterpart to the wrapper-side
+    /// `validate_raw_engine_state_shape` byte-level check that runs
+    /// pre-cast in `zc::engine_ref` / `zc::engine_mut`. Both must hold
+    /// for the engine to be in a sound observable state.
+    ///
+    /// `assert_public_postconditions` is the strict superset (also runs
+    /// conservation / OI / PnL invariants); use this lightweight
+    /// aggregator when the caller can't afford the full post-check
+    /// cost.
+    pub fn validate_engine_state_shape(&self) -> Result<()> {
+        self.validate_b_tracking_shape()?;
+        self.validate_active_bankrupt_close_shape()?;
         Ok(())
     }
 
