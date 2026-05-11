@@ -724,6 +724,27 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t11_54_worked_example_regression() {
+    // Wave 11e (v12.20.6 ADL): the K-adjust post-state (`adl_coeff_long !=
+    // 0i128`) is gone — `enqueue_adl` no longer mutates K for bankruptcy
+    // residual. The deficit instead splits into the certified-phantom-share
+    // (uninsured loss) and the social share (B-residual booking or explicit
+    // non-claim loss when `loss_weight_sum_<opp> == 0`).
+    //
+    // This setup leaves both phantom-dust accumulators at zero and never
+    // initializes loss_weight_sum_<opp>, so the social share (d_rem = 500)
+    // routes entirely through `add_explicit_unallocated_loss_side` via
+    // `book_or_start_active_close_residual_to_side`.
+    //
+    // Pinned invariants (algorithm-agnostic, still valid):
+    //  - A_opp was reduced (Step 10 shrank `adl_mult_long`).
+    //  - OI_opp was reduced by `q_close`.
+    //  - Lazy K-snap sync still works (both engine and account K stay 0).
+    //  - Conservation holds.
+    // Pinned invariants (new under v12.20.6):
+    //  - Bankruptcy h_max lock was armed (Step 2).
+    //  - Exactly d_social = 500 atoms routed to the long-side explicit
+    //    non-claim loss bucket (since loss_weight_sum_long == 0, the entire
+    //    chunk records explicit and no state-machine startup is needed).
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, 100);
 
     let a = add_user_test(&mut engine, 0).unwrap();
@@ -758,9 +779,17 @@ fn t11_54_worked_example_regression() {
     let r2 = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(r2.is_ok());
 
-    assert!(engine.adl_mult_long < ADL_ONE);
-    assert!(engine.oi_eff_long_q == POS_SCALE);
-    assert!(engine.adl_coeff_long != 0i128);
+    assert!(engine.adl_mult_long < ADL_ONE, "A_opp must shrink");
+    assert!(engine.oi_eff_long_q == POS_SCALE, "OI_opp must shrink by q_close");
+    assert!(
+        engine.bankruptcy_hmax_lock_active,
+        "v12.20.6: Step 2 must arm the bankruptcy h_max lock when d > 0"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == d,
+        "v12.20.6: d_social == d must be recorded as explicit non-claim loss \
+         on opp side when loss_weight_sum_<opp> == 0 (no holders to absorb)"
+    );
 
     let _ = {
         let mut _ctx = InstructionContext::new_with_admission(0, 100);
@@ -769,6 +798,160 @@ fn t11_54_worked_example_regression() {
 
     assert!(engine.accounts[a as usize].adl_k_snap == engine.adl_coeff_long);
     assert!(engine.check_conservation());
+}
+
+// ============================================================================
+// Wave 11e: v12.20.6 enqueue_adl B-residual routing harnesses
+//
+// Pins the three observable routes of `D_rem` under the new algorithm:
+//   1. Certified-phantom-dust share routes to `record_uninsured_protocol_loss`
+//      (the `explicit_unallocated_protocol_loss` bucket), because phantom-dust
+//      units cannot absorb claims.
+//   2. Social share routes to `record_uninsured_protocol_loss` when
+//      `uncertified_potential != 0` (gap between certified and potential
+//      means the certified mass isn't pinned, so socialization would be
+//      unfair).
+//   3. Social share routes to `book_or_start_active_close_residual_to_side`
+//      when `uncertified_potential == 0` (certified mass is pinned).
+//      Without B-tracking holders (`loss_weight_sum_<opp> == 0`), this
+//      degenerates to `add_explicit_unallocated_loss_side` (records_explicit
+//      path in `plan_bankruptcy_residual_chunk_to_side`).
+// ============================================================================
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_d_phantom_routes_to_uninsured_protocol_loss() {
+    // Pre-state: opp side has `old_certified == oi`. Step 7 takes the
+    // `old_certified >= oi` shortcut and routes the entire d_rem through
+    // `record_uninsured_protocol_loss` — no B-residual booking attempted,
+    // no K modification.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = POS_SCALE;
+    engine.oi_eff_long_q = 2 * POS_SCALE;
+    engine.oi_eff_short_q = 2 * POS_SCALE;
+    engine.stored_pos_count_long = 1;
+    // Saturate certified phantom dust on the opp (long) side.
+    engine.phantom_dust_certified_long_q = 2 * POS_SCALE;
+    engine.phantom_dust_potential_long_q = 2 * POS_SCALE;
+
+    let protocol_loss_before = engine.explicit_unallocated_protocol_loss.get();
+    let explicit_long_before = engine.explicit_unallocated_loss_long.get();
+    let k_before = engine.adl_coeff_long;
+
+    let d = 700u128;
+    let q_close = 0u128;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    assert!(
+        engine.explicit_unallocated_protocol_loss.get() == protocol_loss_before + d,
+        "fully-certified opp side routes entire d_rem to uninsured loss"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == explicit_long_before,
+        "no explicit non-claim loss recorded on the certified-saturated path"
+    );
+    assert!(
+        engine.adl_coeff_long == k_before,
+        "K must not be modified on the certified-saturated path"
+    );
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_d_social_routes_to_uninsured_when_uncertified_gap_nonzero() {
+    // Pre-state: opp side has 0 < old_certified < oi AND
+    // old_potential > old_certified (so uncertified_potential != 0).
+    // d_phantom proportional to certified routes to uninsured; d_social
+    // (the remainder) ALSO routes to uninsured because the certified mass
+    // isn't pinned (socializing would be unfair).
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = POS_SCALE;
+    engine.oi_eff_long_q = 4 * POS_SCALE;
+    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.stored_pos_count_long = 1;
+    // Half-certified + uncertified gap.
+    engine.phantom_dust_certified_long_q = 2 * POS_SCALE;
+    engine.phantom_dust_potential_long_q = 3 * POS_SCALE;
+
+    let protocol_loss_before = engine.explicit_unallocated_protocol_loss.get();
+    let explicit_long_before = engine.explicit_unallocated_loss_long.get();
+    let active_close_before = engine.active_close_present;
+
+    let d = 400u128;
+    let q_close = 0u128;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    assert!(
+        engine.explicit_unallocated_protocol_loss.get() == protocol_loss_before + d,
+        "uncertified-gap-nonzero path routes the entire d_rem to uninsured \
+         (d_phantom + d_social both increment protocol_loss)"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == explicit_long_before,
+        "no explicit non-claim loss on the uncertified-gap path"
+    );
+    assert!(
+        engine.active_close_present == active_close_before,
+        "no bankrupt-close state machine startup on the uncertified-gap path"
+    );
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_d_social_books_residual_when_uncertified_gap_zero() {
+    // Pre-state: opp side has old_certified == old_potential (and both <
+    // oi). uncertified_potential == 0 → d_social routes through
+    // `book_or_start_active_close_residual_to_side`. With no B-tracking
+    // holders (loss_weight_sum_<opp> == 0), the chunk plan records explicit
+    // and `add_explicit_unallocated_loss_side` writes the full d_social to
+    // the opp side's explicit non-claim bucket. No state-machine startup
+    // since the entire residual is absorbed in one chunk.
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let mut ctx = InstructionContext::new();
+
+    engine.adl_mult_long = POS_SCALE;
+    engine.oi_eff_long_q = 4 * POS_SCALE;
+    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.stored_pos_count_long = 1;
+    // Half-certified, no uncertified gap.
+    engine.phantom_dust_certified_long_q = 2 * POS_SCALE;
+    engine.phantom_dust_potential_long_q = 2 * POS_SCALE;
+
+    let protocol_loss_before = engine.explicit_unallocated_protocol_loss.get();
+    let explicit_long_before = engine.explicit_unallocated_loss_long.get();
+
+    let d = 400u128;
+    let q_close = 0u128;
+
+    let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
+    assert!(result.is_ok());
+
+    // d_phantom = ceil(400 * 2*POS_SCALE / 4*POS_SCALE) = 200.
+    // d_social = 400 - 200 = 200.
+    let expected_d_phantom = 200u128;
+    let expected_d_social = d - expected_d_phantom;
+
+    assert!(
+        engine.explicit_unallocated_protocol_loss.get() == protocol_loss_before + expected_d_phantom,
+        "d_phantom must route to uninsured protocol loss"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == explicit_long_before + expected_d_social,
+        "d_social must route to explicit non-claim loss on opp side \
+         (no holders → records_explicit path)"
+    );
+    assert!(
+        engine.bankruptcy_hmax_lock_active,
+        "Step 2 must arm the bankruptcy h_max lock when d > 0"
+    );
 }
 
 #[kani::proof]

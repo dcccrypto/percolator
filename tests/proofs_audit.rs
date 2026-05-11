@@ -761,6 +761,7 @@ fn proof_trade_no_crank_gate() {
         size,
         DEFAULT_ORACLE,
         0,
+        0,
         100,
         None,
     );

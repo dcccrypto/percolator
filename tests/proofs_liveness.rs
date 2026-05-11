@@ -207,6 +207,10 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
 #[kani::proof]
 #[kani::solver(cadical)]
 fn t11_49_pure_pnl_bankruptcy_path() {
+    // Wave 11e (v12.20.6 ADL): pure-PnL bankruptcy (q_close = 0, D > 0)
+    // socializes the deficit via the B-residual path now, not via K-adjust.
+    // Asserts the new post-state: lock armed + entire D recorded as explicit
+    // non-claim loss on the opposing side (no holders → records_explicit).
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
@@ -217,7 +221,6 @@ fn t11_49_pure_pnl_bankruptcy_path() {
     engine.stored_pos_count_long = 1;
 
     let a_before = engine.adl_mult_long;
-    let k_before = engine.adl_coeff_long;
 
     let d = 1_000u128;
     let q_close = 0u128;
@@ -230,8 +233,13 @@ fn t11_49_pure_pnl_bankruptcy_path() {
         "A must be unchanged for pure PnL bankruptcy"
     );
     assert!(
-        engine.adl_coeff_long != k_before,
-        "K must change when D > 0"
+        engine.bankruptcy_hmax_lock_active,
+        "v12.20.6: Step 2 must arm the bankruptcy h_max lock when D > 0"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == d,
+        "v12.20.6: full d_social == D must record as explicit non-claim loss \
+         on opp side when loss_weight_sum_<opp> == 0"
     );
     assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
 }
@@ -490,8 +498,8 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
     assert!(engine.check_conservation());
 
     let mut ctx = InstructionContext::new();
-    let k_short_before = engine.adl_coeff_short;
-    let result = engine.enqueue_adl(&mut ctx, Side::Long, size, 1_000u128);
+    let d = 1_000u128;
+    let result = engine.enqueue_adl(&mut ctx, Side::Long, size, d);
     assert!(result.is_ok(), "ADL enqueue must succeed for balanced OI");
     assert!(
         engine.oi_eff_long_q == engine.oi_eff_short_q,
@@ -507,9 +515,17 @@ fn proof_adl_pipeline_trade_liquidate_reopen() {
         ctx.pending_reset_short,
         "ADL full drain must schedule short reset"
     );
+    // Wave 11e (v12.20.6 ADL): deficit is socialized to opp side via the
+    // B-residual booking path, not via K-adjust. With no loss-weight on
+    // opp side, the full d records as explicit non-claim loss.
     assert!(
-        engine.adl_coeff_short < k_short_before,
-        "deficit must be socialized to the opposing short side K"
+        engine.bankruptcy_hmax_lock_active,
+        "Step 2 must arm the bankruptcy h_max lock when d > 0"
+    );
+    assert!(
+        engine.explicit_unallocated_loss_short.get() == d,
+        "v12.20.6: d_social == d must record as explicit non-claim loss \
+         on opp (short) side when loss_weight_sum_short == 0"
     );
     assert!(engine.check_conservation());
 
