@@ -4983,6 +4983,7 @@ impl RiskEngine {
     }
     }
 
+    test_visible! {
     fn assert_public_postconditions_fast(&self) -> Result<()> {
         Self::validate_params_fast_shape(&self.params).map_err(|_| RiskError::CorruptState)?;
         self.validate_persistent_global_signed_shape()?;
@@ -5110,9 +5111,20 @@ impl RiskEngine {
                 if self.current_slot != self.resolved_slot {
                     return Err(RiskError::CorruptState);
                 }
+                // Wave 11f / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED):
+                // resolved markets cannot have a live bankruptcy h_max lock.
+                // The resolve path's `clear_stress_envelope` zeroes the lock
+                // (Wave 5a wired this); this assertion is the dual read-side
+                // invariant catching any future writer that arms the lock
+                // post-resolution. Mirrors toly engine
+                // `assert_public_postconditions_fast` (toly:6222-6224).
+                if self.bankruptcy_hmax_lock_active {
+                    return Err(RiskError::CorruptState);
+                }
             }
         }
         Ok(())
+    }
     }
 
     #[cfg(all(
@@ -7126,12 +7138,14 @@ impl RiskEngine {
     ///
     /// Mirrors toly engine `trigger_bankruptcy_hmax_lock_without_context`
     /// (toly:7072-7077).
+    test_visible! {
     #[allow(dead_code)]
     fn trigger_bankruptcy_hmax_lock_without_context(&mut self) {
         self.bankruptcy_hmax_lock_active = true;
         self.stress_envelope_remaining_indices = self.params.max_accounts;
         self.stress_envelope_start_slot = self.current_slot;
         self.stress_envelope_start_generation = self.sweep_generation;
+    }
     }
 
     // ========================================================================
@@ -8852,6 +8866,26 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
 
+        // Wave 11f (defense-in-depth): if a bankrupt-close residual is in
+        // flight, advance the state machine by one chunk via the core
+        // helper and return early without touching liquidation. The outer
+        // dispatcher `permissionless_progress_not_atomic` (Wave 11a-ii-C)
+        // already routes active-close cases through
+        // `continue_active_bankrupt_close_not_atomic`, but the keeper-crank
+        // path itself is the chokepoint where toly enforces the gate
+        // (toly:8905-8911). Mirroring the gate here closes the
+        // architectural seam — any future direct caller of
+        // `keeper_crank_not_atomic` (test fixture, audit-crank, new
+        // wrapper tag, direct SDK invocation) sees the gate regardless
+        // of how the call was issued.
+        if self.active_close_present != 0 {
+            self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
+            self.assert_public_postconditions()?;
+            return Ok(CrankOutcome {
+                num_liquidations: 0,
+            });
+        }
+
         // Step 5: accrue_market_to exactly once.
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
 
@@ -10493,10 +10527,14 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
-        // Wave 4a (gate-only): refuse live-insurance withdrawal while a
-        // bankrupt-close continuation is in flight. Path A port — the
-        // gate variable is always 0 on this branch, but the seam exists
-        // for Wave 5b's state machine.
+        // Wave 4a (gate-only) + Wave 11f: refuse live-insurance withdrawal
+        // while a bankrupt-close continuation is in flight. The
+        // `ensure_no_active_bankrupt_close` predicate enforces
+        // `active_close_present == 0`; the `bankruptcy_hmax_lock_active`
+        // condition added below (Wave 11f) catches the case where
+        // `trigger_bankruptcy_hmax_lock` armed the lock during a settle /
+        // ADL / resolve_flat_negative path but the state machine hasn't
+        // opened yet (or the lock is held for stress reconciliation).
         self.ensure_no_active_bankrupt_close()?;
         self.assert_public_postconditions()?;
         if now_slot < self.current_slot {
@@ -10505,15 +10543,23 @@ impl RiskEngine {
         self.check_live_accrual_envelope(now_slot)?;
         // PORT (ENG-PORT-1 / CRITICAL-5 — empty-market gate): toly upstream
         // refuses live-insurance withdrawal unless the market is provably
-        // empty + fully accrued. ADAPTED port — the 2 toly-only conditions
-        // (`stress_consumed_bps_e9_since_envelope`,
-        //  remaining stress-envelope checks) are SKIPPED per
-        // KL-FORK-ENGINE-STRESS-ENVELOPE-1 — fork has no such fields.
-        // The `active_close_present` / `bankruptcy_hmax_lock_active` legs
-        // are now covered by the `ensure_no_active_bankrupt_close` call
-        // above (Wave 4a / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 REVOKED).
-        // The 8 surviving conditions all map to existing fork fields and
-        // prove the same empty-market invariant for fork's narrower schema.
+        // empty + fully accrued. Wave 11f adds the two toly conditions
+        // fork was missing:
+        //  - `bankruptcy_hmax_lock_active`: SECURITY-CRITICAL. Wave 11d
+        //    Phase 1 + Wave 11e wire `trigger_bankruptcy_hmax_lock` into
+        //    `enqueue_adl` Step 2, `settle_losses_with_context`,
+        //    `resolve_flat_negative_with_context`, and the residual
+        //    booking chain. Without this gate an admin could withdraw
+        //    insurance from a market with an armed lock — defeating the
+        //    lock's defense-in-depth purpose.
+        //  - `stress_consumed_bps_e9_since_envelope != 0`: stress-envelope
+        //    reconciliation in flight. The field is dormant on fork (the
+        //    `apply_stress_envelope_progress` writer is still deferred per
+        //    KL-FORK-ENGINE-STRESS-ENVELOPE-1) but the gate is added now
+        //    so it fires the moment that subsystem lands without needing
+        //    a second pass.
+        // Mirrors toly engine `withdraw_live_insurance_not_atomic`
+        // (toly:10263-10276).
         if self.oi_eff_long_q != 0
             || self.oi_eff_short_q != 0
             || self.stored_pos_count_long != 0
@@ -10522,6 +10568,8 @@ impl RiskEngine {
             || self.stale_account_count_short != 0
             || self.neg_pnl_account_count != 0
             || self.current_slot != self.last_market_slot
+            || self.stress_consumed_bps_e9_since_envelope != 0
+            || self.bankruptcy_hmax_lock_active
         {
             return Err(RiskError::Undercollateralized);
         }
