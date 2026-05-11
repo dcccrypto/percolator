@@ -1863,3 +1863,158 @@ fn proof_resolve_flat_negative_with_context_arms_lock_before_absorb() {
     assert!(engine.accounts[i].pnl == 0);
     assert!(engine.insurance_fund.balance.get() < ins_before);
 }
+
+// ============================================================================
+// Wave 11f: bankrupt-close gate completion proofs
+// ============================================================================
+
+/// Wave 11f / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED) — Gap 1 (SECURITY).
+///
+/// `withdraw_live_insurance_not_atomic` MUST refuse withdrawal when
+/// `bankruptcy_hmax_lock_active` is true, even if every other empty-market
+/// condition is satisfied. Wave 11d Phase 1 + Wave 11e wired
+/// `trigger_bankruptcy_hmax_lock` into `enqueue_adl` Step 2, settle paths,
+/// and the residual-booking chain — so the lock IS armed in real markets
+/// undergoing bankrupt-close. Without this gate, an admin could withdraw
+/// insurance during an active lock, defeating its defense-in-depth purpose.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_withdraw_insurance_rejects_during_bankrupt_close_lock() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    engine.top_up_insurance_fund(1_000_000u128, DEFAULT_SLOT).unwrap();
+
+    // Empty-market preconditions: no OI, no positions, no stale accounts,
+    // current_slot == last_market_slot. All set by `new_with_market`.
+    assert!(engine.oi_eff_long_q == 0);
+    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.stored_pos_count_long == 0);
+    assert!(engine.stored_pos_count_short == 0);
+    assert!(engine.stale_account_count_long == 0);
+    assert!(engine.stale_account_count_short == 0);
+    assert!(engine.neg_pnl_account_count == 0);
+    assert!(engine.current_slot == engine.last_market_slot);
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    assert!(engine.active_close_present == 0);
+
+    let ins_before = engine.insurance_fund.balance.get();
+
+    // Baseline: the call succeeds when the lock is not armed.
+    let baseline = engine.withdraw_live_insurance_not_atomic(1u128, DEFAULT_SLOT);
+    assert!(baseline.is_ok(), "baseline empty-market withdrawal succeeds");
+    assert!(engine.insurance_fund.balance.get() == ins_before - 1);
+
+    // Arm the lock via the contextless writer (the writer's pre-conditions
+    // require Live mode and no ctx; the gate read at the empty-market check
+    // is the property under test).
+    engine.trigger_bankruptcy_hmax_lock_without_context();
+    assert!(engine.bankruptcy_hmax_lock_active);
+
+    let ins_mid = engine.insurance_fund.balance.get();
+    let result = engine.withdraw_live_insurance_not_atomic(1u128, DEFAULT_SLOT);
+    assert!(
+        matches!(result, Err(RiskError::Undercollateralized)),
+        "withdrawal MUST reject when bankruptcy h_max lock is armed"
+    );
+    assert!(
+        engine.insurance_fund.balance.get() == ins_mid,
+        "insurance fund MUST NOT mutate when gate rejects"
+    );
+}
+
+/// Wave 11f / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED) — Gap 2.
+///
+/// `keeper_crank_not_atomic` MUST route to `continue_active_bankrupt_close_core`
+/// when `active_close_present != 0` and return early without entering
+/// liquidation. Mirrors toly:8905-8911. Defense-in-depth: the outer dispatcher
+/// `permissionless_progress_not_atomic` covers this for the wrapper today,
+/// but the gate must hold for any direct caller of the inner crank.
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn proof_keeper_crank_routes_active_close_to_continuation() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+
+    // Set up a valid Phase RESIDUAL_B state. loss_weight_sum_long stays 0
+    // (no holders), so plan_bankruptcy_residual_chunk_to_side returns
+    // records_explicit=true and the chunk closes via
+    // add_explicit_unallocated_loss_side in one step.
+    engine.bankruptcy_hmax_lock_active = true;
+    engine.active_close_present = 1;
+    engine.active_close_phase = ACTIVE_CLOSE_PHASE_RESIDUAL_B;
+    engine.active_close_account_idx = u16::MAX;
+    engine.active_close_opp_side = ACTIVE_CLOSE_SIDE_LONG;
+    engine.active_close_close_price = DEFAULT_ORACLE;
+    engine.active_close_close_slot = DEFAULT_SLOT;
+    engine.active_close_q_close_q = 0;
+    engine.active_close_residual_remaining = 500u128;
+    engine.active_close_residual_booked = 0;
+    engine.active_close_residual_recorded = 0;
+    engine.active_close_b_chunks_booked = 0;
+
+    let explicit_before = engine.explicit_unallocated_loss_long.get();
+
+    let res = engine.keeper_crank_not_atomic(
+        DEFAULT_SLOT,
+        DEFAULT_ORACLE,
+        &[],
+        1,    // max_revalidations
+        0i128,
+        0,    // admit_h_min
+        100,  // admit_h_max
+        None, // admit_h_max_consumption_threshold_bps_opt
+        1,    // rr_window_size
+    );
+
+    let outcome = res.expect("active-close keeper-crank path must succeed");
+    assert!(
+        outcome.num_liquidations == 0,
+        "active-close path MUST NOT liquidate any account"
+    );
+    // continue_active_bankrupt_close_core booked the entire residual in one
+    // chunk via records_explicit (loss_weight_sum_long == 0).
+    assert!(engine.active_close_residual_remaining == 0);
+    assert!(
+        engine.explicit_unallocated_loss_long.get() == explicit_before + 500,
+        "explicit non-claim loss MUST receive the full residual when no holders"
+    );
+    // State machine cleared (residual_remaining hit zero).
+    assert!(engine.active_close_present == 0);
+}
+
+/// Wave 11f / KL-FORK-ENGINE-BANKRUPT-CLOSE-1 (REVOKED) — Gap 4 resolved-leg.
+///
+/// `assert_public_postconditions_fast` MUST reject a resolved market that
+/// still has `bankruptcy_hmax_lock_active = true`. The resolve path's
+/// `clear_stress_envelope` zeroes the lock; this read-side invariant
+/// catches any future writer that arms the lock post-resolution.
+/// Mirrors toly:6222-6224.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_resolved_mode_postcondition_invariants() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    // Resolved-mode minimal shape: positive resolved_price + resolved_live_price,
+    // current_slot frozen at resolved_slot.
+    engine.market_mode = MarketMode::Resolved;
+    engine.resolved_price = DEFAULT_ORACLE;
+    engine.resolved_live_price = DEFAULT_ORACLE;
+    engine.resolved_slot = DEFAULT_SLOT;
+    engine.current_slot = DEFAULT_SLOT;
+
+    // Baseline: postcondition passes for a resolved market without the lock.
+    assert!(!engine.bankruptcy_hmax_lock_active);
+    let baseline = engine.assert_public_postconditions_fast();
+    assert!(
+        baseline.is_ok(),
+        "resolved-mode baseline postcondition must hold"
+    );
+
+    // Arm the lock manually (no production path does this on a resolved
+    // market — this is the invariant under test).
+    engine.bankruptcy_hmax_lock_active = true;
+    let result = engine.assert_public_postconditions_fast();
+    assert!(
+        matches!(result, Err(RiskError::CorruptState)),
+        "resolved-mode + lock-active MUST trip the postcondition"
+    );
+}
