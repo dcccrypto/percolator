@@ -316,6 +316,55 @@ fn v13_fee_sync_settles_hidden_kf_losses_before_collecting_fee() {
 }
 
 #[test]
+fn v13_hlock_allows_principal_withdrawal_without_positive_credit_escape() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.threshold_stress_active = true;
+
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 50, &[10; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Ok(())
+    );
+    assert_eq!(a.capital, 50);
+    assert_eq!(g.vault, 50);
+}
+
+#[test]
+fn v13_hlock_withdraw_rejects_if_post_state_needs_positive_pnl_credit() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 20).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    a.pnl = 100;
+    g.pnl_pos_tot = 100;
+    g.threshold_stress_active = true;
+
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 10, &[50; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V13Error::InvalidConfig)
+    );
+}
+
+#[test]
+fn v13_loss_stale_blocks_nonflat_withdrawal_even_if_no_positive_credit_suffices() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.loss_stale_active = true;
+
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 10, &[10; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V13Error::LockActive)
+    );
+}
+
+#[test]
 fn v13_account_free_equity_active_accrual_requires_protective_progress() {
     let mut g = group();
     let mut a = account();

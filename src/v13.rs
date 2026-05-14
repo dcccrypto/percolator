@@ -758,17 +758,27 @@ impl MarketGroupV13 {
         &mut self,
         account: &mut PortfolioAccountV13,
         amount: u128,
+        effective_prices: &[u64; V13_MAX_PORTFOLIO_ASSETS_N],
     ) -> V13Result<()> {
-        self.ensure_favorable_action_allowed(account)?;
         if amount == 0 {
             return Ok(());
+        }
+        self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
+        self.full_account_refresh(account, effective_prices)?;
+        let locked = self.h_lock_lane(Some(account), false)? == HLockLaneV13::HMax;
+        if self.loss_stale_active && account.active_bitmap != 0 {
+            return Err(V13Error::LockActive);
         }
         self.settle_negative_pnl_from_principal(account)?;
         if account.pnl < 0 || amount > account.capital {
             return Err(V13Error::LockActive);
         }
         let post_capital = account.capital - amount;
-        let equity_after = account_equity_with_capital(account, post_capital)?;
+        let equity_after = if locked {
+            account_no_positive_credit_equity_with_capital(account, post_capital)?
+        } else {
+            account_equity_with_capital(account, post_capital)?
+        };
         if equity_after < 0 {
             return Err(V13Error::InvalidConfig);
         }
@@ -2306,6 +2316,21 @@ fn account_no_positive_credit_equity(account: &PortfolioAccountV13) -> V13Result
     validate_non_min_i128(account.pnl)?;
     validate_fee_credits(account.fee_credits)?;
     let capital = i128::try_from(account.capital).map_err(|_| V13Error::ArithmeticOverflow)?;
+    let fee_debt =
+        i128::try_from(fee_debt_u128(account)?).map_err(|_| V13Error::ArithmeticOverflow)?;
+    capital
+        .checked_add(account.pnl.min(0))
+        .and_then(|v| v.checked_sub(fee_debt))
+        .ok_or(V13Error::ArithmeticOverflow)
+}
+
+fn account_no_positive_credit_equity_with_capital(
+    account: &PortfolioAccountV13,
+    capital_override: u128,
+) -> V13Result<i128> {
+    validate_non_min_i128(account.pnl)?;
+    validate_fee_credits(account.fee_credits)?;
+    let capital = i128::try_from(capital_override).map_err(|_| V13Error::ArithmeticOverflow)?;
     let fee_debt =
         i128::try_from(fee_debt_u128(account)?).map_err(|_| V13Error::ArithmeticOverflow)?;
     capital

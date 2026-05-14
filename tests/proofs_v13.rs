@@ -480,6 +480,47 @@ fn proof_v13_hlock_allows_pure_risk_reducing_trade_with_principal_margin() {
 }
 
 #[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v13_hlock_withdraw_uses_no_positive_credit_lane() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 20).unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV13::Long, 10)
+        .unwrap();
+    account.pnl = 100;
+    group.pnl_pos_tot = 100;
+    group.threshold_stress_active = true;
+
+    let result =
+        group.withdraw_not_atomic(&mut account, 11, &[1_000_000; V13_MAX_PORTFOLIO_ASSETS_N]);
+
+    assert_eq!(result, Err(V13Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v13_loss_stale_blocks_nonflat_withdrawal() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV13::Long, 10)
+        .unwrap();
+    group.loss_stale_active = true;
+
+    let result = group.withdraw_not_atomic(&mut account, 10, &[1; V13_MAX_PORTFOLIO_ASSETS_N]);
+
+    assert_eq!(result, Err(V13Error::LockActive));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_b_residual_booking_makes_durable_progress_or_fails_closed() {
