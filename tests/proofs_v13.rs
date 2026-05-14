@@ -1,8 +1,8 @@
 #![cfg(kani)]
 
 use percolator::v13::{
-    account_equity, HLockLaneV13, MarketGroupV13, PortfolioAccountV13, ProvenanceHeaderV13,
-    ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
+    account_equity, HLockLaneV13, LiquidationRequestV13, MarketGroupV13, PortfolioAccountV13,
+    ProvenanceHeaderV13, ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
     V13_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{POS_SCALE, SOCIAL_LOSS_DEN};
@@ -579,6 +579,40 @@ fn proof_v13_resolved_positive_payout_snapshot_is_order_stable() {
     );
     assert_eq!(group.payout_snapshot, 100);
     assert_eq!(group.payout_snapshot_pnl_pos_tot, 200);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.vault = 4;
+    group.insurance = 4;
+    account.pnl = -9;
+    group.negative_pnl_account_count = 1;
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+
+    let out = group
+        .liquidate_account_not_atomic(
+            &mut account,
+            LiquidationRequestV13 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 0,
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.insurance_used, 4);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(out.explicit_loss, 5);
+    assert_eq!(group.insurance, 0);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(account.active_bitmap, 0);
 }
 
 #[kani::proof]

@@ -793,3 +793,33 @@ fn v13_liquidation_requires_strict_account_risk_progress() {
     assert_eq!(out.closed_q, POS_SCALE);
     assert_eq!(a.active_bitmap, 0);
 }
+
+#[test]
+fn v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
+    let mut g = group();
+    let mut a = account();
+    g.vault = 4;
+    g.insurance = 4;
+    a.pnl = -9;
+    g.negative_pnl_account_count = 1;
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+
+    let out = g
+        .liquidate_account_not_atomic(
+            &mut a,
+            LiquidationRequestV13 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 0,
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.insurance_used, 4);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(out.explicit_loss, 5);
+    assert_eq!(g.insurance, 0);
+    assert_eq!(a.pnl, 0);
+    assert_eq!(a.active_bitmap, 0);
+}

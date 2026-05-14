@@ -444,6 +444,7 @@ pub struct LiquidationRequestV13 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationOutcomeV13 {
     pub closed_q: u128,
+    pub insurance_used: u128,
     pub residual_booked: u128,
     pub explicit_loss: u128,
     pub fee_charged: u128,
@@ -1505,6 +1506,7 @@ impl MarketGroupV13 {
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
         self.reduce_position(account, request.asset_index, close_q)?;
         self.settle_negative_pnl_from_principal(account)?;
+        let insurance_used = self.consume_insurance_for_negative_pnl(account)?;
         let residual = if account.pnl < 0 {
             account.pnl.unsigned_abs()
         } else {
@@ -1537,6 +1539,7 @@ impl MarketGroupV13 {
         self.assert_public_invariants()?;
         Ok(LiquidationOutcomeV13 {
             closed_q: close_q,
+            insurance_used,
             residual_booked: booked,
             explicit_loss: explicit,
             fee_charged: charged_fee,
@@ -1607,6 +1610,7 @@ impl MarketGroupV13 {
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.sync_account_fee_to_slot_not_atomic(account, self.resolved_slot, fee_rate_per_slot)?;
         self.settle_negative_pnl_from_principal(account)?;
+        self.consume_insurance_for_negative_pnl(account)?;
         if account.active_bitmap != 0
             || account.pnl < 0
             || account.b_stale_state
@@ -2100,6 +2104,33 @@ impl MarketGroupV13 {
     fn residual(&self) -> u128 {
         self.vault
             .saturating_sub(self.c_tot.saturating_add(self.insurance))
+    }
+
+    fn consume_insurance_for_negative_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV13,
+    ) -> V13Result<u128> {
+        if account.pnl >= 0 {
+            return Ok(0);
+        }
+        self.bankruptcy_hlock_active = true;
+        let residual = account.pnl.unsigned_abs();
+        let used = residual.min(self.insurance);
+        if used == 0 {
+            return Ok(0);
+        }
+        self.insurance = self
+            .insurance
+            .checked_sub(used)
+            .ok_or(V13Error::CounterUnderflow)?;
+        let used_i128 = i128::try_from(used).map_err(|_| V13Error::ArithmeticOverflow)?;
+        let new_pnl = account
+            .pnl
+            .checked_add(used_i128)
+            .ok_or(V13Error::ArithmeticOverflow)?;
+        self.set_account_pnl(account, new_pnl)?;
+        account.health_cert.valid = false;
+        Ok(used)
     }
 
     fn resolved_positive_payout_ready(&self) -> bool {
