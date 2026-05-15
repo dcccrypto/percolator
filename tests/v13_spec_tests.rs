@@ -1399,6 +1399,35 @@ fn v13_permissionless_crank_commits_refresh_before_equity_active_accrual() {
 }
 
 #[test]
+fn v13_permissionless_crank_does_not_require_full_market_scan() {
+    let mut g = group();
+    let mut hinted = account();
+    g.deposit_not_atomic(&mut hinted, 1).unwrap();
+    g.materialized_portfolio_count = 1_000_000;
+    g.stale_certificate_count = 77;
+    g.b_stale_account_count = 55;
+    g.negative_pnl_account_count = 33;
+    let req = PermissionlessCrankRequestV13 {
+        now_slot: 0,
+        asset_index: 0,
+        effective_price: 1,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV13::Refresh,
+    };
+
+    let out = g
+        .permissionless_crank_not_atomic(&mut hinted, req, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(out, PermissionlessProgressOutcomeV13::AccountCurrent);
+    assert!(hinted.health_cert.valid);
+    assert_eq!(g.materialized_portfolio_count, 1_000_000);
+    assert_eq!(g.stale_certificate_count, 77);
+    assert_eq!(g.b_stale_account_count, 55);
+    assert_eq!(g.negative_pnl_account_count, 33);
+}
+
+#[test]
 fn v13_permissionless_refresh_returns_partial_b_progress_without_failing() {
     let (market, _, _) = ids();
     let mut cfg = V13Config::public_user_fund(1, 0, 10);

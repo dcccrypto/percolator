@@ -1107,6 +1107,53 @@ fn proof_v13_equity_active_accrual_requires_protective_progress() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_permissionless_crank_does_not_require_full_market_scan() {
+    let stale_count: u16 = kani::any();
+    let b_stale_count: u16 = kani::any();
+    let negative_count: u16 = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 1).unwrap();
+    group.materialized_portfolio_count = 1 + stale_count as u64;
+    group.stale_certificate_count = stale_count as u64;
+    group.b_stale_account_count = b_stale_count as u64;
+    group.negative_pnl_account_count = negative_count as u64;
+    let before_materialized = group.materialized_portfolio_count;
+    let before_stale = group.stale_certificate_count;
+    let before_b_stale = group.b_stale_account_count;
+    let before_negative = group.negative_pnl_account_count;
+
+    let out = group
+        .permissionless_crank_not_atomic(
+            &mut account,
+            PermissionlessCrankRequestV13 {
+                now_slot: 0,
+                asset_index: 0,
+                effective_price: 1,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV13::Refresh,
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    kani::cover!(
+        stale_count > 0 || b_stale_count > 0 || negative_count > 0,
+        "v13 permissionless hinted progress ignores unrelated global account counters"
+    );
+    assert_eq!(out, PermissionlessProgressOutcomeV13::AccountCurrent);
+    assert!(account.health_cert.valid);
+    assert_eq!(group.materialized_portfolio_count, before_materialized);
+    assert_eq!(group.stale_certificate_count, before_stale);
+    assert_eq!(group.b_stale_account_count, before_b_stale);
+    assert_eq!(group.negative_pnl_account_count, before_negative);
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
 fn proof_v13_permissionless_refresh_returns_partial_b_progress_without_accrual() {
