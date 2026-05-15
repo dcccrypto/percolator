@@ -129,6 +129,24 @@ fn v13_stale_and_b_stale_counters_are_exact_and_idempotent() {
 }
 
 #[test]
+fn v13_b_stale_account_cannot_clear_while_leg_is_b_stale() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+
+    g.mark_leg_b_stale(&mut a, 0).unwrap();
+    g.mark_leg_b_stale(&mut a, 0).unwrap();
+    assert!(a.b_stale_state);
+    assert!(a.legs[0].b_stale);
+    assert_eq!(g.b_stale_account_count, 1);
+
+    assert_eq!(g.clear_account_b_stale(&mut a), Err(V13Error::BStale));
+    assert!(a.b_stale_state);
+    assert_eq!(g.b_stale_account_count, 1);
+}
+
+#[test]
 fn v13_full_refresh_clears_stale_certificate_but_not_b_stale_loss() {
     let mut g = group();
     let mut a = account();

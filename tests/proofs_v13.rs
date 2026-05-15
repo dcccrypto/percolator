@@ -129,6 +129,45 @@ fn proof_v13_stale_counter_transitions_are_idempotent() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_b_stale_counter_transitions_are_idempotent_and_leg_gated() {
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+
+    group.mark_account_b_stale(&mut account).unwrap();
+    group.mark_account_b_stale(&mut account).unwrap();
+    kani::cover!(account.b_stale_state, "v13 b-stale state reachable");
+    assert_eq!(group.b_stale_account_count, 1);
+
+    group.clear_account_b_stale(&mut account).unwrap();
+    group.clear_account_b_stale(&mut account).unwrap();
+    kani::cover!(!account.b_stale_state, "v13 b-stale clear reachable");
+    assert_eq!(group.b_stale_account_count, 0);
+
+    group
+        .attach_leg(&mut account, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    group.mark_leg_b_stale(&mut account, 0).unwrap();
+    group.mark_leg_b_stale(&mut account, 0).unwrap();
+    kani::cover!(
+        account.b_stale_state && account.legs[0].b_stale,
+        "v13 active b-stale leg reachable"
+    );
+    assert_eq!(group.b_stale_account_count, 1);
+
+    assert_eq!(
+        group.clear_account_b_stale(&mut account),
+        Err(V13Error::BStale)
+    );
+    assert!(account.b_stale_state);
+    assert!(account.legs[0].b_stale);
+    assert_eq!(group.b_stale_account_count, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_account_equity_rejects_i128_min_persistent_pnl() {
     let (market, account_id, owner) = symbolic_ids();
     let mut account =
