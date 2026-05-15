@@ -219,6 +219,19 @@ fn v13_global_residual_is_not_account_health_proof() {
 }
 
 #[test]
+fn v13_public_invariants_reject_broken_senior_claim_conservation() {
+    let mut g = group();
+    g.vault = 10;
+    g.c_tot = 8;
+    g.insurance = 3;
+
+    assert_eq!(g.assert_public_invariants(), Err(V13Error::InvalidConfig));
+
+    g.insurance = 2;
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
 fn v13_cross_margin_collateral_counted_once_and_not_below_loss_envelope() {
     let mut g = group();
     let mut a = account();
@@ -276,6 +289,46 @@ fn v13_public_init_rejects_disabled_recovery_profile() {
     let mut cfg = V13Config::public_user_fund(4, 0, 10);
     cfg.permissionless_recovery_enabled = false;
 
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+}
+
+#[test]
+fn v13_public_init_requires_crankforward_recovery_and_chunk_caps() {
+    let (market, _, _) = ids();
+
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.stale_certificate_penalty_enabled = false;
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.full_refresh_required_for_favorable_actions = false;
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.public_liveness_profile_crank_forward = false;
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.max_account_b_settlement_chunks = 0;
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.max_bankrupt_close_chunks = 0;
     assert_eq!(
         MarketGroupV13::new(market, cfg),
         Err(V13Error::InvalidConfig)

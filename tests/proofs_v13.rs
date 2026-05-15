@@ -299,7 +299,7 @@ fn proof_v13_authoritatively_flat_account_never_receives_b_loss() {
 #[kani::solver(cadical)]
 fn proof_v13_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
-    kani::assume(case < 6);
+    kani::assume(case < 11);
     let (market, _, _) = symbolic_ids();
     let mut cfg = V13Config::public_user_fund(1, 0, 1);
     match case {
@@ -308,7 +308,12 @@ fn proof_v13_public_config_rejects_invalid_user_fund_shapes() {
         2 => cfg.h_min = 2,
         3 => cfg.min_nonzero_mm_req = cfg.min_nonzero_im_req,
         4 => cfg.permissionless_recovery_enabled = false,
-        _ => cfg.public_b_chunk_atoms = 0,
+        5 => cfg.public_b_chunk_atoms = 0,
+        6 => cfg.stale_certificate_penalty_enabled = false,
+        7 => cfg.full_refresh_required_for_favorable_actions = false,
+        8 => cfg.public_liveness_profile_crank_forward = false,
+        9 => cfg.max_account_b_settlement_chunks = 0,
+        _ => cfg.max_bankrupt_close_chunks = 0,
     }
 
     kani::cover!(case == 0, "v13 zero portfolio width rejected");
@@ -317,6 +322,11 @@ fn proof_v13_public_config_rejects_invalid_user_fund_shapes() {
     kani::cover!(case == 3, "v13 invalid margin floor ordering rejected");
     kani::cover!(case == 4, "v13 disabled recovery rejected");
     kani::cover!(case == 5, "v13 zero B chunk budget rejected");
+    kani::cover!(case == 6, "v13 disabled stale certificate penalty rejected");
+    kani::cover!(case == 7, "v13 disabled required full refresh rejected");
+    kani::cover!(case == 8, "v13 disabled crank-forward profile rejected");
+    kani::cover!(case == 9, "v13 zero account B chunk cap rejected");
+    kani::cover!(case == 10, "v13 zero bankrupt close chunk cap rejected");
     assert_eq!(
         MarketGroupV13::new(market, cfg),
         Err(V13Error::InvalidConfig)
@@ -903,6 +913,34 @@ fn proof_v13_global_residual_is_not_account_health_proof() {
     assert_eq!(result, Err(V13Error::Stale));
     assert_eq!(group, before_group);
     assert_eq!(account, before_account);
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v13_public_invariants_reject_broken_senior_claim_conservation() {
+    let vault_units: u8 = kani::any();
+    let c_units: u8 = kani::any();
+    let i_units: u8 = kani::any();
+    kani::assume(vault_units <= 10);
+    kani::assume(c_units <= 10);
+    kani::assume(i_units <= 10);
+    kani::assume((c_units as u16) + (i_units as u16) > vault_units as u16);
+
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.vault = vault_units as u128;
+    group.c_tot = c_units as u128;
+    group.insurance = i_units as u128;
+
+    kani::cover!(
+        group.c_tot <= group.vault && group.insurance <= group.vault,
+        "v13 senior sum overflow can violate conservation even when each claim is individually within vault"
+    );
+    assert_eq!(
+        group.assert_public_invariants(),
+        Err(V13Error::InvalidConfig)
+    );
 }
 
 #[kani::proof]
