@@ -1351,6 +1351,53 @@ fn proof_v13_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v13_target_effective_lag_blocks_pnl_conversion_before_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 10).unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    account.pnl = 10;
+    group.pnl_pos_tot = 10;
+    group.pnl_matured_pos_tot = 10;
+    group.vault = group.vault.checked_add(10).unwrap();
+    group.assets[0].effective_price = 100;
+    group.assets[0].raw_oracle_target_price = 100;
+    group
+        .full_account_refresh(&mut account, &[100; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    group.assets[0].raw_oracle_target_price = 120;
+
+    let vault_before = group.vault;
+    let c_tot_before = group.c_tot;
+    let pnl_pos_before = group.pnl_pos_tot;
+    let matured_before = group.pnl_matured_pos_tot;
+    let capital_before = account.capital;
+    let pnl_before = account.pnl;
+    let cert_before = account.health_cert;
+    let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        account.active_bitmap != 0
+            && group.assets[0].raw_oracle_target_price != group.assets[0].effective_price,
+        "v13 target/effective lag conversion lock reachable"
+    );
+    assert_eq!(result, Err(V13Error::LockActive));
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.c_tot, c_tot_before);
+    assert_eq!(group.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(group.pnl_matured_pos_tot, matured_before);
+    assert_eq!(account.capital, capital_before);
+    assert_eq!(account.pnl, pnl_before);
+    assert_eq!(account.health_cert, cert_before);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v13_loss_stale_blocks_nonflat_withdrawal() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
