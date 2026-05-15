@@ -2123,6 +2123,16 @@ impl MarketGroupV13 {
             ),
         };
         if weight_sum == 0 {
+            let explicit_headroom = match opp {
+                SideV13::Long => u128::MAX - asset.explicit_unallocated_loss_long,
+                SideV13::Short => u128::MAX - asset.explicit_unallocated_loss_short,
+            };
+            if residual_remaining > explicit_headroom {
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow,
+                )?;
+                return Err(V13Error::RecoveryRequired);
+            }
             let asset = &mut self.assets[asset_index];
             match opp {
                 SideV13::Long => {

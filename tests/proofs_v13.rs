@@ -2095,6 +2095,45 @@ fn proof_v13_b_residual_booking_makes_durable_progress_or_fails_closed() {
 }
 
 #[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v13_explicit_loss_audit_overflow_declares_recovery_without_mutation() {
+    let bankrupt_long: bool = kani::any();
+    let (market, _, _) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let bankrupt_side = if bankrupt_long {
+        group.assets[0].explicit_unallocated_loss_short = u128::MAX;
+        SideV13::Long
+    } else {
+        group.assets[0].explicit_unallocated_loss_long = u128::MAX;
+        SideV13::Short
+    };
+
+    let before_long = group.assets[0].explicit_unallocated_loss_long;
+    let before_short = group.assets[0].explicit_unallocated_loss_short;
+    let result = group.book_bankruptcy_residual_chunk(0, bankrupt_side, 1);
+
+    kani::cover!(
+        bankrupt_long,
+        "v13 explicit-loss short audit overflow reachable"
+    );
+    kani::cover!(
+        !bankrupt_long,
+        "v13 explicit-loss long audit overflow reachable"
+    );
+    assert_eq!(result, Err(V13Error::RecoveryRequired));
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow)
+    );
+    assert_eq!(group.assets[0].explicit_unallocated_loss_long, before_long);
+    assert_eq!(
+        group.assets[0].explicit_unallocated_loss_short,
+        before_short
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
 fn proof_v13_invalid_trade_request_rejects_before_any_mutation() {

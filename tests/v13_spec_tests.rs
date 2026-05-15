@@ -1362,6 +1362,22 @@ fn v13_b_residual_booking_is_bounded_and_remainder_conserving() {
 }
 
 #[test]
+fn v13_explicit_loss_audit_overflow_declares_recovery() {
+    let mut g = group();
+    g.assets[0].explicit_unallocated_loss_short = u128::MAX;
+
+    assert_eq!(
+        g.book_bankruptcy_residual_chunk(0, SideV13::Long, 1),
+        Err(V13Error::RecoveryRequired)
+    );
+    assert_eq!(
+        g.recovery_reason,
+        Some(PermissionlessRecoveryReasonV13::ExplicitLossOrDustAuditOverflow)
+    );
+    assert_eq!(g.assets[0].explicit_unallocated_loss_short, u128::MAX);
+}
+
+#[test]
 fn v13_side_reset_snapshots_epoch_start_for_prior_epoch_accounts() {
     let mut g = group();
     let mut a = account();
