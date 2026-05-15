@@ -846,6 +846,38 @@ fn proof_v13_full_refresh_clears_stale_certificate() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_b_stale_blocks_refresh_and_favorable_actions() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+
+    group
+        .full_account_refresh(&mut account, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(group.ensure_favorable_action_allowed(&account), Ok(()));
+
+    group.mark_account_b_stale(&mut account).unwrap();
+    kani::cover!(
+        account.b_stale_state && !account.health_cert.valid,
+        "v13 b-stale invalidates prior health certificate"
+    );
+
+    assert_eq!(
+        group.full_account_refresh(&mut account, &[1; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V13Error::BStale)
+    );
+    assert_eq!(
+        group.ensure_favorable_action_allowed(&account),
+        Err(V13Error::LockActive)
+    );
+    assert!(account.b_stale_state);
+    assert_eq!(group.b_stale_account_count, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_side_reset_prior_epoch_account_can_clear_without_oi_underflow() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
