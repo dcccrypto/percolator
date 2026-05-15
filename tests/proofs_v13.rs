@@ -809,7 +809,12 @@ fn proof_v13_account_b_chunk_either_advances_or_fails_closed() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_liquidation_progress_rejects_non_reducing_scores() {
+    let case: u8 = kani::any();
     let deficit: u8 = kani::any();
+    let gross_loss: u8 = kani::any();
+    kani::assume(case <= 3);
+    kani::assume(deficit <= 5);
+    kani::assume(gross_loss <= 5);
     let (market, account_id, owner) = symbolic_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
     let mut before =
@@ -823,6 +828,20 @@ fn proof_v13_liquidation_progress_rejects_non_reducing_scores() {
         .unwrap();
     before.health_cert.certified_liq_deficit = deficit as u128;
     after.health_cert.certified_liq_deficit = deficit as u128;
+    before.health_cert.certified_worst_case_loss = gross_loss as u128;
+    after.health_cert.certified_worst_case_loss = gross_loss as u128;
+
+    match case {
+        0 => {}
+        1 => after.health_cert.certified_liq_deficit = deficit as u128 + 1,
+        2 => after.stale_state = true,
+        _ => after.health_cert.certified_worst_case_loss = gross_loss as u128 + 1,
+    }
+
+    kani::cover!(case == 0, "v13 equal risk score non-progress reachable");
+    kani::cover!(case == 1, "v13 worse deficit non-progress reachable");
+    kani::cover!(case == 2, "v13 stale-penalty non-progress reachable");
+    kani::cover!(case == 3, "v13 worse gross-loss non-progress reachable");
 
     assert_eq!(
         group.validate_liquidation_progress(&before, &after),

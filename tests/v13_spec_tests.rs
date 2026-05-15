@@ -631,6 +631,37 @@ fn v13_liquidation_progress_requires_strict_risk_score_reduction() {
 }
 
 #[test]
+fn v13_cyclic_rescue_without_scalar_progress_reverts() {
+    let mut g = group();
+    let mut before = account();
+    let mut after = account();
+    g.full_account_refresh(&mut before, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.full_account_refresh(&mut after, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    before.health_cert.certified_liq_deficit = 5;
+    before.health_cert.certified_worst_case_loss = 3;
+
+    after.health_cert.certified_liq_deficit = 5;
+    after.health_cert.certified_worst_case_loss = 4;
+    assert_eq!(
+        g.validate_liquidation_progress(&before, &after),
+        Err(V13Error::NonProgress)
+    );
+
+    after.health_cert.certified_worst_case_loss = 3;
+    after.stale_state = true;
+    assert_eq!(
+        g.validate_liquidation_progress(&before, &after),
+        Err(V13Error::NonProgress)
+    );
+
+    after.stale_state = false;
+    after.health_cert.certified_liq_deficit = 4;
+    assert_eq!(g.validate_liquidation_progress(&before, &after), Ok(()));
+}
+
+#[test]
 fn v13_permissionless_recovery_is_declared_by_reason_not_caller_price() {
     let mut g = group();
     let reason = PermissionlessRecoveryReasonV13::AccountBSettlementCannotProgress;
