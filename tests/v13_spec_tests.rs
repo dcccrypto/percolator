@@ -566,6 +566,23 @@ fn v13_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
 }
 
 #[test]
+fn v13_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
+    let mut g = group();
+    let mut a = account();
+    a.pnl = 3;
+    a.fee_credits = -7;
+
+    g.deposit_not_atomic(&mut a, 10).unwrap();
+
+    assert_eq!(a.pnl, 3);
+    assert_eq!(a.fee_credits, -7);
+    assert_eq!(a.capital, 10);
+    assert_eq!(g.c_tot, 10);
+    assert_eq!(g.vault, 10);
+    assert_eq!(g.insurance, 0);
+}
+
+#[test]
 fn v13_partial_withdraw_can_leave_small_remainder() {
     let mut g = group();
     let mut a = account();
@@ -618,6 +635,26 @@ fn v13_attach_and_clear_leg_update_only_bounded_account_and_asset_state() {
     assert_eq!(g.assets[1].stored_pos_count_short, 0);
     assert_eq!(g.assets[1].oi_eff_short_q, 0);
     assert_eq!(g.assets[1].loss_weight_sum_short, 0);
+}
+
+#[test]
+fn v13_bilateral_oi_decomposition_counts_only_active_side_exposure() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+
+    g.attach_leg(&mut long, 0, SideV13::Long, 3).unwrap();
+    g.attach_leg(&mut short, 0, SideV13::Short, -3).unwrap();
+
+    assert_eq!(g.assets[0].oi_eff_long_q, 3);
+    assert_eq!(g.assets[0].oi_eff_short_q, 3);
+    assert_eq!(g.assets[0].stored_pos_count_long, 1);
+    assert_eq!(g.assets[0].stored_pos_count_short, 1);
+    assert_eq!(long.active_bitmap, 1);
+    assert_eq!(short.active_bitmap, 1);
+    assert_eq!(long.legs[0].basis_pos_q, 3);
+    assert_eq!(short.legs[0].basis_pos_q, -3);
 }
 
 #[test]
@@ -1363,6 +1400,46 @@ fn v13_funding_accrual_requires_bilateral_exposure() {
 }
 
 #[test]
+fn v13_permissionless_crank_accepts_configured_funding_rate_boundaries() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.max_price_move_bps_per_slot = 9_999;
+    cfg.max_abs_funding_e9_per_slot = 1;
+    let mut positive = MarketGroupV13::new(market, cfg).unwrap();
+    let mut positive_account = account();
+    let req = PermissionlessCrankRequestV13 {
+        now_slot: 1,
+        asset_index: 0,
+        effective_price: 1,
+        funding_rate_e9: 1,
+        action: PermissionlessCrankActionV13::Refresh,
+    };
+    assert_eq!(
+        positive.permissionless_crank_not_atomic(
+            &mut positive_account,
+            req,
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N]
+        ),
+        Ok(PermissionlessProgressOutcomeV13::AccountCurrent)
+    );
+
+    let mut negative = MarketGroupV13::new(market, cfg).unwrap();
+    let mut negative_account = account();
+    let negative_req = PermissionlessCrankRequestV13 {
+        funding_rate_e9: -1,
+        ..req
+    };
+    assert_eq!(
+        negative.permissionless_crank_not_atomic(
+            &mut negative_account,
+            negative_req,
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N]
+        ),
+        Ok(PermissionlessProgressOutcomeV13::AccountCurrent)
+    );
+}
+
+#[test]
 fn v13_funding_accrual_uses_only_bounded_segment_dt() {
     let (market, _, _) = ids();
     let mut cfg = V13Config::public_user_fund(4, 0, 10);
@@ -2041,6 +2118,30 @@ fn v13_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
     assert_eq!(a.legs[0].basis_pos_q.unsigned_abs(), POS_SCALE / 2);
     assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE / 2);
     assert_eq!(a.health_cert.certified_liq_deficit, 40);
+}
+
+#[test]
+fn v13_liquidation_rejects_zero_close_before_mutation() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    let before_group = g;
+    let before_account = a;
+
+    let res = g.liquidate_account_not_atomic(
+        &mut a,
+        LiquidationRequestV13 {
+            asset_index: 0,
+            close_q: 0,
+            fee_bps: 0,
+        },
+        &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V13Error::InvalidConfig));
+    assert_eq!(g, before_group);
+    assert_eq!(a, before_account);
 }
 
 #[test]
