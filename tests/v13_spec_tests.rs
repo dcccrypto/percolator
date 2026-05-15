@@ -453,6 +453,13 @@ fn v13_risk_notional_and_equity_use_exact_conservative_shapes() {
 }
 
 #[test]
+fn v13_account_equity_rejects_capital_above_i128_max() {
+    let mut a = account();
+    a.capital = i128::MAX as u128 + 1;
+    assert_eq!(account_equity(&a), Err(V13Error::ArithmeticOverflow));
+}
+
+#[test]
 fn v13_min_nonzero_initial_floor_blocks_tiny_risk_increasing_trade() {
     let (market, account_id, owner) = ids();
     let mut cfg = V13Config::public_user_fund(1, 0, 1);

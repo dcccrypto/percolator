@@ -199,6 +199,22 @@ fn proof_v13_account_equity_rejects_malformed_fee_credits() {
 }
 
 #[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_v13_account_equity_rejects_capital_above_i128_max() {
+    let (market, account_id, owner) = symbolic_ids();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    account.capital = i128::MAX as u128 + 1;
+
+    kani::cover!(
+        account.capital > i128::MAX as u128,
+        "v13 capital overflow equity path reachable"
+    );
+    assert_eq!(account_equity(&account), Err(V13Error::ArithmeticOverflow));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_account_shape_rejects_malformed_persistent_economic_state() {
