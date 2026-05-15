@@ -544,6 +544,33 @@ fn proof_v13_public_config_accepts_capped_liquidation_fee_envelope() {
 }
 
 #[kani::proof]
+#[kani::unwind(45)]
+#[kani::solver(cadical)]
+fn proof_v13_min_nonzero_initial_floor_is_in_health_certificate() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.config.min_nonzero_mm_req = 49;
+    group.config.min_nonzero_im_req = 50;
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 49).unwrap();
+    group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+    group
+        .full_account_refresh(&mut account, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    kani::cover!(
+        account.health_cert.certified_initial_req == 50,
+        "v13 tiny nonzero leg gets min initial floor"
+    );
+    assert_eq!(account.health_cert.certified_equity, 49);
+    assert_eq!(account.health_cert.certified_initial_req, 50);
+    assert!(
+        account.health_cert.certified_equity < account.health_cert.certified_initial_req as i128
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_deposit_then_withdraw_roundtrip_preserves_accounting() {

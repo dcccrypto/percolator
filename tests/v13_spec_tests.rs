@@ -453,6 +453,39 @@ fn v13_risk_notional_and_equity_use_exact_conservative_shapes() {
 }
 
 #[test]
+fn v13_min_nonzero_initial_floor_blocks_tiny_risk_increasing_trade() {
+    let (market, account_id, owner) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 1);
+    cfg.min_nonzero_mm_req = 49;
+    cfg.min_nonzero_im_req = 50;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut long = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut short = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    g.deposit_not_atomic(&mut long, 49).unwrap();
+    g.deposit_not_atomic(&mut short, 100).unwrap();
+    let before_group = g;
+    let before_long = long;
+    let before_short = short;
+
+    let result = g.execute_trade_with_fee_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV13 {
+            asset_index: 0,
+            size_q: 1,
+            exec_price: 1,
+            fee_bps: 0,
+        },
+        &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(result, Err(V13Error::InvalidConfig));
+    assert_eq!(g, before_group);
+    assert_eq!(long, before_long);
+    assert_eq!(short, before_short);
+}
+
+#[test]
 fn v13_account_shape_rejects_malformed_persistent_economic_state() {
     let g = group();
 
