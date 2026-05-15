@@ -2644,6 +2644,78 @@ fn proof_v13_funding_accrual_uses_only_bounded_segment_dt() {
     assert_eq!(group.assets[0].f_short_num, 2 * ADL_ONE as i128);
 }
 
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v13_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group =
+        MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.config.max_price_move_bps_per_slot = 9_999;
+    group.config.max_abs_funding_e9_per_slot = 1;
+    group.assets[0].effective_price = 999_999_999;
+    group.assets[0].fund_px_last = 999_999_999;
+    group.assets[0].raw_oracle_target_price = 999_999_999;
+    let mut long =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut short = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    group
+        .attach_leg(&mut long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+
+    let out = group
+        .accrue_asset_to_not_atomic(0, 1, 1_000_000_000, 1, true)
+        .unwrap();
+    kani::cover!(
+        out.price_move_active && out.funding_active,
+        "v13 combined mark and funding accrual reachable"
+    );
+
+    assert_eq!(group.assets[0].k_long, ADL_ONE as i128);
+    assert_eq!(group.assets[0].k_short, -(ADL_ONE as i128));
+    assert_eq!(group.assets[0].f_long_num, -(ADL_ONE as i128));
+    assert_eq!(group.assets[0].f_short_num, ADL_ONE as i128);
+    assert_eq!(group.assets[0].fund_px_last, 1_000_000_000);
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v13_zero_funding_rate_advances_time_without_f_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group =
+        MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    group.assets[0].effective_price = 100;
+    group.assets[0].fund_px_last = 100;
+    group.assets[0].raw_oracle_target_price = 100;
+    let mut long =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    let mut short = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, [4; 32], owner));
+    group
+        .attach_leg(&mut long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    let before = group.assets[0];
+
+    let out = group.accrue_asset_to_not_atomic(0, 1, 100, 0, true).unwrap();
+    kani::cover!(
+        group.assets[0].oi_eff_long_q != 0 && group.assets[0].oi_eff_short_q != 0,
+        "v13 zero-rate funding proof covers bilateral exposure"
+    );
+
+    assert!(!out.funding_active);
+    assert_eq!(group.assets[0].f_long_num, before.f_long_num);
+    assert_eq!(group.assets[0].f_short_num, before.f_short_num);
+    assert_eq!(group.funding_epoch, 0);
+    assert_eq!(group.slot_last, 1);
+    assert_eq!(group.current_slot, 1);
+}
+
 fn assert_funding_accrual_refresh_matches_sign_and_floor(
     funding_rate_e9: i128,
     expected_long_pnl: i128,

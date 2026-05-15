@@ -1395,6 +1395,62 @@ fn v13_funding_accrual_uses_only_bounded_segment_dt() {
 }
 
 #[test]
+fn v13_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.max_price_move_bps_per_slot = 9_999;
+    cfg.max_abs_funding_e9_per_slot = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    g.assets[0].effective_price = 999_999_999;
+    g.assets[0].fund_px_last = 999_999_999;
+    g.assets[0].raw_oracle_target_price = 999_999_999;
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    g.attach_leg(&mut long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+
+    let out = g
+        .accrue_asset_to_not_atomic(0, 1, 1_000_000_000, 1, true)
+        .unwrap();
+
+    assert!(out.price_move_active);
+    assert!(out.funding_active);
+    assert_eq!(g.assets[0].k_long, ADL_ONE as i128);
+    assert_eq!(g.assets[0].k_short, -(ADL_ONE as i128));
+    assert_eq!(g.assets[0].f_long_num, -(ADL_ONE as i128));
+    assert_eq!(g.assets[0].f_short_num, ADL_ONE as i128);
+    assert_eq!(g.assets[0].fund_px_last, 1_000_000_000);
+}
+
+#[test]
+fn v13_zero_funding_rate_advances_time_without_f_mutation() {
+    let mut g = group();
+    g.assets[0].effective_price = 100;
+    g.assets[0].fund_px_last = 100;
+    g.assets[0].raw_oracle_target_price = 100;
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    g.attach_leg(&mut long, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV13::Short, -(POS_SCALE as i128))
+        .unwrap();
+    let before = g.assets[0];
+
+    let out = g.accrue_asset_to_not_atomic(0, 1, 100, 0, true).unwrap();
+
+    assert!(!out.funding_active);
+    assert_eq!(g.assets[0].f_long_num, before.f_long_num);
+    assert_eq!(g.assets[0].f_short_num, before.f_short_num);
+    assert_eq!(g.funding_epoch, 0);
+    assert_eq!(g.slot_last, 1);
+    assert_eq!(g.current_slot, 1);
+}
+
+#[test]
 fn v13_same_slot_exposed_price_move_rejects_without_mutation() {
     let mut g = group();
     let mut a = account();
