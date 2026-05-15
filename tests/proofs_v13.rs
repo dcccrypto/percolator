@@ -1380,6 +1380,50 @@ fn proof_v13_quantity_adl_preserves_oi_symmetry_after_close() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
+    let oi_before: u8 = kani::any();
+    let close_q: u8 = kani::any();
+    kani::assume(oi_before > 0);
+    kani::assume(oi_before <= 4);
+    kani::assume(close_q > 0);
+    kani::assume(close_q <= oi_before);
+
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let oi_before = oi_before as u128;
+    let close_q = close_q as u128;
+    group.assets[0].oi_eff_long_q = oi_before;
+    group.assets[0].oi_eff_short_q = oi_before;
+    group.assets[0].a_short = ADL_ONE;
+    let a_before = group.assets[0].a_short;
+
+    let out = group
+        .apply_quantity_adl_after_residual_not_atomic(0, SideV13::Long, close_q)
+        .unwrap();
+
+    let oi_after = oi_before - close_q;
+    kani::cover!(oi_after > 0, "v13 partial quantity ADL branch reachable");
+    kani::cover!(
+        oi_after == 0,
+        "v13 full-drain quantity ADL branch reachable"
+    );
+    assert_eq!(out.closed_q, close_q);
+    assert_eq!(group.assets[0].oi_eff_long_q, oi_after);
+    assert_eq!(group.assets[0].oi_eff_short_q, oi_after);
+    if oi_after == 0 {
+        assert!(out.reset_started);
+        assert_eq!(group.assets[0].a_short, ADL_ONE);
+    } else {
+        assert!(!out.reset_started);
+        assert!(group.assets[0].a_short > 0);
+        assert!(group.assets[0].a_short < a_before);
+    }
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_fee_charge_settles_loss_before_fee() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
