@@ -1425,6 +1425,28 @@ impl MarketGroupV13 {
         request: TradeRequestV13,
         effective_prices: &[u64; V13_MAX_PORTFOLIO_ASSETS_N],
     ) -> V13Result<TradeOutcomeV13> {
+        let mut staged_group = *self;
+        let mut staged_long = *long_account;
+        let mut staged_short = *short_account;
+        let outcome = staged_group.execute_trade_with_fee_inner(
+            &mut staged_long,
+            &mut staged_short,
+            request,
+            effective_prices,
+        )?;
+        *self = staged_group;
+        *long_account = staged_long;
+        *short_account = staged_short;
+        Ok(outcome)
+    }
+
+    fn execute_trade_with_fee_inner(
+        &mut self,
+        long_account: &mut PortfolioAccountV13,
+        short_account: &mut PortfolioAccountV13,
+        request: TradeRequestV13,
+        effective_prices: &[u64; V13_MAX_PORTFOLIO_ASSETS_N],
+    ) -> V13Result<TradeOutcomeV13> {
         if request.asset_index >= self.config.max_portfolio_assets as usize
             || request.size_q == 0
             || request.size_q > MAX_TRADE_SIZE_Q
@@ -1471,6 +1493,8 @@ impl MarketGroupV13 {
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
         self.full_account_refresh(long_account, effective_prices)?;
         self.full_account_refresh(short_account, effective_prices)?;
+        ensure_initial_margin(long_account)?;
+        ensure_initial_margin(short_account)?;
         if locked {
             ensure_no_positive_credit_initial_margin(long_account)?;
             ensure_no_positive_credit_initial_margin(short_account)?;
@@ -2519,6 +2543,14 @@ fn account_no_positive_credit_equity_with_capital(
         .checked_add(account.pnl.min(0))
         .and_then(|v| v.checked_sub(fee_debt))
         .ok_or(V13Error::ArithmeticOverflow)
+}
+
+fn ensure_initial_margin(account: &PortfolioAccountV13) -> V13Result<()> {
+    let equity = account_equity(account)?;
+    if equity < 0 || (equity as u128) < account.health_cert.certified_initial_req {
+        return Err(V13Error::InvalidConfig);
+    }
+    Ok(())
 }
 
 fn ensure_no_positive_credit_initial_margin(account: &PortfolioAccountV13) -> V13Result<()> {
