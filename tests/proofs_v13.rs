@@ -1218,6 +1218,118 @@ fn proof_v13_permissionless_refresh_returns_partial_b_progress_without_accrual()
 }
 
 #[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v13_worst_case_hinted_progress_actions_are_total_and_bounded() {
+    let case: u8 = kani::any();
+    kani::assume(case < 4);
+    let (market, account_id, owner) = concrete_ids();
+    let base_req = PermissionlessCrankRequestV13 {
+        now_slot: 0,
+        asset_index: 0,
+        effective_price: 1,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV13::Refresh,
+    };
+
+    match case {
+        0 => {
+            let mut group =
+                MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+            let mut account =
+                PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+            group.deposit_not_atomic(&mut account, 1).unwrap();
+            let outcome = group.permissionless_crank_not_atomic(
+                &mut account,
+                base_req,
+                &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+            );
+            kani::cover!(true, "v13 hinted refresh-current branch reachable");
+            assert_eq!(
+                outcome,
+                Ok(PermissionlessProgressOutcomeV13::AccountCurrent)
+            );
+            assert!(account.health_cert.valid);
+        }
+        1 => {
+            let mut cfg = V13Config::public_user_fund(1, 0, 1);
+            cfg.public_b_chunk_atoms = 1;
+            let mut group = MarketGroupV13::new(market, cfg).unwrap();
+            let mut account =
+                PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+            group.attach_leg(&mut account, 0, SideV13::Long, 1).unwrap();
+            group.assets[0].b_long_num = 2;
+            let outcome = group.permissionless_crank_not_atomic(
+                &mut account,
+                PermissionlessCrankRequestV13 {
+                    action: PermissionlessCrankActionV13::SettleB { asset_index: 0 },
+                    ..base_req
+                },
+                &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+            );
+            kani::cover!(true, "v13 hinted settle-B branch reachable");
+            match outcome {
+                Ok(PermissionlessProgressOutcomeV13::AccountBChunk(chunk)) => {
+                    assert_eq!(chunk.delta_b, 1);
+                    assert_eq!(chunk.remaining_after, 1);
+                    assert!(account.b_stale_state);
+                    assert_eq!(group.b_stale_account_count, 1);
+                }
+                _ => assert!(false),
+            }
+        }
+        2 => {
+            let mut group =
+                MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+            let mut account =
+                PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+            group
+                .attach_leg(&mut account, 0, SideV13::Long, POS_SCALE as i128)
+                .unwrap();
+            let outcome = group.permissionless_crank_not_atomic(
+                &mut account,
+                PermissionlessCrankRequestV13 {
+                    action: PermissionlessCrankActionV13::Liquidate(LiquidationRequestV13 {
+                        asset_index: 0,
+                        close_q: POS_SCALE,
+                        fee_bps: 0,
+                    }),
+                    ..base_req
+                },
+                &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+            );
+            kani::cover!(true, "v13 hinted liquidation branch reachable");
+            assert_eq!(
+                outcome,
+                Ok(PermissionlessProgressOutcomeV13::AccountCurrent)
+            );
+            assert_eq!(account.active_bitmap, 0);
+        }
+        _ => {
+            let mut group =
+                MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+            let mut account =
+                PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+            let reason = PermissionlessRecoveryReasonV13::BelowProgressFloor;
+            let outcome = group.permissionless_crank_not_atomic(
+                &mut account,
+                PermissionlessCrankRequestV13 {
+                    action: PermissionlessCrankActionV13::Recover(reason),
+                    ..base_req
+                },
+                &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+            );
+            kani::cover!(true, "v13 hinted recovery branch reachable");
+            assert_eq!(
+                outcome,
+                Ok(PermissionlessProgressOutcomeV13::RecoveryDeclared(reason))
+            );
+            assert_eq!(group.recovery_reason, Some(reason));
+        }
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v13_equity_active_accrual_advances_at_most_one_bounded_segment() {

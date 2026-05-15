@@ -1507,6 +1507,89 @@ fn v13_permissionless_refresh_returns_partial_b_progress_without_failing() {
 }
 
 #[test]
+fn v13_worst_case_hinted_progress_actions_are_total_and_bounded() {
+    let req_current = PermissionlessCrankRequestV13 {
+        now_slot: 0,
+        asset_index: 0,
+        effective_price: 1,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV13::Refresh,
+    };
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 1).unwrap();
+    assert_eq!(
+        g.permissionless_crank_not_atomic(&mut a, req_current, &[1; V13_MAX_PORTFOLIO_ASSETS_N]),
+        Ok(PermissionlessProgressOutcomeV13::AccountCurrent)
+    );
+    assert!(a.health_cert.valid);
+
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+    g.assets[0].b_long_num = 2;
+    let out = g
+        .permissionless_crank_not_atomic(
+            &mut a,
+            PermissionlessCrankRequestV13 {
+                action: PermissionlessCrankActionV13::SettleB { asset_index: 0 },
+                ..req_current
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    match out {
+        PermissionlessProgressOutcomeV13::AccountBChunk(chunk) => {
+            assert_eq!(chunk.delta_b, 1);
+            assert_eq!(chunk.remaining_after, 1);
+        }
+        _ => panic!("SettleB hint must return bounded B progress"),
+    }
+    assert!(a.b_stale_state);
+    assert_eq!(g.b_stale_account_count, 1);
+
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+    let out = g
+        .permissionless_crank_not_atomic(
+            &mut a,
+            PermissionlessCrankRequestV13 {
+                action: PermissionlessCrankActionV13::Liquidate(LiquidationRequestV13 {
+                    asset_index: 0,
+                    close_q: POS_SCALE,
+                    fee_bps: 0,
+                }),
+                ..req_current
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    assert_eq!(out, PermissionlessProgressOutcomeV13::AccountCurrent);
+    assert_eq!(a.active_bitmap, 0);
+
+    let mut g = group();
+    let mut a = account();
+    let reason = PermissionlessRecoveryReasonV13::BelowProgressFloor;
+    assert_eq!(
+        g.permissionless_crank_not_atomic(
+            &mut a,
+            PermissionlessCrankRequestV13 {
+                action: PermissionlessCrankActionV13::Recover(reason),
+                ..req_current
+            },
+            &[1; V13_MAX_PORTFOLIO_ASSETS_N],
+        ),
+        Ok(PermissionlessProgressOutcomeV13::RecoveryDeclared(reason))
+    );
+    assert_eq!(g.recovery_reason, Some(reason));
+}
+
+#[test]
 fn v13_resolved_close_is_bounded_and_fee_current() {
     let mut g = group();
     let mut a = account();

@@ -1643,7 +1643,9 @@ impl MarketGroupV13 {
             leg.b_stale = chunk.remaining_after != 0;
         }
         self.set_account_pnl(account, new_pnl)?;
-        if !has_b_stale_leg(account) {
+        if chunk.remaining_after != 0 {
+            self.mark_account_b_stale(account)?;
+        } else if !has_b_stale_leg(account) {
             self.clear_account_b_stale(account)?;
         }
         account.health_cert.valid = false;
