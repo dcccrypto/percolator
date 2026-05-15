@@ -1598,10 +1598,15 @@ impl MarketGroupV13 {
         self.validate_account_shape(account)?;
         let protective_progress = match request.action {
             PermissionlessCrankActionV13::Refresh => {
-                self.settle_account_side_effects_not_atomic(
-                    account,
-                    self.config.public_b_chunk_atoms,
-                )?;
+                if let PermissionlessProgressOutcomeV13::AccountBChunk(out) = self
+                    .settle_account_side_effects_not_atomic(
+                        account,
+                        self.config.public_b_chunk_atoms,
+                    )?
+                {
+                    self.assert_public_invariants()?;
+                    return Ok(PermissionlessProgressOutcomeV13::AccountBChunk(out));
+                }
                 self.full_account_refresh(account, effective_prices)?;
                 true
             }

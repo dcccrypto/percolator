@@ -192,6 +192,18 @@ fn v13_public_init_rejects_unbounded_portfolio_width() {
 }
 
 #[test]
+fn v13_public_init_rejects_disabled_recovery_profile() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(4, 0, 10);
+    cfg.permissionless_recovery_enabled = false;
+
+    assert_eq!(
+        MarketGroupV13::new(market, cfg),
+        Err(V13Error::InvalidConfig)
+    );
+}
+
+#[test]
 fn v13_risk_notional_and_equity_use_exact_conservative_shapes() {
     assert_eq!(risk_notional_ceil(1, 1), Ok(1));
     assert_eq!(risk_notional_ceil(1, 1_000_001), Ok(2));
@@ -201,6 +213,40 @@ fn v13_risk_notional_and_equity_use_exact_conservative_shapes() {
     a.pnl = -25;
     a.fee_credits = -10;
     assert_eq!(account_equity(&a), Ok(65));
+}
+
+#[test]
+fn v13_deposit_withdraw_roundtrip_preserves_accounting() {
+    let mut g = group();
+    let mut a = account();
+
+    g.deposit_not_atomic(&mut a, 123).unwrap();
+    assert_eq!(a.capital, 123);
+    assert_eq!(g.c_tot, 123);
+    assert_eq!(g.vault, 123);
+
+    g.withdraw_not_atomic(&mut a, 123, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(a.capital, 0);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.vault, 0);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
+fn v13_close_portfolio_account_requires_clean_local_state() {
+    let mut g = group();
+    let mut a = account();
+    g.create_portfolio_account(&a).unwrap();
+    assert_eq!(g.materialized_portfolio_count, 1);
+
+    a.capital = 1;
+    assert_eq!(g.close_portfolio_account(&a), Err(V13Error::LockActive));
+    assert_eq!(g.materialized_portfolio_count, 1);
+
+    a.capital = 0;
+    g.close_portfolio_account(&a).unwrap();
+    assert_eq!(g.materialized_portfolio_count, 0);
 }
 
 #[test]
@@ -219,6 +265,23 @@ fn v13_attach_and_clear_leg_update_only_bounded_account_and_asset_state() {
     assert_eq!(g.assets[1].stored_pos_count_short, 0);
     assert_eq!(g.assets[1].oi_eff_short_q, 0);
     assert_eq!(g.assets[1].loss_weight_sum_short, 0);
+}
+
+#[test]
+fn v13_oversize_position_is_rejected_before_oi_mutation() {
+    let mut g = group();
+    let mut a = account();
+
+    let res = g.attach_leg(
+        &mut a,
+        0,
+        SideV13::Long,
+        (percolator::MAX_POSITION_ABS_Q + 1) as i128,
+    );
+
+    assert_eq!(res, Err(V13Error::InvalidLeg));
+    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
 }
 
 #[test]
@@ -484,6 +547,20 @@ fn v13_equity_active_accrual_commits_one_bounded_loss_stale_segment() {
 }
 
 #[test]
+fn v13_funding_rate_above_cap_rejects_before_state_mutation() {
+    let mut g = group();
+    g.config.max_abs_funding_e9_per_slot = 1;
+    let before_asset = g.assets[0];
+
+    let res = g.accrue_asset_to_not_atomic(0, 1, 1, 2, true);
+
+    assert_eq!(res, Err(V13Error::InvalidConfig));
+    assert_eq!(g.assets[0], before_asset);
+    assert_eq!(g.slot_last, 0);
+    assert_eq!(g.current_slot, 0);
+}
+
+#[test]
 fn v13_trade_fee_is_dynamic_bounded_and_charged_inside_engine() {
     let mut g = group();
     g.config.max_trading_fee_bps = 100;
@@ -524,6 +601,42 @@ fn v13_trade_fee_is_dynamic_bounded_and_charged_inside_engine() {
         ),
         Err(V13Error::InvalidConfig)
     );
+}
+
+#[test]
+fn v13_trade_fee_conserves_vault_and_keeps_oi_symmetric() {
+    let mut g = group();
+    g.config.max_trading_fee_bps = 1_000;
+    let mut long = account();
+    let mut short = account();
+    short.provenance_header.portfolio_account_id = [4; 32];
+    g.deposit_not_atomic(&mut long, 10_000).unwrap();
+    g.deposit_not_atomic(&mut short, 10_000).unwrap();
+    let vault_before = g.vault;
+    let c_tot_before = g.c_tot;
+
+    let out = g
+        .execute_trade_with_fee_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV13 {
+                asset_index: 0,
+                size_q: POS_SCALE,
+                exec_price: 100,
+                fee_bps: 100,
+            },
+            &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.notional, 100);
+    assert_eq!(out.fee_a, 1);
+    assert_eq!(out.fee_b, 1);
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.insurance, 2);
+    assert_eq!(g.c_tot, c_tot_before - 2);
+    assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE);
+    assert_eq!(g.assets[0].oi_eff_short_q, POS_SCALE);
 }
 
 #[test]
@@ -621,6 +734,29 @@ fn v13_hlock_rejects_reducing_trade_that_needs_positive_pnl_credit() {
     );
 
     assert_eq!(res, Err(V13Error::LockActive));
+}
+
+#[test]
+fn v13_released_pnl_conversion_is_bounded_by_residual_not_profit_only() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 10).unwrap();
+    a.pnl = 50;
+    g.pnl_pos_tot = 50;
+    g.pnl_matured_pos_tot = 50;
+    g.vault = g.c_tot + 7;
+    g.full_account_refresh(&mut a, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut a)
+        .unwrap();
+
+    assert_eq!(converted, 7);
+    assert_eq!(g.vault, 17);
+    assert_eq!(g.c_tot, 17);
+    assert_eq!(a.capital, 17);
+    assert_eq!(a.pnl, 43);
 }
 
 #[test]
@@ -740,6 +876,38 @@ fn v13_permissionless_crank_commits_refresh_before_equity_active_accrual() {
         .unwrap();
     assert_eq!(out, PermissionlessProgressOutcomeV13::AccountCurrent);
     assert_eq!(g.slot_last, 1);
+}
+
+#[test]
+fn v13_permissionless_refresh_returns_partial_b_progress_without_failing() {
+    let (market, _, _) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, 1).unwrap();
+    g.assets[0].b_long_num = SOCIAL_LOSS_DEN * 2;
+    let req = PermissionlessCrankRequestV13 {
+        now_slot: 1,
+        asset_index: 0,
+        effective_price: 1,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV13::Refresh,
+    };
+
+    let out = g
+        .permissionless_crank_not_atomic(&mut a, req, &[1; V13_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert!(matches!(
+        out,
+        PermissionlessProgressOutcomeV13::AccountBChunk(_)
+    ));
+    assert!(a.legs[0].b_stale);
+    assert!(a.legs[0].b_snap > 0);
+    assert!(a.legs[0].b_snap < g.assets[0].b_long_num);
+    assert_eq!(g.slot_last, 0);
 }
 
 #[test]
