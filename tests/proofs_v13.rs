@@ -7,7 +7,10 @@ use percolator::v13::{
     RebalanceRequestV13, ResolvedCloseOutcomeV13, SideV13, TradeRequestV13, V13Config, V13Error,
     V13_MAX_PORTFOLIO_ASSETS_N,
 };
-use percolator::{ADL_ONE, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    ADL_ONE, MAX_OI_SIDE_Q, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, MAX_VAULT_TVL, POS_SCALE,
+    SOCIAL_LOSS_DEN,
+};
 
 fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     let market: [u8; 32] = kani::any();
@@ -1173,6 +1176,44 @@ fn proof_v13_public_invariants_reject_broken_senior_claim_conservation() {
         group.c_tot <= group.vault && group.insurance <= group.vault,
         "v13 senior sum overflow can violate conservation even when each claim is individually within vault"
     );
+    assert_eq!(
+        group.assert_public_invariants(),
+        Err(V13Error::InvalidConfig)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v13_public_invariants_reject_hard_global_bounds() {
+    let case: u8 = kani::any();
+    kani::assume(case < 7);
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+
+    match case {
+        0 => group.vault = MAX_VAULT_TVL + 1,
+        1 => {
+            group.pnl_pos_tot = 1;
+            group.pnl_matured_pos_tot = 2;
+        }
+        2 => {
+            group.current_slot = 1;
+            group.slot_last = 2;
+        }
+        3 => group.assets[0].effective_price = 0,
+        4 => group.assets[0].oi_eff_long_q = MAX_OI_SIDE_Q + 1,
+        5 => group.assets[0].loss_weight_sum_long = SOCIAL_LOSS_DEN + 1,
+        _ => group.assets[0].social_loss_remainder_long_num = SOCIAL_LOSS_DEN,
+    }
+
+    kani::cover!(case == 0, "v13 vault cap violation reachable");
+    kani::cover!(case == 1, "v13 matured positive PnL violation reachable");
+    kani::cover!(case == 2, "v13 slot ordering violation reachable");
+    kani::cover!(case == 3, "v13 zero effective price violation reachable");
+    kani::cover!(case == 4, "v13 OI side cap violation reachable");
+    kani::cover!(case == 5, "v13 loss weight cap violation reachable");
+    kani::cover!(case == 6, "v13 social loss remainder violation reachable");
     assert_eq!(
         group.assert_public_invariants(),
         Err(V13Error::InvalidConfig)
