@@ -2218,6 +2218,43 @@ fn v13_liquidation_rejects_zero_close_before_mutation() {
 }
 
 #[test]
+fn v13_min_liquidation_abs_shortfall_does_not_block_risk_close() {
+    let (market, account_id, owner) = ids();
+    let mut cfg = V13Config::public_user_fund(1, 0, 1);
+    cfg.min_nonzero_mm_req = 100;
+    cfg.min_nonzero_im_req = 101;
+    cfg.max_price_move_bps_per_slot = 5_000;
+    cfg.liquidation_fee_cap = 40;
+    cfg.min_liquidation_abs = 40;
+    let mut g = MarketGroupV13::new(market, cfg).unwrap();
+    let mut a = PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    g.deposit_not_atomic(&mut a, 20).unwrap();
+    g.attach_leg(&mut a, 0, SideV13::Long, POS_SCALE as i128)
+        .unwrap();
+
+    let out = g
+        .liquidate_account_not_atomic(
+            &mut a,
+            LiquidationRequestV13 {
+                asset_index: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+            },
+            &[100; V13_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.closed_q, POS_SCALE);
+    assert_eq!(out.fee_charged, 20);
+    assert_eq!(a.capital, 0);
+    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(g.insurance, 20);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.vault, 20);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
 fn v13_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     let mut g = group();
     let mut a = account();

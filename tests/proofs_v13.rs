@@ -3101,6 +3101,37 @@ fn proof_v13_liquidation_rejects_zero_close_before_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v13_liquidation_fee_floor_shortfall_charges_available_capital_only() {
+    let capital: u8 = kani::any();
+    kani::assume(capital > 0);
+    kani::assume(capital <= 20);
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group
+        .deposit_not_atomic(&mut account, capital as u128)
+        .unwrap();
+
+    let charged = group
+        .charge_account_fee_not_atomic(&mut account, 40)
+        .unwrap();
+
+    kani::cover!(
+        charged < 40,
+        "v13 liquidation-fee floor shortfall fee path reachable"
+    );
+    assert_eq!(charged, capital as u128);
+    assert_eq!(account.capital, 0);
+    assert_eq!(group.insurance, capital as u128);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.vault, capital as u128);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v13_resolved_active_position_close_returns_progress_without_payout() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
