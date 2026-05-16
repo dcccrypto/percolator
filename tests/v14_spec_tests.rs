@@ -1103,6 +1103,73 @@ fn v14_permissionless_recovery_cannot_override_resolved_mode() {
 }
 
 #[test]
+fn v14_recovery_mode_blocks_value_escape_and_fee_sync_before_mutation() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    a.pnl = 10;
+    g.pnl_pos_tot = 10;
+    g.vault += 10;
+    g.full_account_refresh(&mut a, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    let before = a;
+    let vault_before = g.vault;
+    let c_tot_before = g.c_tot;
+    let insurance_before = g.insurance;
+    g.declare_permissionless_recovery(PermissionlessRecoveryReasonV14::BelowProgressFloor)
+        .unwrap();
+
+    assert_eq!(
+        g.convert_released_pnl_to_capital_not_atomic(&mut a),
+        Err(V14Error::LockActive)
+    );
+    assert_eq!(
+        g.withdraw_not_atomic(&mut a, 1, &[1; V14_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V14Error::LockActive)
+    );
+    assert_eq!(
+        g.sync_account_fee_to_slot_not_atomic(&mut a, 1, 1),
+        Err(V14Error::LockActive)
+    );
+    assert_eq!(a, before);
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.c_tot, c_tot_before);
+    assert_eq!(g.insurance, insurance_before);
+}
+
+#[test]
+fn v14_recovery_mode_rejects_non_recovery_crank_before_account_mutation() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
+    g.declare_permissionless_recovery(
+        PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
+    )
+    .unwrap();
+    let before = a;
+
+    let res = g.permissionless_crank_not_atomic(
+        &mut a,
+        PermissionlessCrankRequestV14 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 1,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV14::Refresh,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    assert_eq!(res, Err(V14Error::LockActive));
+    assert_eq!(a, before);
+    assert_eq!(
+        g.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability)
+    );
+    assert_eq!(g.mode, MarketModeV14::Recovery);
+}
+
+#[test]
 fn v14_permissionless_recovery_fails_closed_when_disabled() {
     let mut g = group();
     g.config.permissionless_recovery_enabled = false;

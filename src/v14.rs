@@ -2046,6 +2046,9 @@ impl MarketGroupV14 {
         fee_rate_per_slot: u128,
     ) -> V14Result<u128> {
         self.validate_account_shape(account)?;
+        if matches!(self.mode, MarketModeV14::Recovery) {
+            return Err(V14Error::LockActive);
+        }
         if now_slot < account.last_fee_slot {
             return Err(V14Error::Stale);
         }
@@ -2120,6 +2123,9 @@ impl MarketGroupV14 {
     ) -> V14Result<()> {
         if amount == 0 {
             return Ok(());
+        }
+        if self.mode != MarketModeV14::Live {
+            return Err(V14Error::LockActive);
         }
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         self.full_account_refresh(account, effective_prices)?;
@@ -2413,6 +2419,7 @@ impl MarketGroupV14 {
 
         if self.threshold_stress_active
             || self.bankruptcy_hlock_active
+            || self.mode == MarketModeV14::Recovery
             || instruction_bankruptcy_candidate
             || self.loss_stale_active
             || self.active_bankrupt_close_present
@@ -3159,6 +3166,11 @@ impl MarketGroupV14 {
         effective_prices: &[u64; V14_MAX_PORTFOLIO_ASSETS_N],
     ) -> V14Result<PermissionlessProgressOutcomeV14> {
         self.validate_account_shape(account)?;
+        if self.mode != MarketModeV14::Live
+            && !matches!(request.action, PermissionlessCrankActionV14::Recover(_))
+        {
+            return Err(V14Error::LockActive);
+        }
         let protective_progress = match request.action {
             PermissionlessCrankActionV14::Refresh => {
                 let touches_accrued_asset = request.asset_index

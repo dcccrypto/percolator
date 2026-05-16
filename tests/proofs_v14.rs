@@ -870,6 +870,89 @@ fn proof_v14_permissionless_recovery_enables_dead_leg_forfeit_without_value_esca
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v14_recovery_mode_blocks_value_escape_paths_before_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    account.pnl = 10;
+    group.pnl_pos_tot = 10;
+    group.vault = group.vault.checked_add(10).unwrap();
+    group
+        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    group
+        .declare_permissionless_recovery(PermissionlessRecoveryReasonV14::BelowProgressFloor)
+        .unwrap();
+    let account_before = account;
+    let vault_before = group.vault;
+    let c_tot_before = group.c_tot;
+    let insurance_before = group.insurance;
+
+    let convert = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+    let withdraw = group.withdraw_not_atomic(&mut account, 1, &[1; V14_MAX_PORTFOLIO_ASSETS_N]);
+    let fee_sync = group.sync_account_fee_to_slot_not_atomic(&mut account, 1, 1);
+
+    kani::cover!(
+        convert == Err(V14Error::LockActive)
+            && withdraw == Err(V14Error::LockActive)
+            && fee_sync == Err(V14Error::LockActive),
+        "v14 terminal recovery blocks value escape paths"
+    );
+    assert_eq!(convert, Err(V14Error::LockActive));
+    assert_eq!(withdraw, Err(V14Error::LockActive));
+    assert_eq!(fee_sync, Err(V14Error::LockActive));
+    assert_eq!(account, account_before);
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.c_tot, c_tot_before);
+    assert_eq!(group.insurance, insurance_before);
+    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::BelowProgressFloor)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v14_recovery_mode_rejects_non_recovery_crank_before_account_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    let asset_before = group.assets[0];
+    let reason = PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability;
+    group.declare_permissionless_recovery(reason).unwrap();
+    let account_before = account;
+    let result = group.permissionless_crank_not_atomic(
+        &mut account,
+        PermissionlessCrankRequestV14 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 1,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV14::Refresh,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V14Error::LockActive),
+        "v14 terminal recovery rejects non-recovery crank before mutation"
+    );
+    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(account, account_before);
+    assert_eq!(group.assets[0], asset_before);
+    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.recovery_reason, Some(reason));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_public_config_accepts_full_margin_loss_only_envelope() {
