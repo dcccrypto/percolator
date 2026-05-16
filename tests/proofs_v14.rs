@@ -954,6 +954,50 @@ fn proof_v14_full_refresh_haircuts_positive_pnl_under_global_impairment() {
 }
 
 #[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
+    let profit: u8 = kani::any();
+    let residual: u8 = kani::any();
+    let loss: u8 = kani::any();
+    kani::assume(profit > 1);
+    kani::assume(profit <= 20);
+    kani::assume(residual > 0);
+    kani::assume(residual < profit);
+    kani::assume(loss > residual);
+    kani::assume(loss <= 20);
+
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    account.pnl = profit as i128;
+    group.pnl_pos_tot = profit as u128;
+    group.pnl_pos_bound_tot = profit as u128;
+    group.vault = residual as u128;
+    group.assets[0].k_long = -((loss as i128) * ADL_ONE as i128);
+
+    let cert = group
+        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let uncovered = (loss - residual) as i128;
+    kani::cover!(
+        profit > loss && residual < loss,
+        "v14 negative K/F settlement would be positive under face netting"
+    );
+    assert_eq!(account.pnl, -uncovered);
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(group.pnl_pos_bound_tot, 0);
+    assert_eq!(group.negative_pnl_account_count, 1);
+    assert_eq!(cert.certified_equity, -uncovered);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_deposit_then_withdraw_roundtrip_preserves_accounting() {

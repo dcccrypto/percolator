@@ -4378,7 +4378,10 @@ impl MarketGroupV14 {
         let net = k_delta
             .checked_add(f_delta)
             .ok_or(V14Error::ArithmeticOverflow)?;
-        if net != 0 {
+        validate_non_min_i128(net)?;
+        if net < 0 {
+            self.apply_haircut_bounded_close_loss_to_pnl(account, net.unsigned_abs())?;
+        } else if net > 0 {
             let new_pnl = account
                 .pnl
                 .checked_add(net)
