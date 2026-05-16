@@ -364,6 +364,33 @@ fn v14_full_refresh_uses_haircut_bounded_support_for_negative_kf_delta_when_impa
 }
 
 #[test]
+fn v14_full_refresh_uses_haircut_bounded_new_positive_kf_to_cure_prior_loss() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+
+    g.vault = 50;
+    g.assets[0].k_long = -(100 * ADL_ONE as i128);
+    g.assets[1].k_long = 100 * ADL_ONE as i128;
+
+    let cert = g
+        .full_account_refresh(&mut a, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(
+        a.pnl, -50,
+        "new positive K/F support must cure prior losses only at haircut value"
+    );
+    assert_eq!(g.pnl_pos_tot, 0);
+    assert_eq!(g.pnl_pos_bound_tot, 0);
+    assert_eq!(g.negative_pnl_account_count, 1);
+    assert_eq!(cert.certified_equity, -50);
+}
+
+#[test]
 fn v14_withdraw_uses_haircut_positive_credit_not_face_pnl_when_unlocked() {
     let (market, _, _) = ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 10);

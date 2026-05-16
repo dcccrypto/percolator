@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 124 |
-| Kani proofs | 124 |
-| Kani cover checks | 194 |
+| Rust spec/fuzz tests | 125 |
+| Kani proofs | 125 |
+| Kani cover checks | 195 |
 | Kani assumptions | 123 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 123 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 124 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 117 | 186 |
+| `tests/proofs_v14.rs` | 0 | 118 | 187 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 124 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 125 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -86,6 +86,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only` | 225s | PASS |
 | `proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired` | 51s | PASS |
 | `proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting` | 308s | PASS |
+| `proof_v14_positive_kf_delta_cures_prior_loss_at_haircut_value` | 29s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -147,7 +148,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `permissionless_recovery_no_caller_chosen_price` | `v14_permissionless_recovery_is_declared_by_reason_not_caller_price`; `proof_v14_permissionless_recovery_declares_reason_or_fails_closed`; recovery crank proof |
 | `explicit_loss_audit_overflow_does_not_trap_funds` | `v14_explicit_loss_audit_overflow_declares_recovery`; `proof_v14_explicit_loss_audit_overflow_declares_recovery_without_mutation` |
 | `owner_dead_leg_forfeit_does_not_hostage_unrelated_collateral` | `v14_dead_leg_forfeit_is_unavailable_for_normal_live_leg`; `v14_dead_leg_forfeit_detaches_without_crediting_positive_pnl`; `v14_dead_leg_forfeit_books_negative_residual_to_opposing_domain_only`; `proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta`; `proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only` |
-| `effective_support_consumption_burns_required_face_junior_claim` / `support_consumed_cannot_exceed_g_value_of_face_claim_burned` | `v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired`; `proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired`; `v14_full_refresh_uses_haircut_bounded_support_for_negative_kf_delta_when_impaired`; `proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting` |
+| `effective_support_consumption_burns_required_face_junior_claim` / `support_consumed_cannot_exceed_g_value_of_face_claim_burned` | `v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired`; `proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired`; `v14_full_refresh_uses_haircut_bounded_support_for_negative_kf_delta_when_impaired`; `proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting`; `v14_full_refresh_uses_haircut_bounded_new_positive_kf_to_cure_prior_loss`; `proof_v14_positive_kf_delta_cures_prior_loss_at_haircut_value` |
 | `authoritatively_flat_account_never_receives_B_loss` | `v14_authoritatively_flat_account_never_receives_b_loss`; `proof_v14_authoritatively_flat_account_never_receives_b_loss` |
 | `no_single_instruction_full_market_requirement` | no-slab v14 architecture; no full-market scan crank test/proof; account-local crank and refresh tests/proofs |
 | `worst_case_hinted_progress_totality` | `v14_worst_case_hinted_progress_actions_are_total_and_bounded`; `proof_v14_worst_case_hinted_progress_actions_are_total_and_bounded` |
@@ -204,9 +205,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v14 production transitions | 109 |
+| Harnesses over v14 production transitions | 110 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 109 |
+| Harnesses with `kani::cover!` reachability checks | 110 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |

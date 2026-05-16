@@ -998,6 +998,40 @@ fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v14_positive_kf_delta_cures_prior_loss_at_haircut_value() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut account, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group.vault = 50;
+    group.assets[0].k_long = -(100 * ADL_ONE as i128);
+    group.assets[1].k_long = 100 * ADL_ONE as i128;
+
+    let cert = group
+        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    kani::cover!(
+        account.pnl == -50,
+        "v14 positive K/F support cures prior loss only at haircut value"
+    );
+    assert_eq!(account.pnl, -50);
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(group.pnl_pos_bound_tot, 0);
+    assert_eq!(group.negative_pnl_account_count, 1);
+    assert_eq!(cert.certified_equity, -50);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_deposit_then_withdraw_roundtrip_preserves_accounting() {

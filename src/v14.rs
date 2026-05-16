@@ -4136,6 +4136,75 @@ impl MarketGroupV14 {
         })
     }
 
+    fn apply_signed_kf_delta_to_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV14,
+        delta: i128,
+    ) -> V14Result<SupportLossApplicationV14> {
+        validate_non_min_i128(delta)?;
+        if delta == 0 {
+            return Ok(SupportLossApplicationV14 {
+                support_consumed: 0,
+                junior_face_burned: 0,
+            });
+        }
+        if delta < 0 {
+            return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs());
+        }
+        if account.pnl >= 0 {
+            let new_pnl = account
+                .pnl
+                .checked_add(delta)
+                .ok_or(V14Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, new_pnl)?;
+            return Ok(SupportLossApplicationV14 {
+                support_consumed: 0,
+                junior_face_burned: 0,
+            });
+        }
+
+        let old_loss = account.pnl.unsigned_abs();
+        let new_face_support = delta as u128;
+        let residual = self.residual();
+        let junior_bound = self
+            .junior_claim_bound()
+            .checked_add(new_face_support)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let effective_available =
+            self.haircut_effective_support(new_face_support, residual, junior_bound)?;
+        let support_consumed = effective_available.min(old_loss);
+        let remaining_loss = old_loss
+            .checked_sub(support_consumed)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let mut junior_face_burned = if support_consumed == 0 {
+            0
+        } else {
+            self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
+        };
+        if remaining_loss != 0 {
+            junior_face_burned = new_face_support;
+        }
+        if junior_face_burned > new_face_support {
+            return Err(V14Error::ArithmeticOverflow);
+        }
+
+        let retained_face = new_face_support
+            .checked_sub(junior_face_burned)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        let retained_i128 =
+            i128::try_from(retained_face).map_err(|_| V14Error::ArithmeticOverflow)?;
+        let remaining_i128 =
+            i128::try_from(remaining_loss).map_err(|_| V14Error::ArithmeticOverflow)?;
+        let new_pnl = retained_i128
+            .checked_sub(remaining_i128)
+            .ok_or(V14Error::ArithmeticOverflow)?;
+        self.set_account_pnl(account, new_pnl)?;
+        Ok(SupportLossApplicationV14 {
+            support_consumed,
+            junior_face_burned,
+        })
+    }
+
     fn insurance_domain_index(&self, asset_index: usize, side: SideV14) -> V14Result<usize> {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V14Error::InvalidLeg);
@@ -4379,14 +4448,8 @@ impl MarketGroupV14 {
             .checked_add(f_delta)
             .ok_or(V14Error::ArithmeticOverflow)?;
         validate_non_min_i128(net)?;
-        if net < 0 {
-            self.apply_haircut_bounded_close_loss_to_pnl(account, net.unsigned_abs())?;
-        } else if net > 0 {
-            let new_pnl = account
-                .pnl
-                .checked_add(net)
-                .ok_or(V14Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+        if net != 0 {
+            self.apply_signed_kf_delta_to_pnl(account, net)?;
         }
         account.legs[asset_index].k_snap = k_now;
         account.legs[asset_index].f_snap = f_now;
