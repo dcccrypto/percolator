@@ -6040,6 +6040,50 @@ impl RiskEngine {
         self.bankruptcy_hmax_lock_active = false;
     }
 
+    /// Wave 12-I (port of upstream `apply_stress_envelope_progress`): the
+    /// missing WRITER that completes KL-FORK-ENGINE-STRESS-ENVELOPE-1
+    /// revocation. Called by keeper_crank paths after a stress-counted
+    /// inspection pass.
+    ///
+    /// When an envelope is active (`stress_consumed_bps_e9_since_envelope > 0`
+    /// OR `bankruptcy_hmax_lock_active`), each counted inspection consumes
+    /// one of the remaining envelope indices. Once `remaining_indices`
+    /// drops to zero AND the sweep generation has advanced past the
+    /// envelope's start AND we're not in the same slot as the envelope
+    /// start AND no active bankrupt-close is in flight, the envelope
+    /// clears (bankruptcy_hmax_lock_active → false, stress fields → 0).
+    ///
+    /// Mirrors toly engine `apply_stress_envelope_progress`
+    /// (upstream src/percolator.rs:6271-6300).
+    pub fn apply_stress_envelope_progress(
+        &mut self,
+        now_slot: u64,
+        counted_indices: u64,
+    ) -> Result<()> {
+        let envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        if !envelope_active || counted_indices == 0 {
+            return Ok(());
+        }
+        let dec = core::cmp::min(self.stress_envelope_remaining_indices, counted_indices);
+        self.stress_envelope_remaining_indices = self
+            .stress_envelope_remaining_indices
+            .checked_sub(dec)
+            .ok_or(RiskError::CorruptState)?;
+        let generation_after_stress = self.stress_envelope_start_generation != NO_SLOT
+            && self.sweep_generation > self.stress_envelope_start_generation
+            && self.last_sweep_generation_advance_slot != NO_SLOT
+            && self.last_sweep_generation_advance_slot > self.stress_envelope_start_slot;
+        if self.stress_envelope_remaining_indices == 0
+            && self.stress_envelope_start_slot != now_slot
+            && generation_after_stress
+            && self.active_close_present == 0
+        {
+            self.clear_stress_envelope();
+        }
+        Ok(())
+    }
+
     /// Wave 5b / KL-FORK-ENGINE-BANKRUPT-CLOSE-1: state-machine
     /// structural helpers (Path A2 schema+helpers).
     ///
@@ -8965,11 +9009,18 @@ impl RiskEngine {
         let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
         let sweep_end = core::cmp::min(sweep_end_u64, wrap_bound);
 
+        // Wave 12-I: track inspected count for stress envelope progress.
+        // Each USED-account inspection consumes one of the envelope's
+        // remaining indices (matches toly upstream's
+        // `phase2.stress_counted_inspected` counter).
         let mut i = cursor_start;
+        let mut stress_counted_inspected: u64 = 0;
         while i < sweep_end {
             let iu = i as usize;
             if self.is_used(iu) {
                 self.touch_account_live_local(iu, &mut ctx)?;
+                stress_counted_inspected =
+                    stress_counted_inspected.checked_add(1).ok_or(RiskError::Overflow)?;
             }
             i += 1;
         }
@@ -8982,9 +9033,29 @@ impl RiskEngine {
                 .checked_add(1)
                 .ok_or(RiskError::Overflow)?;
             self.price_move_consumed_bps_this_generation = 0;
+            // Wave 12-I: stamp the wrap slot so the stress envelope
+            // writer's `generation_after_stress` predicate can recognise
+            // that the sweep has rotated past the envelope's start point.
+            self.last_sweep_generation_advance_slot = now_slot;
         } else {
             self.rr_cursor_position = sweep_end;
         }
+
+        // Wave 12-I (port of upstream apply_stress_envelope_progress wire-up):
+        // decrement the envelope's remaining-indices counter by the inspections
+        // performed this crank. If `ctx.stress_envelope_restarted` was set
+        // earlier in this instruction, treat the consumption as zero so the
+        // restart's freshly-stamped envelope is not pre-consumed by inspections
+        // that happened BEFORE the restart. Once the counter drops to zero
+        // (with the generation/slot guards) the envelope clears, allowing the
+        // bankruptcy_hmax_lock to release and live insurance withdrawals to
+        // pass `withdraw_live_insurance_not_atomic`'s stress gate again.
+        let counted = if ctx.stress_envelope_restarted {
+            0
+        } else {
+            stress_counted_inspected
+        };
+        self.apply_stress_envelope_progress(now_slot, counted)?;
 
         // Finalize: compute fresh snapshot from post-mutation state, apply
         // whole-only conversion + fee sweep to all tracked accounts.
