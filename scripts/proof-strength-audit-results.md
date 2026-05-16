@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 129 |
-| Kani proofs | 129 |
-| Kani cover checks | 200 |
+| Rust spec/fuzz tests | 130 |
+| Kani proofs | 130 |
+| Kani cover checks | 202 |
 | Kani assumptions | 123 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 128 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 129 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 122 | 192 |
+| `tests/proofs_v14.rs` | 0 | 123 | 194 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -91,6 +91,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_active_bankrupt_close_does_not_freeze_asset_accrual` | 11s | PASS |
 | `proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger` | 60s | PASS |
 | `proof_v14_account_shape_rejects_malformed_quantity_adl_close_progress` | 32s | PASS |
+| `proof_v14_account_shape_rejects_close_progress_domain_mismatch_for_open_leg` | 77s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -213,9 +214,9 @@ Strength indicators:
 
 | Check | Result |
 |---|---:|
-| Harnesses over v14 production transitions | 114 |
+| Harnesses over v14 production transitions | 115 |
 | Harnesses over shared production arithmetic helpers | 7 |
-| Harnesses with `kani::cover!` reachability checks | 114 |
+| Harnesses with `kani::cover!` reachability checks | 115 |
 | Explicit `kani::assume(false)` / `assume(false)` findings | 0 |
 | Confirmed vacuous harnesses | 0 |
 | Confirmed weak harnesses | 0 |
@@ -224,10 +225,10 @@ Current classification:
 
 | Classification | Status |
 |---|---|
-| Non-vacuity | No confirmed vacuous harnesses found. Cover checks exercise h-min/h-max, stale set/clear, stale/B-stale deposit lock preservation, hidden-leg rejection, persisted provenance/bitmap smuggling rejection, B-chunk progress paths, B-stale trade rollback, malformed fee-credit states, invalid config branches, aggregate deposit branches, arithmetic floor/ceil branches, positive/negative K-diff branches, bankrupt residual recovery, zero/partial insurance paths, non-deficit insurance-boundary public paths, favorable-action lock composition, active-close accrual, close-id overwrite rejection, malformed quantity-ADL ledgers, permissionless partial-B refresh, released-PnL zero/positive conversion paths, resolved partial-B close progress, partial-liquidation recovery, and rebalance reduction paths. |
+| Non-vacuity | No confirmed vacuous harnesses found. Cover checks exercise h-min/h-max, stale set/clear, stale/B-stale deposit lock preservation, hidden-leg rejection, persisted provenance/bitmap smuggling rejection, B-chunk progress paths, B-stale trade rollback, malformed fee-credit states, invalid config branches, aggregate deposit branches, arithmetic floor/ceil branches, positive/negative K-diff branches, bankrupt residual recovery, zero/partial insurance paths, non-deficit insurance-boundary public paths, favorable-action lock composition, active-close accrual, close-id overwrite rejection, malformed quantity-ADL ledgers, close-progress domain mismatch rejection, permissionless partial-B refresh, released-PnL zero/positive conversion paths, resolved partial-B close progress, partial-liquidation recovery, and rebalance reduction paths. |
 | Weak proofs | No confirmed weak proofs in the v14 inventory. Concrete-branch harnesses are intentional regression proofs over production methods, and symbolic arithmetic/transition harnesses cover the remaining branch families. |
 | Inductive strength | The stale-counter and arithmetic helper proofs are closest to local inductive transition proofs. The overall suite is a strong production-code safety/liveness harness set, not a complete arbitrary-state inductive proof of the whole engine. |
-| Practical proof boundary | The suite proves key v14 account-local invariants over real production methods: h-lock selection, provenance/hidden-leg fail-closed behavior, persisted wire provenance/bitmap fail-closed behavior, stale counter idempotence and refresh clearing, stale/B-stale deposit lock preservation, malformed signed state rejection, deposit/withdraw accounting, aggregate senior accounting, close-account local-state gating, risk-notional monotonicity, position-bound fail-before-mutation, B-chunk progress/fail-closed behavior, close-id immutability against active-ledger overwrite, quantity-ADL close-progress shape, B-stale trade preflight rollback through the public staged API, bounded repeated B-chunk completion for small residuals, multi-asset full-refresh settlement/scoring, non-deficit public-path insurance preservation, full-refresh gating, favorable-action lock fail-before-mutation behavior, monotonic liquidation-score rejection, loss-before-fee ordering, account-free equity-active accrual protective-progress gating, active-bankrupt-close accrual liveness, one-segment bounded catchup, funding-rate cap fail-before-mutation, dynamic trade-fee enforcement, trade conservation/OI symmetry, target/effective lag risk-increase rejection, h-lock risk-increase rejection, h-lock risk-reducing liveness under no-positive-credit margin, h-lock withdrawal no-positive-credit gating, released-PnL conversion bounded by residual, loss-stale nonflat withdrawal blocking, bankrupt liquidation insurance-before-social-loss ordering, bankrupt residual durability before exposure release, partial-liquidation residual recovery before socialization, uncollectible liquidation-fee exclusion from residual loss, resolved close liveness and payout shape, durable B residual booking, prior-epoch reset clearing, quantity-ADL OI symmetry, rebalance strict risk-progress, price/funding settlement, invalid trade rollback, partial liquidation, and shared wide arithmetic semantics. |
+| Practical proof boundary | The suite proves key v14 account-local invariants over real production methods: h-lock selection, provenance/hidden-leg fail-closed behavior, persisted wire provenance/bitmap fail-closed behavior, stale counter idempotence and refresh clearing, stale/B-stale deposit lock preservation, malformed signed state rejection, deposit/withdraw accounting, aggregate senior accounting, close-account local-state gating, risk-notional monotonicity, position-bound fail-before-mutation, B-chunk progress/fail-closed behavior, close-id immutability against active-ledger overwrite, quantity-ADL close-progress shape, close-progress residual-domain shape, B-stale trade preflight rollback through the public staged API, bounded repeated B-chunk completion for small residuals, multi-asset full-refresh settlement/scoring, non-deficit public-path insurance preservation, full-refresh gating, favorable-action lock fail-before-mutation behavior, monotonic liquidation-score rejection, loss-before-fee ordering, account-free equity-active accrual protective-progress gating, active-bankrupt-close accrual liveness, one-segment bounded catchup, funding-rate cap fail-before-mutation, dynamic trade-fee enforcement, trade conservation/OI symmetry, target/effective lag risk-increase rejection, h-lock risk-increase rejection, h-lock risk-reducing liveness under no-positive-credit margin, h-lock withdrawal no-positive-credit gating, released-PnL conversion bounded by residual, loss-stale nonflat withdrawal blocking, bankrupt liquidation insurance-before-social-loss ordering, bankrupt residual durability before exposure release, partial-liquidation residual recovery before socialization, uncollectible liquidation-fee exclusion from residual loss, resolved close liveness and payout shape, durable B residual booking, prior-epoch reset clearing, quantity-ADL OI symmetry, rebalance strict risk-progress, price/funding settlement, invalid trade rollback, partial liquidation, and shared wide arithmetic semantics. |
 
 ## Rust Test Matrix
 
@@ -245,5 +246,5 @@ property families have been reviewed and either ported to v14 production-code
 tests/proofs or retired as slab/wrapper/v12-queue-specific.
 
 The only open audit-maintenance item is to rerun `scripts/run_kani_full_audit.sh`
-against the current 120-proof inventory and replace the older 57-proof timing
+against the current 130-proof inventory and replace the older 57-proof timing
 artifacts.

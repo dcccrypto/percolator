@@ -4027,6 +4027,43 @@ fn proof_v14_account_shape_rejects_malformed_quantity_adl_close_progress() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v14_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
+    let closing_long: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let side = if closing_long {
+        SideV14::Long
+    } else {
+        SideV14::Short
+    };
+    let signed_basis = if closing_long { 4 } else { -4 };
+    group
+        .attach_leg(&mut account, 0, side, signed_basis)
+        .unwrap();
+    account.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: false,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: side,
+        gross_loss_at_close_start: 2,
+        b_loss_booked: 1,
+        residual_remaining: 1,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+
+    let result = group.validate_account_shape(&account);
+
+    kani::cover!(closing_long, "v14 long close domain mismatch reachable");
+    kani::cover!(!closing_long, "v14 short close domain mismatch reachable");
+    assert_eq!(result, Err(V14Error::InvalidLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
     let close_b_residual: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();

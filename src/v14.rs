@@ -1892,6 +1892,15 @@ impl MarketGroupV14 {
                 validate_active_leg(leg)?;
             }
         }
+        if account.close_progress.active {
+            let i = account.close_progress.asset_index as usize;
+            if i < n {
+                let leg = account.legs[i];
+                if leg.active && account.close_progress.domain_side != opposite_side(leg.side) {
+                    return Err(V14Error::InvalidLeg);
+                }
+            }
+        }
         if account.close_progress.quantity_adl_applied_q != 0 {
             let i = account.close_progress.asset_index as usize;
             if i >= n || account.legs[i].active {

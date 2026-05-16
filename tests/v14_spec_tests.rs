@@ -2682,6 +2682,30 @@ fn v14_account_shape_rejects_malformed_quantity_adl_close_progress() {
 }
 
 #[test]
+fn v14_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
+    let mut g = group();
+    let mut closing = account();
+    g.attach_leg(&mut closing, 0, SideV14::Long, 4).unwrap();
+    closing.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: false,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Long,
+        gross_loss_at_close_start: 2,
+        b_loss_booked: 1,
+        residual_remaining: 1,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+
+    assert_eq!(
+        g.validate_account_shape(&closing),
+        Err(V14Error::InvalidLeg),
+        "a close ledger for an open long leg must attribute residual loss to the short domain"
+    );
+}
+
+#[test]
 fn v14_permissionless_crank_commits_refresh_before_equity_active_accrual() {
     let mut g = group();
     let mut long = account();
