@@ -1187,7 +1187,7 @@ fn proof_v13_public_invariants_reject_broken_senior_claim_conservation() {
 #[kani::solver(cadical)]
 fn proof_v13_public_invariants_reject_hard_global_bounds() {
     let case: u8 = kani::any();
-    kani::assume(case < 7);
+    kani::assume(case < 15);
     let (market, _, _) = concrete_ids();
     let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
 
@@ -1204,7 +1204,15 @@ fn proof_v13_public_invariants_reject_hard_global_bounds() {
         3 => group.assets[0].effective_price = 0,
         4 => group.assets[0].oi_eff_long_q = MAX_OI_SIDE_Q + 1,
         5 => group.assets[0].loss_weight_sum_long = SOCIAL_LOSS_DEN + 1,
-        _ => group.assets[0].social_loss_remainder_long_num = SOCIAL_LOSS_DEN,
+        6 => group.assets[0].social_loss_remainder_long_num = SOCIAL_LOSS_DEN,
+        7 => group.assets[0].k_long = i128::MIN,
+        8 => group.assets[0].k_short = i128::MIN,
+        9 => group.assets[0].f_long_num = i128::MIN,
+        10 => group.assets[0].f_short_num = i128::MIN,
+        11 => group.assets[0].k_epoch_start_long = i128::MIN,
+        12 => group.assets[0].k_epoch_start_short = i128::MIN,
+        13 => group.assets[0].f_epoch_start_long_num = i128::MIN,
+        _ => group.assets[0].f_epoch_start_short_num = i128::MIN,
     }
 
     kani::cover!(case == 0, "v13 vault cap violation reachable");
@@ -1214,6 +1222,26 @@ fn proof_v13_public_invariants_reject_hard_global_bounds() {
     kani::cover!(case == 4, "v13 OI side cap violation reachable");
     kani::cover!(case == 5, "v13 loss weight cap violation reachable");
     kani::cover!(case == 6, "v13 social loss remainder violation reachable");
+    kani::cover!(case == 7, "v13 K long i128::MIN violation reachable");
+    kani::cover!(case == 8, "v13 K short i128::MIN violation reachable");
+    kani::cover!(case == 9, "v13 F long i128::MIN violation reachable");
+    kani::cover!(case == 10, "v13 F short i128::MIN violation reachable");
+    kani::cover!(
+        case == 11,
+        "v13 K long epoch-start i128::MIN violation reachable"
+    );
+    kani::cover!(
+        case == 12,
+        "v13 K short epoch-start i128::MIN violation reachable"
+    );
+    kani::cover!(
+        case == 13,
+        "v13 F long epoch-start i128::MIN violation reachable"
+    );
+    kani::cover!(
+        case == 14,
+        "v13 F short epoch-start i128::MIN violation reachable"
+    );
     assert_eq!(
         group.assert_public_invariants(),
         Err(V13Error::InvalidConfig)
@@ -1486,6 +1514,63 @@ fn proof_v13_fee_charge_settles_loss_before_fee() {
     assert_eq!(account.capital, 0);
     assert_eq!(account.pnl, 0);
     assert_eq!(group.insurance, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
+    let capital: u8 = kani::any();
+    kani::assume(capital > 0);
+    kani::assume(capital <= 20);
+    let (market, account_id, owner) = symbolic_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group
+        .deposit_not_atomic(&mut account, capital as u128)
+        .unwrap();
+
+    let charged = group
+        .sync_account_fee_to_slot_not_atomic(&mut account, 2, u128::MAX)
+        .unwrap();
+
+    kani::cover!(
+        charged == capital as u128,
+        "v13 fee sync wide-product cap path charges available principal"
+    );
+    assert_eq!(charged, capital as u128);
+    assert_eq!(account.last_fee_slot, 2);
+    assert_eq!(account.capital, 0);
+    assert_eq!(account.fee_credits, 0);
+    assert_eq!(group.insurance, capital as u128);
+    assert_eq!(group.c_tot, 0);
+    assert_eq!(group.vault, capital as u128);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v13_direct_fee_charge_is_live_only_without_resolved_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV13::new(market, V13Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV13::empty(ProvenanceHeaderV13::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 5).unwrap();
+    group.resolve_market_not_atomic(1).unwrap();
+    let before_group = group;
+    let before_account = account;
+
+    let result = group.charge_account_fee_not_atomic(&mut account, 1);
+
+    kani::cover!(
+        group.mode == MarketModeV13::Resolved,
+        "v13 direct fee charge resolved-mode rejection reachable"
+    );
+    assert_eq!(result, Err(V13Error::LockActive));
+    assert_eq!(group, before_group);
+    assert_eq!(account, before_account);
 }
 
 #[kani::proof]

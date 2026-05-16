@@ -235,6 +235,17 @@ fn v13_public_invariants_reject_broken_senior_claim_conservation() {
 }
 
 #[test]
+fn v13_public_invariants_reject_persistent_asset_kf_i128_min() {
+    let mut g = group();
+    g.assets[0].k_long = i128::MIN;
+    assert_eq!(g.assert_public_invariants(), Err(V13Error::InvalidConfig));
+
+    let mut g = group();
+    g.assets[0].f_epoch_start_short_num = i128::MIN;
+    assert_eq!(g.assert_public_invariants(), Err(V13Error::InvalidConfig));
+}
+
+#[test]
 fn v13_cross_margin_collateral_counted_once_and_not_below_loss_envelope() {
     let mut g = group();
     let mut a = account();
@@ -958,6 +969,53 @@ fn v13_fee_sync_settles_hidden_kf_losses_before_collecting_fee() {
     assert_eq!(long.capital, 0);
     assert_eq!(long.pnl, 0);
     assert_eq!(g.insurance, 0);
+}
+
+#[test]
+fn v13_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 1_000_000).unwrap();
+
+    let charged = g
+        .sync_account_fee_to_slot_not_atomic(&mut a, 2, u128::MAX)
+        .unwrap();
+
+    assert_eq!(charged, 1_000_000);
+    assert_eq!(a.last_fee_slot, 2);
+    assert_eq!(a.capital, 0);
+    assert_eq!(
+        a.fee_credits, 0,
+        "uncollectible fee tail is dropped, not debt-socialized"
+    );
+    assert_eq!(g.insurance, 1_000_000);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(g.vault, 1_000_000);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
+fn v13_direct_fee_charge_is_live_only_but_resolved_fee_sync_still_works() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.resolve_market_not_atomic(10).unwrap();
+
+    let before = (g, a);
+    assert_eq!(
+        g.charge_account_fee_not_atomic(&mut a, 10),
+        Err(V13Error::LockActive)
+    );
+    assert_eq!((g, a), before);
+
+    let synced = g
+        .sync_account_fee_to_slot_not_atomic(&mut a, 10, 1)
+        .unwrap();
+    assert_eq!(synced, 10);
+    assert_eq!(a.last_fee_slot, 10);
+    assert_eq!(a.capital, 90);
+    assert_eq!(g.insurance, 10);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
 }
 
 #[test]

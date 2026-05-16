@@ -1033,6 +1033,17 @@ impl MarketGroupV13 {
         account: &mut PortfolioAccountV13,
         requested_fee: u128,
     ) -> V13Result<u128> {
+        if self.mode != MarketModeV13::Live {
+            return Err(V13Error::LockActive);
+        }
+        self.charge_account_fee_after_loss_settlement(account, requested_fee)
+    }
+
+    fn charge_account_fee_after_loss_settlement(
+        &mut self,
+        account: &mut PortfolioAccountV13,
+        requested_fee: u128,
+    ) -> V13Result<u128> {
         self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
         if account.b_stale_state || has_b_stale_leg(account) {
             return Err(V13Error::BStale);
@@ -1082,10 +1093,11 @@ impl MarketGroupV13 {
             return Ok(0);
         }
         let dt = fee_anchor - account.last_fee_slot;
-        let requested_fee = fee_rate_per_slot
-            .checked_mul(dt as u128)
+        let raw_fee = U256::from_u128(fee_rate_per_slot)
+            .checked_mul(U256::from_u64(dt))
             .ok_or(V13Error::ArithmeticOverflow)?;
-        let charged = self.charge_account_fee_not_atomic(account, requested_fee)?;
+        let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
+        let charged = self.charge_account_fee_after_loss_settlement(account, requested_fee)?;
         account.last_fee_slot = fee_anchor;
         Ok(charged)
     }
@@ -2458,6 +2470,14 @@ impl MarketGroupV13 {
                 || asset.raw_oracle_target_price > MAX_ORACLE_PRICE
                 || asset.fund_px_last == 0
                 || asset.fund_px_last > MAX_ORACLE_PRICE
+                || asset.k_long == i128::MIN
+                || asset.k_short == i128::MIN
+                || asset.f_long_num == i128::MIN
+                || asset.f_short_num == i128::MIN
+                || asset.k_epoch_start_long == i128::MIN
+                || asset.k_epoch_start_short == i128::MIN
+                || asset.f_epoch_start_long_num == i128::MIN
+                || asset.f_epoch_start_short_num == i128::MIN
                 || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
                 || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
                 || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
