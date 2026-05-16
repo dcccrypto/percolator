@@ -3705,6 +3705,40 @@ fn v14_resolved_positive_payout_waits_for_pending_domain_loss_barrier() {
 }
 
 #[test]
+fn v14_pending_domain_loss_barrier_does_not_freeze_unrelated_positive_credit() {
+    let (market, _, owner) = ids();
+    let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();
+    let mut profitable =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [71; 32], owner));
+    let mut opposite =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [72; 32], owner));
+    g.deposit_not_atomic(&mut profitable, 100).unwrap();
+    g.deposit_not_atomic(&mut opposite, 100).unwrap();
+    g.attach_leg(&mut profitable, 1, SideV14::Long, 10).unwrap();
+    g.attach_leg(&mut opposite, 1, SideV14::Short, -10).unwrap();
+    profitable.pnl = 5;
+    g.pnl_pos_tot = 5;
+    g.pnl_matured_pos_tot = 5;
+    g.pnl_pos_bound_tot = 5;
+    g.vault = g.c_tot + 5;
+    g.pending_domain_loss_barriers[1] = 1;
+    g.full_account_refresh(&mut profitable, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut profitable)
+        .unwrap();
+
+    assert_eq!(converted, 5);
+    assert_eq!(profitable.pnl, 0);
+    assert_eq!(profitable.capital, 105);
+    assert_eq!(g.c_tot, 205);
+    assert_eq!(g.pending_domain_loss_barriers[1], 1);
+    assert_eq!(g.assets[1].oi_eff_long_q, 10);
+    assert_eq!(g.assets[1].oi_eff_short_q, 10);
+}
+
+#[test]
 fn v14_dead_leg_forfeit_is_unavailable_for_normal_live_leg() {
     let mut g = group();
     let mut a = account();

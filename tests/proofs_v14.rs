@@ -4066,6 +4066,50 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
 }
 
 #[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
+fn proof_v14_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut profitable =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposite =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [77; 32], owner));
+    group.deposit_not_atomic(&mut profitable, 100).unwrap();
+    group.deposit_not_atomic(&mut opposite, 100).unwrap();
+    group
+        .attach_leg(&mut profitable, 1, SideV14::Long, 1)
+        .unwrap();
+    group
+        .attach_leg(&mut opposite, 1, SideV14::Short, -1)
+        .unwrap();
+    profitable.pnl = 5;
+    group.pnl_pos_tot = 5;
+    group.pnl_matured_pos_tot = 5;
+    group.pnl_pos_bound_tot = 5;
+    group.vault = group.c_tot + 5;
+    group.pending_domain_loss_barriers[1] = 1;
+    group
+        .full_account_refresh(&mut profitable, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let result = group.convert_released_pnl_to_capital_not_atomic(&mut profitable);
+
+    kani::cover!(
+        result == Ok(5),
+        "v14 unrelated-domain positive-credit conversion remains reachable"
+    );
+    assert_eq!(result, Ok(5));
+    assert_eq!(profitable.pnl, 0);
+    assert_eq!(profitable.capital, 105);
+    assert_eq!(group.c_tot, 205);
+    assert_eq!(group.pending_domain_loss_barriers[1], 1);
+    assert_eq!(group.assets[1].oi_eff_long_q, 1);
+    assert_eq!(group.assets[1].oi_eff_short_q, 1);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_resolved_flat_close_returns_exact_capital() {
