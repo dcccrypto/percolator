@@ -3267,7 +3267,7 @@ impl MarketGroupV14 {
         if gross_loss == 0 {
             return Ok(());
         }
-        if account.close_progress.has_pending_residual() {
+        if account.close_progress.active {
             return Err(V14Error::LockActive);
         }
         let close_id = account.close_progress.close_id.saturating_add(1).max(1);

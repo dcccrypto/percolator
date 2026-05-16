@@ -3921,6 +3921,57 @@ fn proof_v14_pending_domain_barrier_blocks_participants_until_residual_finalized
 }
 
 #[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    group
+        .attach_leg(&mut bankrupt, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    bankrupt.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: true,
+        close_id: 7,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 2,
+        b_loss_booked: 2,
+        residual_remaining: 0,
+        drift_reference_slot: group.current_slot,
+        max_close_slot: group.current_slot + 1,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    group.assets[1].k_long = -(100 * ADL_ONE as i128);
+    let before_ledger = bankrupt.close_progress;
+    let before_b_short = group.assets[1].b_short_num;
+
+    let result = group.liquidate_account_not_atomic(
+        &mut bankrupt,
+        LiquidationRequestV14 {
+            asset_index: 1,
+            close_q: POS_SCALE,
+            fee_bps: 0,
+        },
+        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        result == Err(V14Error::LockActive),
+        "v14 active finalized close ledger blocks new close id"
+    );
+    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(bankrupt.close_progress, before_ledger);
+    assert_eq!(group.assets[1].b_short_num, before_b_short);
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
 fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {

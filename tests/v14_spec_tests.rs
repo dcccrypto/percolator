@@ -2293,6 +2293,49 @@ fn v14_pending_close_progress_blocks_domain_escape_until_finalized() {
 }
 
 #[test]
+fn v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
+    let mut g = group();
+    let mut bankrupt = account();
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [42; 32], [3; 32]));
+    g.attach_leg(&mut bankrupt, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    bankrupt.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: true,
+        close_id: 7,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 2,
+        b_loss_booked: 2,
+        residual_remaining: 0,
+        drift_reference_slot: g.current_slot,
+        max_close_slot: g.current_slot + 1,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    g.assets[1].k_long = -(100 * ADL_ONE as i128);
+    let before_ledger = bankrupt.close_progress;
+    let before_b_short = g.assets[1].b_short_num;
+
+    assert_eq!(
+        g.liquidate_account_not_atomic(
+            &mut bankrupt,
+            LiquidationRequestV14 {
+                asset_index: 1,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+            },
+            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        ),
+        Err(V14Error::LockActive)
+    );
+    assert_eq!(bankrupt.close_progress, before_ledger);
+    assert_eq!(g.assets[1].b_short_num, before_b_short);
+}
+
+#[test]
 fn v14_pending_domain_loss_barrier_blocks_other_participants_until_residual_done() {
     let (market, _, owner) = ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 10);
