@@ -2151,6 +2151,89 @@ fn proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
 }
 
 #[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.mode = MarketModeV14::Recovery;
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group.assets[0].k_long = 3 * ADL_ONE as i128;
+
+    let out = group
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, 1)
+        .unwrap();
+
+    kani::cover!(
+        out.positive_pnl_forfeited > 0,
+        "v14 dead-leg positive K/F delta is forfeited"
+    );
+    assert!(out.detached);
+    assert_eq!(out.positive_pnl_forfeited, 3);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(account.active_bitmap, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
+    let loss_units: u8 = kani::any();
+    kani::assume(loss_units > 0);
+    kani::assume(loss_units <= 4);
+    let loss = loss_units as u128;
+
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
+    group.mode = MarketModeV14::Recovery;
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group.assets[0].mode_long = SideModeV14::DrainOnly;
+    group.assets[0].k_long = -((loss as i128) * ADL_ONE as i128);
+    let b_long_before = group.assets[0].b_long_num;
+    let b_short_before = group.assets[0].b_short_num;
+
+    let out = group
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, loss)
+        .unwrap();
+
+    kani::cover!(
+        out.residual_booked > 0,
+        "v14 dead-leg negative K/F delta books durable opposing-domain loss"
+    );
+    assert!(out.detached);
+    assert_eq!(out.loss_settled, loss);
+    assert_eq!(out.residual_booked, loss);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(account.pnl, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(group.assets[0].b_long_num, b_long_before);
+    assert!(group.assets[0].b_short_num > b_short_before);
+    assert_eq!(
+        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        Ok(0)
+    );
+    assert!(account.close_progress.finalized);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_fee_charge_settles_loss_before_fee() {

@@ -4,7 +4,7 @@ use percolator::v14::{
     MarketModeV14, PermissionlessCrankActionV14, PermissionlessCrankRequestV14,
     PermissionlessProgressOutcomeV14, PermissionlessRecoveryReasonV14, PortfolioAccountV14,
     PortfolioAccountV14Account, PortfolioLegV14, PortfolioLegV14Account, ProvenanceHeaderV14,
-    ProvenanceHeaderV14Account, RebalanceRequestV14, ResolvedCloseOutcomeV14, SideV14,
+    ProvenanceHeaderV14Account, RebalanceRequestV14, ResolvedCloseOutcomeV14, SideModeV14, SideV14,
     TradeRequestV14, V14Config, V14ConfigAccount, V14Error, V14OptionalRecoveryReasonAccount,
     V14PodI128, V14PodU128, V14PodU16, V14PodU32, V14PodU64, V14_DOMAIN_COUNT,
     V14_MAX_PORTFOLIO_ASSETS_N,
@@ -2771,6 +2771,91 @@ fn v14_resolved_close_returns_progress_after_partial_b_settlement() {
     assert!(a.legs[0].b_snap < g.assets[0].b_long_num);
     assert_eq!(a.last_fee_slot, 0);
     assert_eq!(a.active_bitmap, 1);
+}
+
+#[test]
+fn v14_dead_leg_forfeit_is_unavailable_for_normal_live_leg() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+
+    assert_eq!(
+        g.forfeit_recovery_leg_not_atomic(&mut a, 0, 4),
+        Err(V14Error::LockActive)
+    );
+    assert!(a.legs[0].active);
+    assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE);
+}
+
+#[test]
+fn v14_dead_leg_forfeit_detaches_without_crediting_positive_pnl() {
+    let mut g = group();
+    let mut a = account();
+    let mut unrelated =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [21; 32], [3; 32]));
+    g.mode = MarketModeV14::Recovery;
+    g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut unrelated, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].k_long = 7 * ADL_ONE as i128;
+
+    let out = g.forfeit_recovery_leg_not_atomic(&mut a, 0, 4).unwrap();
+
+    assert!(out.detached);
+    assert_eq!(out.positive_pnl_forfeited, 7);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(
+        a.pnl, 0,
+        "forfeited dead-leg profit must not become account credit"
+    );
+    assert_eq!(g.pnl_pos_tot, 0);
+    assert_eq!(a.active_bitmap, 0);
+    assert!(!a.legs[0].active);
+    assert!(unrelated.legs[1].active);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[1].oi_eff_short_q, POS_SCALE);
+}
+
+#[test]
+fn v14_dead_leg_forfeit_books_negative_residual_to_opposing_domain_only() {
+    let mut g = group();
+    let mut bankrupt = account();
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [22; 32], [3; 32]));
+    g.mode = MarketModeV14::Recovery;
+    g.attach_leg(&mut bankrupt, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].mode_long = SideModeV14::DrainOnly;
+    g.assets[0].k_long = -(5 * ADL_ONE as i128);
+    let long_b_before = g.assets[0].b_long_num;
+    let short_b_before = g.assets[0].b_short_num;
+
+    let out = g
+        .forfeit_recovery_leg_not_atomic(&mut bankrupt, 0, 10)
+        .unwrap();
+
+    assert!(out.detached);
+    assert_eq!(out.loss_settled, 5);
+    assert_eq!(out.residual_booked, 5);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(bankrupt.pnl, 0);
+    assert!(!bankrupt.legs[0].active);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[0].oi_eff_short_q, POS_SCALE);
+    assert_eq!(g.assets[0].b_long_num, long_b_before);
+    assert!(
+        g.assets[0].b_short_num > short_b_before,
+        "long dead-leg residual must book to the short bankruptcy domain"
+    );
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV14::Short),
+        Ok(0)
+    );
+    assert!(bankrupt.close_progress.finalized);
 }
 
 #[test]

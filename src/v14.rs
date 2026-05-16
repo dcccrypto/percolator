@@ -885,6 +885,18 @@ pub struct LiquidationOutcomeV14 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeadLegForfeitOutcomeV14 {
+    pub detached: bool,
+    pub positive_pnl_forfeited: u128,
+    pub loss_settled: u128,
+    pub principal_used: u128,
+    pub insurance_used: u128,
+    pub residual_booked: u128,
+    pub explicit_loss: u128,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RebalanceRequestV14 {
     pub asset_index: usize,
     pub reduce_q: u128,
@@ -2937,6 +2949,117 @@ impl MarketGroupV14 {
         })
     }
 
+    pub fn forfeit_recovery_leg_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV14,
+        asset_index: usize,
+        b_delta_budget: u128,
+    ) -> V14Result<DeadLegForfeitOutcomeV14> {
+        self.validate_account_shape(account)?;
+        if asset_index >= self.config.max_portfolio_assets as usize || b_delta_budget == 0 {
+            return Err(V14Error::InvalidLeg);
+        }
+        let leg = account.legs[asset_index];
+        if !leg.active {
+            return Err(V14Error::InvalidLeg);
+        }
+        if !self.leg_is_dead_for_forfeit(asset_index, leg.side)? {
+            return Err(V14Error::LockActive);
+        }
+
+        let (loss_settled, positive_pnl_forfeited) =
+            self.settle_forfeited_leg_kf_effects(account, asset_index)?;
+
+        let mut total_loss_settled = loss_settled;
+        if self.b_target_for_leg(asset_index, account.legs[asset_index])?
+            > account.legs[asset_index].b_snap
+        {
+            self.mark_leg_b_stale(account, asset_index)?;
+            let chunk = self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+            total_loss_settled = total_loss_settled
+                .checked_add(chunk.loss)
+                .ok_or(V14Error::ArithmeticOverflow)?;
+            if chunk.remaining_after != 0 {
+                return Ok(DeadLegForfeitOutcomeV14 {
+                    detached: false,
+                    positive_pnl_forfeited,
+                    loss_settled: total_loss_settled,
+                    principal_used: 0,
+                    insurance_used: 0,
+                    residual_booked: 0,
+                    explicit_loss: 0,
+                });
+            }
+        }
+
+        let principal_used = self.settle_negative_pnl_from_principal(account)?;
+        let gross_bankruptcy_residual = if account.pnl < 0 {
+            account.pnl.unsigned_abs()
+        } else {
+            0
+        };
+        if gross_bankruptcy_residual != 0 {
+            self.begin_close_progress_ledger(
+                account,
+                asset_index,
+                opposite_side(leg.side),
+                gross_bankruptcy_residual,
+            )?;
+        }
+
+        let insurance_used =
+            self.consume_domain_insurance_for_negative_pnl(asset_index, leg.side, account)?;
+        if insurance_used != 0 {
+            self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+        }
+
+        let residual = if account.pnl < 0 {
+            account.pnl.unsigned_abs()
+        } else {
+            0
+        };
+        let mut residual_booked = 0u128;
+        let mut explicit_loss = 0u128;
+        if residual != 0 {
+            let outcome = self.book_bankruptcy_residual_chunk_for_account(
+                account,
+                asset_index,
+                leg.side,
+                residual,
+            )?;
+            residual_booked = outcome.booked_loss;
+            explicit_loss = outcome.explicit_loss;
+            let cleared = residual_booked
+                .checked_add(explicit_loss)
+                .ok_or(V14Error::ArithmeticOverflow)?
+                .min(residual);
+            let cleared_i128 = i128::try_from(cleared).map_err(|_| V14Error::ArithmeticOverflow)?;
+            self.set_account_pnl(
+                account,
+                account
+                    .pnl
+                    .checked_add(cleared_i128)
+                    .ok_or(V14Error::ArithmeticOverflow)?,
+            )?;
+        }
+
+        let detached = account.pnl >= 0 && !account.close_progress.has_pending_residual();
+        if detached {
+            self.clear_leg(account, asset_index)?;
+        }
+
+        self.assert_public_invariants()?;
+        Ok(DeadLegForfeitOutcomeV14 {
+            detached,
+            positive_pnl_forfeited,
+            loss_settled: total_loss_settled,
+            principal_used,
+            insurance_used,
+            residual_booked,
+            explicit_loss,
+        })
+    }
+
     pub fn rebalance_reduce_position_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV14,
@@ -3805,7 +3928,10 @@ impl MarketGroupV14 {
     fn leg_is_dead_for_forfeit(&self, asset_index: usize, side: SideV14) -> V14Result<bool> {
         let side_mode = self.side_mode_for(asset_index, side)?;
         Ok(self.mode == MarketModeV14::Recovery
-            || matches!(side_mode, SideModeV14::DrainOnly | SideModeV14::ResetPending))
+            || matches!(
+                side_mode,
+                SideModeV14::DrainOnly | SideModeV14::ResetPending
+            ))
     }
 
     fn kf_target_for_leg(
