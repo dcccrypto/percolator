@@ -75,6 +75,7 @@ pub enum PermissionlessRecoveryReasonV13 {
     CounterOrEpochOverflowDeclaredRecovery,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProvenanceHeaderV13 {
     pub market_group_id: [u8; 32],
@@ -100,6 +101,7 @@ impl ProvenanceHeaderV13 {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V13Config {
     pub max_portfolio_assets: u8,
@@ -553,6 +555,7 @@ impl V13Config {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV13 {
     pub raw_oracle_target_price: u64,
@@ -634,6 +637,7 @@ impl Default for AssetStateV13 {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioLegV13 {
     pub active: bool,
@@ -675,6 +679,7 @@ impl Default for PortfolioLegV13 {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct HealthCertV13 {
     pub certified_equity: i128,
@@ -689,6 +694,7 @@ pub struct HealthCertV13 {
     pub valid: bool,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioAccountV13 {
     pub provenance_header: ProvenanceHeaderV13,
@@ -739,6 +745,7 @@ impl PortfolioAccountV13 {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarketGroupV13 {
     pub market_group_id: [u8; 32],
@@ -770,6 +777,7 @@ pub struct MarketGroupV13 {
     pub payout_snapshot_captured: bool,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccrueAssetOutcomeV13 {
     pub dt: u64,
@@ -779,6 +787,7 @@ pub struct AccrueAssetOutcomeV13 {
     pub loss_stale_after: bool,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TradeRequestV13 {
     pub asset_index: usize,
@@ -787,6 +796,7 @@ pub struct TradeRequestV13 {
     pub fee_bps: u64,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TradeOutcomeV13 {
     pub fee_a: u128,
@@ -794,6 +804,7 @@ pub struct TradeOutcomeV13 {
     pub notional: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationRequestV13 {
     pub asset_index: usize,
@@ -801,6 +812,7 @@ pub struct LiquidationRequestV13 {
     pub fee_bps: u64,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationOutcomeV13 {
     pub closed_q: u128,
@@ -810,17 +822,20 @@ pub struct LiquidationOutcomeV13 {
     pub fee_charged: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RebalanceRequestV13 {
     pub asset_index: usize,
     pub reduce_q: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RebalanceOutcomeV13 {
     pub reduced_q: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BResidualBookingOutcomeV13 {
     pub booked_loss: u128,
@@ -829,6 +844,7 @@ pub struct BResidualBookingOutcomeV13 {
     pub remaining_after: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuantityAdlOutcomeV13 {
     pub closed_q: u128,
@@ -844,6 +860,7 @@ pub enum PermissionlessCrankActionV13 {
     Recover(PermissionlessRecoveryReasonV13),
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermissionlessCrankRequestV13 {
     pub now_slot: u64,
@@ -2866,6 +2883,7 @@ impl MarketGroupV13 {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccountBSettlementChunkV13 {
     pub delta_b: u128,
@@ -2874,6 +2892,7 @@ pub struct AccountBSettlementChunkV13 {
     pub remaining_after: u128,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RiskScoreV13 {
     pub certified_liq_deficit: u128,

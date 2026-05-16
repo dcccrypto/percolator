@@ -7,8 +7,8 @@
 // risk engine.
 //
 // DUAL-MODE LAYOUT (mirrors src/i128.rs):
-//   - Kani builds: `#[repr(transparent)]` wrapper around `[u128; 2]` so the
-//     SAT solver works on native 128-bit words instead of 64-bit limb arrays.
+//   - Kani builds: `#[repr(C)]` wrapper around `[u128; 2]` so the SAT solver
+//     works on native 128-bit words instead of 64-bit limb arrays.
 //   - BPF / host builds: `#[repr(C)] [u64; 4]` for consistent 8-byte
 //     alignment across all Solana targets.
 //
@@ -20,7 +20,7 @@ use core::cmp::Ordering;
 // U256 -- Kani version
 // ============================================================================
 #[cfg(kani)]
-#[repr(transparent)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct U256([u128; 2]); // [lo, hi]
 
@@ -539,7 +539,7 @@ impl core::ops::SubAssign for U256 {
 // I256 -- Kani version
 // ============================================================================
 #[cfg(kani)]
-#[repr(transparent)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct I256([u128; 2]); // two's complement [lo, hi]; sign bit is bit 127 of hi
 
@@ -1146,6 +1146,7 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
 
 /// Private 512-bit unsigned integer for intermediate computations.
 /// Stored as [u128; 4] in little-endian order.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct U512([u128; 4]);
 
@@ -1674,6 +1675,7 @@ pub fn wide_signed_mul_div_floor_from_k_pair(
 }
 
 /// ADL delta_K representability check error.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OverI128Magnitude;
 
