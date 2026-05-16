@@ -1715,11 +1715,21 @@ fn v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
         g.assets[i].raw_oracle_target_price = 100;
     }
 
+    let asset1_initial = g.assets[1];
     g.accrue_asset_to_not_atomic(0, 1, 101, 0, true).unwrap();
     let asset0_k = g.assets[0].k_long;
+    let asset0_after_first = g.assets[0];
     let asset1_before = g.assets[1];
+    assert_eq!(
+        asset1_before, asset1_initial,
+        "asset 0 accrual must not alias into asset 1"
+    );
     g.accrue_asset_to_not_atomic(1, 1, 101, 0, true).unwrap();
 
+    assert_eq!(
+        g.assets[0], asset0_after_first,
+        "asset 1 accrual must not alias back into asset 0"
+    );
     assert_ne!(asset0_k, 0);
     assert_eq!(g.assets[0].slot_last, 1);
     assert_eq!(asset1_before.slot_last, 0);

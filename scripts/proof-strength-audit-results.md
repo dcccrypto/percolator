@@ -113,6 +113,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk` | 159s | PASS |
 | `proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | 18s | PASS |
 | `proof_v14_health_certificate_bound_to_market_epochs_and_prices` | 52s | PASS |
+| `proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing` | 27s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -152,6 +153,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `unbounded_global_accounts_no_full_market_scan_required` | `v14_permissionless_crank_does_not_require_full_market_scan`; `proof_v14_permissionless_crank_does_not_require_full_market_scan` |
 | `full_account_refresh_is_O_N_and_required_for_favorable_actions` | `v14_favorable_action_requires_current_full_account_refresh`; `proof_v14_favorable_action_requires_current_full_refresh`; `proof_v14_full_refresh_settles_and_scores_two_active_assets`; bounded `PortfolioLegV14` array coverage |
 | `certificate_bound_to_market_config_asset_slots_and_prices` | `v14_health_certificate_is_bound_to_market_epochs_and_prices`; `proof_v14_health_certificate_bound_to_market_epochs_and_prices`; favorable-action stale certificate rejection tests/proofs |
+| `per_asset_slot_last_prevents_cross_asset_accrual_aliasing` | `v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing`; strengthened `proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing` checks full non-accrued asset state isolation |
 | `hinted_subset_cannot_hide_toxic_leg` | `v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset`; `proof_v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset` |
 | `stale_certificate_loses_margin_credit` | `v14_full_refresh_clears_stale_certificate_but_not_b_stale_loss`; `proof_v14_full_refresh_clears_stale_certificate`; stale counter proofs |
 | `stale_profitable_leg_cannot_support_risk_increase` | stale certificate and full-refresh gating tests/proofs; target/effective lag and h-lock no-positive-credit trade proofs |

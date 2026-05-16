@@ -5068,23 +5068,46 @@ fn proof_v14_permissionless_crank_accepts_configured_funding_rate_boundaries() {
 }
 
 #[kani::proof]
-#[kani::unwind(70)]
+#[kani::unwind(100)]
 #[kani::solver(cadical)]
 fn proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     let (market, _, _) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let owner = [3; 32];
+    let mut a0_long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [31; 32], owner));
+    let mut a0_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [32; 32], owner));
+    let mut a1_long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [33; 32], owner));
+    let mut a1_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [34; 32], owner));
+    group
+        .attach_leg(&mut a0_long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut a0_short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group
+        .attach_leg(&mut a1_long, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut a1_short, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
     let mut i = 0;
     while i < 2 {
-        group.assets[i].oi_eff_long_q = 1;
-        group.assets[i].oi_eff_short_q = 1;
         group.assets[i].effective_price = 100;
         group.assets[i].fund_px_last = 100;
         group.assets[i].raw_oracle_target_price = 100;
         i += 1;
     }
 
+    let asset1_initial = group.assets[1];
     let first = group.accrue_asset_to_not_atomic(0, 1, 101, 0, true);
+    let asset0_after_first = group.assets[0];
     let asset1_slot_before = group.assets[1].slot_last;
+    assert_eq!(
+        group.assets[1], asset1_initial,
+        "asset 0 accrual must not mutate asset 1 state"
+    );
     let second = group.accrue_asset_to_not_atomic(1, 1, 101, 0, true);
 
     kani::cover!(
@@ -5093,6 +5116,10 @@ fn proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     );
     assert!(first.is_ok());
     assert!(second.is_ok());
+    assert_eq!(
+        group.assets[0], asset0_after_first,
+        "asset 1 accrual must not mutate asset 0 state"
+    );
     assert_eq!(group.assets[0].slot_last, 1);
     assert_eq!(asset1_slot_before, 0);
     assert_eq!(group.assets[1].slot_last, 1);
