@@ -2457,6 +2457,89 @@ fn v14_expired_close_progress_routes_recovery_before_quantity_adl() {
 }
 
 #[test]
+fn v14_stale_active_close_residual_routes_recovery_before_b_booking() {
+    let (market, _, owner) = ids();
+    let mut cfg = V14Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV14::new(market, cfg).unwrap();
+    let mut closing = account();
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    g.attach_leg(&mut closing, 0, SideV14::Long, 4).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -4).unwrap();
+    closing.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: false,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 2,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        residual_remaining: 2,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    g.current_slot = 1;
+    let b_before = g.assets[0].b_short_num;
+    let ledger_before = closing.close_progress;
+
+    assert_eq!(
+        g.book_bankruptcy_residual_chunk_for_account(&mut closing, 0, SideV14::Long, 2),
+        Err(V14Error::RecoveryRequired)
+    );
+    assert_eq!(
+        g.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(g.assets[0].b_short_num, b_before);
+    assert_eq!(closing.close_progress, ledger_before);
+}
+
+#[test]
+fn v14_stale_active_close_routes_recovery_before_quantity_adl() {
+    let mut g = group();
+    let mut closing = account();
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [12; 32], [3; 32]));
+    g.attach_leg(&mut closing, 0, SideV14::Long, 4).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -4).unwrap();
+    closing.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 1,
+        explicit_loss_assigned: 1,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        residual_remaining: 0,
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    g.current_slot = 1;
+    let a_before = g.assets[0].a_short;
+    let oi_long_before = g.assets[0].oi_eff_long_q;
+    let oi_short_before = g.assets[0].oi_eff_short_q;
+
+    assert_eq!(
+        g.apply_quantity_adl_after_residual_for_account_not_atomic(
+            &mut closing,
+            0,
+            SideV14::Long,
+            4
+        ),
+        Err(V14Error::RecoveryRequired)
+    );
+    assert_eq!(
+        g.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(closing.close_progress.quantity_adl_applied_q, 0);
+    assert_eq!(g.assets[0].a_short, a_before);
+    assert_eq!(g.assets[0].oi_eff_long_q, oi_long_before);
+    assert_eq!(g.assets[0].oi_eff_short_q, oi_short_before);
+}
+
+#[test]
 fn v14_side_reset_snapshots_epoch_start_for_prior_epoch_accounts() {
     let mut g = group();
     let mut a = account();

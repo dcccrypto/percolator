@@ -4135,6 +4135,76 @@ fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
+fn proof_v14_stale_open_close_snapshot_routes_recovery_before_durable_mutation() {
+    let close_b_residual: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    group.current_slot = 1;
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
+    group.attach_leg(&mut account, 0, SideV14::Long, 4).unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -4)
+        .unwrap();
+    account.close_progress = CloseProgressLedgerV14 {
+        active: true,
+        finalized: !close_b_residual,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV14::Short,
+        gross_loss_at_close_start: 2,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        explicit_loss_assigned: if close_b_residual { 0 } else { 2 },
+        residual_remaining: if close_b_residual { 2 } else { 0 },
+        ..CloseProgressLedgerV14::EMPTY
+    };
+    let before_ledger = account.close_progress;
+    let before_b = group.assets[0].b_short_num;
+    let before_a = group.assets[0].a_short;
+    let before_long_oi = group.assets[0].oi_eff_long_q;
+    let before_short_oi = group.assets[0].oi_eff_short_q;
+
+    let result = if close_b_residual {
+        group
+            .book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV14::Long, 2)
+            .map(|_| ())
+    } else {
+        group
+            .apply_quantity_adl_after_residual_for_account_not_atomic(
+                &mut account,
+                0,
+                SideV14::Long,
+                4,
+            )
+            .map(|_| ())
+    };
+
+    kani::cover!(
+        close_b_residual,
+        "v14 stale open close B continuation recovery path reachable"
+    );
+    kani::cover!(
+        !close_b_residual,
+        "v14 stale open close quantity ADL recovery path reachable"
+    );
+    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(account.close_progress, before_ledger);
+    assert_eq!(group.assets[0].b_short_num, before_b);
+    assert_eq!(group.assets[0].a_short, before_a);
+    assert_eq!(group.assets[0].oi_eff_long_q, before_long_oi);
+    assert_eq!(group.assets[0].oi_eff_short_q, before_short_oi);
+}
+
+#[kani::proof]
+#[kani::unwind(50)]
+#[kani::solver(cadical)]
 fn proof_v14_invalid_trade_request_rejects_before_any_mutation() {
     assert_invalid_trade_reverts(TradeRequestV14 {
         asset_index: 1,

@@ -3457,6 +3457,7 @@ impl MarketGroupV14 {
         if ledger.asset_index as usize != asset_index || ledger.domain_side != domain_side {
             return Err(V14Error::LockActive);
         }
+        self.ensure_open_close_snapshot_current_or_recovery(account, ledger)?;
         let residual_to_book = ledger.residual_remaining;
         let outcome = self.book_bankruptcy_residual_chunk_internal(
             asset_index,
@@ -3591,6 +3592,7 @@ impl MarketGroupV14 {
             return Err(V14Error::InvalidLeg);
         }
         self.ensure_close_progress_not_expired(ledger)?;
+        self.ensure_open_close_snapshot_current_or_recovery(account, ledger)?;
         let out =
             self.apply_quantity_adl_after_residual_internal(asset_index, bankrupt_side, close_q)?;
         self.advance_close_progress_quantity_adl(account, out.closed_q)?;
@@ -3662,6 +3664,27 @@ impl MarketGroupV14 {
         ledger: CloseProgressLedgerV14,
     ) -> V14Result<()> {
         if ledger.active && self.current_slot > ledger.max_close_slot {
+            self.declare_permissionless_recovery(
+                PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
+            )?;
+            return Err(V14Error::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    fn ensure_open_close_snapshot_current_or_recovery(
+        &mut self,
+        account: &PortfolioAccountV14,
+        ledger: CloseProgressLedgerV14,
+    ) -> V14Result<()> {
+        if !ledger.active {
+            return Ok(());
+        }
+        let asset_index = ledger.asset_index as usize;
+        if asset_index < self.config.max_portfolio_assets as usize
+            && account.legs[asset_index].active
+            && self.current_slot > ledger.drift_reference_slot
+        {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
             )?;
