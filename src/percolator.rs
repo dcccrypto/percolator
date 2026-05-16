@@ -8921,7 +8921,19 @@ impl RiskEngine {
 
             self.touch_account_live_local(cidx, &mut ctx)?;
 
-            if !ctx.pending_reset_long && !ctx.pending_reset_short {
+            // Wave 12-G item 3 (port of upstream 1dc4466 "Allow local-current
+            // phase1 liquidation during catchup"): per-account
+            // `account_has_unsettled_live_effects` check replaces the
+            // upstream `loss_stale_after_accrual` market-wide flag. This
+            // lets phase1 liquidate an account that's individually current
+            // (no unsettled lazy A/K/F effects) even when the market still
+            // has loss-stale state elsewhere — the touch above already
+            // settled this account's local state, so the margin check below
+            // can trust the post-touch shape.
+            if !ctx.pending_reset_long
+                && !ctx.pending_reset_short
+                && !self.account_has_unsettled_live_effects(cidx)?
+            {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
