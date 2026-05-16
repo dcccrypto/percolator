@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 146 |
-| Kani proofs | 140 |
-| Kani cover checks | 223 |
+| Rust spec/fuzz tests | 147 |
+| Kani proofs | 141 |
+| Kani cover checks | 224 |
 | Kani assumptions | 124 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 145 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 146 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 133 | 215 |
+| `tests/proofs_v14.rs` | 0 | 134 | 216 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 139 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 141 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -112,6 +112,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once` | 536s | PASS |
 | `proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk` | 159s | PASS |
 | `proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | 18s | PASS |
+| `proof_v14_health_certificate_bound_to_market_epochs_and_prices` | 52s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -146,10 +147,11 @@ All per-harness timings are recorded in `kani_audit_final.tsv`.
 The current v14.12 source-of-truth spec requires the following proof/TDD coverage.
 Each item below maps to production-code tests, Kani proofs, or both.
 
-| Spec §15 item | Coverage |
+| Spec §16 item | Coverage |
 |---|---|
 | `unbounded_global_accounts_no_full_market_scan_required` | `v14_permissionless_crank_does_not_require_full_market_scan`; `proof_v14_permissionless_crank_does_not_require_full_market_scan` |
 | `full_account_refresh_is_O_N_and_required_for_favorable_actions` | `v14_favorable_action_requires_current_full_account_refresh`; `proof_v14_favorable_action_requires_current_full_refresh`; `proof_v14_full_refresh_settles_and_scores_two_active_assets`; bounded `PortfolioLegV14` array coverage |
+| `certificate_bound_to_market_config_asset_slots_and_prices` | `v14_health_certificate_is_bound_to_market_epochs_and_prices`; `proof_v14_health_certificate_bound_to_market_epochs_and_prices`; favorable-action stale certificate rejection tests/proofs |
 | `hinted_subset_cannot_hide_toxic_leg` | `v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset`; `proof_v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset` |
 | `stale_certificate_loses_margin_credit` | `v14_full_refresh_clears_stale_certificate_but_not_b_stale_loss`; `proof_v14_full_refresh_clears_stale_certificate`; stale counter proofs |
 | `stale_profitable_leg_cannot_support_risk_increase` | stale certificate and full-refresh gating tests/proofs; target/effective lag and h-lock no-positive-credit trade proofs |

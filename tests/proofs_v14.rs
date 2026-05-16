@@ -1876,6 +1876,49 @@ fn proof_v14_favorable_action_requires_current_full_refresh() {
 }
 
 #[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v14_health_certificate_bound_to_market_epochs_and_prices() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    group.deposit_not_atomic(&mut long, 1_000).unwrap();
+    group.deposit_not_atomic(&mut short, 1_000).unwrap();
+    group
+        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+
+    let cert = group
+        .full_account_refresh(&mut long, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(cert.cert_oracle_epoch, group.oracle_epoch);
+    assert_eq!(cert.cert_funding_epoch, group.funding_epoch);
+    assert_eq!(cert.cert_risk_epoch, group.risk_epoch);
+    assert_eq!(cert.active_bitmap_at_cert, long.active_bitmap);
+    assert_eq!(group.ensure_favorable_action_allowed(&long), Ok(()));
+
+    group.accrue_asset_to_not_atomic(0, 1, 2, 0, true).unwrap();
+
+    kani::cover!(
+        long.health_cert.cert_oracle_epoch != group.oracle_epoch,
+        "v14 health certificate stale after price epoch advances"
+    );
+    assert_eq!(
+        group.ensure_favorable_action_allowed(&long),
+        Err(V14Error::Stale)
+    );
+
+    let refreshed = group
+        .full_account_refresh(&mut long, &[2; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(refreshed.cert_oracle_epoch, group.oracle_epoch);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_global_residual_is_not_account_health_proof() {

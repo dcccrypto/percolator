@@ -329,6 +329,39 @@ fn v14_favorable_action_requires_current_full_account_refresh() {
 }
 
 #[test]
+fn v14_health_certificate_is_bound_to_market_epochs_and_prices() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account_with_id(111);
+    g.deposit_not_atomic(&mut long, 1_000).unwrap();
+    g.deposit_not_atomic(&mut short, 1_000).unwrap();
+    g.attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+
+    let cert = g
+        .full_account_refresh(&mut long, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(cert.cert_oracle_epoch, g.oracle_epoch);
+    assert_eq!(cert.cert_funding_epoch, g.funding_epoch);
+    assert_eq!(cert.cert_risk_epoch, g.risk_epoch);
+    assert_eq!(cert.active_bitmap_at_cert, long.active_bitmap);
+    assert_eq!(g.ensure_favorable_action_allowed(&long), Ok(()));
+
+    g.accrue_asset_to_not_atomic(0, 1, 2, 0, true).unwrap();
+    assert_eq!(
+        g.ensure_favorable_action_allowed(&long),
+        Err(V14Error::Stale)
+    );
+
+    let refreshed = g
+        .full_account_refresh(&mut long, &[2; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(refreshed.cert_oracle_epoch, g.oracle_epoch);
+}
+
+#[test]
 fn v14_global_residual_is_not_account_health_proof() {
     let mut g = group();
     let mut a = account();
