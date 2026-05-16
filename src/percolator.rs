@@ -7060,8 +7060,8 @@ impl RiskEngine {
     /// callers that must refuse normal positive-PnL settlement. Combines
     /// active bankrupt-close, hmax lock, stress consumption, neg-pnl
     /// account count, and the stale positive-PnL lock (toly engine
-    /// src/percolator.rs:3851-3857).
-    #[allow(dead_code)]
+    /// src/percolator.rs:3851-3857). Wave 12-G item 1 wired this into
+    /// `credit_account_from_insurance_not_atomic` (port of upstream 6500a2f).
     fn live_reconciliation_lock_active(&self) -> bool {
         self.active_close_present != 0
             || self.bankruptcy_hmax_lock_active
@@ -10494,6 +10494,21 @@ impl RiskEngine {
         self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
         self.assert_public_postconditions()?;
         self.check_live_accrual_envelope(now_slot)?;
+        // Wave 12-G item 1 (port of upstream 6500a2f): refuse insurance
+        // reward credits while a live reconciliation is in flight. The
+        // `live_reconciliation_lock_active` predicate flags:
+        //   - active_close_present (bankrupt-close state machine running)
+        //   - bankruptcy_hmax_lock_active (lock armed pending settlement)
+        //   - stress_consumed_bps_e9_since_envelope (envelope mid-consume)
+        //   - neg_pnl_account_count (negative-PnL accounts unsettled)
+        //   - loss_stale_positive_pnl_lock_active (positive-PnL lock)
+        // Without this gate, an admin/keeper could credit insurance INTO
+        // an account during reconciliation, defeating the lock's purpose
+        // (the lock exists to prevent value transfers that would invalidate
+        // the in-flight settlement math).
+        if self.live_reconciliation_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);
