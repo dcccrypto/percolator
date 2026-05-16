@@ -444,6 +444,17 @@ fn v14_public_invariants_reject_persistent_asset_kf_i128_min() {
 }
 
 #[test]
+fn v14_public_invariants_reject_oi_loss_weight_shape_mismatch() {
+    let mut g = group();
+    g.assets[0].oi_eff_long_q = 1;
+    assert_eq!(g.assert_public_invariants(), Err(V14Error::InvalidConfig));
+
+    let mut g = group();
+    g.assets[0].loss_weight_sum_short = 1;
+    assert_eq!(g.assert_public_invariants(), Err(V14Error::InvalidConfig));
+}
+
+#[test]
 fn v14_cross_margin_collateral_counted_once_and_not_below_loss_envelope() {
     let mut g = group();
     let mut a = account();
@@ -1607,9 +1618,23 @@ fn v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
 fn v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     let (market, _, _) = ids();
     let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();
+    let mut a0_long =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [31; 32], [3; 32]));
+    let mut a0_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [32; 32], [3; 32]));
+    let mut a1_long =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [33; 32], [3; 32]));
+    let mut a1_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [34; 32], [3; 32]));
+    g.attach_leg(&mut a0_long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a0_short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut a1_long, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a1_short, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
     for i in 0..2 {
-        g.assets[i].oi_eff_long_q = 1;
-        g.assets[i].oi_eff_short_q = 1;
         g.assets[i].effective_price = 100;
         g.assets[i].fund_px_last = 100;
         g.assets[i].raw_oracle_target_price = 100;
@@ -3091,8 +3116,14 @@ fn v14_permissionless_crank_cross_asset_liquidation_is_not_protective_for_accrue
     let (market, _, _) = ids();
     let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();
     let mut victim = account();
-    g.assets[0].oi_eff_long_q = 1;
-    g.assets[0].oi_eff_short_q = 1;
+    let mut asset0_long =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [41; 32], [3; 32]));
+    let mut asset0_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [42; 32], [3; 32]));
+    g.attach_leg(&mut asset0_long, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut asset0_short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
     g.attach_leg(&mut victim, 1, SideV14::Long, POS_SCALE as i128)
         .unwrap();
     let before_asset = g.assets[0];

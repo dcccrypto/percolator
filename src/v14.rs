@@ -3793,11 +3793,11 @@ impl MarketGroupV14 {
         }
 
         if final_liq_oi_after == 0 {
-            self.begin_full_drain_reset(asset_index, bankrupt_side)?;
+            self.begin_full_drain_reset_inner(asset_index, bankrupt_side)?;
             reset_started = true;
         }
         if final_opp_oi_after == 0 {
-            self.begin_full_drain_reset(asset_index, opp)?;
+            self.begin_full_drain_reset_inner(asset_index, opp)?;
             reset_started = true;
         }
         self.assert_public_invariants()?;
@@ -3809,6 +3809,11 @@ impl MarketGroupV14 {
     }
 
     pub fn begin_full_drain_reset(&mut self, asset_index: usize, side: SideV14) -> V14Result<()> {
+        self.begin_full_drain_reset_inner(asset_index, side)?;
+        self.assert_public_invariants()
+    }
+
+    fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV14) -> V14Result<()> {
         if self.active_bankrupt_close_present
             || asset_index >= self.config.max_portfolio_assets as usize
         {
@@ -3865,7 +3870,7 @@ impl MarketGroupV14 {
             .risk_epoch
             .checked_add(1)
             .ok_or(V14Error::CounterOverflow)?;
-        self.assert_public_invariants()
+        Ok(())
     }
 
     pub fn finalize_ready_reset_side(
@@ -4003,6 +4008,8 @@ impl MarketGroupV14 {
                 || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
                 || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
                 || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
+                || (asset.oi_eff_long_q != 0) != (asset.loss_weight_sum_long != 0)
+                || (asset.oi_eff_short_q != 0) != (asset.loss_weight_sum_short != 0)
                 || asset.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_dust_long_num >= SOCIAL_LOSS_DEN

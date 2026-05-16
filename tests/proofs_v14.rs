@@ -1954,7 +1954,7 @@ fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
 }
 
 #[kani::proof]
-#[kani::unwind(20)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_public_invariants_reject_broken_senior_claim_conservation() {
     let vault_units: u8 = kani::any();
@@ -1982,11 +1982,11 @@ fn proof_v14_public_invariants_reject_broken_senior_claim_conservation() {
 }
 
 #[kani::proof]
-#[kani::unwind(20)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_public_invariants_reject_hard_global_bounds() {
     let case: u8 = kani::any();
-    kani::assume(case < 15);
+    kani::assume(case < 17);
     let (market, _, _) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
 
@@ -2005,13 +2005,15 @@ fn proof_v14_public_invariants_reject_hard_global_bounds() {
         4 => group.assets[0].oi_eff_long_q = MAX_OI_SIDE_Q + 1,
         5 => group.assets[0].loss_weight_sum_long = SOCIAL_LOSS_DEN + 1,
         6 => group.assets[0].social_loss_remainder_long_num = SOCIAL_LOSS_DEN,
-        7 => group.assets[0].k_long = i128::MIN,
-        8 => group.assets[0].k_short = i128::MIN,
-        9 => group.assets[0].f_long_num = i128::MIN,
-        10 => group.assets[0].f_short_num = i128::MIN,
-        11 => group.assets[0].k_epoch_start_long = i128::MIN,
-        12 => group.assets[0].k_epoch_start_short = i128::MIN,
-        13 => group.assets[0].f_epoch_start_long_num = i128::MIN,
+        7 => group.assets[0].oi_eff_long_q = 1,
+        8 => group.assets[0].loss_weight_sum_short = 1,
+        9 => group.assets[0].k_long = i128::MIN,
+        10 => group.assets[0].k_short = i128::MIN,
+        11 => group.assets[0].f_long_num = i128::MIN,
+        12 => group.assets[0].f_short_num = i128::MIN,
+        13 => group.assets[0].k_epoch_start_long = i128::MIN,
+        14 => group.assets[0].k_epoch_start_short = i128::MIN,
+        15 => group.assets[0].f_epoch_start_long_num = i128::MIN,
         _ => group.assets[0].f_epoch_start_short_num = i128::MIN,
     }
 
@@ -2022,24 +2024,29 @@ fn proof_v14_public_invariants_reject_hard_global_bounds() {
     kani::cover!(case == 4, "v14 OI side cap violation reachable");
     kani::cover!(case == 5, "v14 loss weight cap violation reachable");
     kani::cover!(case == 6, "v14 social loss remainder violation reachable");
-    kani::cover!(case == 7, "v14 K long i128::MIN violation reachable");
-    kani::cover!(case == 8, "v14 K short i128::MIN violation reachable");
-    kani::cover!(case == 9, "v14 F long i128::MIN violation reachable");
-    kani::cover!(case == 10, "v14 F short i128::MIN violation reachable");
     kani::cover!(
-        case == 11,
+        case == 7,
+        "v14 positive OI without loss weight violation reachable"
+    );
+    kani::cover!(case == 8, "v14 loss weight without OI violation reachable");
+    kani::cover!(case == 9, "v14 K long i128::MIN violation reachable");
+    kani::cover!(case == 10, "v14 K short i128::MIN violation reachable");
+    kani::cover!(case == 11, "v14 F long i128::MIN violation reachable");
+    kani::cover!(case == 12, "v14 F short i128::MIN violation reachable");
+    kani::cover!(
+        case == 13,
         "v14 K long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 12,
+        case == 14,
         "v14 K short epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 13,
+        case == 15,
         "v14 F long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 14,
+        case == 16,
         "v14 F short epoch-start i128::MIN violation reachable"
     );
     assert_eq!(
