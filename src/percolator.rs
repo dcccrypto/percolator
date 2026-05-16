@@ -7070,6 +7070,37 @@ impl RiskEngine {
             || self.loss_stale_positive_pnl_lock_active()
     }
 
+    /// Wave 12-G item 2 (port of upstream 2052807): predicate that returns
+    /// false for terminal-epoch reset participants (Resolved + ResetPending
+    /// + epoch = u64::MAX + account.adl_epoch_snap == side epoch). These
+    /// accounts are stale reset participants whose live loss-weight pool
+    /// was zeroed at recovery — they should not be counted as current
+    /// loss-weight contributors in side-sum reconciliation.
+    ///
+    /// Currently unwired (#[allow(dead_code)]): fork's resolved
+    /// settlement path at force_close_resolved_cursor uses a different
+    /// branch shape (rejects same-epoch nonzero-basis with CorruptState
+    /// at percolator.rs:10190). Safely wiring this helper into that path
+    /// requires audit-confirming the math against fork's
+    /// b-tracking weight subtraction logic (Wave 11a-i schema). Helper
+    /// kept additive so future maintainers don't re-derive it.
+    #[allow(dead_code)]
+    fn account_loss_weight_is_counted_in_side_sum(&self, idx: usize, side: Side) -> bool {
+        let account = &self.accounts[idx];
+        if account.b_epoch_snap != self.get_epoch_side(side) {
+            return false;
+        }
+        // Counter/epoch-overflow terminal recovery cannot advance the side
+        // epoch past u64::MAX. The side is nevertheless in ResetPending and
+        // its live loss-weight pool was zeroed at recovery; these
+        // positioned accounts are stale reset participants, not current
+        // loss-weight contributors.
+        !(self.market_mode == MarketMode::Resolved
+            && self.get_side_mode(side) == SideMode::ResetPending
+            && self.get_epoch_side(side) == u64::MAX
+            && account.adl_epoch_snap == self.get_epoch_side(side))
+    }
+
     /// "Real" stress gate: any non-speculative reason a bankruptcy h-max
     /// lock or stress envelope is active. Used by
     /// `trigger_bankruptcy_hmax_lock` to admit a same-instruction
