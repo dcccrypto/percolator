@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 147 |
-| Kani proofs | 141 |
-| Kani cover checks | 224 |
-| Kani assumptions | 124 |
+| Rust spec/fuzz tests | 148 |
+| Kani proofs | 142 |
+| Kani cover checks | 226 |
+| Kani assumptions | 125 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 146 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 147 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 134 | 216 |
+| `tests/proofs_v14.rs` | 0 | 135 | 218 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -62,7 +62,7 @@ Aggregate timing from that completed sweep:
 | Slowest harness | `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | Slowest harness time | 397s |
 
-The current tree has 141 Kani proofs, so the timing artifacts must be regenerated
+The current tree has 142 Kani proofs, so the timing artifacts must be regenerated
 before using them as a current full-proof pass record.
 
 Focused incremental proofs added after the last completed full sweep:
@@ -114,6 +114,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | 18s | PASS |
 | `proof_v14_health_certificate_bound_to_market_epochs_and_prices` | 52s | PASS |
 | `proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing` | 27s | PASS |
+| `proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds` | 15s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -194,6 +195,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `active_bitmap_canonical_no_hidden_legs` | `v14_active_bitmap_is_the_only_active_leg_authority`; `proof_v14_hidden_leg_rejected_by_bitmap_authority` |
 | `N_too_large_rejected_at_public_user_fund_init` / `cfg_max_bankrupt_close_lifetime_slots_positive` | `v14_public_init_rejects_unbounded_portfolio_width`; `v14_public_init_requires_crankforward_recovery_and_chunk_caps`; `proof_v14_configured_portfolio_width_rejects_out_of_range_leg`; public config proof |
 | `PNL_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | `v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay`; `proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay`; resolved positive-payout bound-denominator test/proof |
+| `resolved_payout_readiness_uses_exact_counters_and_bounds` | `v14_resolved_payout_readiness_uses_exact_counters_and_bounds`; `proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds`; existing resolved close partial-B/active-position/payout proofs |
 
 No missing engine-side spec §16 coverage item was identified in this pass.
 

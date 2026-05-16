@@ -3478,6 +3478,46 @@ fn v14_resolved_close_returns_progress_after_partial_b_settlement() {
 }
 
 #[test]
+fn v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
+    for case in 0..8 {
+        let mut g = group();
+        let mut a = account();
+        g.vault = 10;
+        a.pnl = 10;
+        g.pnl_pos_tot = 10;
+        g.pnl_pos_bound_tot = 10;
+        g.resolve_market_not_atomic(1).unwrap();
+        match case {
+            0 => g.active_bankrupt_close_present = true,
+            1 => g.b_stale_account_count = 1,
+            2 => g.stale_certificate_count = 1,
+            3 => g.negative_pnl_account_count = 1,
+            4 => g.assets[0].stored_pos_count_long = 1,
+            5 => g.assets[0].stored_pos_count_short = 1,
+            6 => g.assets[0].stale_account_count_long = 1,
+            _ => g.assets[0].stale_account_count_short = 1,
+        }
+
+        let vault_before = g.vault;
+        let pnl_pos_before = g.pnl_pos_tot;
+        let bound_before = g.pnl_pos_bound_tot;
+        let account_pnl_before = a.pnl;
+        let outcome = g.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+
+        assert_eq!(
+            outcome,
+            ResolvedCloseOutcomeV14::ProgressOnly,
+            "readiness blocker case {case} must not pay positive PnL"
+        );
+        assert_eq!(g.vault, vault_before);
+        assert_eq!(g.pnl_pos_tot, pnl_pos_before);
+        assert_eq!(g.pnl_pos_bound_tot, bound_before);
+        assert_eq!(a.pnl, account_pnl_before);
+        assert!(!g.payout_snapshot_captured);
+    }
+}
+
+#[test]
 fn v14_dead_leg_forfeit_is_unavailable_for_normal_live_leg() {
     let mut g = group();
     let mut a = account();

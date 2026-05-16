@@ -3790,6 +3790,51 @@ fn proof_v14_resolved_close_partial_b_settlement_makes_progress_without_closing(
 }
 
 #[kani::proof]
+#[kani::unwind(45)]
+#[kani::solver(cadical)]
+fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
+    let blocker: u8 = kani::any();
+    kani::assume(blocker < 8);
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.vault = 10;
+    account.pnl = 10;
+    group.pnl_pos_tot = 10;
+    group.pnl_pos_bound_tot = 10;
+    group.resolve_market_not_atomic(1).unwrap();
+    match blocker {
+        0 => group.active_bankrupt_close_present = true,
+        1 => group.b_stale_account_count = 1,
+        2 => group.stale_certificate_count = 1,
+        3 => group.negative_pnl_account_count = 1,
+        4 => group.assets[0].stored_pos_count_long = 1,
+        5 => group.assets[0].stored_pos_count_short = 1,
+        6 => group.assets[0].stale_account_count_long = 1,
+        _ => group.assets[0].stale_account_count_short = 1,
+    }
+
+    let vault_before = group.vault;
+    let pnl_pos_before = group.pnl_pos_tot;
+    let bound_before = group.pnl_pos_bound_tot;
+    let account_pnl_before = account.pnl;
+    let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
+
+    kani::cover!(blocker == 0, "v14 resolved readiness active close blocker");
+    kani::cover!(
+        blocker == 7,
+        "v14 resolved readiness stale short-count blocker"
+    );
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(group.pnl_pos_bound_tot, bound_before);
+    assert_eq!(account.pnl, account_pnl_before);
+    assert!(!group.payout_snapshot_captured);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v14_resolved_flat_close_returns_exact_capital() {
