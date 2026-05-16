@@ -44,6 +44,31 @@ fn account() -> PortfolioAccountV14 {
     PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner))
 }
 
+fn account_with_id(id: u8) -> PortfolioAccountV14 {
+    let (market, _, owner) = ids();
+    PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [id; 32], owner))
+}
+
+fn attach_opposite(
+    group: &mut MarketGroupV14,
+    asset_index: usize,
+    side_to_balance: SideV14,
+    abs_q: u128,
+    account_id: u8,
+) -> PortfolioAccountV14 {
+    let mut opposite = account_with_id(account_id);
+    let abs_i128 = i128::try_from(abs_q).unwrap();
+    match side_to_balance {
+        SideV14::Long => group
+            .attach_leg(&mut opposite, asset_index, SideV14::Short, -abs_i128)
+            .unwrap(),
+        SideV14::Short => group
+            .attach_leg(&mut opposite, asset_index, SideV14::Long, abs_i128)
+            .unwrap(),
+    }
+    opposite
+}
+
 fn active_leg(side: SideV14, basis_pos_q: i128) -> PortfolioLegV14 {
     PortfolioLegV14 {
         active: true,
@@ -92,6 +117,7 @@ fn v14_persisted_account_wire_roundtrips_runtime_state() {
     g.deposit_not_atomic(&mut a, 10_000).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 90);
     g.full_account_refresh(&mut a, &[100; V14_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
@@ -452,6 +478,18 @@ fn v14_public_invariants_reject_oi_loss_weight_shape_mismatch() {
     let mut g = group();
     g.assets[0].loss_weight_sum_short = 1;
     assert_eq!(g.assert_public_invariants(), Err(V14Error::InvalidConfig));
+}
+
+#[test]
+fn v14_public_invariants_reject_live_oi_imbalance() {
+    let mut g = group();
+    let mut long = account();
+    g.attach_leg(&mut long, 0, SideV14::Long, 1).unwrap();
+    assert_eq!(g.assert_public_invariants(), Err(V14Error::InvalidConfig));
+
+    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new([1; 32], [9; 32], [3; 32]));
+    g.attach_leg(&mut short, 0, SideV14::Short, -1).unwrap();
+    assert_eq!(g.assert_public_invariants(), Ok(()));
 }
 
 #[test]
@@ -855,6 +893,7 @@ fn v14_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
     g.vault = 50;
     g.insurance = 50;
     g.attach_leg(&mut a, 0, SideV14::Long, 10).unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, 10, 91);
     a.pnl = -100;
     a.fee_credits = -7;
 
@@ -1361,6 +1400,7 @@ fn v14_fee_sync_settles_hidden_kf_losses_before_collecting_fee() {
     g.deposit_not_atomic(&mut long, 50).unwrap();
     g.attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 92);
 
     g.accrue_asset_to_not_atomic(0, 1, 50, 0, true).unwrap();
     let charged = g
@@ -1427,6 +1467,7 @@ fn v14_hlock_allows_principal_withdrawal_without_positive_credit_escape() {
     g.deposit_not_atomic(&mut a, 100).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 93);
     g.threshold_stress_active = true;
 
     assert_eq!(
@@ -1559,11 +1600,10 @@ fn v14_account_free_equity_active_accrual_requires_protective_progress() {
     let mut g = group();
     let mut a = account();
     g.deposit_not_atomic(&mut a, 1000).unwrap();
+    let mut b = account_with_id(4);
+    g.deposit_not_atomic(&mut b, 1000).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
-    let mut b = account();
-    b.provenance_header.portfolio_account_id = [4; 32];
-    g.deposit_not_atomic(&mut b, 1000).unwrap();
     g.attach_leg(&mut b, 0, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
 
@@ -1581,6 +1621,7 @@ fn v14_equity_active_accrual_commits_one_bounded_loss_stale_segment() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 94);
 
     let out = g.accrue_asset_to_not_atomic(0, 10, 3, 0, true).unwrap();
     assert_eq!(out.dt, 2);
@@ -1596,6 +1637,7 @@ fn v14_active_bankrupt_close_does_not_freeze_asset_accrual() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 95);
     g.active_bankrupt_close_present = true;
 
     let a_long_before = g.assets[0].a_long;
@@ -1995,6 +2037,7 @@ fn v14_same_epoch_full_refresh_is_idempotent_after_kf_settlement() {
 
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 96);
     g.accrue_asset_to_not_atomic(0, 1, 101, 0, true).unwrap();
     g.full_account_refresh(&mut a, &[101; V14_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
@@ -2017,6 +2060,7 @@ fn v14_sequential_kf_refresh_is_additive_not_compounding() {
     sequential
         .attach_leg(&mut seq_account, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _seq_opposite = attach_opposite(&mut sequential, 0, SideV14::Long, POS_SCALE, 97);
 
     sequential
         .accrue_asset_to_not_atomic(0, 1, 101, 0, true)
@@ -2041,6 +2085,7 @@ fn v14_sequential_kf_refresh_is_additive_not_compounding() {
     direct
         .attach_leg(&mut direct_account, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _direct_opposite = attach_opposite(&mut direct, 0, SideV14::Long, POS_SCALE, 98);
 
     direct
         .accrue_asset_to_not_atomic(0, 1, 102, 0, true)
@@ -2116,8 +2161,8 @@ fn v14_funding_accrual_requires_bilateral_exposure() {
     let one_sided_before = one_sided.assets[0];
     let out = one_sided
         .accrue_asset_to_not_atomic(0, 1, 1_000_000_000, 1, false)
-        .unwrap();
-    assert!(!out.funding_active);
+        .unwrap_err();
+    assert_eq!(out, V14Error::InvalidConfig);
     assert_eq!(one_sided.assets[0].f_long_num, one_sided_before.f_long_num);
     assert_eq!(
         one_sided.assets[0].f_short_num,
@@ -2137,8 +2182,8 @@ fn v14_funding_accrual_requires_bilateral_exposure() {
     let short_only_before = short_only.assets[0];
     let out = short_only
         .accrue_asset_to_not_atomic(0, 1, 1_000_000_000, 1, false)
-        .unwrap();
-    assert!(!out.funding_active);
+        .unwrap_err();
+    assert_eq!(out, V14Error::InvalidConfig);
     assert_eq!(
         short_only.assets[0].f_long_num,
         short_only_before.f_long_num
@@ -3065,6 +3110,7 @@ fn v14_permissionless_crank_commits_refresh_before_equity_active_accrual() {
     g.deposit_not_atomic(&mut long, 1000).unwrap();
     g.attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 99);
     let req = PermissionlessCrankRequestV14 {
         now_slot: 1,
         asset_index: 0,
@@ -3120,11 +3166,15 @@ fn v14_permissionless_crank_cross_asset_liquidation_is_not_protective_for_accrue
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [41; 32], [3; 32]));
     let mut asset0_short =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [42; 32], [3; 32]));
+    let mut asset1_short =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [43; 32], [3; 32]));
     g.attach_leg(&mut asset0_long, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
     g.attach_leg(&mut asset0_short, 0, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
     g.attach_leg(&mut victim, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut asset1_short, 1, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
     let before_asset = g.assets[0];
     let before_slot = g.slot_last;
@@ -3185,6 +3235,7 @@ fn v14_permissionless_refresh_returns_partial_b_progress_without_failing() {
     let mut a = account();
     g.deposit_not_atomic(&mut a, 100).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, 1, 100);
     g.assets[0].b_long_num = SOCIAL_LOSS_DEN * 2;
     let req = PermissionlessCrankRequestV14 {
         now_slot: 1,
@@ -3257,6 +3308,7 @@ fn v14_worst_case_hinted_progress_actions_are_total_and_bounded() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposing = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 91);
     let out = g
         .permissionless_crank_not_atomic(
             &mut a,
@@ -3556,6 +3608,7 @@ fn v14_liquidation_requires_strict_account_risk_progress() {
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 101);
     g.accrue_asset_to_not_atomic(0, 1, 1, 0, true).unwrap();
     let req = LiquidationRequestV14 {
         asset_index: 0,
@@ -3576,6 +3629,7 @@ fn v14_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
     g.deposit_not_atomic(&mut a, 10).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 102);
 
     let out = g
         .liquidate_account_not_atomic(
@@ -3665,6 +3719,7 @@ fn v14_min_liquidation_abs_shortfall_does_not_block_risk_close() {
     g.deposit_not_atomic(&mut a, 20).unwrap();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 103);
 
     let out = g
         .liquidate_account_not_atomic(
@@ -3699,7 +3754,7 @@ fn v14_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     a.pnl = -9;
     g.negative_pnl_account_count = 1;
     g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
-    g.attach_leg(&mut opposing, 0, SideV14::Short, -10).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -1).unwrap();
 
     let out = g
         .liquidate_account_not_atomic(
@@ -3735,7 +3790,7 @@ fn v14_domain_insurance_budget_caps_bankruptcy_spend_for_one_asset_side() {
     a.pnl = -9;
     g.negative_pnl_account_count = 1;
     g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
-    g.attach_leg(&mut opposing, 0, SideV14::Short, -10).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -1).unwrap();
 
     let out = g
         .liquidate_account_not_atomic(
@@ -3777,7 +3832,7 @@ fn v14_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() 
     a.pnl = -5;
     g.negative_pnl_account_count = 1;
     g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
-    g.attach_leg(&mut opposing, 0, SideV14::Short, -10).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -1).unwrap();
 
     let out = g
         .liquidate_account_not_atomic(
@@ -3844,6 +3899,7 @@ fn v14_rebalance_reduce_position_requires_strict_risk_progress_and_preserves_sen
     let mut a = account();
     g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 104);
     let senior_before = g.c_tot + g.insurance;
     let out = g
         .rebalance_reduce_position_not_atomic(

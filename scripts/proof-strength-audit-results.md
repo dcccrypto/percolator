@@ -10,18 +10,18 @@ Static inventory from the current `v14` tree:
 
 | Item | Count |
 |---|---:|
-| Rust spec/fuzz tests | 144 |
+| Rust spec/fuzz tests | 145 |
 | Kani proofs | 139 |
-| Kani cover checks | 221 |
+| Kani cover checks | 222 |
 | Kani assumptions | 124 |
 
 Breakdown:
 
 | File | Tests | Kani proofs | Cover checks |
 |---|---:|---:|---:|
-| `tests/v14_spec_tests.rs` | 143 | 0 | 0 |
+| `tests/v14_spec_tests.rs` | 144 | 0 | 0 |
 | `tests/v14_fuzzing.rs` | 1 | 0 | 0 |
-| `tests/proofs_v14.rs` | 0 | 132 | 213 |
+| `tests/proofs_v14.rs` | 0 | 132 | 214 |
 | `tests/proofs_v14_arithmetic.rs` | 0 | 7 | 8 |
 
 The v14 suite is over production engine code and shared production arithmetic
@@ -79,7 +79,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_persisted_wire_rejects_provenance_and_hidden_leg_smuggling` | 213s | PASS |
 | `proof_v14_b_stale_trade_preflight_rolls_back_partial_side_effects` | 56s | PASS |
 | `proof_v14_deposit_into_stale_or_b_stale_account_does_not_unlock_favorable_actions` | 7s | PASS |
-| `proof_v14_quantity_adl_preserves_oi_symmetry_after_close` | 148s | PASS |
+| `proof_v14_quantity_adl_preserves_oi_symmetry_after_close` | 146s | PASS |
 | `proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets` | 254s | PASS |
 | `proof_v14_expired_close_progress_routes_recovery_before_durable_mutation` | 15s | PASS |
 | `proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta` | 22s | PASS |
@@ -105,6 +105,12 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_public_config_rejects_invalid_user_fund_shapes` | 4s | PASS |
 | `proof_v14_persisted_wire_rejects_noncanonical_bool_enum_and_option` | 256s | PASS |
 | `proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed` | 18s | PASS |
+| `proof_v14_public_invariants_reject_hard_global_bounds` | 8.5s | PASS |
+| `proof_v14_bankrupt_liquidation_consumes_insurance_before_social_loss` | 111s | PASS |
+| `proof_v14_domain_insurance_budget_caps_bankruptcy_spend` | 594s | PASS |
+| `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` | 499s | PASS |
+| `proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once` | 536s | PASS |
+| `proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk` | 159s | PASS |
 
 ## Slowest Harnesses From Last Completed Sweep
 
@@ -157,6 +163,7 @@ Each item below maps to production-code tests, Kani proofs, or both.
 | `bankrupt_close_books_residual_without_opposing_scan` | bankrupt liquidation residual-durability tests/proofs; residual booking tests/proofs; no full-market scan crank proof |
 | `bankrupt_close_cannot_clear_basis_before_residual_durable` | `v14_bankrupt_liquidation_requires_residual_durable_before_freeing_exposure`; `proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable` |
 | `oi_positive_requires_loss_weight_or_recovery` | `v14_public_invariants_reject_oi_loss_weight_shape_mismatch`; `proof_v14_public_invariants_reject_hard_global_bounds`; attach/clear and quantity-ADL OI symmetry tests/proofs |
+| `live_oi_symmetric_in_live_mode` | `v14_public_invariants_reject_live_oi_imbalance`; `proof_v14_public_invariants_reject_hard_global_bounds`; trade, liquidation, rebalance, and quantity-ADL OI symmetry tests/proofs |
 | `staged_insurance_not_double_spent` | `v14_bankrupt_liquidation_consumes_insurance_before_social_loss`; `v14_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once`; matching bankrupt-liquidation proofs |
 | `bankruptcy_residual_excludes_protocol_fees` | `v14_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once`; `proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once` |
 | `uncollectible_fees_forgiven_not_socialized` | fee loss-seniority tests/proofs; wide fee sync test/proof; bankrupt liquidation fee-exclusion test/proof |

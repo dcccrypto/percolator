@@ -1026,8 +1026,12 @@ fn proof_v14_recovery_mode_rejects_liquidation_and_rebalance_before_mutation() {
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
     group
         .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
     let asset_before = group.assets[0];
     let reason = PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability;
@@ -1986,7 +1990,7 @@ fn proof_v14_public_invariants_reject_broken_senior_claim_conservation() {
 #[kani::solver(cadical)]
 fn proof_v14_public_invariants_reject_hard_global_bounds() {
     let case: u8 = kani::any();
-    kani::assume(case < 17);
+    kani::assume(case < 18);
     let (market, _, _) = concrete_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
 
@@ -2007,13 +2011,19 @@ fn proof_v14_public_invariants_reject_hard_global_bounds() {
         6 => group.assets[0].social_loss_remainder_long_num = SOCIAL_LOSS_DEN,
         7 => group.assets[0].oi_eff_long_q = 1,
         8 => group.assets[0].loss_weight_sum_short = 1,
-        9 => group.assets[0].k_long = i128::MIN,
-        10 => group.assets[0].k_short = i128::MIN,
-        11 => group.assets[0].f_long_num = i128::MIN,
-        12 => group.assets[0].f_short_num = i128::MIN,
-        13 => group.assets[0].k_epoch_start_long = i128::MIN,
-        14 => group.assets[0].k_epoch_start_short = i128::MIN,
-        15 => group.assets[0].f_epoch_start_long_num = i128::MIN,
+        9 => {
+            group.assets[0].oi_eff_long_q = 2;
+            group.assets[0].loss_weight_sum_long = 2;
+            group.assets[0].oi_eff_short_q = 1;
+            group.assets[0].loss_weight_sum_short = 1;
+        }
+        10 => group.assets[0].k_long = i128::MIN,
+        11 => group.assets[0].k_short = i128::MIN,
+        12 => group.assets[0].f_long_num = i128::MIN,
+        13 => group.assets[0].f_short_num = i128::MIN,
+        14 => group.assets[0].k_epoch_start_long = i128::MIN,
+        15 => group.assets[0].k_epoch_start_short = i128::MIN,
+        16 => group.assets[0].f_epoch_start_long_num = i128::MIN,
         _ => group.assets[0].f_epoch_start_short_num = i128::MIN,
     }
 
@@ -2029,24 +2039,25 @@ fn proof_v14_public_invariants_reject_hard_global_bounds() {
         "v14 positive OI without loss weight violation reachable"
     );
     kani::cover!(case == 8, "v14 loss weight without OI violation reachable");
-    kani::cover!(case == 9, "v14 K long i128::MIN violation reachable");
-    kani::cover!(case == 10, "v14 K short i128::MIN violation reachable");
-    kani::cover!(case == 11, "v14 F long i128::MIN violation reachable");
-    kani::cover!(case == 12, "v14 F short i128::MIN violation reachable");
+    kani::cover!(case == 9, "v14 live OI imbalance violation reachable");
+    kani::cover!(case == 10, "v14 K long i128::MIN violation reachable");
+    kani::cover!(case == 11, "v14 K short i128::MIN violation reachable");
+    kani::cover!(case == 12, "v14 F long i128::MIN violation reachable");
+    kani::cover!(case == 13, "v14 F short i128::MIN violation reachable");
     kani::cover!(
-        case == 13,
+        case == 14,
         "v14 K long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 14,
+        case == 15,
         "v14 K short epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 15,
+        case == 16,
         "v14 F long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
-        case == 16,
+        case == 17,
         "v14 F short epoch-start i128::MIN violation reachable"
     );
     assert_eq!(
@@ -3830,7 +3841,7 @@ fn proof_v14_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     group.negative_pnl_account_count = 1;
     group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -10)
+        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
         .unwrap();
 
     let out = group
@@ -3872,7 +3883,7 @@ fn proof_v14_domain_insurance_budget_caps_bankruptcy_spend() {
     group.negative_pnl_account_count = 1;
     group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -10)
+        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
         .unwrap();
 
     let out = group
@@ -3923,7 +3934,7 @@ fn proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable()
         .attach_leg(&mut bankrupt, 0, SideV14::Long, 4)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -10)
+        .attach_leg(&mut opposing, 0, SideV14::Short, -4)
         .unwrap();
     group.assets[0].b_short_num = u128::MAX;
     group.assets[0].social_loss_remainder_short_num = 10;
@@ -3993,7 +4004,7 @@ fn proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insuranc
     group.negative_pnl_account_count = 1;
     group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -10)
+        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
         .unwrap();
 
     let out = group
@@ -4033,8 +4044,12 @@ fn proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk(
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
     group
         .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
         .unwrap();
     let senior_before = group.c_tot + group.insurance;
 
@@ -4061,8 +4076,12 @@ fn proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk(
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [5; 32], owner));
     group
         .attach_leg(&mut account, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Long, POS_SCALE as i128)
         .unwrap();
     let senior_before = group.c_tot + group.insurance;
 

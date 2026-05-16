@@ -2954,7 +2954,6 @@ impl MarketGroupV14 {
             .max(self.config.min_liquidation_abs)
             .min(self.config.liquidation_fee_cap);
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
-        self.reduce_position(account, request.asset_index, close_q)?;
         self.settle_negative_pnl_from_principal(account)?;
         let gross_bankruptcy_residual = if account.pnl < 0 {
             account.pnl.unsigned_abs()
@@ -3005,6 +3004,7 @@ impl MarketGroupV14 {
             )?;
             self.bankruptcy_hlock_active = true;
         }
+        self.reduce_position(account, request.asset_index, close_q)?;
         self.full_account_refresh(account, effective_prices)?;
         self.validate_liquidation_progress(&before, account)?;
         self.assert_public_invariants()?;
@@ -4006,6 +4006,7 @@ impl MarketGroupV14 {
                 || asset.f_epoch_start_short_num == i128::MIN
                 || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
                 || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
+                || (self.mode == MarketModeV14::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
                 || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
                 || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
                 || (asset.oi_eff_long_q != 0) != (asset.loss_weight_sum_long != 0)
@@ -4703,7 +4704,65 @@ impl MarketGroupV14 {
                 .ok_or(V14Error::ArithmeticOverflow)?,
             SideV14::Short => close_i128,
         };
-        self.apply_position_delta(account, asset_index, delta)
+        self.apply_position_delta(account, asset_index, delta)?;
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
+    }
+
+    fn reduce_matching_open_interest_for_unilateral_close(
+        &mut self,
+        asset_index: usize,
+        closed_side: SideV14,
+        close_q: u128,
+    ) -> V14Result<()> {
+        if close_q == 0 {
+            return Ok(());
+        }
+        let opp = opposite_side(closed_side);
+        let asset = self.assets[asset_index];
+        let (opp_oi_before, opp_a_before) = match opp {
+            SideV14::Long => (asset.oi_eff_long_q, asset.a_long),
+            SideV14::Short => (asset.oi_eff_short_q, asset.a_short),
+        };
+        if close_q > opp_oi_before {
+            return Err(V14Error::InvalidLeg);
+        }
+        let opp_oi_after = opp_oi_before - close_q;
+        let opp_a_after = if opp_oi_after == 0 {
+            ADL_ONE
+        } else {
+            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
+            if candidate == 0 {
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
+                )?;
+                return Err(V14Error::RecoveryRequired);
+            }
+            candidate
+        };
+
+        {
+            let asset = &mut self.assets[asset_index];
+            match opp {
+                SideV14::Long => {
+                    asset.oi_eff_long_q = opp_oi_after;
+                    asset.a_long = opp_a_after;
+                    if opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
+                        asset.mode_long = SideModeV14::DrainOnly;
+                    }
+                }
+                SideV14::Short => {
+                    asset.oi_eff_short_q = opp_oi_after;
+                    asset.a_short = opp_a_after;
+                    if opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
+                        asset.mode_short = SideModeV14::DrainOnly;
+                    }
+                }
+            }
+        }
+        if opp_oi_after == 0 {
+            self.begin_full_drain_reset_inner(asset_index, opp)?;
+        }
+        Ok(())
     }
 
     fn set_account_pnl(
