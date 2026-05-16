@@ -3907,6 +3907,10 @@ impl MarketGroupV14 {
         if !self.config.permissionless_recovery_enabled {
             return Err(V14Error::InvalidConfig);
         }
+        if self.mode == MarketModeV14::Resolved {
+            return Err(V14Error::LockActive);
+        }
+        self.mode = MarketModeV14::Recovery;
         self.recovery_reason = Some(reason);
         Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
     }

@@ -1062,6 +1062,44 @@ fn v14_permissionless_recovery_is_declared_by_reason_not_caller_price() {
         Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
     );
     assert_eq!(g.recovery_reason, Some(reason));
+    assert_eq!(g.mode, MarketModeV14::Recovery);
+}
+
+#[test]
+fn v14_permissionless_recovery_enters_terminal_mode_and_enables_dead_leg_forfeit() {
+    let mut g = group();
+    let mut a = account();
+    g.attach_leg(&mut a, 0, SideV14::Long, 1).unwrap();
+    assert_eq!(
+        g.forfeit_recovery_leg_not_atomic(&mut a, 0, 1),
+        Err(V14Error::LockActive)
+    );
+
+    let reason = PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy;
+    assert_eq!(
+        g.declare_permissionless_recovery(reason),
+        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+    );
+    let out = g.forfeit_recovery_leg_not_atomic(&mut a, 0, 1).unwrap();
+
+    assert!(out.detached);
+    assert_eq!(a.active_bitmap, 0);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.recovery_reason, Some(reason));
+    assert_eq!(g.mode, MarketModeV14::Recovery);
+}
+
+#[test]
+fn v14_permissionless_recovery_cannot_override_resolved_mode() {
+    let mut g = group();
+    g.resolve_market_not_atomic(1).unwrap();
+
+    assert_eq!(
+        g.declare_permissionless_recovery(PermissionlessRecoveryReasonV14::BelowProgressFloor),
+        Err(V14Error::LockActive)
+    );
+    assert_eq!(g.mode, MarketModeV14::Resolved);
+    assert_eq!(g.recovery_reason, None);
 }
 
 #[test]
@@ -1122,7 +1160,7 @@ fn v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     assert_eq!(g.assets[0], asset_before);
     assert_eq!(g.slot_last, slot_last_before);
     assert_eq!(g.current_slot, current_slot_before);
-    assert_eq!(g.mode, MarketModeV14::Live);
+    assert_eq!(g.mode, MarketModeV14::Recovery);
 }
 
 #[test]

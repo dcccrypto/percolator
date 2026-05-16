@@ -1,8 +1,8 @@
 #![cfg(kani)]
 
 use percolator::v14::{
-    account_equity, risk_notional_ceil, CloseProgressLedgerV14, HLockLaneV14,
-    LiquidationRequestV14, MarketGroupV14, MarketGroupV14Account, MarketModeV14,
+    account_equity, risk_notional_ceil, CloseProgressLedgerV14, DeadLegForfeitOutcomeV14,
+    HLockLaneV14, LiquidationRequestV14, MarketGroupV14, MarketGroupV14Account, MarketModeV14,
     PermissionlessCrankActionV14, PermissionlessCrankRequestV14, PermissionlessProgressOutcomeV14,
     PermissionlessRecoveryReasonV14, PortfolioAccountV14, PortfolioAccountV14Account,
     PortfolioLegV14, ProvenanceHeaderV14, RebalanceRequestV14, ResolvedCloseOutcomeV14,
@@ -689,6 +689,7 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
     let reason_case: u8 = kani::any();
     kani::assume(reason_case < 8);
     let enabled: bool = kani::any();
+    let start_resolved: bool = kani::any();
     let reason = match reason_case {
         0 => PermissionlessRecoveryReasonV14::BelowProgressFloor,
         1 => PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
@@ -702,6 +703,9 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
     let (market, _, _) = symbolic_ids();
     let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.permissionless_recovery_enabled = enabled;
+    if start_resolved {
+        group.resolve_market_not_atomic(0).unwrap();
+    }
 
     let before_mode = group.mode;
     let before_vault = group.vault;
@@ -718,6 +722,10 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
         "v14 permissionless recovery disabled path reachable"
     );
     kani::cover!(
+        enabled && start_resolved,
+        "v14 permissionless recovery resolved-mode rejection reachable"
+    );
+    kani::cover!(
         reason_case == 0,
         "v14 permissionless recovery first reason reachable"
     );
@@ -726,18 +734,22 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
         "v14 permissionless recovery last reason reachable"
     );
 
-    if enabled {
+    if enabled && !start_resolved {
         assert_eq!(
             result,
             Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
         );
         assert_eq!(group.recovery_reason, Some(reason));
+        assert_eq!(group.mode, MarketModeV14::Recovery);
     } else {
-        assert_eq!(result, Err(V14Error::InvalidConfig));
+        if enabled {
+            assert_eq!(result, Err(V14Error::LockActive));
+        } else {
+            assert_eq!(result, Err(V14Error::InvalidConfig));
+        }
         assert_eq!(group.recovery_reason, None);
+        assert_eq!(group.mode, before_mode);
     }
-    assert_eq!(before_mode, MarketModeV14::Live);
-    assert_eq!(group.mode, before_mode);
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.c_tot, before_c_tot);
     assert_eq!(group.insurance, before_insurance);
@@ -796,6 +808,7 @@ fn proof_v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
         Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
     );
     assert_eq!(group.recovery_reason, Some(reason));
+    assert_eq!(group.mode, MarketModeV14::Recovery);
     assert_eq!(account, account_before);
     assert_eq!(group.vault, vault_before);
     assert_eq!(group.c_tot, c_tot_before);
@@ -804,7 +817,56 @@ fn proof_v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     assert_eq!(group.assets[0], asset_before);
     assert_eq!(group.slot_last, slot_last_before);
     assert_eq!(group.current_slot, current_slot_before);
-    assert_eq!(group.mode, MarketModeV14::Live);
+    assert_eq!(group.mode, MarketModeV14::Recovery);
+}
+
+#[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
+fn proof_v14_permissionless_recovery_enables_dead_leg_forfeit_without_value_escape() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    let before_vault = group.vault;
+    let before_c_tot = group.c_tot;
+    let before_insurance = group.insurance;
+    let before_pnl_pos = group.pnl_pos_tot;
+
+    let reason = PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy;
+    let declared = group.declare_permissionless_recovery(reason);
+    let outcome = group.forfeit_recovery_leg_not_atomic(&mut account, 0, 1);
+
+    kani::cover!(
+        declared == Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+            && matches!(outcome, Ok(DeadLegForfeitOutcomeV14 { detached: true, .. })),
+        "v14 declared recovery enables bounded dead-leg forfeit"
+    );
+    assert_eq!(
+        declared,
+        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+    );
+    match outcome {
+        Ok(out) => {
+            assert!(out.detached);
+            assert_eq!(out.positive_pnl_forfeited, 0);
+            assert_eq!(out.loss_settled, 0);
+            assert_eq!(out.insurance_used, 0);
+            assert_eq!(out.residual_booked, 0);
+            assert_eq!(out.explicit_loss, 0);
+        }
+        Err(_) => assert!(false),
+    }
+    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.recovery_reason, Some(reason));
+    assert_eq!(account.active_bitmap, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(group.insurance, before_insurance);
+    assert_eq!(group.pnl_pos_tot, before_pnl_pos);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
 }
 
 #[kani::proof]
