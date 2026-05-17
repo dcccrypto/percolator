@@ -2033,3 +2033,79 @@ fn proof_resolved_mode_postcondition_invariants() {
         "resolved-mode + lock-active MUST trip the postcondition"
     );
 }
+
+// ============================================================================
+// Wave 12-L rank/audit helpers — formal verification callers
+// These harnesses are the production callers for the O(1) audit-rank API
+// (permissionless_progress_rank_for_now, permissionless_account_progress_rank,
+// phase2_scan_outcome). They verify the API contracts hold on fresh markets.
+// ============================================================================
+
+/// permissionless_progress_rank_for_now returns all-zeros on a fresh Live
+/// market with no OI, no stress envelope, no active-close, and no Resolved
+/// mode. This is the baseline contract: a market that has never been stressed
+/// has zero outstanding liveness debt.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_permissionless_progress_rank_zero_on_fresh_live_market() {
+    let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let rank = engine
+        .permissionless_progress_rank_for_now(DEFAULT_SLOT)
+        .expect("rank must succeed on a valid fresh market");
+    // Fresh Live market: no OI → no live-catchup slots, no stress envelope,
+    // no active-close, not in Resolved mode.
+    assert_eq!(rank.live_catchup_slots, 0, "no catchup on fresh market");
+    assert_eq!(rank.stress_envelope_indices, 0, "no stress envelope");
+    assert_eq!(rank.active_close_residual_atoms, 0, "no active close");
+    assert_eq!(rank.resolved_blocker_units, 0, "not in Resolved mode");
+    // A fresh rank strictly-reduces from itself is false (not strictly less).
+    assert!(!rank.strictly_reduces_from(&rank), "rank does not reduce from itself");
+}
+
+/// permissionless_account_progress_rank returns zero B-remaining for a flat
+/// account (no open position). A flat account has no B-stale obligation.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_permissionless_account_rank_zero_on_flat_account() {
+    let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let idx = add_user_test(&mut engine, 0).expect("init account");
+    // Account is flat (no position) — B-remaining must be zero.
+    let rank = engine
+        .permissionless_account_progress_rank(idx as u16)
+        .expect("account rank must succeed for a materialized flat account");
+    assert_eq!(
+        rank.account_b_remaining_num, 0,
+        "flat account has no B-stale obligation"
+    );
+}
+
+/// phase2_scan_outcome: next_cursor is bounded by wrap_bound and the
+/// touched/inspected counts are non-negative with inspected >= touched
+/// (can only touch used accounts). Verifies the pure-compute helper's
+/// output invariants without mutating engine state.
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_phase2_scan_outcome_bounded() {
+    let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
+    let wrap_bound = engine.params.max_accounts;
+    if wrap_bound == 0 {
+        return;
+    }
+    // Probe with zero limits: outcome returns cursor unchanged, zero counts.
+    let outcome = engine
+        .phase2_scan_outcome(wrap_bound, 0, 0, false, false, false)
+        .expect("zero-limit scan must succeed");
+    assert!(
+        outcome.next_cursor < wrap_bound,
+        "next_cursor must stay within wrap_bound"
+    );
+    assert_eq!(outcome.touched, 0, "zero touch limit yields zero touched");
+    assert_eq!(outcome.inspected, 0, "zero scan limit yields zero inspected");
+    assert_eq!(
+        outcome.stress_counted_inspected, 0,
+        "no stress counting with zero limits"
+    );
+}

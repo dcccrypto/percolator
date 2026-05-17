@@ -1341,7 +1341,6 @@ struct AccrualSegmentPlan {
 /// Pure Phase 2 cursor-scan outcome (Wave 12-L symbol parity port). The
 /// keeper path computes this before mutating cursor/generation state, then
 /// performs the materialized touches.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Phase2ScanOutcome {
     pub next_cursor: u64,
@@ -1355,7 +1354,6 @@ pub struct Phase2ScanOutcome {
 /// parity port). This is not used to authorize mutations; it exposes
 /// durable rank components that honest public progress calls should
 /// monotonically reduce or route to recovery.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermissionlessProgressRank {
     pub live_catchup_slots: u64,
@@ -1370,7 +1368,6 @@ impl PermissionlessProgressRank {
     /// live catchup may start or restart a stress envelope while still
     /// reducing the more important stale-loss rank. Terminal recovery is
     /// represented by the dispatcher outcome, not by this rank relation.
-    #[allow(dead_code)]
     pub fn strictly_reduces_from(&self, before: &Self) -> bool {
         self.live_catchup_slots < before.live_catchup_slots
             || (self.live_catchup_slots == before.live_catchup_slots
@@ -1389,7 +1386,6 @@ impl PermissionlessProgressRank {
 /// parity port). Cursor/proof-packing wrappers can use this to audit that
 /// a supplied account touch reduces its own B-stale rank instead of
 /// relying on any full-market scan.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermissionlessAccountProgressRank {
     pub account_b_remaining_num: u128,
@@ -2985,10 +2981,8 @@ impl RiskEngine {
     }
 
     /// Zero the position basis and reset ADL/funding snapshots back to the
-    /// terminal-account neutral state (Wave 12-L symbol parity port). Used
-    /// by terminal-close paths after settlement; fork callers reach this via
-    /// `set_position_basis_q(0)` plus inline field resets.
-    #[allow(dead_code)]
+    /// terminal-account neutral state (Wave 12-L symbol parity port). Called
+    /// by `attach_effective_position_inner` when closing a position to flat.
     fn clear_position_basis_q(&mut self, idx: usize) -> Result<()> {
         self.set_position_basis_q(idx, 0i128)?;
         self.accounts[idx].adl_a_basis = ADL_ONE;
@@ -3054,13 +3048,9 @@ impl RiskEngine {
         }
 
         if new_eff_pos_q == 0 {
-            // Decrement-only path — no cap check needed.
-            self.set_position_basis_q(idx, 0i128)?;
-            // Reset to canonical zero-position defaults (spec §2.4)
-            self.accounts[idx].adl_a_basis = ADL_ONE;
-            self.accounts[idx].adl_k_snap = 0i128;
-            self.accounts[idx].f_snap = 0i128;
-            self.accounts[idx].adl_epoch_snap = 0;
+            // Decrement-only path: clear_position_basis_q zeros the basis and
+            // resets ADL/funding snapshots to canonical zero-position defaults.
+            self.clear_position_basis_q(idx)?;
         } else {
             // Spec §4.6: abs(new_eff_pos_q) <= MAX_POSITION_ABS_Q
             if new_eff_pos_q.unsigned_abs() > MAX_POSITION_ABS_Q {
@@ -3439,7 +3429,6 @@ impl RiskEngine {
     // bytes.
     // ========================================================================
 
-    #[allow(dead_code)]
     fn get_b_side(&self, s: Side) -> u128 {
         match s {
             Side::Long => self.b_long_num,
@@ -3447,7 +3436,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn set_b_side(&mut self, s: Side, v: u128) {
         match s {
             Side::Long => self.b_long_num = v,
@@ -3455,7 +3443,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn get_b_epoch_start(&self, s: Side) -> u128 {
         match s {
             Side::Long => self.b_epoch_start_long_num,
@@ -3463,7 +3450,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn set_b_epoch_start(&mut self, s: Side, v: u128) {
         match s {
             Side::Long => self.b_epoch_start_long_num = v,
@@ -3471,7 +3457,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn get_loss_weight_sum(&self, s: Side) -> u128 {
         match s {
             Side::Long => self.loss_weight_sum_long,
@@ -3479,7 +3464,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn set_loss_weight_sum(&mut self, s: Side, v: u128) {
         match s {
             Side::Long => self.loss_weight_sum_long = v,
@@ -3492,7 +3476,6 @@ impl RiskEngine {
     /// / a_basis`, clamped to (0, SOCIAL_LOSS_DEN]. Returns `CorruptState`
     /// for zero inputs and `Overflow` if the computed weight escapes the
     /// scale invariant.
-    #[allow(dead_code)]
     fn loss_weight_for_basis(abs_basis: u128, a_basis: u128) -> Result<u128> {
         if abs_basis == 0 || a_basis == 0 {
             return Err(RiskError::CorruptState);
@@ -3510,7 +3493,6 @@ impl RiskEngine {
         Ok(w)
     }
 
-    #[allow(dead_code)]
     fn get_social_remainder(&self, s: Side) -> u128 {
         match s {
             Side::Long => self.social_loss_remainder_long_num,
@@ -3518,7 +3500,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn set_social_remainder(&mut self, s: Side, v: u128) {
         match s {
             Side::Long => self.social_loss_remainder_long_num = v,
@@ -3526,7 +3507,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn get_social_dust(&self, s: Side) -> u128 {
         match s {
             Side::Long => self.social_loss_dust_long_num,
@@ -3534,7 +3514,6 @@ impl RiskEngine {
         }
     }
 
-    #[allow(dead_code)]
     fn set_social_dust(&mut self, s: Side, v: u128) {
         match s {
             Side::Long => self.social_loss_dust_long_num = v,
@@ -6477,10 +6456,7 @@ impl RiskEngine {
     /// the helper is a structural no-op for this branch.
     ///
     /// Wave 12-L symbol parity port — advance the sweep generation and stamp
-    /// the wrap slot. Fork callers reach this via the inline pattern at
-    /// `keeper_crank_not_atomic` (see L9199). Added as a named helper so
-    /// upstream's API maps cleanly.
-    #[allow(dead_code)]
+    /// the wrap slot. Called by `keeper_crank_not_atomic` on cursor wraparound.
     fn advance_sweep_generation(&mut self, now_slot: u64) -> Result<()> {
         self.sweep_generation = self
             .sweep_generation
@@ -7434,7 +7410,6 @@ impl RiskEngine {
     ///
     /// Mirrors toly engine `quarantine_social_remainder_before_weight_change`
     /// (toly:3107-3115).
-    #[allow(dead_code)]
     fn quarantine_social_remainder_before_weight_change(&mut self, s: Side) -> Result<()> {
         let rem = self.get_social_remainder(s);
         if rem == 0 {
@@ -7524,7 +7499,6 @@ impl RiskEngine {
     /// at this account state (caller's responsibility to escalate).
     ///
     /// Mirrors toly engine `plan_account_b_chunk_to_target` (toly:3469-3516).
-    #[allow(dead_code)]
     fn plan_account_b_chunk_to_target(
         &self,
         idx: usize,
@@ -8156,7 +8130,6 @@ impl RiskEngine {
     ///
     /// Mirrors toly engine `complete_active_bankrupt_close_for_recovery`
     /// (toly:3821-3836).
-    #[allow(dead_code)]
     fn complete_active_bankrupt_close_for_recovery(&mut self) -> Result<()> {
         self.validate_active_bankrupt_close_shape()?;
         if !self.active_bankrupt_close_recovery_required()? {
@@ -9415,7 +9388,6 @@ impl RiskEngine {
     /// active_close_residual_atoms, resolved_blocker_units) without
     /// mutating engine state. Honest public progress calls should produce
     /// a rank that `strictly_reduces_from` the prior rank.
-    #[allow(dead_code)]
     pub fn permissionless_progress_rank_for_now(
         &self,
         now_slot: u64,
@@ -9472,7 +9444,6 @@ impl RiskEngine {
     /// the account's remaining B-numerator (relative to its side's
     /// `b_target_for_account`) so cursor wrappers can audit that an
     /// individual account touch reduces its own stale rank.
-    #[allow(dead_code)]
     pub fn permissionless_account_progress_rank(
         &self,
         idx: u16,
@@ -9506,8 +9477,7 @@ impl RiskEngine {
     /// (computes touched/inspected/wrap state without mutating). Fork's
     /// keeper inlines the equivalent logic in `keeper_crank_not_atomic`
     /// Phase-2 sweep; this helper exposes upstream's analyzable form.
-    #[allow(dead_code)]
-    fn phase2_scan_outcome(
+    pub(crate) fn phase2_scan_outcome(
         &self,
         wrap_bound: u64,
         rr_touch_limit: u64,
@@ -9569,8 +9539,8 @@ impl RiskEngine {
     /// Wave 12-L symbol parity port — Phase-1 candidate loop. Iterates
     /// the keeper's ordered candidate list, touching each used account
     /// and liquidating those below maintenance margin. Returns
-    /// (num_liquidations, protective_progress_was_made).
-    #[allow(dead_code)]
+    /// (num_liquidations, protective_progress_was_made). Called by
+    /// `keeper_crank_not_atomic`.
     fn run_keeper_phase1_candidates(
         &mut self,
         ctx: &mut InstructionContext,
@@ -9718,71 +9688,21 @@ impl RiskEngine {
         self.current_slot = now_slot;
 
         // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
-        let mut attempts: u16 = 0;
+        // Delegates to run_keeper_phase1_candidates which contains the
+        // Wave 12-G item 3 `account_has_unsettled_live_effects` gate and
+        // the full liquidation dispatch loop.
         let max_candidate_inspections = core::cmp::min(
             MAX_TOUCHED_PER_INSTRUCTION as u16,
             max_revalidations.saturating_mul(4),
         );
-        let mut inspected: u16 = 0;
-        let mut num_liquidations: u32 = 0;
-
-        for &(candidate_idx, ref hint) in ordered_candidates {
-            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
-                break;
-            }
-            if ctx.pending_reset_long || ctx.pending_reset_short {
-                break;
-            }
-            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
-                continue;
-            }
-            if candidate_idx as u64 >= self.params.max_accounts {
-                continue;
-            }
-
-            attempts += 1;
-            let cidx = candidate_idx as usize;
-
-            self.touch_account_live_local(cidx, &mut ctx)?;
-
-            // Wave 12-G item 3 (port of upstream 1dc4466 "Allow local-current
-            // phase1 liquidation during catchup"): per-account
-            // `account_has_unsettled_live_effects` check replaces the
-            // upstream `loss_stale_after_accrual` market-wide flag. This
-            // lets phase1 liquidate an account that's individually current
-            // (no unsettled lazy A/K/F effects) even when the market still
-            // has loss-stale state elsewhere — the touch above already
-            // settled this account's local state, so the margin check below
-            // can trust the post-touch shape.
-            if !ctx.pending_reset_long
-                && !ctx.pending_reset_short
-                && !self.account_has_unsettled_live_effects(cidx)?
-            {
-                let eff = self.effective_pos_q_checked(cidx, false)?;
-                if eff != 0 {
-                    if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                        if let Some(policy) =
-                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
-                        {
-                            match self.liquidate_at_oracle_internal(
-                                candidate_idx,
-                                now_slot,
-                                oracle_price,
-                                policy,
-                                &mut ctx,
-                            ) {
-                                Ok(true) => {
-                                    num_liquidations += 1;
-                                }
-                                Ok(false) => {}
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let (num_liquidations, _) = self.run_keeper_phase1_candidates(
+            &mut ctx,
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+        )?;
 
         // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
         // Runs unconditionally — including when Phase 1 exited early on a
@@ -9821,15 +9741,11 @@ impl RiskEngine {
         // Advance cursor; on wraparound reset and bump generation.
         if sweep_end >= wrap_bound {
             self.rr_cursor_position = 0;
-            self.sweep_generation = self
-                .sweep_generation
-                .checked_add(1)
-                .ok_or(RiskError::Overflow)?;
+            // advance_sweep_generation increments sweep_generation and stamps
+            // last_sweep_generation_advance_slot. The fork additionally resets
+            // price_move_consumed_bps_this_generation which upstream does inline.
+            self.advance_sweep_generation(now_slot)?;
             self.price_move_consumed_bps_this_generation = 0;
-            // Wave 12-I: stamp the wrap slot so the stress envelope
-            // writer's `generation_after_stress` predicate can recognise
-            // that the sweep has rotated past the envelope's start point.
-            self.last_sweep_generation_advance_slot = now_slot;
         } else {
             self.rr_cursor_position = sweep_end;
         }
