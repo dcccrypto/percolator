@@ -4713,6 +4713,57 @@ fn proof_v14_short_liquidation_residual_charges_long_domain() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
+fn proof_v14_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
+    group.vault = 4;
+    group.insurance = 4;
+    group.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    group.insurance_domain_budget[0] = 4;
+    bankrupt.pnl = -5;
+    group.negative_pnl_account_count = 1;
+    group
+        .attach_leg(&mut bankrupt, 0, SideV14::Long, 1)
+        .unwrap();
+    group
+        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .unwrap();
+
+    let out = group
+        .liquidate_account_not_atomic(
+            &mut bankrupt,
+            LiquidationRequestV14 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 0,
+            },
+            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    kani::cover!(
+        out.residual_booked != 0,
+        "v14 unrelated insurance budget leaves bad-asset residual on domain"
+    );
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(out.residual_booked, 5);
+    assert_eq!(group.insurance, 4);
+    assert_eq!(group.insurance_domain_spent[0], 0);
+    assert_eq!(group.insurance_domain_spent[1], 0);
+    assert_eq!(
+        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        Ok(0)
+    );
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(bankrupt.active_bitmap, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(60)]
+#[kani::solver(cadical)]
 fn proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable() {
     let larger_residual: bool = kani::any();
     let residual = if larger_residual { -3 } else { -2 };

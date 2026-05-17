@@ -4278,6 +4278,45 @@ fn v14_liquidation_residual_domain_is_opposite_side_for_long_and_short() {
 }
 
 #[test]
+fn v14_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
+    let mut g = group();
+    let mut bankrupt = account();
+    let mut opposing = account_with_id(9);
+    g.vault = 4;
+    g.insurance = 4;
+    g.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    g.insurance_domain_budget[0] = 4;
+    bankrupt.pnl = -5;
+    g.negative_pnl_account_count = 1;
+    g.attach_leg(&mut bankrupt, 0, SideV14::Long, 1).unwrap();
+    g.attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .unwrap();
+
+    let out = g
+        .liquidate_account_not_atomic(
+            &mut bankrupt,
+            LiquidationRequestV14 {
+                asset_index: 0,
+                close_q: 1,
+                fee_bps: 0,
+            },
+            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(out.residual_booked, 5);
+    assert_eq!(g.insurance, 4);
+    assert_eq!(g.insurance_domain_spent, [0; V14_DOMAIN_COUNT]);
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV14::Short),
+        Ok(0)
+    );
+    assert_eq!(bankrupt.pnl, 0);
+    assert_eq!(bankrupt.active_bitmap, 0);
+}
+
+#[test]
 fn v14_bankrupt_liquidation_drops_uncollectible_fee_and_spends_insurance_once() {
     let (market, _, owner) = ids();
     let mut cfg = V14Config::public_user_fund(1, 0, 10);
