@@ -10830,6 +10830,7 @@ impl RiskEngine {
     /// price.
     /// Mirrors toly engine `permissionless_recovery_resolve_p_last_not_atomic`
     /// (toly:9400-9420).
+    test_visible! {
     fn permissionless_recovery_resolve_p_last_not_atomic(
         &mut self,
         reason: RecoveryReason,
@@ -10851,6 +10852,7 @@ impl RiskEngine {
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
     }
+    }
 
     /// Account-specific terminal recovery used by the account-B
     /// dispatch when the production planner reports the settlement
@@ -10858,6 +10860,7 @@ impl RiskEngine {
     /// accepted oracle price after a final validator pass.
     /// Mirrors toly engine `permissionless_recovery_resolve_account_b_p_last_not_atomic`
     /// (toly:9504-9514).
+    test_visible! {
     fn permissionless_recovery_resolve_account_b_p_last_not_atomic(
         &mut self,
         idx: u16,
@@ -10867,6 +10870,7 @@ impl RiskEngine {
         self.validate_permissionless_account_b_recovery_reason(idx as usize, now_slot)?;
         let p_last = self.last_oracle_price;
         self.resolve_market_not_atomic(ResolveMode::Degenerate, p_last, p_last, now_slot, 0)
+    }
     }
 
     /// Specialised resolver for the
