@@ -728,6 +728,7 @@ pub struct HealthCertV15 {
 pub struct CloseProgressLedgerV15 {
     pub active: bool,
     pub finalized: bool,
+    pub canceled: bool,
     pub close_id: u64,
     pub asset_index: u8,
     pub domain_side: SideV15,
@@ -748,6 +749,7 @@ impl CloseProgressLedgerV15 {
     pub const EMPTY: Self = Self {
         active: false,
         finalized: false,
+        canceled: false,
         close_id: 0,
         asset_index: 0,
         domain_side: SideV15::Long,
@@ -765,7 +767,17 @@ impl CloseProgressLedgerV15 {
     };
 
     pub fn has_pending_residual(self) -> bool {
-        self.active && !self.finalized && self.residual_remaining != 0
+        self.active && !self.finalized && !self.canceled && self.residual_remaining != 0
+    }
+
+    pub fn has_irreversible_progress(self) -> bool {
+        self.support_consumed != 0
+            || self.junior_face_burned != 0
+            || self.insurance_spent != 0
+            || self.b_loss_booked != 0
+            || self.explicit_loss_assigned != 0
+            || self.quantity_adl_applied_q != 0
+            || self.drift_consumed != 0
     }
 }
 
@@ -844,6 +856,7 @@ pub struct PortfolioAccountV15 {
     pub pnl: i128,
     pub reserved_pnl: u128,
     pub fee_credits: i128,
+    pub cancel_deposit_escrow: u128,
     pub last_fee_slot: u64,
     pub active_bitmap: u32,
     pub legs: [PortfolioLegV15; V15_MAX_PORTFOLIO_ASSETS_N],
@@ -865,6 +878,7 @@ impl PortfolioAccountV15 {
             pnl: 0,
             reserved_pnl: 0,
             fee_credits: 0,
+            cancel_deposit_escrow: 0,
             last_fee_slot: 0,
             active_bitmap: 0,
             legs: [PortfolioLegV15::EMPTY; V15_MAX_PORTFOLIO_ASSETS_N],
@@ -1574,6 +1588,7 @@ impl HealthCertV15Account {
 pub struct CloseProgressLedgerV15Account {
     pub active: u8,
     pub finalized: u8,
+    pub canceled: u8,
     pub close_id: V15PodU64,
     pub asset_index: u8,
     pub domain_side: u8,
@@ -1595,6 +1610,7 @@ impl CloseProgressLedgerV15Account {
         Self {
             active: encode_bool(value.active),
             finalized: encode_bool(value.finalized),
+            canceled: encode_bool(value.canceled),
             close_id: V15PodU64::new(value.close_id),
             asset_index: value.asset_index,
             domain_side: encode_side(value.domain_side),
@@ -1616,6 +1632,7 @@ impl CloseProgressLedgerV15Account {
         Ok(CloseProgressLedgerV15 {
             active: decode_bool(self.active)?,
             finalized: decode_bool(self.finalized)?,
+            canceled: decode_bool(self.canceled)?,
             close_id: self.close_id.get(),
             asset_index: self.asset_index,
             domain_side: decode_side(self.domain_side)?,
@@ -1723,6 +1740,7 @@ pub struct PortfolioAccountV15Account {
     pub pnl: V15PodI128,
     pub reserved_pnl: V15PodU128,
     pub fee_credits: V15PodI128,
+    pub cancel_deposit_escrow: V15PodU128,
     pub last_fee_slot: V15PodU64,
     pub active_bitmap: V15PodU32,
     pub legs: [PortfolioLegV15Account; V15_MAX_PORTFOLIO_ASSETS_N],
@@ -1758,6 +1776,7 @@ impl PortfolioAccountV15Account {
             pnl: V15PodI128::new(value.pnl),
             reserved_pnl: V15PodU128::new(value.reserved_pnl),
             fee_credits: V15PodI128::new(value.fee_credits),
+            cancel_deposit_escrow: V15PodU128::new(value.cancel_deposit_escrow),
             last_fee_slot: V15PodU64::new(value.last_fee_slot),
             active_bitmap: V15PodU32::new(value.active_bitmap),
             legs,
@@ -1788,6 +1807,7 @@ impl PortfolioAccountV15Account {
             pnl: self.pnl.get(),
             reserved_pnl: self.reserved_pnl.get(),
             fee_credits: self.fee_credits.get(),
+            cancel_deposit_escrow: self.cancel_deposit_escrow.get(),
             last_fee_slot: self.last_fee_slot.get(),
             active_bitmap: self.active_bitmap.get(),
             legs,
@@ -2042,6 +2062,19 @@ impl MarketGroupV15 {
     }
 
     fn validate_close_progress_ledger(&self, ledger: CloseProgressLedgerV15) -> V15Result<()> {
+        if ledger.canceled {
+            if ledger.active
+                || ledger.finalized
+                || ledger.close_id == 0
+                || ledger.asset_index as usize >= self.config.max_portfolio_assets as usize
+                || ledger.drift_reference_slot > ledger.max_close_slot
+                || ledger.has_irreversible_progress()
+                || ledger.residual_remaining != ledger.gross_loss_at_close_start
+            {
+                return Err(V15Error::InvalidLeg);
+            }
+            return Ok(());
+        }
         if !ledger.active {
             if ledger != CloseProgressLedgerV15::EMPTY {
                 return Err(V15Error::InvalidLeg);
@@ -2053,6 +2086,7 @@ impl MarketGroupV15 {
             || ledger.drift_reference_slot > ledger.max_close_slot
             || ledger.max_close_slot < ledger.drift_reference_slot
             || ledger.support_consumed > ledger.junior_face_burned
+            || ledger.canceled
         {
             return Err(V15Error::InvalidLeg);
         }
@@ -2166,6 +2200,7 @@ impl MarketGroupV15 {
             || account.pnl != 0
             || account.reserved_pnl != 0
             || account.fee_credits != 0
+            || account.cancel_deposit_escrow != 0
             || account.stale_state
             || account.b_stale_state
             || account.close_progress.active
@@ -2203,6 +2238,75 @@ impl MarketGroupV15 {
             .checked_add(amount)
             .ok_or(V15Error::ArithmeticOverflow)?;
         account.health_cert.valid = false;
+        self.assert_public_invariants()
+    }
+
+    pub fn cure_and_cancel_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV15,
+        optional_deposit: u128,
+        effective_prices: &[u64; V15_MAX_PORTFOLIO_ASSETS_N],
+    ) -> V15Result<()> {
+        self.validate_account_shape(account)?;
+        let ledger = account.close_progress;
+        if !ledger.active
+            || ledger.finalized
+            || ledger.canceled
+            || ledger.has_irreversible_progress()
+            || ledger.residual_remaining != ledger.gross_loss_at_close_start
+        {
+            return Err(V15Error::LockActive);
+        }
+        let domain =
+            self.insurance_domain_index(ledger.asset_index as usize, ledger.domain_side)?;
+        if self.pending_domain_loss_barriers[domain] == 0 {
+            return Err(V15Error::LockActive);
+        }
+        let escrow_total = account
+            .cancel_deposit_escrow
+            .checked_add(optional_deposit)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+        let new_vault = self
+            .vault
+            .checked_add(optional_deposit)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(V15Error::InvalidConfig);
+        }
+        let new_capital = account
+            .capital
+            .checked_add(escrow_total)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+        let new_c_tot = self
+            .c_tot
+            .checked_add(escrow_total)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+
+        let cert = self.full_account_refresh(account, effective_prices)?;
+        let escrow_i128 = i128::try_from(escrow_total).map_err(|_| V15Error::ArithmeticOverflow)?;
+        let cured_equity = cert
+            .certified_equity
+            .checked_add(escrow_i128)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+        if cured_equity < 0 || (cured_equity as u128) < cert.certified_initial_req {
+            return Err(V15Error::InvalidConfig);
+        }
+
+        self.vault = new_vault;
+        self.c_tot = new_c_tot;
+        account.capital = new_capital;
+        account.cancel_deposit_escrow = 0;
+        self.pending_domain_loss_barriers[domain] = self.pending_domain_loss_barriers[domain]
+            .checked_sub(1)
+            .ok_or(V15Error::CounterUnderflow)?;
+        account.close_progress = CloseProgressLedgerV15 {
+            active: false,
+            finalized: false,
+            canceled: true,
+            ..ledger
+        };
+        account.health_cert.valid = false;
+        self.validate_account_shape(account)?;
         self.assert_public_invariants()
     }
 

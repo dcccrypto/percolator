@@ -193,6 +193,13 @@ fn v15_persisted_account_wire_rejects_invalid_bool_enum_and_option_encoding() {
         Err(V15Error::InvalidConfig)
     );
 
+    let mut bad_close_bool = PortfolioAccountV15Account::from_runtime(&a);
+    bad_close_bool.close_progress.canceled = 2;
+    assert_eq!(
+        bad_close_bool.try_to_runtime(),
+        Err(V15Error::InvalidConfig)
+    );
+
     let mut bad_leg_enum = PortfolioAccountV15Account::from_runtime(&a);
     bad_leg_enum.legs[0].active = 1;
     bad_leg_enum.legs[0].side = 9;
@@ -1338,6 +1345,11 @@ fn v15_close_portfolio_account_requires_clean_local_state() {
     assert_eq!(g.materialized_portfolio_count, 1);
 
     a.b_stale_state = false;
+    a.cancel_deposit_escrow = 1;
+    assert_eq!(g.close_portfolio_account(&a), Err(V15Error::LockActive));
+    assert_eq!(g.materialized_portfolio_count, 1);
+
+    a.cancel_deposit_escrow = 0;
     a.capital = 0;
     g.close_portfolio_account(&a).unwrap();
     assert_eq!(g.materialized_portfolio_count, 0);
@@ -3064,6 +3076,70 @@ fn v15_pending_close_progress_blocks_domain_escape_until_finalized() {
 
     assert_eq!(g.clear_leg(&mut a, 0), Err(V15Error::LockActive));
     assert_eq!(g.h_lock_lane(Some(&a), false), Ok(HLockLaneV15::HMax));
+}
+
+#[test]
+fn v15_cure_and_cancel_close_releases_barrier_and_escrow_before_irreversible_progress() {
+    let mut g = group();
+    let mut a = account();
+    g.create_portfolio_account(&a).unwrap();
+    a.close_progress = CloseProgressLedgerV15 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: g.current_slot,
+        max_close_slot: g.current_slot + g.config.max_bankrupt_close_lifetime_slots,
+        residual_remaining: 5,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    g.pending_domain_loss_barriers[1] = 1;
+
+    g.cure_and_cancel_close_not_atomic(&mut a, 7, &[100; V15_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert!(!a.close_progress.active);
+    assert!(a.close_progress.canceled);
+    assert_eq!(a.close_progress.close_id, 1);
+    assert_eq!(a.close_progress.residual_remaining, 5);
+    assert_eq!(a.cancel_deposit_escrow, 0);
+    assert_eq!(a.capital, 7);
+    assert_eq!(g.c_tot, 7);
+    assert_eq!(g.vault, 7);
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV15::Short),
+        Ok(0)
+    );
+}
+
+#[test]
+fn v15_cure_and_cancel_close_rejects_after_irreversible_progress_without_consuming_deposit() {
+    let mut g = group();
+    let mut a = account();
+    g.create_portfolio_account(&a).unwrap();
+    a.close_progress = CloseProgressLedgerV15 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: g.current_slot,
+        max_close_slot: g.current_slot + g.config.max_bankrupt_close_lifetime_slots,
+        insurance_spent: 1,
+        residual_remaining: 4,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    g.pending_domain_loss_barriers[1] = 1;
+    let before_account = a;
+    let before_group = g;
+
+    assert_eq!(
+        g.cure_and_cancel_close_not_atomic(&mut a, 7, &[100; V15_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V15Error::LockActive)
+    );
+    assert_eq!(a, before_account);
+    assert_eq!(g, before_group);
 }
 
 #[test]

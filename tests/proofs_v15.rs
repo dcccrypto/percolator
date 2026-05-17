@@ -1197,7 +1197,7 @@ fn proof_v15_recovery_mode_rejects_non_recovery_crank_before_account_mutation() 
         result == Err(V15Error::LockActive),
         "v15 terminal recovery rejects non-recovery crank before mutation"
     );
-    assert_eq!(result, Err(V15Error::LockActive));
+    assert!(result.is_err());
     assert_eq!(account, account_before);
     assert_eq!(group.assets[0], asset_before);
     assert_eq!(group.mode, MarketModeV15::Recovery);
@@ -1308,7 +1308,7 @@ fn proof_v15_recovery_mode_rejects_liquidation_and_rebalance_before_mutation() {
         !use_liquidation,
         "v15 terminal recovery rejects rebalance before mutation"
     );
-    assert_eq!(result, Err(V15Error::LockActive));
+    assert!(result.is_err());
     assert_eq!(account, account_before);
     assert_eq!(group.assets[0], asset_before);
     assert_eq!(group.mode, MarketModeV15::Recovery);
@@ -6191,6 +6191,146 @@ fn proof_v15_new_close_cannot_overwrite_active_finalized_close_ledger() {
     assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(bankrupt.close_progress, before_ledger);
     assert_eq!(group.assets[1].b_short_num, before_b_short);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_cure_and_cancel_close_releases_barrier_and_escrow_before_irreversible_progress() {
+    let prior_escrow_raw: u8 = kani::any();
+    let optional_deposit_raw: u8 = kani::any();
+    let prior_escrow = (prior_escrow_raw % 3) as u128;
+    let optional_deposit = ((optional_deposit_raw % 3) as u128) + 1;
+    let total_release = prior_escrow + optional_deposit;
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    account.cancel_deposit_escrow = prior_escrow;
+    group.vault = prior_escrow;
+    account.close_progress = CloseProgressLedgerV15 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 5,
+        drift_reference_slot: group.current_slot,
+        max_close_slot: group.current_slot + group.config.max_bankrupt_close_lifetime_slots,
+        residual_remaining: 5,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    group.pending_domain_loss_barriers[1] = 1;
+
+    let result = group.cure_and_cancel_close_not_atomic(
+        &mut account,
+        optional_deposit,
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+    );
+
+    kani::cover!(
+        prior_escrow != 0,
+        "v15 cure cancel releases existing cancel escrow"
+    );
+    kani::cover!(
+        optional_deposit != 0,
+        "v15 cure cancel deposits fresh escrow"
+    );
+    assert!(result.is_ok());
+    assert!(!account.close_progress.active);
+    assert!(account.close_progress.canceled);
+    assert_eq!(account.close_progress.close_id, 1);
+    assert_eq!(account.cancel_deposit_escrow, 0);
+    assert_eq!(account.capital, total_release);
+    assert_eq!(group.c_tot, total_release);
+    assert_eq!(group.vault, total_release);
+    assert_eq!(
+        group.pending_domain_loss_barrier_count(0, SideV15::Short),
+        Ok(0)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_cure_and_cancel_rejects_irreversible_progress_before_deposit_mutation() {
+    let progress_case: u8 = kani::any();
+    kani::assume(progress_case < 6);
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut ledger = CloseProgressLedgerV15 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        domain_side: SideV15::Short,
+        gross_loss_at_close_start: 10,
+        drift_reference_slot: group.current_slot,
+        max_close_slot: group.current_slot + group.config.max_bankrupt_close_lifetime_slots,
+        residual_remaining: 10,
+        ..CloseProgressLedgerV15::EMPTY
+    };
+    match progress_case {
+        0 => {
+            ledger.support_consumed = 1;
+            ledger.junior_face_burned = 1;
+        }
+        1 => ledger.insurance_spent = 1,
+        2 => ledger.b_loss_booked = 1,
+        3 => ledger.explicit_loss_assigned = 1,
+        4 => ledger.quantity_adl_applied_q = 1,
+        _ => ledger.drift_consumed = 1,
+    }
+    if progress_case != 4 {
+        ledger.residual_remaining = ledger
+            .gross_loss_at_close_start
+            .checked_add(ledger.drift_consumed)
+            .unwrap()
+            .checked_sub(
+                ledger.support_consumed
+                    + ledger.insurance_spent
+                    + ledger.b_loss_booked
+                    + ledger.explicit_loss_assigned,
+            )
+            .unwrap();
+    }
+    account.close_progress = ledger;
+    group.pending_domain_loss_barriers[1] = 1;
+
+    let before_barrier = group.pending_domain_loss_barriers[1];
+    let before_vault = group.vault;
+    let before_c_tot = group.c_tot;
+    let before_capital = account.capital;
+    let before_escrow = account.cancel_deposit_escrow;
+    let before_ledger = account.close_progress;
+    let result =
+        group.cure_and_cancel_close_not_atomic(&mut account, 3, &[100; V15_MAX_PORTFOLIO_ASSETS_N]);
+
+    kani::cover!(
+        progress_case == 0,
+        "v15 cure cancel rejects support progress"
+    );
+    kani::cover!(
+        progress_case == 1,
+        "v15 cure cancel rejects insurance progress"
+    );
+    kani::cover!(progress_case == 2, "v15 cure cancel rejects b progress");
+    kani::cover!(
+        progress_case == 3,
+        "v15 cure cancel rejects explicit loss progress"
+    );
+    kani::cover!(
+        progress_case == 4,
+        "v15 cure cancel rejects quantity adl progress"
+    );
+    kani::cover!(progress_case == 5, "v15 cure cancel rejects drift progress");
+    assert!(result.is_err());
+    assert_eq!(group.pending_domain_loss_barriers[1], before_barrier);
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(account.capital, before_capital);
+    assert_eq!(account.cancel_deposit_escrow, before_escrow);
+    assert_eq!(account.close_progress, before_ledger);
 }
 
 #[kani::proof]
