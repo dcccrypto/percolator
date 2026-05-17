@@ -738,7 +738,7 @@ fn proof_attach_effective_position_updates_side_counts() {
 /// The settle_maintenance_fee path uses checked_sub which can produce i128::MIN,
 /// but fee_debt_u128_checked uses unsigned_abs() which safely returns 2^127.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_fee_credits_never_i128_min() {
     // Part 1: fee_debt_u128_checked is safe for ALL i128 values
@@ -1103,7 +1103,7 @@ fn proof_bankrupt_close_state_machine_schema() {
 /// so the gate trivially passes; when B-tracking lands, this harness will
 /// detect any setter that violates the lower-bound ≤ upper-bound contract.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_phantom_dust_certified_le_potential_at_genesis() {
     let engine = RiskEngine::new(zero_fee_params());
@@ -1123,7 +1123,7 @@ fn proof_phantom_dust_certified_le_potential_at_genesis() {
 /// `certified` from liquidation step 7, this guards against off-by-one or
 /// step-ordering bugs.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_phantom_dust_certified_gt_potential_rejects() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1159,7 +1159,7 @@ fn proof_phantom_dust_certified_gt_potential_rejects() {
 /// init-time predicate so future Wave 11a-ii writers can't silently
 /// regress the genesis state.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_b_tracking_shape_holds_at_genesis() {
     let engine = RiskEngine::new(zero_fee_params());
@@ -1183,7 +1183,7 @@ fn proof_b_tracking_shape_holds_at_genesis() {
 /// starts incrementing loss_weight_sum, this catches off-by-one and
 /// overflow-style regressions.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_b_tracking_loss_weight_sum_overflow_rejects() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1215,7 +1215,7 @@ fn proof_b_tracking_loss_weight_sum_overflow_rejects() {
 /// `set_social_remainder(side, plan.rem_new)`, this catches a wrap or
 /// off-by-one that would push the numerator into invalid range.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_b_tracking_shape_rejects_social_remainder_at_or_above_denominator() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1239,7 +1239,7 @@ fn proof_b_tracking_shape_rejects_social_remainder_at_or_above_denominator() {
 /// `transfer_scaled_dust_side` that fails to flush the post-mod dust
 /// correctly.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_b_tracking_shape_rejects_social_dust_at_or_above_denominator() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1264,7 +1264,7 @@ fn proof_b_tracking_shape_rejects_social_dust_at_or_above_denominator() {
 /// `checked_add` overflow; this harness catches any future writer that
 /// might store an out-of-range value.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_b_tracking_shape_rejects_saturated_flag_out_of_range() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1286,7 +1286,7 @@ fn proof_b_tracking_shape_rejects_saturated_flag_out_of_range() {
 /// the encoded byte; `continue_active_bankrupt_close_core` reads it back)
 /// depend on for end-to-end correctness.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_encode_decode_active_close_side_roundtrip() {
     let pick_long: bool = kani::any();
@@ -1308,7 +1308,7 @@ fn proof_encode_decode_active_close_side_roundtrip() {
 /// shows `active_close_present = 1` but `opp_side` is `0` (NONE) or any
 /// other byte, the decoder MUST surface `CorruptState`.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_decode_active_close_side_rejects_invalid_byte() {
     let byte: u8 = kani::any();
@@ -1327,7 +1327,7 @@ fn proof_decode_active_close_side_rejects_invalid_byte() {
 /// in the recovery terminal — both paths rely on the clear being
 /// total.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_clear_active_bankrupt_close_state_zeros_all_fields() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1370,7 +1370,7 @@ fn proof_clear_active_bankrupt_close_state_zeros_all_fields() {
 /// extension adds a third mode, the dispatcher must not silently take any
 /// of the two branches it understands.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_resolved_routes_to_resolved_close() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1418,7 +1418,7 @@ fn proof_permissionless_progress_resolved_routes_to_resolved_close() {
 /// instead of taking either of the two live-mode branches the
 /// dispatcher knows.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_rejects_when_active_close_present() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1454,7 +1454,7 @@ fn proof_permissionless_progress_rejects_when_active_close_present() {
 /// market — Live markets must take the keeper-crank path, not the
 /// cursor-scan path.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_force_close_resolved_cursor_rejects_live_market() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1470,7 +1470,7 @@ fn proof_force_close_resolved_cursor_rejects_live_market() {
 /// limit — silently treating it as a no-op would mean the wrapper's
 /// liveness contract has no guarantee the cursor advanced.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_force_close_resolved_cursor_rejects_zero_scan_limit() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1491,7 +1491,7 @@ fn proof_force_close_resolved_cursor_rejects_zero_scan_limit() {
 /// Genesis state has every B-tracking and bankrupt-close field at the
 /// no-continuation default, so the aggregator must accept.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_validate_engine_state_shape_holds_at_genesis() {
     let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1504,7 +1504,7 @@ fn proof_validate_engine_state_shape_holds_at_genesis() {
 /// `validate_b_tracking_shape` call from inside the aggregator, Kani
 /// catches it.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_validate_engine_state_shape_delegates_to_b_tracking() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1520,7 +1520,7 @@ fn proof_validate_engine_state_shape_delegates_to_b_tracking() {
 /// state-machine validator would reject (e.g., active_close_present > 1).
 /// Pins the second delegation arm of the aggregator.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_validate_engine_state_shape_delegates_to_bankrupt_close() {
     let mut engine = RiskEngine::new(zero_fee_params());
@@ -1544,7 +1544,7 @@ fn proof_validate_engine_state_shape_delegates_to_bankrupt_close() {
 /// neither Live nor Resolved with `Unauthorized` — the dispatcher must
 /// not silently advance an unknown-mode market.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_permissionless_progress_rejects_non_live_non_resolved() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1587,7 +1587,7 @@ fn proof_permissionless_progress_rejects_non_live_non_resolved() {
 /// or `b_short_num` has saturated at `u128::MAX`. Pins the headroom-
 /// detection contract.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_b_index_headroom_exhausted_requires_saturation() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1617,7 +1617,7 @@ fn proof_recovery_reason_b_index_headroom_exhausted_requires_saturation() {
 /// `sweep_generation`, `adl_epoch_long`, or `adl_epoch_short` is at
 /// `u64::MAX`.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_counter_or_epoch_overflow_requires_saturation() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1647,7 +1647,7 @@ fn proof_recovery_reason_counter_or_epoch_overflow_requires_saturation() {
 /// `ExplicitLossOrDustAuditOverflow` branch is authorised iff
 /// `explicit_unallocated_loss_saturated != 0`.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_explicit_loss_overflow_requires_saturation_flag() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1672,7 +1672,7 @@ fn proof_recovery_reason_explicit_loss_overflow_requires_saturation_flag() {
 /// `Unauthorized` — that reason is account-scoped and only the
 /// per-account validator may authorise it.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_account_b_settlement_is_global_unauthorized() {
     let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1693,7 +1693,7 @@ fn proof_recovery_reason_account_b_settlement_is_global_unauthorized() {
 /// and it must opt in by deciding to call the resolver directly. The
 /// permissionless dispatcher refuses to take the branch unilaterally.
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_oracle_policy_unavailable_is_wrapper_only() {
     let engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
@@ -1712,7 +1712,7 @@ fn proof_recovery_reason_oracle_policy_unavailable_is_wrapper_only() {
 /// when the market is not Live (already-Resolved markets must route
 /// through the resolved-close branch instead).
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(5)]
 #[kani::solver(cadical)]
 fn proof_recovery_reason_validators_reject_non_live_market() {
     let mut engine = RiskEngine::new_with_market(zero_fee_params(), DEFAULT_SLOT, DEFAULT_ORACLE);
