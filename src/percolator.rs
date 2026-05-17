@@ -9596,6 +9596,7 @@ impl RiskEngine {
     /// and liquidating those below maintenance margin. Returns
     /// (num_liquidations, protective_progress_was_made). Called by
     /// `keeper_crank_not_atomic`.
+    test_visible! {
     fn run_keeper_phase1_candidates(
         &mut self,
         ctx: &mut InstructionContext,
@@ -9659,6 +9660,7 @@ impl RiskEngine {
         }
         Ok((num_liquidations, protective_progress))
     }
+    } // end test_visible! run_keeper_phase1_candidates
 
     /// runs a mandatory structural sweep over the next `rr_window_size`
     /// materialized-account indices starting from `rr_cursor_position`. On
@@ -10701,6 +10703,7 @@ impl RiskEngine {
     /// to the global recovery loop or the keeper crank.
     /// Mirrors toly engine `try_permissionless_account_b_dispatch`
     /// (toly:8718-8744).
+    test_visible! {
     fn try_permissionless_account_b_dispatch(
         &mut self,
         idx: u16,
@@ -10727,6 +10730,7 @@ impl RiskEngine {
             Err(e) => Err(e),
         }
     }
+    } // end test_visible! try_permissionless_account_b_dispatch
 
     /// Account-B settlement progress step. Touches the named account
     /// through `touch_account_live_local`, drains any pending B chunk
@@ -10736,6 +10740,7 @@ impl RiskEngine {
     /// invalid in a recoverable way.
     /// Mirrors toly engine `try_permissionless_account_b_progress`
     /// (toly:8662-8714).
+    test_visible! {
     fn try_permissionless_account_b_progress(
         &mut self,
         idx: u16,
@@ -10789,6 +10794,7 @@ impl RiskEngine {
         self.assert_public_postconditions()?;
         Ok(true)
     }
+    } // end test_visible! try_permissionless_account_b_progress
 
     /// Wave 11a-ii-C: 5-reason global recovery wrapper. Validates the
     /// given reason against engine state; on success calls the P_last
