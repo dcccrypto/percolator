@@ -2,10 +2,10 @@
 
 **EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY. NOT AUDITED. Do NOT use with real funds.**
 
-Current normative spec: [`spec.md`](spec.md), **v14.0.0**.
+Current normative spec: [`spec.md`](spec.md), **v15.10.0**.
 
 Percolator is a perpetual-futures risk-engine library for account-local,
-permissionless risk progress. v14 removes the finite global account slab: every
+permissionless risk progress. v15 removes the finite global account slab: every
 portfolio account is a distinct authenticated account bound to a market group,
 and safety depends on bounded full-account refresh plus fail-closed stale
 states, not on scanning every account in the market.
@@ -21,9 +21,9 @@ or increase risk using optimistic health.
 2. **Account-local safety:** every favorable action refreshes the account's full active portfolio first; hidden, stale, or B-stale legs fail closed.
 3. **Bounded progress:** cranks and recovery paths are account-local and incremental; no public instruction needs to evaluate the whole market.
 
-## Account-Local v14
+## Account-Local v15
 
-Each `PortfolioAccountV14` carries provenance:
+Each `PortfolioAccountV15` carries provenance:
 
 ```text
 market_group_id
@@ -33,7 +33,7 @@ version/layout discriminator
 ```
 
 The engine rejects any account whose provenance does not match the
-`MarketGroupV14`. Active positions are defined only by the canonical active
+`MarketGroupV15`. Active positions are defined only by the canonical active
 bitmap and bounded leg array. There is no hidden slab slot and no global account
 table to scan.
 
@@ -56,9 +56,17 @@ healthy, but h-lock selection is state-derived and permissionless:
 Wrappers do not choose h-lock from an oracle. They supply authenticated market
 inputs; the engine selects the lane from committed market/account state.
 
+## Positive Payouts
+
+Live positive PnL is an ordinary junior lane only while the market group is
+`Live` and no resolved payout ledger exists. Once the market resolves, positive
+claims move to a single resolved payout ledger: exact account receipts replace
+scaled unreceipted bounds, payouts track `paid_effective`, and later bound
+refinements can only increase claimable top-ups.
+
 ## A/K/F/B
 
-v14 keeps the lazy index model but makes bankruptcy residuals explicit:
+v15 keeps the lazy index model but makes bankruptcy residuals explicit:
 
 - **A** scales effective quantity for side-level quantity ADL.
 - **K/F** represent mark and funding settlement.
@@ -83,8 +91,8 @@ deterministic recovery reason. The caller does not choose a recovery price.
 
 ## Proofs
 
-The current v14 proof suite is intentionally account-local and runs over the
-production v14 methods:
+The current v15 proof suite is intentionally account-local and runs over the
+production v15 methods:
 
 ```bash
 cargo install --locked kani-verifier
@@ -100,7 +108,7 @@ kani_audit_final.tsv
 scripts/proof-strength-audit-results.md
 ```
 
-The v12 slab proof inventory was retired with the v14 cutover because it no
+The old slab proof inventory was retired with the v15 cutover because it no
 longer applies to the architecture.
 
 ## Tests

@@ -1,9 +1,9 @@
 #![cfg(feature = "fuzz")]
 
-use percolator::v14::{
-    LiquidationRequestV14, MarketGroupV14, PermissionlessCrankActionV14,
-    PermissionlessCrankRequestV14, PortfolioAccountV14, ProvenanceHeaderV14, TradeRequestV14,
-    V14Config, V14Error, V14_MAX_PORTFOLIO_ASSETS_N,
+use percolator::v15::{
+    LiquidationRequestV15, MarketGroupV15, PermissionlessCrankActionV15,
+    PermissionlessCrankRequestV15, PortfolioAccountV15, ProvenanceHeaderV15, TradeRequestV15,
+    V15Config, V15Error, V15_MAX_PORTFOLIO_ASSETS_N,
 };
 use proptest::prelude::*;
 
@@ -11,30 +11,30 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32], [4; 32])
 }
 
-fn fuzz_group() -> MarketGroupV14 {
+fn fuzz_group() -> MarketGroupV15 {
     let (market, _, _, _) = ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 10);
+    let mut cfg = V15Config::public_user_fund(1, 0, 10);
     cfg.max_trading_fee_bps = 10;
     cfg.public_b_chunk_atoms = 1;
-    MarketGroupV14::new(market, cfg).unwrap()
+    MarketGroupV15::new(market, cfg).unwrap()
 }
 
-fn fuzz_accounts() -> (PortfolioAccountV14, PortfolioAccountV14) {
+fn fuzz_accounts() -> (PortfolioAccountV15, PortfolioAccountV15) {
     let (market, a_id, b_id, owner) = ids();
     (
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, a_id, owner)),
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, b_id, owner)),
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, a_id, owner)),
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, b_id, owner)),
     )
 }
 
-fn prices(price: u64) -> [u64; V14_MAX_PORTFOLIO_ASSETS_N] {
-    [price; V14_MAX_PORTFOLIO_ASSETS_N]
+fn prices(price: u64) -> [u64; V15_MAX_PORTFOLIO_ASSETS_N] {
+    [price; V15_MAX_PORTFOLIO_ASSETS_N]
 }
 
 fn assert_fuzz_invariants(
-    group: &MarketGroupV14,
-    a: &PortfolioAccountV14,
-    b: &PortfolioAccountV14,
+    group: &MarketGroupV15,
+    a: &PortfolioAccountV15,
+    b: &PortfolioAccountV15,
 ) {
     assert_eq!(group.assert_public_invariants(), Ok(()));
     assert_eq!(group.validate_account_shape(a), Ok(()));
@@ -50,11 +50,11 @@ fn assert_fuzz_invariants(
 }
 
 fn run_with_svm_rollback(
-    group: &mut MarketGroupV14,
-    a: &mut PortfolioAccountV14,
-    b: &mut PortfolioAccountV14,
-    result: Result<(), V14Error>,
-    before: (MarketGroupV14, PortfolioAccountV14, PortfolioAccountV14),
+    group: &mut MarketGroupV15,
+    a: &mut PortfolioAccountV15,
+    b: &mut PortfolioAccountV15,
+    result: Result<(), V15Error>,
+    before: (MarketGroupV15, PortfolioAccountV15, PortfolioAccountV15),
 ) {
     if result.is_err() {
         *group = before.0;
@@ -65,9 +65,9 @@ fn run_with_svm_rollback(
 }
 
 fn apply_fuzz_action(
-    group: &mut MarketGroupV14,
-    a: &mut PortfolioAccountV14,
-    b: &mut PortfolioAccountV14,
+    group: &mut MarketGroupV15,
+    a: &mut PortfolioAccountV15,
+    b: &mut PortfolioAccountV15,
     selector: u8,
     amount_seed: u16,
 ) {
@@ -109,7 +109,7 @@ fn apply_fuzz_action(
             .execute_trade_with_fee_not_atomic(
                 a,
                 b,
-                TradeRequestV14 {
+                TradeRequestV15 {
                     asset_index: 0,
                     size_q: 1 + (amount % 4),
                     exec_price: price,
@@ -123,12 +123,12 @@ fn apply_fuzz_action(
                 group
                     .permissionless_crank_not_atomic(
                         a,
-                        PermissionlessCrankRequestV14 {
+                        PermissionlessCrankRequestV15 {
                             now_slot: group.current_slot.saturating_add(1),
                             asset_index: 0,
                             effective_price: price,
                             funding_rate_e9: 0,
-                            action: PermissionlessCrankActionV14::Refresh,
+                            action: PermissionlessCrankActionV15::Refresh,
                         },
                         &effective_prices,
                     )
@@ -137,12 +137,12 @@ fn apply_fuzz_action(
                 group
                     .permissionless_crank_not_atomic(
                         b,
-                        PermissionlessCrankRequestV14 {
+                        PermissionlessCrankRequestV15 {
                             now_slot: group.current_slot.saturating_add(1),
                             asset_index: 0,
                             effective_price: price,
                             funding_rate_e9: 0,
-                            action: PermissionlessCrankActionV14::Refresh,
+                            action: PermissionlessCrankActionV15::Refresh,
                         },
                         &effective_prices,
                     )
@@ -150,7 +150,7 @@ fn apply_fuzz_action(
             }
         }
         6 => {
-            let req = LiquidationRequestV14 {
+            let req = LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1 + (amount % 4),
                 fee_bps: (amount_seed as u64) % 11,
@@ -177,7 +177,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn v14_fuzz_public_live_actions_preserve_conservation_under_svm_rollback(
+    fn v15_fuzz_public_live_actions_preserve_conservation_under_svm_rollback(
         actions in prop::collection::vec((0u8..16, 0u16..512), 1..80)
     ) {
         let mut group = fuzz_group();

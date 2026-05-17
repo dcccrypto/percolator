@@ -20,7 +20,7 @@ fn small_signed_floor_reference(n: i128, d: u128) -> i128 {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_floor_div_signed_conservative_matches_small_reference() {
+fn proof_v15_floor_div_signed_conservative_matches_small_reference() {
     let n_raw: i16 = kani::any();
     let d_raw: u8 = kani::any();
     kani::assume((-500..=500).contains(&n_raw));
@@ -42,7 +42,7 @@ fn proof_v14_floor_div_signed_conservative_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_mul_div_floor_u256_matches_small_reference() {
+fn proof_v15_mul_div_floor_u256_matches_small_reference() {
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let d_raw: u8 = kani::any();
@@ -61,7 +61,7 @@ fn proof_v14_mul_div_floor_u256_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_mul_div_ceil_u256_is_floor_plus_remainder_indicator() {
+fn proof_v15_mul_div_ceil_u256_is_floor_plus_remainder_indicator() {
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let d_raw: u8 = kani::any();
@@ -90,7 +90,7 @@ fn proof_v14_mul_div_ceil_u256_is_floor_plus_remainder_indicator() {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_ceil_div_positive_checked_matches_small_reference() {
+fn proof_v15_ceil_div_positive_checked_matches_small_reference() {
     let n_raw: u8 = kani::any();
     let d_raw: u8 = kani::any();
     kani::assume(n_raw <= 80);
@@ -107,7 +107,7 @@ fn proof_v14_ceil_div_positive_checked_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_wide_signed_mul_div_floor_matches_small_reference() {
+fn proof_v15_wide_signed_mul_div_floor_matches_small_reference() {
     let abs_basis_raw: u8 = kani::any();
     let k_diff_raw: i8 = kani::any();
     let den_raw: u8 = kani::any();
@@ -133,7 +133,7 @@ fn proof_v14_wide_signed_mul_div_floor_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_k_pair_mul_div_floor_matches_small_reference() {
+fn proof_v15_k_pair_mul_div_floor_matches_small_reference() {
     let abs_basis_raw: u8 = kani::any();
     let k_then_raw: i8 = kani::any();
     let k_now_raw: i8 = kani::any();
@@ -158,7 +158,7 @@ fn proof_v14_k_pair_mul_div_floor_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
-fn proof_v14_k_pair_zero_cases_return_zero() {
+fn proof_v15_k_pair_zero_cases_return_zero() {
     let den_raw: u8 = kani::any();
     kani::assume((1..=40).contains(&den_raw));
     let den = den_raw as u128;

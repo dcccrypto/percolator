@@ -1,17 +1,17 @@
 #![cfg(kani)]
 
-use percolator::v14::{
-    account_equity, risk_notional_ceil, CloseProgressLedgerV14, DeadLegForfeitOutcomeV14,
-    HLockLaneV14, LiquidationRequestV14, MarketGroupV14, MarketGroupV14Account, MarketModeV14,
-    PermissionlessCrankActionV14, PermissionlessCrankRequestV14, PermissionlessProgressOutcomeV14,
-    PermissionlessRecoveryReasonV14, PortfolioAccountV14, PortfolioAccountV14Account,
-    PortfolioLegV14, ProvenanceHeaderV14, RebalanceRequestV14, ResolvedCloseOutcomeV14,
-    SideModeV14, SideV14, TradeRequestV14, V14Config, V14Error, V14PodI128, V14PodU32,
-    V14_DOMAIN_COUNT, V14_MAX_PORTFOLIO_ASSETS_N,
+use percolator::v15::{
+    account_equity, risk_notional_ceil, CloseProgressLedgerV15, DeadLegForfeitOutcomeV15,
+    HLockLaneV15, LiquidationRequestV15, MarketGroupV15, MarketGroupV15Account, MarketModeV15,
+    PermissionlessCrankActionV15, PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
+    PermissionlessRecoveryReasonV15, PortfolioAccountV15, PortfolioAccountV15Account,
+    PortfolioLegV15, ProvenanceHeaderV15, RebalanceRequestV15, ResolvedCloseOutcomeV15,
+    ResolvedPayoutLedgerV15, SideModeV15, SideV15, TradeRequestV15, V15Config, V15Error,
+    V15PodI128, V15PodU32, V15_DOMAIN_COUNT, V15_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
-    ADL_ONE, MAX_OI_SIDE_Q, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, MAX_VAULT_TVL, POS_SCALE,
-    SOCIAL_LOSS_DEN,
+    ADL_ONE, BOUND_SCALE, MAX_OI_SIDE_Q, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, MAX_VAULT_TVL,
+    POS_SCALE, SOCIAL_LOSS_DEN,
 };
 
 fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -21,8 +21,8 @@ fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     (market, account, owner)
 }
 
-fn tight_envelope_config() -> V14Config {
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+fn tight_envelope_config() -> V15Config {
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.maintenance_margin_bps = 500;
     cfg.initial_margin_bps = 600;
     cfg.min_nonzero_mm_req = 100;
@@ -37,17 +37,49 @@ fn tight_envelope_config() -> V14Config {
     cfg
 }
 
+fn set_junior_bound(group: &mut MarketGroupV15, amount: u128) {
+    kani::assume(amount <= u128::MAX / BOUND_SCALE);
+    group.pnl_pos_bound_tot = amount;
+    group.pnl_pos_bound_tot_num = amount * BOUND_SCALE;
+}
+
+fn initialize_payout_ledger(group: &mut MarketGroupV15) {
+    let snapshot_residual = group.vault.saturating_sub(group.c_tot + group.insurance);
+    let total_bound_num = group.pnl_pos_bound_tot_num;
+    group.payout_snapshot = snapshot_residual;
+    group.payout_snapshot_pnl_pos_tot = group.pnl_pos_bound_tot;
+    group.payout_snapshot_captured = true;
+    group.resolved_payout_ledger = ResolvedPayoutLedgerV15 {
+        snapshot_residual,
+        terminal_claim_exact_receipts_num: 0,
+        terminal_claim_bound_unreceipted_num: total_bound_num,
+        current_payout_rate_num: if total_bound_num == 0 {
+            1
+        } else {
+            (snapshot_residual * BOUND_SCALE).min(total_bound_num)
+        },
+        current_payout_rate_den: if total_bound_num == 0 {
+            1
+        } else {
+            total_bound_num
+        },
+        snapshot_slot: group.current_slot.max(group.resolved_slot),
+        payout_halted: false,
+        finalized: false,
+    };
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
+fn proof_v15_hlock_is_exactly_hmin_or_hmax() {
     let h_max: u8 = kani::any();
     kani::assume(h_max > 0);
     let (market, account_id, owner) = symbolic_ids();
     let mut group =
-        MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, h_max as u64)).unwrap();
+        MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, h_max as u64)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.threshold_stress_active = kani::any();
     group.bankruptcy_hlock_active = kani::any();
@@ -63,7 +95,7 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
             && !account.stale_state
             && !account.b_stale_state
             && !instruction_bankruptcy_candidate,
-        "v14 h-min lane reachable"
+        "v15 h-min lane reachable"
     );
     kani::cover!(
         group.threshold_stress_active
@@ -72,7 +104,7 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
             || account.stale_state
             || account.b_stale_state
             || instruction_bankruptcy_candidate,
-        "v14 h-max lane reachable"
+        "v15 h-max lane reachable"
     );
 
     let selected = group
@@ -83,7 +115,7 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
     let lane = group
         .h_lock_lane(Some(&account), instruction_bankruptcy_candidate)
         .unwrap();
-    if lane == HLockLaneV14::HMax {
+    if lane == HLockLaneV15::HMax {
         assert_eq!(selected, h_max as u64);
     } else {
         assert_eq!(selected, 0);
@@ -93,17 +125,17 @@ fn proof_v14_hlock_is_exactly_hmin_or_hmax() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_hmin_zero_remains_available_when_no_lock_state_exists() {
+fn proof_v15_hmin_zero_remains_available_when_no_lock_state_exists() {
     let h_max: u8 = kani::any();
     kani::assume(h_max > 0);
     let (market, account_id, owner) = symbolic_ids();
     let group =
-        MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, h_max as u64)).unwrap();
-    let account = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, h_max as u64)).unwrap();
+    let account = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     assert_eq!(
         group.h_lock_lane(Some(&account), false),
-        Ok(HLockLaneV14::HMin)
+        Ok(HLockLaneV15::HMin)
     );
     assert_eq!(group.select_h_lock(Some(&account), false), Ok(0));
 }
@@ -111,56 +143,56 @@ fn proof_v14_hmin_zero_remains_available_when_no_lock_state_exists() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_stale_counter_transitions_are_idempotent() {
+fn proof_v15_stale_counter_transitions_are_idempotent() {
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.mark_account_stale(&mut account).unwrap();
     group.mark_account_stale(&mut account).unwrap();
-    kani::cover!(account.stale_state, "v14 stale state reachable");
+    kani::cover!(account.stale_state, "v15 stale state reachable");
     assert_eq!(group.stale_certificate_count, 1);
 
     group.clear_account_stale(&mut account).unwrap();
     group.clear_account_stale(&mut account).unwrap();
-    kani::cover!(!account.stale_state, "v14 stale clear reachable");
+    kani::cover!(!account.stale_state, "v15 stale clear reachable");
     assert_eq!(group.stale_certificate_count, 0);
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_b_stale_counter_transitions_are_idempotent_and_leg_gated() {
+fn proof_v15_b_stale_counter_transitions_are_idempotent_and_leg_gated() {
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.mark_account_b_stale(&mut account).unwrap();
     group.mark_account_b_stale(&mut account).unwrap();
-    kani::cover!(account.b_stale_state, "v14 b-stale state reachable");
+    kani::cover!(account.b_stale_state, "v15 b-stale state reachable");
     assert_eq!(group.b_stale_account_count, 1);
 
     group.clear_account_b_stale(&mut account).unwrap();
     group.clear_account_b_stale(&mut account).unwrap();
-    kani::cover!(!account.b_stale_state, "v14 b-stale clear reachable");
+    kani::cover!(!account.b_stale_state, "v15 b-stale clear reachable");
     assert_eq!(group.b_stale_account_count, 0);
 
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group.mark_leg_b_stale(&mut account, 0).unwrap();
     group.mark_leg_b_stale(&mut account, 0).unwrap();
     kani::cover!(
         account.b_stale_state && account.legs[0].b_stale,
-        "v14 active b-stale leg reachable"
+        "v15 active b-stale leg reachable"
     );
     assert_eq!(group.b_stale_account_count, 1);
 
     assert_eq!(
         group.clear_account_b_stale(&mut account),
-        Err(V14Error::BStale)
+        Err(V15Error::BStale)
     );
     assert!(account.b_stale_state);
     assert!(account.legs[0].b_stale);
@@ -170,32 +202,32 @@ fn proof_v14_b_stale_counter_transitions_are_idempotent_and_leg_gated() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_account_equity_rejects_i128_min_persistent_pnl() {
+fn proof_v15_account_equity_rejects_i128_min_persistent_pnl() {
     let (market, account_id, owner) = symbolic_ids();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.pnl = i128::MIN;
-    assert_eq!(account_equity(&account), Err(V14Error::ArithmeticOverflow));
+    assert_eq!(account_equity(&account), Err(V15Error::ArithmeticOverflow));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_account_equity_rejects_malformed_fee_credits() {
+fn proof_v15_account_equity_rejects_malformed_fee_credits() {
     let malformed_positive: bool = kani::any();
     let (market, account_id, owner) = symbolic_ids();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = 100;
     account.fee_credits = if malformed_positive { 1 } else { i128::MIN };
 
     kani::cover!(
         malformed_positive,
-        "v14 positive fee credit corruption reachable"
+        "v15 positive fee credit corruption reachable"
     );
     kani::cover!(
         !malformed_positive,
-        "v14 i128 min fee credit corruption reachable"
+        "v15 i128 min fee credit corruption reachable"
     );
     assert!(account_equity(&account).is_err());
 }
@@ -203,61 +235,61 @@ fn proof_v14_account_equity_rejects_malformed_fee_credits() {
 #[kani::proof]
 #[kani::unwind(10)]
 #[kani::solver(cadical)]
-fn proof_v14_account_equity_rejects_capital_above_i128_max() {
+fn proof_v15_account_equity_rejects_capital_above_i128_max() {
     let (market, account_id, owner) = symbolic_ids();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = i128::MAX as u128 + 1;
 
     kani::cover!(
         account.capital > i128::MAX as u128,
-        "v14 capital overflow equity path reachable"
+        "v15 capital overflow equity path reachable"
     );
-    assert_eq!(account_equity(&account), Err(V14Error::ArithmeticOverflow));
+    assert_eq!(account_equity(&account), Err(V15Error::ArithmeticOverflow));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_account_shape_rejects_malformed_persistent_economic_state() {
+fn proof_v15_account_shape_rejects_malformed_persistent_economic_state() {
     let dirty_case: u8 = kani::any();
     kani::assume(dirty_case < 4);
     let (market, account_id, owner) = symbolic_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     let expected = match dirty_case {
         0 => {
             account.pnl = i128::MIN;
-            V14Error::ArithmeticOverflow
+            V15Error::ArithmeticOverflow
         }
         1 => {
             account.fee_credits = 1;
-            V14Error::InvalidLeg
+            V15Error::InvalidLeg
         }
         2 => {
             account.fee_credits = i128::MIN;
-            V14Error::ArithmeticOverflow
+            V15Error::ArithmeticOverflow
         }
         _ => {
             account.pnl = 1;
             account.reserved_pnl = 2;
-            V14Error::InvalidLeg
+            V15Error::InvalidLeg
         }
     };
 
-    kani::cover!(dirty_case == 0, "v14 shape rejects i128 min pnl");
-    kani::cover!(dirty_case == 1, "v14 shape rejects positive fee credit");
-    kani::cover!(dirty_case == 2, "v14 shape rejects i128 min fee credit");
-    kani::cover!(dirty_case == 3, "v14 shape rejects over-reserved pnl");
+    kani::cover!(dirty_case == 0, "v15 shape rejects i128 min pnl");
+    kani::cover!(dirty_case == 1, "v15 shape rejects positive fee credit");
+    kani::cover!(dirty_case == 2, "v15 shape rejects i128 min fee credit");
+    kani::cover!(dirty_case == 3, "v15 shape rejects over-reserved pnl");
     assert_eq!(group.validate_account_shape(&account), Err(expected));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
+fn proof_v15_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
     let bad_bool: u8 = kani::any();
     let bad_market_mode: u8 = kani::any();
     let bad_side_mode: u8 = kani::any();
@@ -268,60 +300,60 @@ fn proof_v14_persisted_wire_rejects_noncanonical_bool_enum_and_option() {
     kani::assume(bad_option_present > 1);
 
     let (market, account_id, owner) = symbolic_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let account = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let account = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
-    let mut account_wire = PortfolioAccountV14Account::from_runtime(&account);
+    let mut account_wire = PortfolioAccountV15Account::from_runtime(&account);
     account_wire.stale_state = bad_bool;
-    kani::cover!(bad_bool == 2, "v14 persisted invalid bool branch reachable");
-    assert_eq!(account_wire.try_to_runtime(), Err(V14Error::InvalidConfig));
+    kani::cover!(bad_bool == 2, "v15 persisted invalid bool branch reachable");
+    assert_eq!(account_wire.try_to_runtime(), Err(V15Error::InvalidConfig));
 
-    let mut config_bool_wire = MarketGroupV14Account::from_runtime(&group);
+    let mut config_bool_wire = MarketGroupV15Account::from_runtime(&group);
     config_bool_wire.config.recovery_fallback_price_enabled = bad_bool;
     kani::cover!(
         bad_bool == 3,
-        "v14 persisted invalid config bool branch reachable"
+        "v15 persisted invalid config bool branch reachable"
     );
     assert_eq!(
         config_bool_wire.try_to_runtime(),
-        Err(V14Error::InvalidConfig)
+        Err(V15Error::InvalidConfig)
     );
 
-    let mut market_mode_wire = MarketGroupV14Account::from_runtime(&group);
+    let mut market_mode_wire = MarketGroupV15Account::from_runtime(&group);
     market_mode_wire.mode = bad_market_mode;
     kani::cover!(
         bad_market_mode == 3,
-        "v14 persisted invalid market mode branch reachable"
+        "v15 persisted invalid market mode branch reachable"
     );
     assert_eq!(
         market_mode_wire.try_to_runtime(),
-        Err(V14Error::InvalidConfig)
+        Err(V15Error::InvalidConfig)
     );
 
-    let mut side_mode_wire = MarketGroupV14Account::from_runtime(&group);
+    let mut side_mode_wire = MarketGroupV15Account::from_runtime(&group);
     side_mode_wire.assets[0].mode_long = bad_side_mode;
     kani::cover!(
         bad_side_mode == 3,
-        "v14 persisted invalid side mode branch reachable"
+        "v15 persisted invalid side mode branch reachable"
     );
     assert_eq!(
         side_mode_wire.try_to_runtime(),
-        Err(V14Error::InvalidConfig)
+        Err(V15Error::InvalidConfig)
     );
 
-    let mut option_wire = MarketGroupV14Account::from_runtime(&group);
+    let mut option_wire = MarketGroupV15Account::from_runtime(&group);
     option_wire.recovery_reason.present = bad_option_present;
     kani::cover!(
         bad_option_present == 2,
-        "v14 persisted invalid option-present branch reachable"
+        "v15 persisted invalid option-present branch reachable"
     );
-    assert_eq!(option_wire.try_to_runtime(), Err(V14Error::InvalidConfig));
+    assert_eq!(option_wire.try_to_runtime(), Err(V15Error::InvalidConfig));
 }
 
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
+fn proof_v15_market_wire_roundtrip_preserves_valid_runtime_state() {
     let vault_units: u8 = kani::any();
     let c_units: u8 = kani::any();
     let i_units: u8 = kani::any();
@@ -345,41 +377,41 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     kani::assume(recovery_case < 8);
 
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.vault = vault_units as u128;
     group.c_tot = c_units as u128;
     group.insurance = i_units as u128;
     group.pnl_pos_tot = pnl_pos_units as u128;
-    group.pnl_pos_bound_tot = pnl_pos_units as u128;
+    set_junior_bound(&mut group, pnl_pos_units as u128);
     group.pnl_matured_pos_tot = pnl_matured_units as u128;
     group.bankruptcy_hlock_active = kani::any();
     group.threshold_stress_active = kani::any();
     group.loss_stale_active = kani::any();
     group.payout_snapshot_captured = kani::any();
     group.mode = match market_mode_case {
-        0 => MarketModeV14::Live,
-        1 => MarketModeV14::Recovery,
-        _ => MarketModeV14::Resolved,
+        0 => MarketModeV15::Live,
+        1 => MarketModeV15::Recovery,
+        _ => MarketModeV15::Resolved,
     };
     group.recovery_reason = if recovery_present {
         Some(match recovery_case {
-            0 => PermissionlessRecoveryReasonV14::BelowProgressFloor,
-            1 => PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
-            2 => PermissionlessRecoveryReasonV14::AccountBSettlementCannotProgress,
-            3 => PermissionlessRecoveryReasonV14::BIndexHeadroomExhausted,
-            4 => PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
-            5 => PermissionlessRecoveryReasonV14::ExplicitLossOrDustAuditOverflow,
-            6 => PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy,
-            _ => PermissionlessRecoveryReasonV14::CounterOrEpochOverflowDeclaredRecovery,
+            0 => PermissionlessRecoveryReasonV15::BelowProgressFloor,
+            1 => PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability,
+            2 => PermissionlessRecoveryReasonV15::AccountBSettlementCannotProgress,
+            3 => PermissionlessRecoveryReasonV15::BIndexHeadroomExhausted,
+            4 => PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress,
+            5 => PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow,
+            6 => PermissionlessRecoveryReasonV15::OracleOrTargetUnavailableByAuthenticatedPolicy,
+            _ => PermissionlessRecoveryReasonV15::CounterOrEpochOverflowDeclaredRecovery,
         })
     } else {
         None
     };
 
     let side_mode = match side_mode_case {
-        0 => SideModeV14::Normal,
-        1 => SideModeV14::ResetPending,
-        _ => SideModeV14::DrainOnly,
+        0 => SideModeV15::Normal,
+        1 => SideModeV15::ResetPending,
+        _ => SideModeV15::DrainOnly,
     };
     group.assets[0].raw_oracle_target_price = price_raw as u64;
     group.assets[0].effective_price = price_raw as u64;
@@ -399,20 +431,20 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     group.assets[0].mode_long = side_mode;
     group.assets[0].mode_short = side_mode;
 
-    let wire = MarketGroupV14Account::from_runtime(&group);
+    let wire = MarketGroupV15Account::from_runtime(&group);
     let decoded = wire.try_to_runtime().unwrap();
 
     kani::cover!(
         recovery_present,
-        "v14 market wire roundtrip with recovery reason"
+        "v15 market wire roundtrip with recovery reason"
     );
     kani::cover!(
         !recovery_present,
-        "v14 market wire roundtrip without recovery reason"
+        "v15 market wire roundtrip without recovery reason"
     );
     kani::cover!(
         side_mode_case == 1,
-        "v14 market wire roundtrip reset-pending side mode"
+        "v15 market wire roundtrip reset-pending side mode"
     );
     let mut id_i = 0;
     while id_i < 32 {
@@ -465,6 +497,7 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
     assert_eq!(decoded.c_tot, group.c_tot);
     assert_eq!(decoded.insurance, group.insurance);
     assert_eq!(decoded.pnl_pos_tot, group.pnl_pos_tot);
+    assert_eq!(decoded.pnl_pos_bound_tot_num, group.pnl_pos_bound_tot_num);
     assert_eq!(decoded.pnl_pos_bound_tot, group.pnl_pos_bound_tot);
     assert_eq!(decoded.pnl_matured_pos_tot, group.pnl_matured_pos_tot);
     assert_eq!(
@@ -491,7 +524,7 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
         assert_eq!(decoded_reason, group_reason);
     }
     let mut asset_i = 0;
-    while asset_i < V14_MAX_PORTFOLIO_ASSETS_N {
+    while asset_i < V15_MAX_PORTFOLIO_ASSETS_N {
         assert_eq!(
             decoded.assets[asset_i].raw_oracle_target_price,
             group.assets[asset_i].raw_oracle_target_price
@@ -548,7 +581,7 @@ fn proof_v14_market_wire_roundtrip_preserves_valid_runtime_state() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
+fn proof_v15_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
     let active: bool = kani::any();
     let short_side: bool = kani::any();
     let basis_units: u8 = kani::any();
@@ -563,9 +596,9 @@ fn proof_v14_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
     kani::assume(reserved_units <= pnl_units);
 
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     if active {
         let signed_basis = if short_side {
             -(basis_units as i128)
@@ -573,9 +606,9 @@ fn proof_v14_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
             basis_units as i128
         };
         let side = if short_side {
-            SideV14::Short
+            SideV15::Short
         } else {
-            SideV14::Long
+            SideV15::Long
         };
         group
             .attach_leg(&mut account, 0, side, signed_basis)
@@ -594,19 +627,19 @@ fn proof_v14_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
     account.health_cert.certified_equity = account_equity(&account).unwrap();
     account.health_cert.active_bitmap_at_cert = account.active_bitmap;
 
-    let wire = PortfolioAccountV14Account::from_runtime(&account);
+    let wire = PortfolioAccountV15Account::from_runtime(&account);
     let decoded = wire.try_to_runtime().unwrap();
     let checked = wire.validate_with_market(&group).unwrap();
 
     kani::cover!(
         active && !short_side,
-        "v14 portfolio wire roundtrip active long"
+        "v15 portfolio wire roundtrip active long"
     );
     kani::cover!(
         active && short_side,
-        "v14 portfolio wire roundtrip active short"
+        "v15 portfolio wire roundtrip active short"
     );
-    kani::cover!(!active, "v14 portfolio wire roundtrip inactive account");
+    kani::cover!(!active, "v15 portfolio wire roundtrip inactive account");
     assert_eq!(decoded, account);
     assert_eq!(checked, account);
 }
@@ -614,117 +647,117 @@ fn proof_v14_portfolio_wire_roundtrip_preserves_valid_runtime_state() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_persisted_wire_rejects_i128_min_economic_fields() {
+fn proof_v15_persisted_wire_rejects_i128_min_economic_fields() {
     let dirty_case: u8 = kani::any();
     kani::assume(dirty_case < 6);
 
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut active_group = group;
     active_group
-        .attach_leg(&mut account, 0, SideV14::Long, 1)
+        .attach_leg(&mut account, 0, SideV15::Long, 1)
         .unwrap();
 
     match dirty_case {
         0 => {
-            let mut wire = MarketGroupV14Account::from_runtime(&group);
-            wire.assets[0].k_long = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = MarketGroupV15Account::from_runtime(&group);
+            wire.assets[0].k_long = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
         1 => {
-            let mut wire = MarketGroupV14Account::from_runtime(&group);
-            wire.assets[0].f_short_num = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = MarketGroupV15Account::from_runtime(&group);
+            wire.assets[0].f_short_num = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
         2 => {
-            let mut wire = PortfolioAccountV14Account::from_runtime(&account);
-            wire.pnl = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = PortfolioAccountV15Account::from_runtime(&account);
+            wire.pnl = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
         3 => {
-            let mut wire = PortfolioAccountV14Account::from_runtime(&account);
-            wire.fee_credits = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = PortfolioAccountV15Account::from_runtime(&account);
+            wire.fee_credits = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
         4 => {
-            let mut wire = PortfolioAccountV14Account::from_runtime(&account);
-            wire.legs[0].k_snap = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = PortfolioAccountV15Account::from_runtime(&account);
+            wire.legs[0].k_snap = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
         _ => {
-            let mut wire = PortfolioAccountV14Account::from_runtime(&account);
-            wire.health_cert.certified_equity = V14PodI128::new(i128::MIN);
-            assert_eq!(wire.try_to_runtime(), Err(V14Error::ArithmeticOverflow));
+            let mut wire = PortfolioAccountV15Account::from_runtime(&account);
+            wire.health_cert.certified_equity = V15PodI128::new(i128::MIN);
+            assert_eq!(wire.try_to_runtime(), Err(V15Error::ArithmeticOverflow));
         }
     }
 
-    kani::cover!(dirty_case == 0, "v14 wire rejects i128 min market K");
-    kani::cover!(dirty_case == 1, "v14 wire rejects i128 min market F");
-    kani::cover!(dirty_case == 2, "v14 wire rejects i128 min account PnL");
-    kani::cover!(dirty_case == 3, "v14 wire rejects i128 min fee credits");
-    kani::cover!(dirty_case == 4, "v14 wire rejects i128 min leg K snapshot");
+    kani::cover!(dirty_case == 0, "v15 wire rejects i128 min market K");
+    kani::cover!(dirty_case == 1, "v15 wire rejects i128 min market F");
+    kani::cover!(dirty_case == 2, "v15 wire rejects i128 min account PnL");
+    kani::cover!(dirty_case == 3, "v15 wire rejects i128 min fee credits");
+    kani::cover!(dirty_case == 4, "v15 wire rejects i128 min leg K snapshot");
     kani::cover!(
         dirty_case == 5,
-        "v14 wire rejects i128 min health certificate"
+        "v15 wire rejects i128 min health certificate"
     );
 }
 
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_persisted_wire_rejects_provenance_and_hidden_leg_smuggling() {
+fn proof_v15_persisted_wire_rejects_provenance_and_hidden_leg_smuggling() {
     let case: u8 = kani::any();
     kani::assume(case < 5);
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let empty = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let empty = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut active = empty;
     let mut builder_group = group;
     builder_group
-        .attach_leg(&mut active, 0, SideV14::Long, 1)
+        .attach_leg(&mut active, 0, SideV15::Long, 1)
         .unwrap();
-    let active_wire = PortfolioAccountV14Account::from_runtime(&active);
-    let mut wire = PortfolioAccountV14Account::from_runtime(&empty);
+    let active_wire = PortfolioAccountV15Account::from_runtime(&active);
+    let mut wire = PortfolioAccountV15Account::from_runtime(&empty);
 
     let expected = match case {
         0 => {
             wire.provenance_header.market_group_id = [9; 32];
-            V14Error::ProvenanceMismatch
+            V15Error::ProvenanceMismatch
         }
         1 => {
             wire.owner = [9; 32];
-            V14Error::ProvenanceMismatch
+            V15Error::ProvenanceMismatch
         }
         2 => {
-            wire.active_bitmap = V14PodU32::new(1);
-            V14Error::HiddenLeg
+            wire.active_bitmap = V15PodU32::new(1);
+            V15Error::HiddenLeg
         }
         3 => {
             wire.legs[0] = active_wire.legs[0];
-            wire.active_bitmap = V14PodU32::new(0);
-            V14Error::HiddenLeg
+            wire.active_bitmap = V15PodU32::new(0);
+            V15Error::HiddenLeg
         }
         _ => {
             wire.legs[1] = active_wire.legs[0];
-            wire.active_bitmap = V14PodU32::new(1 << 1);
-            V14Error::HiddenLeg
+            wire.active_bitmap = V15PodU32::new(1 << 1);
+            V15Error::HiddenLeg
         }
     };
 
-    kani::cover!(case == 0, "v14 persisted wrong-market account rejected");
-    kani::cover!(case == 1, "v14 persisted wrong-owner account rejected");
-    kani::cover!(case == 2, "v14 persisted bitmap-only leg rejected");
-    kani::cover!(case == 3, "v14 persisted hidden active leg rejected");
-    kani::cover!(case == 4, "v14 persisted out-of-config leg rejected");
+    kani::cover!(case == 0, "v15 persisted wrong-market account rejected");
+    kani::cover!(case == 1, "v15 persisted wrong-owner account rejected");
+    kani::cover!(case == 2, "v15 persisted bitmap-only leg rejected");
+    kani::cover!(case == 3, "v15 persisted hidden active leg rejected");
+    kani::cover!(case == 4, "v15 persisted out-of-config leg rejected");
     assert_eq!(wire.validate_with_market(&group), Err(expected));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
+fn proof_v15_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
     let capital: u16 = kani::any();
     let pnl: i16 = kani::any();
     let debt: u16 = kani::any();
@@ -732,7 +765,7 @@ fn proof_v14_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
     kani::assume(debt <= 10_000);
     let (market, account_id, owner) = symbolic_ids();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = capital as u128;
     account.pnl = pnl as i128;
     account.fee_credits = -(debt as i128);
@@ -740,23 +773,23 @@ fn proof_v14_flat_account_equity_is_exact_capital_plus_pnl_minus_fee_debt() {
     let expected = (capital as i128) + (pnl as i128) - (debt as i128);
     let actual = account_equity(&account).unwrap();
 
-    kani::cover!(pnl < 0, "v14 flat negative pnl equity branch reachable");
-    kani::cover!(pnl >= 0, "v14 flat nonnegative pnl equity branch reachable");
-    kani::cover!(debt > 0, "v14 flat account fee debt branch reachable");
+    kani::cover!(pnl < 0, "v15 flat negative pnl equity branch reachable");
+    kani::cover!(pnl >= 0, "v15 flat nonnegative pnl equity branch reachable");
+    kani::cover!(debt > 0, "v15 flat account fee debt branch reachable");
     assert_eq!(actual, expected);
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_authoritatively_flat_account_never_receives_b_loss() {
+fn proof_v15_authoritatively_flat_account_never_receives_b_loss() {
     let b_long: u8 = kani::any();
     let b_short: u8 = kani::any();
     let budget: u8 = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 100).unwrap();
     group.assets[0].b_long_num = b_long as u128;
     group.assets[0].b_short_num = b_short as u128;
@@ -769,9 +802,9 @@ fn proof_v14_authoritatively_flat_account_never_receives_b_loss() {
 
     kani::cover!(
         b_long > 0 || b_short > 0,
-        "v14 flat account with nonzero side B accumulator reachable"
+        "v15 flat account with nonzero side B accumulator reachable"
     );
-    assert_eq!(outcome, PermissionlessProgressOutcomeV14::AccountCurrent);
+    assert_eq!(outcome, PermissionlessProgressOutcomeV15::AccountCurrent);
     assert_eq!(account.active_bitmap, 0);
     assert_eq!(account.pnl, before_account.pnl);
     assert_eq!(account.capital, before_account.capital);
@@ -782,11 +815,11 @@ fn proof_v14_authoritatively_flat_account_never_receives_b_loss() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
+fn proof_v15_public_config_rejects_invalid_user_fund_shapes() {
     let case: u8 = kani::any();
     kani::assume(case < 13);
     let (market, _, _) = symbolic_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     match case {
         0 => cfg.max_portfolio_assets = 0,
         1 => cfg.h_max = 0,
@@ -803,45 +836,45 @@ fn proof_v14_public_config_rejects_invalid_user_fund_shapes() {
         _ => cfg.max_bankrupt_close_lifetime_slots = 0,
     }
 
-    kani::cover!(case == 0, "v14 zero portfolio width rejected");
-    kani::cover!(case == 1, "v14 zero hmax rejected");
-    kani::cover!(case == 2, "v14 hmin above hmax rejected");
-    kani::cover!(case == 3, "v14 invalid margin floor ordering rejected");
-    kani::cover!(case == 4, "v14 disabled recovery rejected");
-    kani::cover!(case == 5, "v14 disabled recovery fallback rejected");
-    kani::cover!(case == 6, "v14 zero B chunk budget rejected");
-    kani::cover!(case == 7, "v14 disabled stale certificate penalty rejected");
-    kani::cover!(case == 8, "v14 disabled required full refresh rejected");
-    kani::cover!(case == 9, "v14 disabled crank-forward profile rejected");
-    kani::cover!(case == 10, "v14 zero account B chunk cap rejected");
-    kani::cover!(case == 11, "v14 zero bankrupt close chunk cap rejected");
-    kani::cover!(case == 12, "v14 zero bankrupt close lifetime rejected");
+    kani::cover!(case == 0, "v15 zero portfolio width rejected");
+    kani::cover!(case == 1, "v15 zero hmax rejected");
+    kani::cover!(case == 2, "v15 hmin above hmax rejected");
+    kani::cover!(case == 3, "v15 invalid margin floor ordering rejected");
+    kani::cover!(case == 4, "v15 disabled recovery rejected");
+    kani::cover!(case == 5, "v15 disabled recovery fallback rejected");
+    kani::cover!(case == 6, "v15 zero B chunk budget rejected");
+    kani::cover!(case == 7, "v15 disabled stale certificate penalty rejected");
+    kani::cover!(case == 8, "v15 disabled required full refresh rejected");
+    kani::cover!(case == 9, "v15 disabled crank-forward profile rejected");
+    kani::cover!(case == 10, "v15 zero account B chunk cap rejected");
+    kani::cover!(case == 11, "v15 zero bankrupt close chunk cap rejected");
+    kani::cover!(case == 12, "v15 zero bankrupt close lifetime rejected");
     assert_eq!(
-        MarketGroupV14::new(market, cfg),
-        Err(V14Error::InvalidConfig)
+        MarketGroupV15::new(market, cfg),
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
+fn proof_v15_permissionless_recovery_declares_reason_or_fails_closed() {
     let reason_case: u8 = kani::any();
     kani::assume(reason_case < 8);
     let enabled: bool = kani::any();
     let start_resolved: bool = kani::any();
     let reason = match reason_case {
-        0 => PermissionlessRecoveryReasonV14::BelowProgressFloor,
-        1 => PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
-        2 => PermissionlessRecoveryReasonV14::AccountBSettlementCannotProgress,
-        3 => PermissionlessRecoveryReasonV14::BIndexHeadroomExhausted,
-        4 => PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
-        5 => PermissionlessRecoveryReasonV14::ExplicitLossOrDustAuditOverflow,
-        6 => PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy,
-        _ => PermissionlessRecoveryReasonV14::CounterOrEpochOverflowDeclaredRecovery,
+        0 => PermissionlessRecoveryReasonV15::BelowProgressFloor,
+        1 => PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability,
+        2 => PermissionlessRecoveryReasonV15::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV15::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV15::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV15::CounterOrEpochOverflowDeclaredRecovery,
     };
     let (market, _, _) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.permissionless_recovery_enabled = enabled;
     if start_resolved {
         group.resolve_market_not_atomic(0).unwrap();
@@ -855,37 +888,37 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
 
     kani::cover!(
         enabled,
-        "v14 permissionless recovery enabled path reachable"
+        "v15 permissionless recovery enabled path reachable"
     );
     kani::cover!(
         !enabled,
-        "v14 permissionless recovery disabled path reachable"
+        "v15 permissionless recovery disabled path reachable"
     );
     kani::cover!(
         enabled && start_resolved,
-        "v14 permissionless recovery resolved-mode rejection reachable"
+        "v15 permissionless recovery resolved-mode rejection reachable"
     );
     kani::cover!(
         reason_case == 0,
-        "v14 permissionless recovery first reason reachable"
+        "v15 permissionless recovery first reason reachable"
     );
     kani::cover!(
         reason_case == 7,
-        "v14 permissionless recovery last reason reachable"
+        "v15 permissionless recovery last reason reachable"
     );
 
     if enabled && !start_resolved {
         assert_eq!(
             result,
-            Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+            Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(reason))
         );
         assert_eq!(group.recovery_reason, Some(reason));
-        assert_eq!(group.mode, MarketModeV14::Recovery);
+        assert_eq!(group.mode, MarketModeV15::Recovery);
     } else {
         if enabled {
-            assert_eq!(result, Err(V14Error::LockActive));
+            assert_eq!(result, Err(V15Error::LockActive));
         } else {
-            assert_eq!(result, Err(V14Error::InvalidConfig));
+            assert_eq!(result, Err(V15Error::InvalidConfig));
         }
         assert_eq!(group.recovery_reason, None);
         assert_eq!(group.mode, before_mode);
@@ -896,27 +929,67 @@ fn proof_v14_permissionless_recovery_declares_reason_or_fails_closed() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_explicit_loss_audit_overflow_declares_recovery_without_value_mutation() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.deposit_not_atomic(&mut account, 100).unwrap();
+    let vault_before = group.vault;
+    let c_tot_before = group.c_tot;
+    let insurance_before = group.insurance;
+    let pnl_pos_before = group.pnl_pos_tot;
+    let asset_before = group.assets[0];
+
+    let result = group.declare_explicit_loss_or_dust_audit_overflow_not_atomic();
+
+    kani::cover!(
+        group.recovery_reason
+            == Some(PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow),
+        "v15 explicit loss audit overflow recovery declaration reachable"
+    );
+    assert_eq!(
+        result,
+        Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(
+            PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow
+        ))
+    );
+    assert_eq!(group.mode, MarketModeV15::Recovery);
+    assert_eq!(
+        group.recovery_reason,
+        Some(PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow)
+    );
+    assert_eq!(group.vault, vault_before);
+    assert_eq!(group.c_tot, c_tot_before);
+    assert_eq!(group.insurance, insurance_before);
+    assert_eq!(group.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(group.assets[0], asset_before);
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
+fn proof_v15_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     let reason_case: u8 = kani::any();
     kani::assume(reason_case < 8);
     let reason = match reason_case {
-        0 => PermissionlessRecoveryReasonV14::BelowProgressFloor,
-        1 => PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
-        2 => PermissionlessRecoveryReasonV14::AccountBSettlementCannotProgress,
-        3 => PermissionlessRecoveryReasonV14::BIndexHeadroomExhausted,
-        4 => PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
-        5 => PermissionlessRecoveryReasonV14::ExplicitLossOrDustAuditOverflow,
-        6 => PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy,
-        _ => PermissionlessRecoveryReasonV14::CounterOrEpochOverflowDeclaredRecovery,
+        0 => PermissionlessRecoveryReasonV15::BelowProgressFloor,
+        1 => PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability,
+        2 => PermissionlessRecoveryReasonV15::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV15::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV15::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV15::CounterOrEpochOverflowDeclaredRecovery,
     };
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 100).unwrap();
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
 
     let account_before = account;
     let vault_before = group.vault;
@@ -928,27 +1001,27 @@ fn proof_v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     let current_slot_before = group.current_slot;
     let outcome = group.permissionless_crank_not_atomic(
         &mut account,
-        PermissionlessCrankRequestV14 {
+        PermissionlessCrankRequestV15 {
             now_slot: current_slot_before + 1,
             asset_index: 0,
             effective_price: 2,
             funding_rate_e9: 0,
-            action: PermissionlessCrankActionV14::Recover(reason),
+            action: PermissionlessCrankActionV15::Recover(reason),
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
         reason_case == 0,
-        "v14 recovery-crank first reason reachable"
+        "v15 recovery-crank first reason reachable"
     );
-    kani::cover!(reason_case == 7, "v14 recovery-crank last reason reachable");
+    kani::cover!(reason_case == 7, "v15 recovery-crank last reason reachable");
     assert_eq!(
         outcome,
-        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+        Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(reason))
     );
     assert_eq!(group.recovery_reason, Some(reason));
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(account, account_before);
     assert_eq!(group.vault, vault_before);
     assert_eq!(group.c_tot, c_tot_before);
@@ -957,35 +1030,35 @@ fn proof_v14_permissionless_crank_recovery_declaration_is_accounting_neutral() {
     assert_eq!(group.assets[0], asset_before);
     assert_eq!(group.slot_last, slot_last_before);
     assert_eq!(group.current_slot, current_slot_before);
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
 }
 
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_recovery_enables_dead_leg_forfeit_without_value_escape() {
+fn proof_v15_permissionless_recovery_enables_dead_leg_forfeit_without_value_escape() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     let before_vault = group.vault;
     let before_c_tot = group.c_tot;
     let before_insurance = group.insurance;
     let before_pnl_pos = group.pnl_pos_tot;
 
-    let reason = PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy;
+    let reason = PermissionlessRecoveryReasonV15::OracleOrTargetUnavailableByAuthenticatedPolicy;
     let declared = group.declare_permissionless_recovery(reason);
     let outcome = group.forfeit_recovery_leg_not_atomic(&mut account, 0, 1);
 
     kani::cover!(
-        declared == Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
-            && matches!(outcome, Ok(DeadLegForfeitOutcomeV14 { detached: true, .. })),
-        "v14 declared recovery enables bounded dead-leg forfeit"
+        declared == Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(reason))
+            && matches!(outcome, Ok(DeadLegForfeitOutcomeV15 { detached: true, .. })),
+        "v15 declared recovery enables bounded dead-leg forfeit"
     );
     assert_eq!(
         declared,
-        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+        Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(reason))
     );
     match outcome {
         Ok(out) => {
@@ -998,7 +1071,7 @@ fn proof_v14_permissionless_recovery_enables_dead_leg_forfeit_without_value_esca
         }
         Err(_) => assert!(false),
     }
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(group.recovery_reason, Some(reason));
     assert_eq!(account.active_bitmap, 0);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
@@ -1012,20 +1085,20 @@ fn proof_v14_permissionless_recovery_enables_dead_leg_forfeit_without_value_esca
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v14_recovery_mode_blocks_value_escape_paths_before_mutation() {
+fn proof_v15_recovery_mode_blocks_value_escape_paths_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 100).unwrap();
     account.pnl = 10;
     group.pnl_pos_tot = 10;
     group.vault = group.vault.checked_add(10).unwrap();
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     group
-        .declare_permissionless_recovery(PermissionlessRecoveryReasonV14::BelowProgressFloor)
+        .declare_permissionless_recovery(PermissionlessRecoveryReasonV15::BelowProgressFloor)
         .unwrap();
     let account_before = account;
     let vault_before = group.vault;
@@ -1033,84 +1106,84 @@ fn proof_v14_recovery_mode_blocks_value_escape_paths_before_mutation() {
     let insurance_before = group.insurance;
 
     let convert = group.convert_released_pnl_to_capital_not_atomic(&mut account);
-    let withdraw = group.withdraw_not_atomic(&mut account, 1, &[1; V14_MAX_PORTFOLIO_ASSETS_N]);
+    let withdraw = group.withdraw_not_atomic(&mut account, 1, &[1; V15_MAX_PORTFOLIO_ASSETS_N]);
     let fee_sync = group.sync_account_fee_to_slot_not_atomic(&mut account, 1, 1);
 
     kani::cover!(
-        convert == Err(V14Error::LockActive)
-            && withdraw == Err(V14Error::LockActive)
-            && fee_sync == Err(V14Error::LockActive),
-        "v14 terminal recovery blocks value escape paths"
+        convert == Err(V15Error::LockActive)
+            && withdraw == Err(V15Error::LockActive)
+            && fee_sync == Err(V15Error::LockActive),
+        "v15 terminal recovery blocks value escape paths"
     );
-    assert_eq!(convert, Err(V14Error::LockActive));
-    assert_eq!(withdraw, Err(V14Error::LockActive));
-    assert_eq!(fee_sync, Err(V14Error::LockActive));
+    assert_eq!(convert, Err(V15Error::LockActive));
+    assert_eq!(withdraw, Err(V15Error::LockActive));
+    assert_eq!(fee_sync, Err(V15Error::LockActive));
     assert_eq!(account, account_before);
     assert_eq!(group.vault, vault_before);
     assert_eq!(group.c_tot, c_tot_before);
     assert_eq!(group.insurance, insurance_before);
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::BelowProgressFloor)
+        Some(PermissionlessRecoveryReasonV15::BelowProgressFloor)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v14_recovery_mode_rejects_non_recovery_crank_before_account_mutation() {
+fn proof_v15_recovery_mode_rejects_non_recovery_crank_before_account_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     let asset_before = group.assets[0];
-    let reason = PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability;
+    let reason = PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability;
     group.declare_permissionless_recovery(reason).unwrap();
     let account_before = account;
     let result = group.permissionless_crank_not_atomic(
         &mut account,
-        PermissionlessCrankRequestV14 {
+        PermissionlessCrankRequestV15 {
             now_slot: 1,
             asset_index: 0,
             effective_price: 1,
             funding_rate_e9: 0,
-            action: PermissionlessCrankActionV14::Refresh,
+            action: PermissionlessCrankActionV15::Refresh,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::LockActive),
-        "v14 terminal recovery rejects non-recovery crank before mutation"
+        result == Err(V15Error::LockActive),
+        "v15 terminal recovery rejects non-recovery crank before mutation"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(account, account_before);
     assert_eq!(group.assets[0], asset_before);
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(group.recovery_reason, Some(reason));
 }
 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v14_terminal_recovery_reason_and_mode_are_immutable() {
+fn proof_v15_terminal_recovery_reason_and_mode_are_immutable() {
     let second_case: u8 = kani::any();
     kani::assume(second_case < 8);
-    let first_reason = PermissionlessRecoveryReasonV14::BelowProgressFloor;
+    let first_reason = PermissionlessRecoveryReasonV15::BelowProgressFloor;
     let second_reason = match second_case {
-        0 => PermissionlessRecoveryReasonV14::BelowProgressFloor,
-        1 => PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability,
-        2 => PermissionlessRecoveryReasonV14::AccountBSettlementCannotProgress,
-        3 => PermissionlessRecoveryReasonV14::BIndexHeadroomExhausted,
-        4 => PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress,
-        5 => PermissionlessRecoveryReasonV14::ExplicitLossOrDustAuditOverflow,
-        6 => PermissionlessRecoveryReasonV14::OracleOrTargetUnavailableByAuthenticatedPolicy,
-        _ => PermissionlessRecoveryReasonV14::CounterOrEpochOverflowDeclaredRecovery,
+        0 => PermissionlessRecoveryReasonV15::BelowProgressFloor,
+        1 => PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability,
+        2 => PermissionlessRecoveryReasonV15::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV15::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV15::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV15::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV15::CounterOrEpochOverflowDeclaredRecovery,
     };
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
 
     let first = group.declare_permissionless_recovery(first_reason);
     let second = group.declare_permissionless_recovery(second_reason);
@@ -1118,26 +1191,26 @@ fn proof_v14_terminal_recovery_reason_and_mode_are_immutable() {
 
     kani::cover!(
         second_reason != first_reason,
-        "v14 terminal recovery attempted reason override reachable"
+        "v15 terminal recovery attempted reason override reachable"
     );
     kani::cover!(
-        resolve == Err(V14Error::LockActive),
-        "v14 terminal recovery rejects resolved-mode override"
+        resolve == Err(V15Error::LockActive),
+        "v15 terminal recovery rejects resolved-mode override"
     );
     assert_eq!(
         first,
-        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(
+        Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(
             first_reason
         ))
     );
     assert_eq!(
         second,
-        Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(
+        Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(
             first_reason
         ))
     );
-    assert_eq!(resolve, Err(V14Error::LockActive));
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(resolve, Err(V15Error::LockActive));
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(group.recovery_reason, Some(first_reason));
     assert_eq!(group.resolved_slot, 0);
 }
@@ -1145,21 +1218,21 @@ fn proof_v14_terminal_recovery_reason_and_mode_are_immutable() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v14_recovery_mode_rejects_liquidation_and_rebalance_before_mutation() {
+fn proof_v15_recovery_mode_rejects_liquidation_and_rebalance_before_mutation() {
     let use_liquidation: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let asset_before = group.assets[0];
-    let reason = PermissionlessRecoveryReasonV14::BlockedSegmentHeadroomOrRepresentability;
+    let reason = PermissionlessRecoveryReasonV15::BlockedSegmentHeadroomOrRepresentability;
     group.declare_permissionless_recovery(reason).unwrap();
     let account_before = account;
 
@@ -1167,96 +1240,96 @@ fn proof_v14_recovery_mode_rejects_liquidation_and_rebalance_before_mutation() {
         group
             .liquidate_account_not_atomic(
                 &mut account,
-                LiquidationRequestV14 {
+                LiquidationRequestV15 {
                     asset_index: 0,
                     close_q: POS_SCALE,
                     fee_bps: 0,
                 },
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             )
             .map(|_| ())
     } else {
         group
             .rebalance_reduce_position_not_atomic(
                 &mut account,
-                RebalanceRequestV14 {
+                RebalanceRequestV15 {
                     asset_index: 0,
                     reduce_q: POS_SCALE,
                 },
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             )
             .map(|_| ())
     };
 
     kani::cover!(
         use_liquidation,
-        "v14 terminal recovery rejects liquidation before mutation"
+        "v15 terminal recovery rejects liquidation before mutation"
     );
     kani::cover!(
         !use_liquidation,
-        "v14 terminal recovery rejects rebalance before mutation"
+        "v15 terminal recovery rejects rebalance before mutation"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(account, account_before);
     assert_eq!(group.assets[0], asset_before);
-    assert_eq!(group.mode, MarketModeV14::Recovery);
+    assert_eq!(group.mode, MarketModeV15::Recovery);
     assert_eq!(group.recovery_reason, Some(reason));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_accepts_full_margin_loss_only_envelope() {
+fn proof_v15_public_config_accepts_full_margin_loss_only_envelope() {
     let (market, _, _) = symbolic_ids();
-    let cfg = V14Config::public_user_fund(1, 0, 1);
+    let cfg = V15Config::public_user_fund(1, 0, 1);
 
     kani::cover!(
         cfg.maintenance_margin_bps == 10_000 && cfg.max_price_move_bps_per_slot == 10_000,
-        "v14 full-margin one-segment loss envelope reachable"
+        "v15 full-margin one-segment loss envelope reachable"
     );
-    assert!(MarketGroupV14::new(market, cfg).is_ok());
+    assert!(MarketGroupV15::new(market, cfg).is_ok());
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_rejects_price_funding_envelope_breach() {
+fn proof_v15_public_config_rejects_price_funding_envelope_breach() {
     let (market, _, _) = symbolic_ids();
     let mut cfg = tight_envelope_config();
     cfg.max_price_move_bps_per_slot = 10;
 
     kani::cover!(
         cfg.max_price_move_bps_per_slot == 10,
-        "v14 price/funding envelope breach rejected"
+        "v15 price/funding envelope breach rejected"
     );
     assert_eq!(
-        MarketGroupV14::new(market, cfg),
-        Err(V14Error::InvalidConfig)
+        MarketGroupV15::new(market, cfg),
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_rejects_liquidation_fee_envelope_breach() {
+fn proof_v15_public_config_rejects_liquidation_fee_envelope_breach() {
     let (market, _, _) = symbolic_ids();
     let mut cfg = tight_envelope_config();
     cfg.liquidation_fee_bps = 400;
 
     kani::cover!(
         cfg.liquidation_fee_bps == 400,
-        "v14 liquidation-fee envelope breach rejected"
+        "v15 liquidation-fee envelope breach rejected"
     );
     assert_eq!(
-        MarketGroupV14::new(market, cfg),
-        Err(V14Error::InvalidConfig)
+        MarketGroupV15::new(market, cfg),
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_rejects_funding_headroom_breach() {
+fn proof_v15_public_config_rejects_funding_headroom_breach() {
     let (market, _, _) = symbolic_ids();
     let mut cfg = tight_envelope_config();
     cfg.max_accrual_dt_slots = 1_000_000_000;
@@ -1264,18 +1337,18 @@ fn proof_v14_public_config_rejects_funding_headroom_breach() {
 
     kani::cover!(
         cfg.max_accrual_dt_slots == 1_000_000_000,
-        "v14 funding K/F headroom breach rejected"
+        "v15 funding K/F headroom breach rejected"
     );
     assert_eq!(
-        MarketGroupV14::new(market, cfg),
-        Err(V14Error::InvalidConfig)
+        MarketGroupV15::new(market, cfg),
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_public_config_accepts_capped_liquidation_fee_envelope() {
+fn proof_v15_public_config_accepts_capped_liquidation_fee_envelope() {
     let (market, _, _) = symbolic_ids();
     let mut cfg = tight_envelope_config();
     cfg.liquidation_fee_bps = 10_000;
@@ -1283,30 +1356,30 @@ fn proof_v14_public_config_accepts_capped_liquidation_fee_envelope() {
 
     kani::cover!(
         cfg.liquidation_fee_bps == 10_000 && cfg.liquidation_fee_cap == 1,
-        "v14 capped liquidation fee envelope reachable"
+        "v15 capped liquidation fee envelope reachable"
     );
-    assert!(MarketGroupV14::new(market, cfg).is_ok());
+    assert!(MarketGroupV15::new(market, cfg).is_ok());
 }
 
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_min_nonzero_initial_floor_is_in_health_certificate() {
+fn proof_v15_min_nonzero_initial_floor_is_in_health_certificate() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.min_nonzero_mm_req = 49;
     group.config.min_nonzero_im_req = 50;
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 49).unwrap();
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     kani::cover!(
         account.health_cert.certified_initial_req == 50,
-        "v14 tiny nonzero leg gets min initial floor"
+        "v15 tiny nonzero leg gets min initial floor"
     );
     assert_eq!(account.health_cert.certified_equity, 49);
     assert_eq!(account.health_cert.certified_initial_req, 50);
@@ -1318,7 +1391,7 @@ fn proof_v14_min_nonzero_initial_floor_is_in_health_certificate() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_full_refresh_haircuts_positive_pnl_under_global_impairment() {
+fn proof_v15_full_refresh_haircuts_positive_pnl_under_global_impairment() {
     let profit: u8 = kani::any();
     let residual: u8 = kani::any();
     kani::assume(profit > 1);
@@ -1326,23 +1399,23 @@ fn proof_v14_full_refresh_haircuts_positive_pnl_under_global_impairment() {
     kani::assume(residual > 0);
     kani::assume(residual < profit);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 10).unwrap();
     account.pnl = profit as i128;
     group.pnl_pos_tot = profit as u128;
-    group.pnl_pos_bound_tot = profit as u128;
+    set_junior_bound(&mut group, profit as u128);
     group.vault = group.c_tot + group.insurance + residual as u128;
 
     let cert = group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     kani::cover!(
         residual == 1 && profit > 2,
-        "v14 haircut certificate covers strongly impaired junior support"
+        "v15 haircut certificate covers strongly impaired junior support"
     );
     assert_eq!(account_equity(&account), Ok(10 + profit as i128));
     assert_eq!(cert.certified_equity, 10 + residual as i128);
@@ -1352,7 +1425,7 @@ fn proof_v14_full_refresh_haircuts_positive_pnl_under_global_impairment() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
+fn proof_v15_negative_kf_settlement_uses_haircut_support_not_face_netting() {
     let profit: u8 = kani::any();
     let residual: u8 = kani::any();
     let loss: u8 = kani::any();
@@ -1364,31 +1437,31 @@ fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
     kani::assume(loss <= 20);
 
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposite =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [88; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [88; 32], owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposite, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposite, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     account.pnl = profit as i128;
     group.pnl_pos_tot = profit as u128;
-    group.pnl_pos_bound_tot = profit as u128;
+    set_junior_bound(&mut group, profit as u128);
     group.vault = residual as u128;
     group.assets[0].k_long = -((loss as i128) * ADL_ONE as i128);
 
     let cert = group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     let uncovered = (loss - residual) as i128;
     kani::cover!(
         profit > loss && residual < loss,
-        "v14 negative K/F settlement would be positive under face netting"
+        "v15 negative K/F settlement would be positive under face netting"
     );
     assert_eq!(account.pnl, -uncovered);
     assert_eq!(group.pnl_pos_tot, 0);
@@ -1401,28 +1474,28 @@ fn proof_v14_negative_kf_settlement_uses_haircut_support_not_face_netting() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_positive_kf_delta_cures_prior_loss_at_haircut_value() {
+fn proof_v15_positive_kf_delta_cures_prior_loss_at_haircut_value() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut account, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group.vault = 50;
     group.assets[0].k_long = -(100 * ADL_ONE as i128);
     group.assets[1].k_long = 100 * ADL_ONE as i128;
 
     let cert = group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     kani::cover!(
         account.pnl == -50,
-        "v14 positive K/F support cures prior loss only at haircut value"
+        "v15 positive K/F support cures prior loss only at haircut value"
     );
     assert_eq!(account.pnl, -50);
     assert_eq!(group.pnl_pos_tot, 0);
@@ -1435,14 +1508,14 @@ fn proof_v14_positive_kf_delta_cures_prior_loss_at_haircut_value() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_deposit_then_withdraw_roundtrip_preserves_accounting() {
+fn proof_v15_deposit_then_withdraw_roundtrip_preserves_accounting() {
     let amount: u16 = kani::any();
     kani::assume(amount > 0);
     kani::assume(amount <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group
         .deposit_not_atomic(&mut account, amount as u128)
@@ -1455,7 +1528,7 @@ fn proof_v14_deposit_then_withdraw_roundtrip_preserves_accounting() {
         .withdraw_not_atomic(
             &mut account,
             amount as u128,
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
     assert_eq!(account.capital, 0);
@@ -1467,20 +1540,20 @@ fn proof_v14_deposit_then_withdraw_roundtrip_preserves_accounting() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
+fn proof_v15_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
     let amount: u16 = kani::any();
     let fee_debt: u8 = kani::any();
     kani::assume(amount > 0);
     kani::assume(amount <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.vault = 10;
     group.insurance = 10;
     group
-        .attach_leg(&mut account, 0, SideV14::Long, 10)
+        .attach_leg(&mut account, 0, SideV15::Long, 10)
         .unwrap();
     account.pnl = -10_000;
     account.fee_credits = -(fee_debt as i128);
@@ -1495,7 +1568,7 @@ fn proof_v14_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
         .deposit_not_atomic(&mut account, amount as u128)
         .unwrap();
 
-    kani::cover!(fee_debt > 0, "v14 deposit with fee debt reachable");
+    kani::cover!(fee_debt > 0, "v15 deposit with fee debt reachable");
     assert_eq!(group.insurance, insurance_before);
     assert_eq!(account.pnl, pnl_before);
     assert_eq!(account.fee_credits, fee_credits_before);
@@ -1510,7 +1583,7 @@ fn proof_v14_deposit_does_not_draw_insurance_or_sweep_loss_bearing_account() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
+fn proof_v15_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
     let amount: u16 = kani::any();
     let fee_debt: u8 = kani::any();
     let pnl: u8 = kani::any();
@@ -1518,9 +1591,9 @@ fn proof_v14_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
     kani::assume(amount <= 1_000);
     kani::assume(fee_debt > 0);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.pnl = pnl as i128;
     account.fee_credits = -(fee_debt as i128);
 
@@ -1532,7 +1605,7 @@ fn proof_v14_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
 
     kani::cover!(
         pnl_before > 0 && fee_debt > 0,
-        "v14 flat nonnegative deposit with fee debt reachable"
+        "v15 flat nonnegative deposit with fee debt reachable"
     );
     assert_eq!(account.pnl, pnl_before);
     assert_eq!(account.fee_credits, fee_credits_before);
@@ -1546,24 +1619,24 @@ fn proof_v14_deposit_never_sweeps_fee_debt_even_when_flat_and_nonnegative() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_partial_withdraw_can_leave_small_remainder() {
+fn proof_v15_partial_withdraw_can_leave_small_remainder() {
     let remainder: u16 = kani::any();
     kani::assume(remainder <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let deposit = remainder as u128 + 1;
     group.deposit_not_atomic(&mut account, deposit).unwrap();
 
     group
-        .withdraw_not_atomic(&mut account, 1, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .withdraw_not_atomic(&mut account, 1, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
-    kani::cover!(remainder == 0, "v14 partial withdraw leaves zero remainder");
+    kani::cover!(remainder == 0, "v15 partial withdraw leaves zero remainder");
     kani::cover!(
         remainder > 0,
-        "v14 partial withdraw leaves nonzero remainder"
+        "v15 partial withdraw leaves nonzero remainder"
     );
     assert_eq!(account.capital, remainder as u128);
     assert_eq!(group.c_tot, remainder as u128);
@@ -1574,14 +1647,14 @@ fn proof_v14_partial_withdraw_can_leave_small_remainder() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_over_withdraw_rejects_before_any_accounting_mutation() {
+fn proof_v15_over_withdraw_rejects_before_any_accounting_mutation() {
     let capital: u16 = kani::any();
     kani::assume(capital > 0);
     kani::assume(capital <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
         .deposit_not_atomic(&mut account, capital as u128)
         .unwrap();
@@ -1597,11 +1670,11 @@ fn proof_v14_over_withdraw_rejects_before_any_accounting_mutation() {
     let result = group.withdraw_not_atomic(
         &mut account,
         capital as u128 + 1,
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    kani::cover!(capital > 0, "v14 over-withdraw rejection path reachable");
-    assert_eq!(result, Err(V14Error::LockActive));
+    kani::cover!(capital > 0, "v15 over-withdraw rejection path reachable");
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(account.capital, capital_before);
     assert_eq!(account.pnl, pnl_before);
     assert_eq!(account.fee_credits, fee_credits_before);
@@ -1615,17 +1688,17 @@ fn proof_v14_over_withdraw_rejects_before_any_accounting_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_multiple_deposits_aggregate_c_tot_and_vault() {
+fn proof_v15_multiple_deposits_aggregate_c_tot_and_vault() {
     let amount_a: u16 = kani::any();
     let amount_b: u16 = kani::any();
     kani::assume(amount_a <= 1_000);
     kani::assume(amount_b <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account_a =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut account_b =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group
         .deposit_not_atomic(&mut account_a, amount_a as u128)
@@ -1635,7 +1708,7 @@ fn proof_v14_multiple_deposits_aggregate_c_tot_and_vault() {
         .unwrap();
 
     let expected = amount_a as u128 + amount_b as u128;
-    kani::cover!(expected > 0, "v14 nonzero aggregate deposit reachable");
+    kani::cover!(expected > 0, "v15 nonzero aggregate deposit reachable");
     assert_eq!(group.c_tot, account_a.capital + account_b.capital);
     assert_eq!(group.c_tot, expected);
     assert_eq!(group.vault, expected);
@@ -1645,12 +1718,12 @@ fn proof_v14_multiple_deposits_aggregate_c_tot_and_vault() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_close_portfolio_account_requires_clean_local_state() {
+fn proof_v15_close_portfolio_account_requires_clean_local_state() {
     let dirty_case: u8 = kani::any();
     kani::assume(dirty_case < 6);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let clean = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let clean = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.create_portfolio_account(&clean).unwrap();
     assert_eq!(group.materialized_portfolio_count, 1);
 
@@ -1666,15 +1739,15 @@ fn proof_v14_close_portfolio_account_requires_clean_local_state() {
         4 => dirty.stale_state = true,
         _ => dirty.b_stale_state = true,
     }
-    kani::cover!(dirty_case == 0, "v14 close rejects capital");
-    kani::cover!(dirty_case == 1, "v14 close rejects pnl");
-    kani::cover!(dirty_case == 2, "v14 close rejects reserved pnl");
-    kani::cover!(dirty_case == 3, "v14 close rejects fee debt");
-    kani::cover!(dirty_case == 4, "v14 close rejects stale account");
-    kani::cover!(dirty_case == 5, "v14 close rejects b-stale account");
+    kani::cover!(dirty_case == 0, "v15 close rejects capital");
+    kani::cover!(dirty_case == 1, "v15 close rejects pnl");
+    kani::cover!(dirty_case == 2, "v15 close rejects reserved pnl");
+    kani::cover!(dirty_case == 3, "v15 close rejects fee debt");
+    kani::cover!(dirty_case == 4, "v15 close rejects stale account");
+    kani::cover!(dirty_case == 5, "v15 close rejects b-stale account");
     assert_eq!(
         group.close_portfolio_account(&dirty),
-        Err(V14Error::LockActive)
+        Err(V15Error::LockActive)
     );
     assert_eq!(group.materialized_portfolio_count, 1);
 
@@ -1685,7 +1758,7 @@ fn proof_v14_close_portfolio_account_requires_clean_local_state() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_risk_notional_flat_zero_and_monotone_in_price() {
+fn proof_v15_risk_notional_flat_zero_and_monotone_in_price() {
     let abs_pos_q: u16 = kani::any();
     let p1: u16 = kani::any();
     let extra: u16 = kani::any();
@@ -1695,12 +1768,12 @@ fn proof_v14_risk_notional_flat_zero_and_monotone_in_price() {
     kani::assume(extra <= 1_000);
     let p2 = p1 as u64 + extra as u64;
 
-    assert_eq!(percolator::v14::risk_notional_ceil(0, p2), Ok(0));
-    let n1 = percolator::v14::risk_notional_ceil(abs_pos_q as u128, p1 as u64).unwrap();
-    let n2 = percolator::v14::risk_notional_ceil(abs_pos_q as u128, p2).unwrap();
+    assert_eq!(percolator::v15::risk_notional_ceil(0, p2), Ok(0));
+    let n1 = percolator::v15::risk_notional_ceil(abs_pos_q as u128, p1 as u64).unwrap();
+    let n2 = percolator::v15::risk_notional_ceil(abs_pos_q as u128, p2).unwrap();
     kani::cover!(
         abs_pos_q > 0 && extra > 0,
-        "v14 risk notional monotone branch"
+        "v15 risk notional monotone branch"
     );
     assert!(n2 >= n1);
 }
@@ -1712,35 +1785,35 @@ fn concrete_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_hidden_leg_rejected_by_bitmap_authority() {
+fn proof_v15_hidden_leg_rejected_by_bitmap_authority() {
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     account.legs[0].active = true;
     kani::cover!(
         account.active_bitmap == 0 && account.legs[0].active,
-        "v14 hidden active leg reachable"
+        "v15 hidden active leg reachable"
     );
     assert_eq!(
         group.validate_account_shape(&account),
-        Err(V14Error::HiddenLeg)
+        Err(V15Error::HiddenLeg)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_configured_portfolio_width_rejects_out_of_range_leg() {
+fn proof_v15_configured_portfolio_width_rejects_out_of_range_leg() {
     let active_bit: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    account.legs[1] = PortfolioLegV14 {
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    account.legs[1] = PortfolioLegV15 {
         active: true,
-        side: SideV14::Long,
+        side: SideV15::Long,
         basis_pos_q: 1,
         a_basis: ADL_ONE,
         k_snap: 0,
@@ -1757,24 +1830,24 @@ fn proof_v14_configured_portfolio_width_rejects_out_of_range_leg() {
         account.active_bitmap |= 1 << 1;
     }
 
-    kani::cover!(active_bit, "v14 out-of-range leg with bitmap reachable");
-    kani::cover!(!active_bit, "v14 out-of-range hidden leg reachable");
+    kani::cover!(active_bit, "v15 out-of-range leg with bitmap reachable");
+    kani::cover!(!active_bit, "v15 out-of-range hidden leg reachable");
     assert_eq!(
         group.validate_account_shape(&account),
-        Err(V14Error::HiddenLeg)
+        Err(V15Error::HiddenLeg)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_attach_then_clear_leg_restores_account_local_counters_for_long() {
+fn proof_v15_attach_then_clear_leg_restores_account_local_counters_for_long() {
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
-    group.attach_leg(&mut account, 0, SideV14::Long, 7).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 7).unwrap();
     assert_eq!(account.active_bitmap, 1);
     assert_eq!(account.legs[0].basis_pos_q, 7);
     assert_eq!(group.assets[0].oi_eff_long_q, 7);
@@ -1790,18 +1863,18 @@ fn proof_v14_attach_then_clear_leg_restores_account_local_counters_for_long() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_same_asset_duplicate_leg_cannot_double_count_support() {
+fn proof_v15_same_asset_duplicate_leg_cannot_double_count_support() {
     let start_long: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let (existing_side, existing_basis, duplicate_side, duplicate_basis) = if start_long {
-        (SideV14::Long, 7, SideV14::Short, -7)
+        (SideV15::Long, 7, SideV15::Short, -7)
     } else {
-        (SideV14::Short, -7, SideV14::Long, 7)
+        (SideV15::Short, -7, SideV15::Long, 7)
     };
-    account.legs[0] = PortfolioLegV14 {
+    account.legs[0] = PortfolioLegV15 {
         active: true,
         side: existing_side,
         basis_pos_q: existing_basis,
@@ -1818,12 +1891,12 @@ fn proof_v14_same_asset_duplicate_leg_cannot_double_count_support() {
     };
     account.active_bitmap = 1;
     match existing_side {
-        SideV14::Long => {
+        SideV15::Long => {
             group.assets[0].stored_pos_count_long = 1;
             group.assets[0].oi_eff_long_q = 7;
             group.assets[0].loss_weight_sum_long = 7;
         }
-        SideV14::Short => {
+        SideV15::Short => {
             group.assets[0].stored_pos_count_short = 1;
             group.assets[0].oi_eff_short_q = 7;
             group.assets[0].loss_weight_sum_short = 7;
@@ -1837,10 +1910,10 @@ fn proof_v14_same_asset_duplicate_leg_cannot_double_count_support() {
     let result = group.attach_leg(&mut account, 0, duplicate_side, duplicate_basis);
 
     kani::cover!(
-        matches!(result, Err(V14Error::InvalidLeg)),
-        "v14 same-asset duplicate attach rejected"
+        matches!(result, Err(V15Error::InvalidLeg)),
+        "v15 same-asset duplicate attach rejected"
     );
-    assert!(matches!(result, Err(V14Error::InvalidLeg)));
+    assert!(matches!(result, Err(V15Error::InvalidLeg)));
     assert_eq!(account.legs[0], leg_before);
     assert_eq!(account.active_bitmap, bitmap_before);
     assert_eq!(account.health_cert, cert_before);
@@ -1868,21 +1941,21 @@ fn proof_v14_same_asset_duplicate_leg_cannot_double_count_support() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_bilateral_oi_decomposition_counts_long_short_pair() {
+fn proof_v15_bilateral_oi_decomposition_counts_long_short_pair() {
     let size_q = 3u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut a = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut b = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut a = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut b = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group
-        .attach_leg(&mut a, 0, SideV14::Long, size_q as i128)
+        .attach_leg(&mut a, 0, SideV15::Long, size_q as i128)
         .unwrap();
     group
-        .attach_leg(&mut b, 0, SideV14::Short, -(size_q as i128))
+        .attach_leg(&mut b, 0, SideV15::Short, -(size_q as i128))
         .unwrap();
 
-    kani::cover!(true, "v14 bilateral OI proof covers long-short pair");
+    kani::cover!(true, "v15 bilateral OI proof covers long-short pair");
     assert_eq!(group.assets[0].oi_eff_long_q, size_q);
     assert_eq!(group.assets[0].oi_eff_short_q, size_q);
     assert_eq!(group.assets[0].stored_pos_count_long, 1);
@@ -1894,21 +1967,21 @@ fn proof_v14_bilateral_oi_decomposition_counts_long_short_pair() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_bilateral_oi_decomposition_counts_short_long_pair() {
+fn proof_v15_bilateral_oi_decomposition_counts_short_long_pair() {
     let size_q = 3u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut a = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut b = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut a = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut b = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group
-        .attach_leg(&mut a, 0, SideV14::Short, -(size_q as i128))
+        .attach_leg(&mut a, 0, SideV15::Short, -(size_q as i128))
         .unwrap();
     group
-        .attach_leg(&mut b, 0, SideV14::Long, size_q as i128)
+        .attach_leg(&mut b, 0, SideV15::Long, size_q as i128)
         .unwrap();
 
-    kani::cover!(true, "v14 bilateral OI proof covers short-long pair");
+    kani::cover!(true, "v15 bilateral OI proof covers short-long pair");
     assert_eq!(group.assets[0].oi_eff_long_q, size_q);
     assert_eq!(group.assets[0].oi_eff_short_q, size_q);
     assert_eq!(group.assets[0].stored_pos_count_long, 1);
@@ -1920,20 +1993,20 @@ fn proof_v14_bilateral_oi_decomposition_counts_short_long_pair() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_oversize_position_rejected_before_oi_mutation() {
+fn proof_v15_oversize_position_rejected_before_oi_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     let result = group.attach_leg(
         &mut account,
         0,
-        SideV14::Long,
+        SideV15::Long,
         (MAX_POSITION_ABS_Q + 1) as i128,
     );
 
-    assert_eq!(result, Err(V14Error::InvalidLeg));
+    assert_eq!(result, Err(V15Error::InvalidLeg));
     assert_eq!(account.active_bitmap, 0);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     assert_eq!(group.assets[0].stored_pos_count_long, 0);
@@ -1942,16 +2015,16 @@ fn proof_v14_oversize_position_rejected_before_oi_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_account_b_chunk_either_advances_or_fails_closed() {
+fn proof_v15_account_b_chunk_either_advances_or_fails_closed() {
     let target_units: u8 = kani::any();
     let budget_units: u8 = kani::any();
     kani::assume(target_units <= 4);
     kani::assume(budget_units <= 4);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].b_long_num = (target_units as u128) * SOCIAL_LOSS_DEN;
     group.mark_leg_b_stale(&mut account, 0).unwrap();
 
@@ -1964,11 +2037,11 @@ fn proof_v14_account_b_chunk_either_advances_or_fails_closed() {
         assert!(result.is_ok());
         assert_eq!(account.legs[0].b_snap, before_snap);
     } else if budget == 0 {
-        assert_eq!(result, Err(V14Error::RecoveryRequired));
+        assert_eq!(result, Err(V15Error::RecoveryRequired));
         assert_eq!(account.legs[0].b_snap, before_snap);
     } else {
         let chunk = result.unwrap();
-        kani::cover!(chunk.delta_b > 0, "v14 B chunk progress reachable");
+        kani::cover!(chunk.delta_b > 0, "v15 B chunk progress reachable");
         assert!(chunk.delta_b > 0);
         assert!(account.legs[0].b_snap > before_snap);
         assert!(chunk.remaining_after < before_remaining);
@@ -1978,15 +2051,15 @@ fn proof_v14_account_b_chunk_either_advances_or_fails_closed() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_repeated_account_b_chunks_complete_bounded_small_residual() {
+fn proof_v15_repeated_account_b_chunks_complete_bounded_small_residual() {
     let target_units: u8 = kani::any();
     kani::assume((1..=2).contains(&target_units));
 
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].b_long_num = target_units as u128;
 
     let first = group.settle_account_b_chunk(&mut account, 0, 1).unwrap();
@@ -1995,14 +2068,14 @@ fn proof_v14_repeated_account_b_chunks_complete_bounded_small_residual() {
     assert_eq!(first.remaining_after, target_units as u128 - 1);
 
     if target_units == 2 {
-        kani::cover!(true, "v14 two B chunks needed and completed");
+        kani::cover!(true, "v15 two B chunks needed and completed");
         assert!(account.b_stale_state);
         assert!(account.legs[0].b_stale);
         let second = group.settle_account_b_chunk(&mut account, 0, 1).unwrap();
         assert_eq!(second.delta_b, 1);
         assert_eq!(second.remaining_after, 0);
     } else {
-        kani::cover!(true, "v14 one B chunk completed residual");
+        kani::cover!(true, "v15 one B chunk completed residual");
     }
 
     assert_eq!(account.legs[0].b_snap, target_units as u128);
@@ -2017,7 +2090,7 @@ fn proof_v14_repeated_account_b_chunks_complete_bounded_small_residual() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_liquidation_progress_rejects_non_reducing_scores() {
+fn proof_v15_liquidation_progress_rejects_non_reducing_scores() {
     let case: u8 = kani::any();
     let deficit: u8 = kani::any();
     let gross_loss: u8 = kani::any();
@@ -2025,15 +2098,15 @@ fn proof_v14_liquidation_progress_rejects_non_reducing_scores() {
     kani::assume(deficit <= 5);
     kani::assume(gross_loss <= 5);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut before =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut after = before;
     group
-        .full_account_refresh(&mut before, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut before, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     group
-        .full_account_refresh(&mut after, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut after, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     before.health_cert.certified_liq_deficit = deficit as u128;
     after.health_cert.certified_liq_deficit = deficit as u128;
@@ -2047,61 +2120,61 @@ fn proof_v14_liquidation_progress_rejects_non_reducing_scores() {
         _ => after.health_cert.certified_worst_case_loss = gross_loss as u128 + 1,
     }
 
-    kani::cover!(case == 0, "v14 equal risk score non-progress reachable");
-    kani::cover!(case == 1, "v14 worse deficit non-progress reachable");
-    kani::cover!(case == 2, "v14 stale-penalty non-progress reachable");
-    kani::cover!(case == 3, "v14 worse gross-loss non-progress reachable");
+    kani::cover!(case == 0, "v15 equal risk score non-progress reachable");
+    kani::cover!(case == 1, "v15 worse deficit non-progress reachable");
+    kani::cover!(case == 2, "v15 stale-penalty non-progress reachable");
+    kani::cover!(case == 3, "v15 worse gross-loss non-progress reachable");
 
     assert_eq!(
         group.validate_liquidation_progress(&before, &after),
-        Err(V14Error::NonProgress)
+        Err(V15Error::NonProgress)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_favorable_action_requires_current_full_refresh() {
+fn proof_v15_favorable_action_requires_current_full_refresh() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = 2;
 
     assert_eq!(
         group.ensure_favorable_action_allowed(&account),
-        Err(V14Error::Stale)
+        Err(V15Error::Stale)
     );
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(group.ensure_favorable_action_allowed(&account), Ok(()));
     group.oracle_epoch += 1;
     assert_eq!(
         group.ensure_favorable_action_allowed(&account),
-        Err(V14Error::Stale)
+        Err(V15Error::Stale)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_health_certificate_bound_to_market_epochs_and_prices() {
+fn proof_v15_health_certificate_bound_to_market_epochs_and_prices() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 1_000).unwrap();
     group.deposit_not_atomic(&mut short, 1_000).unwrap();
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
 
     let cert = group
-        .full_account_refresh(&mut long, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut long, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(cert.cert_oracle_epoch, group.oracle_epoch);
     assert_eq!(cert.cert_funding_epoch, group.funding_epoch);
@@ -2113,15 +2186,15 @@ fn proof_v14_health_certificate_bound_to_market_epochs_and_prices() {
 
     kani::cover!(
         long.health_cert.cert_oracle_epoch != group.oracle_epoch,
-        "v14 health certificate stale after price epoch advances"
+        "v15 health certificate stale after price epoch advances"
     );
     assert_eq!(
         group.ensure_favorable_action_allowed(&long),
-        Err(V14Error::Stale)
+        Err(V15Error::Stale)
     );
 
     let refreshed = group
-        .full_account_refresh(&mut long, &[2; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut long, &[2; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(refreshed.cert_oracle_epoch, group.oracle_epoch);
 }
@@ -2129,19 +2202,19 @@ fn proof_v14_health_certificate_bound_to_market_epochs_and_prices() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_global_residual_is_not_account_health_proof() {
+fn proof_v15_global_residual_is_not_account_health_proof() {
     let residual_units: u8 = kani::any();
     kani::assume(residual_units > 0);
     kani::assume(residual_units <= 5);
     let residual = residual_units as u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.pnl = residual as i128;
     account.reserved_pnl = 0;
     group.pnl_pos_tot = residual;
-    group.pnl_pos_bound_tot = residual;
+    set_junior_bound(&mut group, residual);
     group.pnl_matured_pos_tot = residual;
     group.vault = group.c_tot + group.insurance + residual;
     let before_group = group;
@@ -2151,9 +2224,9 @@ fn proof_v14_global_residual_is_not_account_health_proof() {
 
     kani::cover!(
         residual > 0 && !account.health_cert.valid,
-        "v14 aggregate residual with stale account certificate reachable"
+        "v15 aggregate residual with stale account certificate reachable"
     );
-    assert_eq!(result, Err(V14Error::Stale));
+    assert_eq!(result, Err(V15Error::Stale));
     assert_eq!(group, before_group);
     assert_eq!(account, before_account);
 }
@@ -2161,25 +2234,25 @@ fn proof_v14_global_residual_is_not_account_health_proof() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
+fn proof_v15_favorable_locks_block_released_pnl_conversion_before_mutation() {
     let lock_case: u8 = kani::any();
     kani::assume(lock_case < 6);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 100).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     account.pnl = 5;
     group.pnl_pos_tot = 5;
-    group.pnl_pos_bound_tot = 5;
+    set_junior_bound(&mut group, 5);
     group.pnl_matured_pos_tot = 5;
     group.vault = group.c_tot + group.insurance + 5;
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     match lock_case {
@@ -2218,13 +2291,13 @@ fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
     let before_b_stale = account.b_stale_state;
     let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
 
-    kani::cover!(lock_case == 0, "v14 threshold-stress conversion lock");
-    kani::cover!(lock_case == 1, "v14 bankruptcy h-lock conversion lock");
-    kani::cover!(lock_case == 2, "v14 loss-stale conversion lock");
-    kani::cover!(lock_case == 3, "v14 stale account conversion lock");
-    kani::cover!(lock_case == 4, "v14 B-stale account conversion lock");
-    kani::cover!(lock_case == 5, "v14 target/effective lag conversion lock");
-    assert_eq!(result, Err(V14Error::LockActive));
+    kani::cover!(lock_case == 0, "v15 threshold-stress conversion lock");
+    kani::cover!(lock_case == 1, "v15 bankruptcy h-lock conversion lock");
+    kani::cover!(lock_case == 2, "v15 loss-stale conversion lock");
+    kani::cover!(lock_case == 3, "v15 stale account conversion lock");
+    kani::cover!(lock_case == 4, "v15 B-stale account conversion lock");
+    kani::cover!(lock_case == 5, "v15 target/effective lag conversion lock");
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.c_tot, before_c_tot);
     assert_eq!(group.insurance, before_insurance);
@@ -2261,7 +2334,7 @@ fn proof_v14_favorable_locks_block_released_pnl_conversion_before_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_invariants_reject_broken_senior_claim_conservation() {
+fn proof_v15_public_invariants_reject_broken_senior_claim_conservation() {
     let vault_units: u8 = kani::any();
     let c_units: u8 = kani::any();
     let i_units: u8 = kani::any();
@@ -2271,35 +2344,35 @@ fn proof_v14_public_invariants_reject_broken_senior_claim_conservation() {
     kani::assume((c_units as u16) + (i_units as u16) > vault_units as u16);
 
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.vault = vault_units as u128;
     group.c_tot = c_units as u128;
     group.insurance = i_units as u128;
 
     kani::cover!(
         group.c_tot <= group.vault && group.insurance <= group.vault,
-        "v14 senior sum overflow can violate conservation even when each claim is individually within vault"
+        "v15 senior sum overflow can violate conservation even when each claim is individually within vault"
     );
     assert_eq!(
         group.assert_public_invariants(),
-        Err(V14Error::InvalidConfig)
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_public_invariants_reject_hard_global_bounds() {
+fn proof_v15_public_invariants_reject_hard_global_bounds() {
     let case: u8 = kani::any();
     kani::assume(case < 18);
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
 
     match case {
         0 => group.vault = MAX_VAULT_TVL + 1,
         1 => {
             group.pnl_pos_tot = 1;
-            group.pnl_pos_bound_tot = 1;
+            set_junior_bound(&mut group, 1);
             group.pnl_matured_pos_tot = 2;
         }
         2 => {
@@ -2328,49 +2401,49 @@ fn proof_v14_public_invariants_reject_hard_global_bounds() {
         _ => group.assets[0].f_epoch_start_short_num = i128::MIN,
     }
 
-    kani::cover!(case == 0, "v14 vault cap violation reachable");
-    kani::cover!(case == 1, "v14 matured positive PnL violation reachable");
-    kani::cover!(case == 2, "v14 slot ordering violation reachable");
-    kani::cover!(case == 3, "v14 zero effective price violation reachable");
-    kani::cover!(case == 4, "v14 OI side cap violation reachable");
-    kani::cover!(case == 5, "v14 loss weight cap violation reachable");
-    kani::cover!(case == 6, "v14 social loss remainder violation reachable");
+    kani::cover!(case == 0, "v15 vault cap violation reachable");
+    kani::cover!(case == 1, "v15 matured positive PnL violation reachable");
+    kani::cover!(case == 2, "v15 slot ordering violation reachable");
+    kani::cover!(case == 3, "v15 zero effective price violation reachable");
+    kani::cover!(case == 4, "v15 OI side cap violation reachable");
+    kani::cover!(case == 5, "v15 loss weight cap violation reachable");
+    kani::cover!(case == 6, "v15 social loss remainder violation reachable");
     kani::cover!(
         case == 7,
-        "v14 positive OI without loss weight violation reachable"
+        "v15 positive OI without loss weight violation reachable"
     );
-    kani::cover!(case == 8, "v14 loss weight without OI violation reachable");
-    kani::cover!(case == 9, "v14 live OI imbalance violation reachable");
-    kani::cover!(case == 10, "v14 K long i128::MIN violation reachable");
-    kani::cover!(case == 11, "v14 K short i128::MIN violation reachable");
-    kani::cover!(case == 12, "v14 F long i128::MIN violation reachable");
-    kani::cover!(case == 13, "v14 F short i128::MIN violation reachable");
+    kani::cover!(case == 8, "v15 loss weight without OI violation reachable");
+    kani::cover!(case == 9, "v15 live OI imbalance violation reachable");
+    kani::cover!(case == 10, "v15 K long i128::MIN violation reachable");
+    kani::cover!(case == 11, "v15 K short i128::MIN violation reachable");
+    kani::cover!(case == 12, "v15 F long i128::MIN violation reachable");
+    kani::cover!(case == 13, "v15 F short i128::MIN violation reachable");
     kani::cover!(
         case == 14,
-        "v14 K long epoch-start i128::MIN violation reachable"
+        "v15 K long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
         case == 15,
-        "v14 K short epoch-start i128::MIN violation reachable"
+        "v15 K short epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
         case == 16,
-        "v14 F long epoch-start i128::MIN violation reachable"
+        "v15 F long epoch-start i128::MIN violation reachable"
     );
     kani::cover!(
         case == 17,
-        "v14 F short epoch-start i128::MIN violation reachable"
+        "v15 F short epoch-start i128::MIN violation reachable"
     );
     assert_eq!(
         group.assert_public_invariants(),
-        Err(V14Error::InvalidConfig)
+        Err(V15Error::InvalidConfig)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_envelope() {
+fn proof_v15_cross_margin_equity_counts_collateral_once_and_score_uses_full_envelope() {
     let capital_units: u8 = kani::any();
     let debt_units: u8 = kani::any();
     let certified_loss_units: u8 = kani::any();
@@ -2382,15 +2455,15 @@ fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
     let debt = debt_units as i128;
     let certified_loss = certified_loss_units as u128;
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = capital;
     account.fee_credits = -debt;
     account.active_bitmap = 0b11;
-    account.legs[0] = PortfolioLegV14 {
+    account.legs[0] = PortfolioLegV15 {
         active: true,
-        side: SideV14::Long,
+        side: SideV15::Long,
         basis_pos_q: POS_SCALE as i128,
         a_basis: ADL_ONE,
         k_snap: 0,
@@ -2403,9 +2476,9 @@ fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
         b_stale: false,
         stale: false,
     };
-    account.legs[1] = PortfolioLegV14 {
+    account.legs[1] = PortfolioLegV15 {
         active: true,
-        side: SideV14::Short,
+        side: SideV15::Short,
         basis_pos_q: -(POS_SCALE as i128),
         a_basis: ADL_ONE,
         k_snap: 0,
@@ -2424,19 +2497,19 @@ fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
 
     kani::cover!(
         account.active_bitmap == 0b11,
-        "v14 two active legs reachable for single-collateral equity"
+        "v15 two active legs reachable for single-collateral equity"
     );
     assert_eq!(equity, expected);
 
     let mut cert_account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     cert_account.health_cert.valid = true;
     cert_account.health_cert.certified_worst_case_loss = certified_loss;
     let score = group.risk_score(&cert_account).unwrap();
 
     kani::cover!(
         certified_loss > 1,
-        "v14 full certified loss envelope reaches risk score"
+        "v15 full certified loss envelope reaches risk score"
     );
     assert_eq!(score.gross_risk_notional, certified_loss);
 }
@@ -2444,37 +2517,37 @@ fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain() {
+fn proof_v15_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opp0 = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
-    let mut opp1 = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opp0 = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], owner));
+    let mut opp1 = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [10; 32], owner));
     group.deposit_not_atomic(&mut account, 1).unwrap();
     group.vault = group.vault.checked_add(3).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut account, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opp0, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opp0, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group
-        .attach_leg(&mut opp1, 1, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opp1, 1, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group.assets[0].k_long = -2 * ADL_ONE as i128;
     group.assets[1].k_long = 3 * ADL_ONE as i128;
 
     let cert = group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     kani::cover!(
         cert.certified_liq_deficit == 0,
-        "v14 positive leg support covers other-leg maintenance"
+        "v15 positive leg support covers other-leg maintenance"
     );
     assert_eq!(account.pnl, 1);
     assert_eq!(cert.certified_equity, 2);
@@ -2498,29 +2571,29 @@ fn proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_wit
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_full_refresh_settles_and_scores_two_active_assets() {
+fn proof_v15_full_refresh_settles_and_scores_two_active_assets() {
     let capital_units: u8 = kani::any();
     kani::assume(capital_units <= 20);
 
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = capital_units as u128;
     group.c_tot = account.capital;
     group.vault = account.capital;
 
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut account, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     group.assets[0].k_long = ADL_ONE as i128;
     group.assets[1].k_long = -2 * (ADL_ONE as i128);
     let prices = {
-        let mut out = [1u64; V14_MAX_PORTFOLIO_ASSETS_N];
+        let mut out = [1u64; V15_MAX_PORTFOLIO_ASSETS_N];
         out[0] = 7;
         out[1] = 11;
         out
@@ -2532,11 +2605,11 @@ fn proof_v14_full_refresh_settles_and_scores_two_active_assets() {
 
     kani::cover!(
         capital_units == 0,
-        "v14 two-asset refresh covers negative-equity account"
+        "v15 two-asset refresh covers negative-equity account"
     );
     kani::cover!(
         capital_units > 1,
-        "v14 two-asset refresh covers positive-equity account"
+        "v15 two-asset refresh covers positive-equity account"
     );
     assert_eq!(account.active_bitmap, 0b11);
     assert_eq!(account.pnl, -1);
@@ -2558,20 +2631,20 @@ fn proof_v14_full_refresh_settles_and_scores_two_active_assets() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_full_refresh_clears_stale_certificate() {
+fn proof_v15_full_refresh_clears_stale_certificate() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.mark_account_stale(&mut account).unwrap();
     assert_eq!(group.stale_certificate_count, 1);
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     kani::cover!(
         !account.stale_state,
-        "v14 stale account refresh clears stale state"
+        "v15 stale account refresh clears stale state"
     );
     assert!(!account.stale_state);
     assert_eq!(group.stale_certificate_count, 0);
@@ -2581,30 +2654,30 @@ fn proof_v14_full_refresh_clears_stale_certificate() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_b_stale_blocks_refresh_and_favorable_actions() {
+fn proof_v15_b_stale_blocks_refresh_and_favorable_actions() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(group.ensure_favorable_action_allowed(&account), Ok(()));
 
     group.mark_account_b_stale(&mut account).unwrap();
     kani::cover!(
         account.b_stale_state && !account.health_cert.valid,
-        "v14 b-stale invalidates prior health certificate"
+        "v15 b-stale invalidates prior health certificate"
     );
 
     assert_eq!(
-        group.full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N]),
-        Err(V14Error::BStale)
+        group.full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V15Error::BStale)
     );
     assert_eq!(
         group.ensure_favorable_action_allowed(&account),
-        Err(V14Error::LockActive)
+        Err(V15Error::LockActive)
     );
     assert!(account.b_stale_state);
     assert_eq!(group.b_stale_account_count, 1);
@@ -2613,16 +2686,16 @@ fn proof_v14_b_stale_blocks_refresh_and_favorable_actions() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_b_stale_trade_preflight_rolls_back_partial_side_effects() {
+fn proof_v15_b_stale_trade_preflight_rolls_back_partial_side_effects() {
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 100).unwrap();
     group.deposit_not_atomic(&mut short, 100).unwrap();
-    group.attach_leg(&mut long, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut long, 0, SideV15::Long, 1).unwrap();
     group.assets[0].b_long_num = 2;
 
     let before_group = group;
@@ -2631,20 +2704,20 @@ fn proof_v14_b_stale_trade_preflight_rolls_back_partial_side_effects() {
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
         before_group.assets[0].b_long_num > before_long.legs[0].b_snap,
-        "v14 trade preflight reaches partial B-stale side effect"
+        "v15 trade preflight reaches partial B-stale side effect"
     );
-    assert_eq!(result, Err(V14Error::BStale));
+    assert_eq!(result, Err(V15Error::BStale));
     assert_eq!(group, before_group);
     assert_eq!(long, before_long);
     assert_eq!(short, before_short);
@@ -2653,19 +2726,19 @@ fn proof_v14_b_stale_trade_preflight_rolls_back_partial_side_effects() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_deposit_into_stale_or_b_stale_account_does_not_unlock_favorable_actions() {
+fn proof_v15_deposit_into_stale_or_b_stale_account_does_not_unlock_favorable_actions() {
     let stale_case: bool = kani::any();
     let deposit_units: u8 = kani::any();
     kani::assume(deposit_units > 0);
     kani::assume(deposit_units <= 20);
     let deposit = deposit_units as u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     if stale_case {
         group.mark_account_stale(&mut account).unwrap();
@@ -2677,8 +2750,8 @@ fn proof_v14_deposit_into_stale_or_b_stale_account_does_not_unlock_favorable_act
 
     group.deposit_not_atomic(&mut account, deposit).unwrap();
 
-    kani::cover!(stale_case, "v14 deposit into stale account reachable");
-    kani::cover!(!stale_case, "v14 deposit into B-stale account reachable");
+    kani::cover!(stale_case, "v15 deposit into stale account reachable");
+    kani::cover!(!stale_case, "v15 deposit into B-stale account reachable");
     assert_eq!(account.capital, deposit);
     assert_eq!(group.c_tot, deposit);
     assert_eq!(group.vault, deposit);
@@ -2687,89 +2760,89 @@ fn proof_v14_deposit_into_stale_or_b_stale_account_does_not_unlock_favorable_act
     assert!(!account.health_cert.valid);
     assert_eq!(
         group.ensure_favorable_action_allowed(&account),
-        Err(V14Error::LockActive)
+        Err(V15Error::LockActive)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_side_reset_prior_epoch_account_can_clear_without_oi_underflow() {
+fn proof_v15_side_reset_prior_epoch_account_can_clear_without_oi_underflow() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].oi_eff_long_q = 0;
 
-    group.begin_full_drain_reset(0, SideV14::Long).unwrap();
+    group.begin_full_drain_reset(0, SideV15::Long).unwrap();
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
     group.clear_leg(&mut account, 0).unwrap();
     assert_eq!(group.assets[0].stored_pos_count_long, 0);
     assert_eq!(group.assets[0].oi_eff_long_q, 0);
-    group.finalize_ready_reset_side(0, SideV14::Long).unwrap();
+    group.finalize_ready_reset_side(0, SideV15::Long).unwrap();
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_side_reset_finalize_requires_prior_epoch_positions_clear() {
+fn proof_v15_side_reset_finalize_requires_prior_epoch_positions_clear() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].oi_eff_long_q = 0;
 
-    group.begin_full_drain_reset(0, SideV14::Long).unwrap();
+    group.begin_full_drain_reset(0, SideV15::Long).unwrap();
     kani::cover!(
         group.assets[0].stored_pos_count_long != 0,
-        "v14 reset pending with prior-epoch stored position reachable"
+        "v15 reset pending with prior-epoch stored position reachable"
     );
     assert_eq!(
-        group.finalize_ready_reset_side(0, SideV14::Long),
-        Err(V14Error::Stale)
+        group.finalize_ready_reset_side(0, SideV15::Long),
+        Err(V15Error::Stale)
     );
 
     group.clear_leg(&mut account, 0).unwrap();
-    assert_eq!(group.finalize_ready_reset_side(0, SideV14::Long), Ok(()));
+    assert_eq!(group.finalize_ready_reset_side(0, SideV15::Long), Ok(()));
 }
 
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrection() {
+fn proof_v15_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrection() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut prior = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut prior = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut prior, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut prior, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group.assets[0].k_long = 5 * ADL_ONE as i128;
     group.assets[0].oi_eff_long_q = 0;
 
-    group.begin_full_drain_reset(0, SideV14::Long).unwrap();
+    group.begin_full_drain_reset(0, SideV15::Long).unwrap();
     kani::cover!(
-        group.assets[0].mode_long == SideModeV14::ResetPending,
-        "v14 reset-pending side captured prior epoch"
+        group.assets[0].mode_long == SideModeV15::ResetPending,
+        "v15 reset-pending side captured prior epoch"
     );
     assert_eq!(group.assets[0].k_epoch_start_long, 5 * ADL_ONE as i128);
     assert_eq!(group.assets[0].k_long, 0);
 
     group
-        .full_account_refresh(&mut prior, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut prior, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(prior.pnl, 5);
     assert_eq!(prior.legs[0].k_snap, 5 * ADL_ONE as i128);
     group.clear_leg(&mut prior, 0).unwrap();
-    group.finalize_ready_reset_side(0, SideV14::Long).unwrap();
-    assert_eq!(group.assets[0].mode_long, SideModeV14::Normal);
+    group.finalize_ready_reset_side(0, SideV15::Long).unwrap();
+    assert_eq!(group.assets[0].mode_long, SideModeV15::Normal);
     assert_eq!(group.assets[0].stored_pos_count_long, 0);
     assert_eq!(group.assets[0].k_long, 0);
 
-    let mut next = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
+    let mut next = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], owner));
     group
-        .attach_leg(&mut next, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut next, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     assert_eq!(next.legs[0].epoch_snap, group.assets[0].epoch_long);
     assert_eq!(next.legs[0].k_snap, group.assets[0].k_long);
@@ -2779,43 +2852,43 @@ fn proof_v14_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrectio
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_quantity_adl_preserves_oi_symmetry_after_close() {
+fn proof_v15_quantity_adl_preserves_oi_symmetry_after_close() {
     let close_q: u8 = kani::any();
     kani::assume(close_q > 0);
     kani::assume(close_q <= 4);
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], [8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], [8; 32]));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], [8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [10; 32], [8; 32]));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, close_q as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, close_q as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(close_q as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(close_q as i128))
         .unwrap();
-    account.close_progress = CloseProgressLedgerV14 {
+    account.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: true,
         close_id: 1,
         asset_index: 0,
-        domain_side: SideV14::Short,
+        domain_side: SideV15::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
         residual_remaining: 0,
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
 
     let out = group
         .apply_quantity_adl_after_residual_for_account_not_atomic(
             &mut account,
             0,
-            SideV14::Long,
+            SideV15::Long,
             close_q as u128,
         )
         .unwrap();
-    kani::cover!(out.closed_q > 0, "v14 quantity ADL close reachable");
+    kani::cover!(out.closed_q > 0, "v15 quantity ADL close reachable");
     assert_eq!(
         account.close_progress.quantity_adl_applied_q,
         close_q as u128
@@ -2833,7 +2906,7 @@ fn proof_v14_quantity_adl_preserves_oi_symmetry_after_close() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
+fn proof_v15_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
     let oi_before: u8 = kani::any();
     let close_q: u8 = kani::any();
     kani::assume(oi_before > 0);
@@ -2842,37 +2915,37 @@ fn proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
     kani::assume(close_q <= oi_before);
 
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], [8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], [8; 32]));
     let mut survivor =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], [8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [10; 32], [8; 32]));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [11; 32], [8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [11; 32], [8; 32]));
     let oi_before = oi_before as u128;
     let close_q = close_q as u128;
     group
-        .attach_leg(&mut account, 0, SideV14::Long, close_q as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, close_q as i128)
         .unwrap();
     let survivor_q = oi_before - close_q;
     if survivor_q != 0 {
         group
-            .attach_leg(&mut survivor, 0, SideV14::Long, survivor_q as i128)
+            .attach_leg(&mut survivor, 0, SideV15::Long, survivor_q as i128)
             .unwrap();
     }
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(oi_before as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(oi_before as i128))
         .unwrap();
-    account.close_progress = CloseProgressLedgerV14 {
+    account.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: true,
         close_id: 1,
         asset_index: 0,
-        domain_side: SideV14::Short,
+        domain_side: SideV15::Short,
         gross_loss_at_close_start: 1,
         explicit_loss_assigned: 1,
         residual_remaining: 0,
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
     group.assets[0].a_short = ADL_ONE;
     let a_before = group.assets[0].a_short;
@@ -2881,16 +2954,16 @@ fn proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
         .apply_quantity_adl_after_residual_for_account_not_atomic(
             &mut account,
             0,
-            SideV14::Long,
+            SideV15::Long,
             close_q,
         )
         .unwrap();
 
     let oi_after = oi_before - close_q;
-    kani::cover!(oi_after > 0, "v14 partial quantity ADL branch reachable");
+    kani::cover!(oi_after > 0, "v15 partial quantity ADL branch reachable");
     kani::cover!(
         oi_after == 0,
-        "v14 full-drain quantity ADL branch reachable"
+        "v15 full-drain quantity ADL branch reachable"
     );
     assert_eq!(out.closed_q, close_q);
     assert_eq!(account.active_bitmap, 0);
@@ -2912,14 +2985,14 @@ fn proof_v14_quantity_adl_monotonically_shrinks_opposing_a_or_resets() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
+fn proof_v15_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.mode = MarketModeV14::Recovery;
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.mode = MarketModeV15::Recovery;
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group.assets[0].k_long = 3 * ADL_ONE as i128;
 
@@ -2929,7 +3002,7 @@ fn proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
 
     kani::cover!(
         out.positive_pnl_forfeited > 0,
-        "v14 dead-leg positive K/F delta is forfeited"
+        "v15 dead-leg positive K/F delta is forfeited"
     );
     assert!(out.detached);
     assert_eq!(out.positive_pnl_forfeited, 3);
@@ -2943,26 +3016,26 @@ fn proof_v14_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
+fn proof_v15_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
     let loss_units: u8 = kani::any();
     kani::assume(loss_units > 0);
     kani::assume(loss_units <= 4);
     let loss = loss_units as u128;
 
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
-    group.mode = MarketModeV14::Recovery;
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [10; 32], owner));
+    group.mode = MarketModeV15::Recovery;
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
-    group.assets[0].mode_long = SideModeV14::DrainOnly;
+    group.assets[0].mode_long = SideModeV15::DrainOnly;
     group.assets[0].k_long = -((loss as i128) * ADL_ONE as i128);
     let b_long_before = group.assets[0].b_long_num;
     let b_short_before = group.assets[0].b_short_num;
@@ -2973,7 +3046,7 @@ fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
 
     kani::cover!(
         out.residual_booked > 0,
-        "v14 dead-leg negative K/F delta books durable opposing-domain loss"
+        "v15 dead-leg negative K/F delta books durable opposing-domain loss"
     );
     assert!(out.detached);
     assert_eq!(out.loss_settled, loss);
@@ -2985,7 +3058,7 @@ fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
     assert_eq!(group.assets[0].b_long_num, b_long_before);
     assert!(group.assets[0].b_short_num > b_short_before);
     assert_eq!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        group.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(0)
     );
     assert!(account.close_progress.finalized);
@@ -2995,25 +3068,25 @@ fn proof_v14_dead_leg_forfeit_books_loss_to_opposing_domain_only() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
+fn proof_v15_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [11; 32], owner));
-    group.mode = MarketModeV14::Recovery;
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [11; 32], owner));
+    group.mode = MarketModeV15::Recovery;
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
-    group.assets[0].mode_long = SideModeV14::DrainOnly;
+    group.assets[0].mode_long = SideModeV15::DrainOnly;
     group.assets[0].k_long = -(100 * ADL_ONE as i128);
     account.pnl = 100;
     group.pnl_pos_tot = 100;
-    group.pnl_pos_bound_tot = 100;
+    set_junior_bound(&mut group, 100);
     group.vault = 50;
 
     let out = group
@@ -3022,7 +3095,7 @@ fn proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
 
     kani::cover!(
         out.support_consumed == 50 && out.junior_face_burned == 100,
-        "v14 impaired positive support burns full face for haircut value"
+        "v15 impaired positive support burns full face for haircut value"
     );
     assert!(out.detached);
     assert_eq!(out.loss_settled, 100);
@@ -3044,11 +3117,11 @@ fn proof_v14_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_fee_charge_settles_loss_before_fee() {
+fn proof_v15_fee_charge_settles_loss_before_fee() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 1).unwrap();
     account.pnl = -1;
@@ -3059,7 +3132,7 @@ fn proof_v14_fee_charge_settles_loss_before_fee() {
 
     kani::cover!(
         account.pnl < 0 || charged == 0,
-        "v14 loss-before-fee path reached"
+        "v15 loss-before-fee path reached"
     );
     assert_eq!(charged, 0);
     assert_eq!(account.capital, 0);
@@ -3070,14 +3143,14 @@ fn proof_v14_fee_charge_settles_loss_before_fee() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
+fn proof_v15_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
     let capital: u8 = kani::any();
     kani::assume(capital > 0);
     kani::assume(capital <= 20);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
         .deposit_not_atomic(&mut account, capital as u128)
         .unwrap();
@@ -3088,7 +3161,7 @@ fn proof_v14_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
 
     kani::cover!(
         charged == capital as u128,
-        "v14 fee sync wide-product cap path charges available principal"
+        "v15 fee sync wide-product cap path charges available principal"
     );
     assert_eq!(charged, capital as u128);
     assert_eq!(account.last_fee_slot, 2);
@@ -3103,7 +3176,7 @@ fn proof_v14_fee_sync_uses_wide_product_and_drops_uncollectible_tail() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
+fn proof_v15_non_deficit_public_paths_do_not_decrease_insurance() {
     let case: u8 = kani::any();
     let capital_units: u8 = kani::any();
     let insurance_units: u8 = kani::any();
@@ -3121,9 +3194,9 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
     let requested_fee = requested_fee_units as u128;
     let amount = amount_units as u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     account.capital = capital;
     group.c_tot = capital;
     group.insurance = insurance;
@@ -3133,14 +3206,14 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
     match case {
         0 => {
             group.deposit_not_atomic(&mut account, amount).unwrap();
-            kani::cover!(amount > 0, "v14 deposit non-deficit insurance boundary");
+            kani::cover!(amount > 0, "v15 deposit non-deficit insurance boundary");
             assert_eq!(group.insurance, insurance_before);
         }
         1 => {
             group
-                .withdraw_not_atomic(&mut account, amount, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+                .withdraw_not_atomic(&mut account, amount, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
                 .unwrap();
-            kani::cover!(amount > 0, "v14 withdraw non-deficit insurance boundary");
+            kani::cover!(amount > 0, "v15 withdraw non-deficit insurance boundary");
             assert_eq!(group.insurance, insurance_before);
         }
         2 => {
@@ -3149,7 +3222,7 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
                 .unwrap();
             kani::cover!(
                 requested_fee > 0,
-                "v14 fee charge can increase but not decrease insurance"
+                "v15 fee charge can increase but not decrease insurance"
             );
             assert_eq!(group.insurance, insurance_before + charged);
         }
@@ -3157,7 +3230,7 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
             let profit = 3u128;
             account.pnl = profit as i128;
             group.pnl_pos_tot = profit;
-            group.pnl_pos_bound_tot = profit;
+            set_junior_bound(&mut group, profit);
             group.pnl_matured_pos_tot = profit;
             group.vault = group.c_tot + group.insurance + profit;
             account.health_cert.valid = true;
@@ -3169,16 +3242,16 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
             group
                 .convert_released_pnl_to_capital_not_atomic(&mut account)
                 .unwrap();
-            kani::cover!(true, "v14 released pnl conversion preserves insurance");
+            kani::cover!(true, "v15 released pnl conversion preserves insurance");
             assert_eq!(group.insurance, insurance_before);
         }
         _ => {
             group.resolve_market_not_atomic(1).unwrap();
             let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
-            kani::cover!(true, "v14 non-deficit resolved close preserves insurance");
+            kani::cover!(true, "v15 non-deficit resolved close preserves insurance");
             assert_eq!(
                 outcome,
-                Ok(ResolvedCloseOutcomeV14::Closed { payout: capital })
+                Ok(ResolvedCloseOutcomeV15::Closed { payout: capital })
             );
             assert_eq!(group.insurance, insurance_before);
         }
@@ -3191,11 +3264,11 @@ fn proof_v14_non_deficit_public_paths_do_not_decrease_insurance() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_direct_fee_charge_is_live_only_without_resolved_mutation() {
+fn proof_v15_direct_fee_charge_is_live_only_without_resolved_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 5).unwrap();
     group.resolve_market_not_atomic(1).unwrap();
     let before_group = group;
@@ -3204,10 +3277,10 @@ fn proof_v14_direct_fee_charge_is_live_only_without_resolved_mutation() {
     let result = group.charge_account_fee_not_atomic(&mut account, 1);
 
     kani::cover!(
-        group.mode == MarketModeV14::Resolved,
-        "v14 direct fee charge resolved-mode rejection reachable"
+        group.mode == MarketModeV15::Resolved,
+        "v15 direct fee charge resolved-mode rejection reachable"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group, before_group);
     assert_eq!(account, before_account);
 }
@@ -3215,17 +3288,17 @@ fn proof_v14_direct_fee_charge_is_live_only_without_resolved_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_equity_active_accrual_requires_protective_progress() {
+fn proof_v15_equity_active_accrual_requires_protective_progress() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     let result = group.accrue_asset_to_not_atomic(0, 1, 2, 0, false);
-    assert_eq!(result, Err(V14Error::NonProgress));
+    assert_eq!(result, Err(V15Error::NonProgress));
     assert_eq!(group.slot_last, 0);
 
     let ok = group.accrue_asset_to_not_atomic(0, 1, 2, 0, true);
@@ -3236,18 +3309,18 @@ fn proof_v14_equity_active_accrual_requires_protective_progress() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
+fn proof_v15_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposite =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [88; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [88; 32], owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposite, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposite, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group.pending_domain_loss_barriers[0] = 1;
     let before_a_long = group.assets[0].a_long;
@@ -3258,7 +3331,7 @@ fn proof_v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
 
     kani::cover!(
         out.equity_active,
-        "v14 pending-domain barrier accrual remains reachable"
+        "v15 pending-domain barrier accrual remains reachable"
     );
     assert!(out.equity_active);
     assert_eq!(out.dt, 1);
@@ -3269,16 +3342,16 @@ fn proof_v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
     assert_eq!(group.pending_domain_loss_barriers[0], 1);
     assert_eq!(
         group.h_lock_lane(Some(&account), false),
-        Ok(HLockLaneV14::HMax)
+        Ok(HLockLaneV15::HMax)
     );
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_blocks_side_reset_before_mutation() {
+fn proof_v15_pending_domain_barrier_blocks_side_reset_before_mutation() {
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.pending_domain_loss_barriers[0] = 1;
     group.assets[0].k_long = 7;
     group.assets[0].f_long_num = -3;
@@ -3294,13 +3367,13 @@ fn proof_v14_pending_domain_barrier_blocks_side_reset_before_mutation() {
     let before_barrier = group.pending_domain_loss_barriers[0];
     let before_risk_epoch = group.risk_epoch;
 
-    let result = group.begin_full_drain_reset(0, SideV14::Long);
+    let result = group.begin_full_drain_reset(0, SideV15::Long);
 
     kani::cover!(
         before_barrier == 1,
-        "v14 pending-domain barrier side-reset lock reachable"
+        "v15 pending-domain barrier side-reset lock reachable"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.assets[0].k_long, before_k);
     assert_eq!(group.assets[0].f_long_num, before_f);
     assert_eq!(group.assets[0].b_long_num, before_b);
@@ -3314,9 +3387,9 @@ fn proof_v14_pending_domain_barrier_blocks_side_reset_before_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_does_not_block_unrelated_side_reset() {
+fn proof_v15_pending_domain_barrier_does_not_block_unrelated_side_reset() {
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.pending_domain_loss_barriers[0] = 1;
     group.assets[0].k_long = 7;
     group.assets[0].f_long_num = -3;
@@ -3332,11 +3405,11 @@ fn proof_v14_pending_domain_barrier_does_not_block_unrelated_side_reset() {
     let before_long_b = group.assets[0].b_long_num;
     let before_long_a = group.assets[0].a_long;
 
-    let result = group.begin_full_drain_reset(0, SideV14::Short);
+    let result = group.begin_full_drain_reset(0, SideV15::Short);
 
     kani::cover!(
         result.is_ok(),
-        "v14 pending-domain barrier unrelated side-reset progress reachable"
+        "v15 pending-domain barrier unrelated side-reset progress reachable"
     );
     assert!(result.is_ok());
     assert_eq!(group.pending_domain_loss_barriers[0], 1);
@@ -3349,20 +3422,20 @@ fn proof_v14_pending_domain_barrier_does_not_block_unrelated_side_reset() {
     assert_eq!(group.assets[0].b_short_num, 0);
     assert_eq!(group.assets[0].a_short, ADL_ONE);
     assert_eq!(group.assets[0].epoch_short, 7);
-    assert_eq!(group.assets[0].mode_short, SideModeV14::ResetPending);
+    assert_eq!(group.assets[0].mode_short, SideModeV15::ResetPending);
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_crank_does_not_require_full_market_scan() {
+fn proof_v15_permissionless_crank_does_not_require_full_market_scan() {
     let stale_count: u16 = kani::any();
     let b_stale_count: u16 = kani::any();
     let negative_count: u16 = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 1).unwrap();
     group.materialized_portfolio_count = 1 + stale_count as u64;
     group.stale_certificate_count = stale_count as u64;
@@ -3376,22 +3449,22 @@ fn proof_v14_permissionless_crank_does_not_require_full_market_scan() {
     let out = group
         .permissionless_crank_not_atomic(
             &mut account,
-            PermissionlessCrankRequestV14 {
+            PermissionlessCrankRequestV15 {
                 now_slot: 0,
                 asset_index: 0,
                 effective_price: 1,
                 funding_rate_e9: 0,
-                action: PermissionlessCrankActionV14::Refresh,
+                action: PermissionlessCrankActionV15::Refresh,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(
         stale_count > 0 || b_stale_count > 0 || negative_count > 0,
-        "v14 permissionless hinted progress ignores unrelated global account counters"
+        "v15 permissionless hinted progress ignores unrelated global account counters"
     );
-    assert_eq!(out, PermissionlessProgressOutcomeV14::AccountCurrent);
+    assert_eq!(out, PermissionlessProgressOutcomeV15::AccountCurrent);
     assert!(account.health_cert.valid);
     assert_eq!(group.materialized_portfolio_count, before_materialized);
     assert_eq!(group.stale_certificate_count, before_stale);
@@ -3402,41 +3475,41 @@ fn proof_v14_permissionless_crank_does_not_require_full_market_scan() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_refresh_returns_partial_b_progress_without_accrual() {
+fn proof_v15_permissionless_refresh_returns_partial_b_progress_without_accrual() {
     let larger_target: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 100).unwrap();
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].b_long_num = if larger_target { 3 } else { 2 };
     let outcome = group.permissionless_crank_not_atomic(
         &mut account,
-        PermissionlessCrankRequestV14 {
+        PermissionlessCrankRequestV15 {
             now_slot: 1,
             asset_index: 0,
             effective_price: 1,
             funding_rate_e9: 0,
-            action: PermissionlessCrankActionV14::Refresh,
+            action: PermissionlessCrankActionV15::Refresh,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
         !larger_target,
-        "v14 permissionless refresh partial B target two"
+        "v15 permissionless refresh partial B target two"
     );
     kani::cover!(
         larger_target,
-        "v14 permissionless refresh partial B target three"
+        "v15 permissionless refresh partial B target three"
     );
     assert!(matches!(
         outcome,
-        Ok(PermissionlessProgressOutcomeV14::AccountBChunk(_))
+        Ok(PermissionlessProgressOutcomeV15::AccountBChunk(_))
     ));
     assert!(account.legs[0].b_stale);
     assert!(account.legs[0].b_snap > 0);
@@ -3447,35 +3520,35 @@ fn proof_v14_permissionless_refresh_returns_partial_b_progress_without_accrual()
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_flat_refresh_is_not_protective_for_equity_active_accrual() {
+fn proof_v15_permissionless_flat_refresh_is_not_protective_for_equity_active_accrual() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     group.assets[0].oi_eff_long_q = 1;
     group.assets[0].oi_eff_short_q = 1;
     let before_asset = group.assets[0];
     let before_slot = group.slot_last;
 
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 1).unwrap();
 
     let outcome = group.permissionless_crank_not_atomic(
         &mut account,
-        PermissionlessCrankRequestV14 {
+        PermissionlessCrankRequestV15 {
             now_slot: 1,
             asset_index: 0,
             effective_price: 2,
             funding_rate_e9: 0,
-            action: PermissionlessCrankActionV14::Refresh,
+            action: PermissionlessCrankActionV15::Refresh,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        outcome == Err(V14Error::NonProgress),
-        "v14 flat refresh is not protective for exposed asset accrual"
+        outcome == Err(V15Error::NonProgress),
+        "v15 flat refresh is not protective for exposed asset accrual"
     );
-    assert_eq!(outcome, Err(V14Error::NonProgress));
+    assert_eq!(outcome, Err(V15Error::NonProgress));
     assert_eq!(group.assets[0], before_asset);
     assert_eq!(group.slot_last, before_slot);
 }
@@ -3483,39 +3556,39 @@ fn proof_v14_permissionless_flat_refresh_is_not_protective_for_equity_active_acc
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_cross_asset_liquidation_is_not_protective_for_equity_active_accrual() {
+fn proof_v15_permissionless_cross_asset_liquidation_is_not_protective_for_equity_active_accrual() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     group.assets[0].oi_eff_long_q = 1;
     group.assets[0].oi_eff_short_q = 1;
     let before_asset = group.assets[0];
     let before_slot = group.slot_last;
 
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut account, 1, SideV14::Long, 1).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut account, 1, SideV15::Long, 1).unwrap();
 
     let outcome = group.permissionless_crank_not_atomic(
         &mut account,
-        PermissionlessCrankRequestV14 {
+        PermissionlessCrankRequestV15 {
             now_slot: 1,
             asset_index: 0,
             effective_price: 2,
             funding_rate_e9: 0,
-            action: PermissionlessCrankActionV14::Liquidate(LiquidationRequestV14 {
+            action: PermissionlessCrankActionV15::Liquidate(LiquidationRequestV15 {
                 asset_index: 1,
                 close_q: 1,
                 fee_bps: 0,
             }),
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        outcome == Err(V14Error::NonProgress),
-        "v14 cross-asset liquidation is not protective for exposed asset accrual"
+        outcome == Err(V15Error::NonProgress),
+        "v15 cross-asset liquidation is not protective for exposed asset accrual"
     );
-    assert_eq!(outcome, Err(V14Error::NonProgress));
+    assert_eq!(outcome, Err(V15Error::NonProgress));
     assert_eq!(group.assets[0], before_asset);
     assert_eq!(group.slot_last, before_slot);
 }
@@ -3523,56 +3596,56 @@ fn proof_v14_permissionless_cross_asset_liquidation_is_not_protective_for_equity
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_worst_case_hinted_progress_actions_are_total_and_bounded() {
+fn proof_v15_worst_case_hinted_progress_actions_are_total_and_bounded() {
     let case: u8 = kani::any();
     kani::assume(case < 4);
     let (market, account_id, owner) = concrete_ids();
-    let base_req = PermissionlessCrankRequestV14 {
+    let base_req = PermissionlessCrankRequestV15 {
         now_slot: 0,
         asset_index: 0,
         effective_price: 1,
         funding_rate_e9: 0,
-        action: PermissionlessCrankActionV14::Refresh,
+        action: PermissionlessCrankActionV15::Refresh,
     };
 
     match case {
         0 => {
             let mut group =
-                MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+                MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
             let mut account =
-                PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+                PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
             group.deposit_not_atomic(&mut account, 1).unwrap();
             let outcome = group.permissionless_crank_not_atomic(
                 &mut account,
                 base_req,
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             );
-            kani::cover!(true, "v14 hinted refresh-current branch reachable");
+            kani::cover!(true, "v15 hinted refresh-current branch reachable");
             assert_eq!(
                 outcome,
-                Ok(PermissionlessProgressOutcomeV14::AccountCurrent)
+                Ok(PermissionlessProgressOutcomeV15::AccountCurrent)
             );
             assert!(account.health_cert.valid);
         }
         1 => {
-            let mut cfg = V14Config::public_user_fund(1, 0, 1);
+            let mut cfg = V15Config::public_user_fund(1, 0, 1);
             cfg.public_b_chunk_atoms = 1;
-            let mut group = MarketGroupV14::new(market, cfg).unwrap();
+            let mut group = MarketGroupV15::new(market, cfg).unwrap();
             let mut account =
-                PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-            group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+                PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+            group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
             group.assets[0].b_long_num = 2;
             let outcome = group.permissionless_crank_not_atomic(
                 &mut account,
-                PermissionlessCrankRequestV14 {
-                    action: PermissionlessCrankActionV14::SettleB { asset_index: 0 },
+                PermissionlessCrankRequestV15 {
+                    action: PermissionlessCrankActionV15::SettleB { asset_index: 0 },
                     ..base_req
                 },
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             );
-            kani::cover!(true, "v14 hinted settle-B branch reachable");
+            kani::cover!(true, "v15 hinted settle-B branch reachable");
             match outcome {
-                Ok(PermissionlessProgressOutcomeV14::AccountBChunk(chunk)) => {
+                Ok(PermissionlessProgressOutcomeV15::AccountBChunk(chunk)) => {
                     assert_eq!(chunk.delta_b, 1);
                     assert_eq!(chunk.remaining_after, 1);
                     assert!(account.b_stale_state);
@@ -3583,49 +3656,49 @@ fn proof_v14_worst_case_hinted_progress_actions_are_total_and_bounded() {
         }
         2 => {
             let mut group =
-                MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+                MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
             let mut account =
-                PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+                PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
             group
-                .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+                .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
                 .unwrap();
             let outcome = group.permissionless_crank_not_atomic(
                 &mut account,
-                PermissionlessCrankRequestV14 {
-                    action: PermissionlessCrankActionV14::Liquidate(LiquidationRequestV14 {
+                PermissionlessCrankRequestV15 {
+                    action: PermissionlessCrankActionV15::Liquidate(LiquidationRequestV15 {
                         asset_index: 0,
                         close_q: POS_SCALE,
                         fee_bps: 0,
                     }),
                     ..base_req
                 },
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             );
-            kani::cover!(true, "v14 hinted liquidation branch reachable");
+            kani::cover!(true, "v15 hinted liquidation branch reachable");
             assert_eq!(
                 outcome,
-                Ok(PermissionlessProgressOutcomeV14::AccountCurrent)
+                Ok(PermissionlessProgressOutcomeV15::AccountCurrent)
             );
             assert_eq!(account.active_bitmap, 0);
         }
         _ => {
             let mut group =
-                MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+                MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
             let mut account =
-                PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-            let reason = PermissionlessRecoveryReasonV14::BelowProgressFloor;
+                PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+            let reason = PermissionlessRecoveryReasonV15::BelowProgressFloor;
             let outcome = group.permissionless_crank_not_atomic(
                 &mut account,
-                PermissionlessCrankRequestV14 {
-                    action: PermissionlessCrankActionV14::Recover(reason),
+                PermissionlessCrankRequestV15 {
+                    action: PermissionlessCrankActionV15::Recover(reason),
                     ..base_req
                 },
-                &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+                &[1; V15_MAX_PORTFOLIO_ASSETS_N],
             );
-            kani::cover!(true, "v14 hinted recovery branch reachable");
+            kani::cover!(true, "v15 hinted recovery branch reachable");
             assert_eq!(
                 outcome,
-                Ok(PermissionlessProgressOutcomeV14::RecoveryDeclared(reason))
+                Ok(PermissionlessProgressOutcomeV15::RecoveryDeclared(reason))
             );
             assert_eq!(group.recovery_reason, Some(reason));
         }
@@ -3635,14 +3708,14 @@ fn proof_v14_worst_case_hinted_progress_actions_are_total_and_bounded() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_equity_active_accrual_advances_at_most_one_bounded_segment() {
+fn proof_v15_equity_active_accrual_advances_at_most_one_bounded_segment() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_accrual_dt_slots = 2;
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     let out = group.accrue_asset_to_not_atomic(0, 10, 3, 0, true).unwrap();
@@ -3655,15 +3728,15 @@ fn proof_v14_equity_active_accrual_advances_at_most_one_bounded_segment() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_funding_rate_above_cap_rejects_before_mutation() {
+fn proof_v15_funding_rate_above_cap_rejects_before_mutation() {
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_abs_funding_e9_per_slot = 1;
     let before = group.assets[0];
 
     let result = group.accrue_asset_to_not_atomic(0, 1, 1, 2, true);
 
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
     assert_eq!(group.assets[0], before);
     assert_eq!(group.slot_last, 0);
     assert_eq!(group.current_slot, 0);
@@ -3672,27 +3745,27 @@ fn proof_v14_funding_rate_above_cap_rejects_before_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_trade_dynamic_fee_cap_is_enforced_before_mutation() {
+fn proof_v15_trade_dynamic_fee_cap_is_enforced_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_trading_fee_bps = 1;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 10).unwrap();
     group.deposit_not_atomic(&mut short, 10).unwrap();
 
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 2,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
     assert_eq!(long.active_bitmap, 0);
     assert_eq!(short.active_bitmap, 0);
 }
@@ -3700,14 +3773,14 @@ fn proof_v14_trade_dynamic_fee_cap_is_enforced_before_mutation() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_trade_fee_conservation_and_oi_symmetry() {
+fn proof_v15_trade_fee_conservation_and_oi_symmetry() {
     let fee_bps: u16 = kani::any();
     kani::assume(fee_bps <= 1_000);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_trading_fee_bps = 1_000;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 10_000).unwrap();
     group.deposit_not_atomic(&mut short, 10_000).unwrap();
     let vault_before = group.vault;
@@ -3718,13 +3791,13 @@ fn proof_v14_trade_fee_conservation_and_oi_symmetry() {
         .execute_trade_with_fee_not_atomic(
             &mut long,
             &mut short,
-            TradeRequestV14 {
+            TradeRequestV15 {
                 asset_index: 0,
                 size_q: POS_SCALE,
                 exec_price: 100,
                 fee_bps: fee_bps as u64,
             },
-            &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[100; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
@@ -3733,8 +3806,8 @@ fn proof_v14_trade_fee_conservation_and_oi_symmetry() {
     } else {
         ((100u128 * fee_bps as u128) + 9_999) / 10_000
     };
-    kani::cover!(fee_bps == 0, "v14 zero fee trade reachable");
-    kani::cover!(expected_fee > 0, "v14 positive fee trade reachable");
+    kani::cover!(fee_bps == 0, "v15 zero fee trade reachable");
+    kani::cover!(expected_fee > 0, "v15 positive fee trade reachable");
     assert_eq!(out.notional, 100);
     assert_eq!(out.fee_a, expected_fee);
     assert_eq!(out.fee_b, expected_fee);
@@ -3749,13 +3822,13 @@ fn proof_v14_trade_fee_conservation_and_oi_symmetry() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_risk_increasing_trade_requires_initial_health_before_mutation() {
+fn proof_v15_risk_increasing_trade_requires_initial_health_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut underfunded_long =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut funded_short =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut funded_short, 10_000).unwrap();
     let before_group = group;
     let before_long = underfunded_long;
@@ -3764,16 +3837,16 @@ fn proof_v14_risk_increasing_trade_requires_initial_health_before_mutation() {
     let result = group.execute_trade_with_fee_not_atomic(
         &mut underfunded_long,
         &mut funded_short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: POS_SCALE,
             exec_price: 100,
             fee_bps: 0,
         },
-        &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
     assert_eq!(group, before_group);
     assert_eq!(underfunded_long, before_long);
     assert_eq!(funded_short, before_short);
@@ -3782,17 +3855,17 @@ fn proof_v14_risk_increasing_trade_requires_initial_health_before_mutation() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset() {
+fn proof_v15_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset() {
     let hidden_loss_units: u8 = kani::any();
     kani::assume((2..=5).contains(&hidden_loss_units));
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 1).unwrap();
     group.deposit_not_atomic(&mut short, 1_000).unwrap();
     group
-        .attach_leg(&mut long, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group.assets[1].k_long = -((hidden_loss_units as i128) * (ADL_ONE as i128));
     let before_group = group;
@@ -3802,18 +3875,18 @@ fn proof_v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset() {
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: POS_SCALE,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
         hidden_loss_units > 1,
-        "v14 trade hint with toxic unhinted active leg reachable"
+        "v15 trade hint with toxic unhinted active leg reachable"
     );
     assert!(result.is_err());
     assert_eq!(group, before_group);
@@ -3824,22 +3897,22 @@ fn proof_v14_trade_hint_cannot_hide_toxic_portfolio_leg_on_other_asset() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
+fn proof_v15_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut flip_to_long =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut flip_to_short =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut flip_to_long, 10_000).unwrap();
     group
         .deposit_not_atomic(&mut flip_to_short, 10_000)
         .unwrap();
     group
-        .attach_leg(&mut flip_to_long, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut flip_to_long, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group
-        .attach_leg(&mut flip_to_short, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut flip_to_short, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     let vault_before = group.vault;
     let c_tot_before = group.c_tot;
@@ -3848,20 +3921,20 @@ fn proof_v14_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
         .execute_trade_with_fee_not_atomic(
             &mut flip_to_long,
             &mut flip_to_short,
-            TradeRequestV14 {
+            TradeRequestV15 {
                 asset_index: 0,
                 size_q: 2 * POS_SCALE,
                 exec_price: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
-    kani::cover!(true, "v14 sign-flip trade transition reachable");
-    assert_eq!(flip_to_long.legs[0].side, SideV14::Long);
+    kani::cover!(true, "v15 sign-flip trade transition reachable");
+    assert_eq!(flip_to_long.legs[0].side, SideV15::Long);
     assert_eq!(flip_to_long.legs[0].basis_pos_q, POS_SCALE as i128);
-    assert_eq!(flip_to_short.legs[0].side, SideV14::Short);
+    assert_eq!(flip_to_short.legs[0].side, SideV15::Short);
     assert_eq!(flip_to_short.legs[0].basis_pos_q, -(POS_SCALE as i128));
     assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
@@ -3875,11 +3948,11 @@ fn proof_v14_sign_flip_trade_preserves_oi_symmetry_and_senior_accounting() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin() {
+fn proof_v15_hlock_allows_risk_increasing_trade_with_principal_margin() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 100).unwrap();
     group.deposit_not_atomic(&mut short, 100).unwrap();
     group.threshold_stress_active = true;
@@ -3887,18 +3960,18 @@ fn proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin() {
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
         result.is_ok(),
-        "v14 h-lock risk-increasing trade principal-only margin lane reachable"
+        "v15 h-lock risk-increasing trade principal-only margin lane reachable"
     );
     assert!(result.is_ok());
     assert_eq!(long.active_bitmap, 1);
@@ -3913,11 +3986,11 @@ fn proof_v14_hlock_allows_risk_increasing_trade_with_principal_margin() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation() {
+fn proof_v15_loss_stale_blocks_risk_increasing_trade_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 100).unwrap();
     group.deposit_not_atomic(&mut short, 100).unwrap();
     group.loss_stale_active = true;
@@ -3930,20 +4003,20 @@ fn proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation() {
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::LockActive),
-        "v14 loss-stale risk-increasing trade rejection reachable"
+        result == Err(V15Error::LockActive),
+        "v15 loss-stale risk-increasing trade rejection reachable"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.c_tot, before_c_tot);
     assert_eq!(group.insurance, before_insurance);
@@ -3958,15 +4031,15 @@ fn proof_v14_loss_stale_blocks_risk_increasing_trade_before_mutation() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_without_mutation() {
+fn proof_v15_hlock_risk_increasing_trade_rejects_positive_credit_dependency_without_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     long.pnl = 10;
     short.pnl = 10;
     group.pnl_pos_tot = 20;
-    group.pnl_pos_bound_tot = 20;
+    set_junior_bound(&mut group, 20);
     group.vault = 20;
     group.threshold_stress_active = true;
 
@@ -3982,20 +4055,20 @@ fn proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_with
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::LockActive),
-        "v14 h-lock risk-increasing positive-credit dependency rejection reachable"
+        result == Err(V15Error::LockActive),
+        "v15 h-lock risk-increasing positive-credit dependency rejection reachable"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.insurance, before_insurance);
     assert_eq!(group.c_tot, before_c_tot);
@@ -4012,11 +4085,11 @@ fn proof_v14_hlock_risk_increasing_trade_rejects_positive_credit_dependency_with
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_target_effective_lag_rejects_risk_increasing_trade_before_mutation() {
+fn proof_v15_target_effective_lag_rejects_risk_increasing_trade_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 10).unwrap();
     group.deposit_not_atomic(&mut short, 10).unwrap();
     group.assets[0].effective_price = 1;
@@ -4025,16 +4098,16 @@ fn proof_v14_target_effective_lag_rejects_risk_increasing_trade_before_mutation(
     let result = group.execute_trade_with_fee_not_atomic(
         &mut long,
         &mut short,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(long.active_bitmap, 0);
     assert_eq!(short.active_bitmap, 0);
     assert_eq!(group.insurance, 0);
@@ -4043,33 +4116,33 @@ fn proof_v14_target_effective_lag_rejects_risk_increasing_trade_before_mutation(
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_allows_pure_risk_reducing_trade_with_principal_margin() {
+fn proof_v15_hlock_allows_pure_risk_reducing_trade_with_principal_margin() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut reducing_short =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut reducing_long =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut reducing_short, 100).unwrap();
     group.deposit_not_atomic(&mut reducing_long, 100).unwrap();
     group
-        .attach_leg(&mut reducing_short, 0, SideV14::Short, -10)
+        .attach_leg(&mut reducing_short, 0, SideV15::Short, -10)
         .unwrap();
     group
-        .attach_leg(&mut reducing_long, 0, SideV14::Long, 10)
+        .attach_leg(&mut reducing_long, 0, SideV15::Long, 10)
         .unwrap();
     group.threshold_stress_active = true;
 
     let result = group.execute_trade_with_fee_not_atomic(
         &mut reducing_short,
         &mut reducing_long,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 5,
             exec_price: 1,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     assert!(result.is_ok());
@@ -4080,52 +4153,52 @@ fn proof_v14_hlock_allows_pure_risk_reducing_trade_with_principal_margin() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_hlock_withdraw_uses_no_positive_credit_lane() {
+fn proof_v15_hlock_withdraw_uses_no_positive_credit_lane() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 20).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, 10)
+        .attach_leg(&mut account, 0, SideV15::Long, 10)
         .unwrap();
     account.pnl = 100;
     group.pnl_pos_tot = 100;
-    group.pnl_pos_bound_tot = 100;
+    set_junior_bound(&mut group, 100);
     group.threshold_stress_active = true;
 
     let result =
-        group.withdraw_not_atomic(&mut account, 11, &[1_000_000; V14_MAX_PORTFOLIO_ASSETS_N]);
+        group.withdraw_not_atomic(&mut account, 11, &[1_000_000; V15_MAX_PORTFOLIO_ASSETS_N]);
 
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
 }
 
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_stale_profitable_leg_cannot_withdraw_using_pre_refresh_positive_pnl() {
+fn proof_v15_stale_profitable_leg_cannot_withdraw_using_pre_refresh_positive_pnl() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 40).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     account.pnl = 100;
     group.pnl_pos_tot = 100;
-    group.pnl_pos_bound_tot = 100;
+    set_junior_bound(&mut group, 100);
     group.vault = group.c_tot + 50;
     group.assets[0].k_long = -(100 * ADL_ONE as i128);
     group.mark_account_stale(&mut account).unwrap();
 
     let before_vault = group.vault;
     let before_c_tot = group.c_tot;
-    let result = group.withdraw_not_atomic(&mut account, 41, &[1; V14_MAX_PORTFOLIO_ASSETS_N]);
+    let result = group.withdraw_not_atomic(&mut account, 41, &[1; V15_MAX_PORTFOLIO_ASSETS_N]);
 
     kani::cover!(
         account.pnl <= 0 && before_vault > before_c_tot,
-        "v14 stale profitable withdraw refreshes hidden loss before extraction"
+        "v15 stale profitable withdraw refreshes hidden loss before extraction"
     );
     assert!(result.is_err());
     assert_eq!(group.vault, before_vault);
@@ -4136,24 +4209,24 @@ fn proof_v14_stale_profitable_leg_cannot_withdraw_using_pre_refresh_positive_pnl
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
+fn proof_v15_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
     let profit: u8 = kani::any();
     let residual: u8 = kani::any();
     kani::assume(profit <= 10);
     kani::assume(residual <= 10);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 10).unwrap();
     account.pnl = profit as i128;
     group.pnl_pos_tot = profit as u128;
-    group.pnl_pos_bound_tot = profit as u128;
+    set_junior_bound(&mut group, profit as u128);
     group.pnl_matured_pos_tot = profit as u128;
     group.vault = group.c_tot + group.insurance + residual as u128;
     group
-        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     let vault_before = group.vault;
@@ -4162,13 +4235,13 @@ fn proof_v14_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
     let expected = (profit as u128).min(residual as u128);
     let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
 
-    kani::cover!(expected == 0, "v14 zero conversion branch reachable");
-    kani::cover!(expected > 0, "v14 positive conversion branch reachable");
+    kani::cover!(expected == 0, "v15 zero conversion branch reachable");
+    kani::cover!(expected > 0, "v15 positive conversion branch reachable");
     if expected == 0 {
         if profit == 0 {
             assert_eq!(result, Ok(0));
         } else {
-            assert_eq!(result, Err(V14Error::LockActive));
+            assert_eq!(result, Err(V15Error::LockActive));
         }
         assert_eq!(group.vault, vault_before);
         assert_eq!(group.c_tot, c_tot_before);
@@ -4188,26 +4261,89 @@ fn proof_v14_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_ordinary_positive_conversion_disabled_outside_live_payout_lane() {
+    let resolved_mode: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    account.pnl = 10;
+    group.pnl_pos_tot = 10;
+    group.pnl_matured_pos_tot = 10;
+    set_junior_bound(&mut group, 10);
+    group.vault = 10;
+    group
+        .full_account_refresh(&mut account, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    if resolved_mode {
+        group.resolve_market_not_atomic(1).unwrap();
+    } else {
+        initialize_payout_ledger(&mut group);
+    }
+    let before_vault = group.vault;
+    let before_c_tot = group.c_tot;
+    let before_pnl_pos_tot = group.pnl_pos_tot;
+    let before_pnl_pos_bound_tot_num = group.pnl_pos_bound_tot_num;
+    let before_pnl_pos_bound_tot = group.pnl_pos_bound_tot;
+    let before_pnl_matured_pos_tot = group.pnl_matured_pos_tot;
+    let before_mode = group.mode;
+    let before_payout_snapshot_captured = group.payout_snapshot_captured;
+    let before_capital = account.capital;
+    let before_pnl = account.pnl;
+    let before_reserved_pnl = account.reserved_pnl;
+    let before_health_valid = account.health_cert.valid;
+
+    let result = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        resolved_mode,
+        "v15 resolved mode disables ordinary positive conversion"
+    );
+    kani::cover!(
+        !resolved_mode,
+        "v15 initialized payout ledger disables ordinary live positive conversion"
+    );
+    assert_eq!(result, Err(V15Error::LockActive));
+    assert_eq!(group.vault, before_vault);
+    assert_eq!(group.c_tot, before_c_tot);
+    assert_eq!(group.pnl_pos_tot, before_pnl_pos_tot);
+    assert_eq!(group.pnl_pos_bound_tot_num, before_pnl_pos_bound_tot_num);
+    assert_eq!(group.pnl_pos_bound_tot, before_pnl_pos_bound_tot);
+    assert_eq!(group.pnl_matured_pos_tot, before_pnl_matured_pos_tot);
+    assert_eq!(group.mode, before_mode);
+    assert_eq!(
+        group.payout_snapshot_captured,
+        before_payout_snapshot_captured
+    );
+    assert_eq!(account.capital, before_capital);
+    assert_eq!(account.pnl, before_pnl);
+    assert_eq!(account.reserved_pnl, before_reserved_pnl);
+    assert_eq!(account.health_cert.valid, before_health_valid);
+}
+
+#[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_target_effective_lag_blocks_pnl_conversion_before_mutation() {
+fn proof_v15_target_effective_lag_blocks_pnl_conversion_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 10).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     account.pnl = 10;
     group.pnl_pos_tot = 10;
-    group.pnl_pos_bound_tot = 10;
+    set_junior_bound(&mut group, 10);
     group.pnl_matured_pos_tot = 10;
     group.vault = group.vault.checked_add(10).unwrap();
     group.assets[0].effective_price = 100;
     group.assets[0].raw_oracle_target_price = 100;
     group
-        .full_account_refresh(&mut account, &[100; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[100; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     group.assets[0].raw_oracle_target_price = 120;
 
@@ -4223,9 +4359,9 @@ fn proof_v14_target_effective_lag_blocks_pnl_conversion_before_mutation() {
     kani::cover!(
         account.active_bitmap != 0
             && group.assets[0].raw_oracle_target_price != group.assets[0].effective_price,
-        "v14 target/effective lag conversion lock reachable"
+        "v15 target/effective lag conversion lock reachable"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, vault_before);
     assert_eq!(group.c_tot, c_tot_before);
     assert_eq!(group.pnl_pos_tot, pnl_pos_before);
@@ -4238,35 +4374,35 @@ fn proof_v14_target_effective_lag_blocks_pnl_conversion_before_mutation() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_loss_stale_blocks_nonflat_withdrawal() {
+fn proof_v15_loss_stale_blocks_nonflat_withdrawal() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 100).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, 10)
+        .attach_leg(&mut account, 0, SideV15::Long, 10)
         .unwrap();
     group.loss_stale_active = true;
 
-    let result = group.withdraw_not_atomic(&mut account, 10, &[1; V14_MAX_PORTFOLIO_ASSETS_N]);
+    let result = group.withdraw_not_atomic(&mut account, 10, &[1; V15_MAX_PORTFOLIO_ASSETS_N]);
 
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
 }
 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_positive_payout_snapshot_is_order_stable() {
+fn proof_v15_resolved_positive_payout_snapshot_is_order_stable() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut first = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut second = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut first = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut second = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.vault = 100;
     first.pnl = 100;
     second.pnl = 100;
     group.pnl_pos_tot = 200;
-    group.pnl_pos_bound_tot = 200;
+    set_junior_bound(&mut group, 200);
     group.resolve_market_not_atomic(1).unwrap();
 
     let first_close = group.close_resolved_account_not_atomic(&mut first, 0);
@@ -4274,11 +4410,11 @@ fn proof_v14_resolved_positive_payout_snapshot_is_order_stable() {
 
     assert_eq!(
         first_close,
-        Ok(ResolvedCloseOutcomeV14::Closed { payout: 50 })
+        Ok(ResolvedCloseOutcomeV15::Closed { payout: 50 })
     );
     assert_eq!(
         second_close,
-        Ok(ResolvedCloseOutcomeV14::Closed { payout: 50 })
+        Ok(ResolvedCloseOutcomeV15::Closed { payout: 50 })
     );
     assert_eq!(group.payout_snapshot, 100);
     assert_eq!(group.payout_snapshot_pnl_pos_tot, 200);
@@ -4287,24 +4423,24 @@ fn proof_v14_resolved_positive_payout_snapshot_is_order_stable() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_payout_uses_positive_bound_denominator() {
+fn proof_v15_resolved_payout_uses_positive_bound_denominator() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.vault = 100;
     account.pnl = 100;
     group.pnl_pos_tot = 100;
-    group.pnl_pos_bound_tot = 200;
+    set_junior_bound(&mut group, 200);
     group.resolve_market_not_atomic(1).unwrap();
 
     let close = group.close_resolved_account_not_atomic(&mut account, 0);
 
     kani::cover!(
         group.payout_snapshot_pnl_pos_tot > group.pnl_pos_tot,
-        "v14 resolved payout bound denominator remains conservative after close"
+        "v15 resolved payout bound denominator remains conservative after close"
     );
-    assert_eq!(close, Ok(ResolvedCloseOutcomeV14::Closed { payout: 50 }));
+    assert_eq!(close, Ok(ResolvedCloseOutcomeV15::Closed { payout: 50 }));
     assert_eq!(group.payout_snapshot, 100);
     assert_eq!(group.payout_snapshot_pnl_pos_tot, 200);
     assert_eq!(group.vault, 50);
@@ -4313,24 +4449,158 @@ fn proof_v14_resolved_payout_uses_positive_bound_denominator() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay() {
+fn proof_v15_scaled_junior_bound_remainder_ceil_controls_resolved_payout() {
+    let extra_num: u16 = kani::any();
+    kani::assume(extra_num > 0);
+    kani::assume(extra_num <= 1_000);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.vault = 1;
+    account.pnl = 1;
+    group.pnl_pos_tot = 1;
+    group.pnl_pos_bound_tot_num = BOUND_SCALE + extra_num as u128;
+    group.pnl_pos_bound_tot = 2;
+    group.resolve_market_not_atomic(1).unwrap();
+
+    let close = group.close_resolved_account_not_atomic(&mut account, 0);
+
+    kani::cover!(
+        extra_num == 1,
+        "v15 scaled junior-bound minimum nonzero remainder is covered"
+    );
+    kani::cover!(
+        extra_num > 1,
+        "v15 scaled junior-bound larger nonzero remainders are covered"
+    );
+    kani::cover!(
+        group.payout_snapshot_pnl_pos_tot == 2,
+        "v15 scaled junior-bound remainder is rounded up in the resolved payout denominator"
+    );
+    assert_eq!(close, Ok(ResolvedCloseOutcomeV15::Closed { payout: 0 }));
+    assert_eq!(group.payout_snapshot, 1);
+    assert_eq!(group.payout_snapshot_pnl_pos_tot, 2);
+    assert_eq!(group.vault, 1);
+    assert_eq!(group.pnl_pos_bound_tot_num, extra_num as u128);
+    assert_eq!(group.pnl_pos_bound_tot, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_resolved_receipt_tracks_paid_effective_and_bound_refinement_topup() {
+    let extra_num: u16 = kani::any();
+    kani::assume(extra_num > 0);
+    kani::assume(extra_num <= 1_000);
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.vault = 1;
+    account.pnl = 1;
+    group.pnl_pos_tot = 1;
+    group.pnl_pos_bound_tot_num = BOUND_SCALE + extra_num as u128;
+    group.pnl_pos_bound_tot = 2;
+    group.resolve_market_not_atomic(1).unwrap();
+
+    let first = group.close_resolved_account_not_atomic(&mut account, 0);
+
+    kani::cover!(
+        extra_num == 1,
+        "v15 resolved receipt top-up covers minimum scaled remainder"
+    );
+    kani::cover!(
+        account.resolved_payout_receipt.present
+            && group
+                .resolved_payout_ledger
+                .terminal_claim_bound_unreceipted_num
+                == extra_num as u128,
+        "v15 resolved receipt leaves only scaled unreceipted remainder"
+    );
+    assert_eq!(first, Ok(ResolvedCloseOutcomeV15::Closed { payout: 0 }));
+    assert_eq!(
+        account.resolved_payout_receipt.terminal_positive_claim_face,
+        1
+    );
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 0);
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_exact_receipts_num,
+        BOUND_SCALE
+    );
+    assert_eq!(
+        group
+            .resolved_payout_ledger
+            .terminal_claim_bound_unreceipted_num,
+        extra_num as u128
+    );
+
+    group
+        .refine_resolved_unreceipted_bound_not_atomic(extra_num as u128)
+        .unwrap();
+    let topup = group.claim_resolved_payout_topup_not_atomic(&mut account);
+
+    kani::cover!(
+        account.resolved_payout_receipt.finalized,
+        "v15 resolved receipt finalizes after bound refinement top-up"
+    );
+    assert_eq!(topup, Ok(1));
+    assert_eq!(account.resolved_payout_receipt.paid_effective, 1);
+    assert!(account.resolved_payout_receipt.finalized);
+    assert_eq!(group.vault, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_public_invariants_reject_scaled_junior_bound_cache_mismatch() {
+    let case: bool = kani::any();
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    group.pnl_pos_tot = 1;
+    group.pnl_pos_bound_tot = 1;
+    if case {
+        group.pnl_pos_bound_tot_num = BOUND_SCALE + 1;
+    } else {
+        group.pnl_pos_bound_tot_num = BOUND_SCALE - 1;
+    }
+
+    let result = group.assert_public_invariants();
+
+    kani::cover!(
+        case,
+        "v15 scaled junior-bound cache too low branch reachable"
+    );
+    kani::cover!(
+        !case,
+        "v15 scaled junior-bound numerator understates exact claim branch reachable"
+    );
+    assert_eq!(result, Err(V15Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut first_mover =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.vault = 100;
     first_mover.pnl = 100;
     group.pnl_pos_tot = 100;
-    group.pnl_pos_bound_tot = 300;
+    set_junior_bound(&mut group, 300);
     group.resolve_market_not_atomic(1).unwrap();
 
     let close = group.close_resolved_account_not_atomic(&mut first_mover, 0);
 
     kani::cover!(
         group.payout_snapshot_pnl_pos_tot > group.pnl_pos_tot,
-        "v14 first-mover payout uses lazy positive PnL bound denominator"
+        "v15 first-mover payout uses lazy positive PnL bound denominator"
     );
-    assert_eq!(close, Ok(ResolvedCloseOutcomeV14::Closed { payout: 33 }));
+    assert_eq!(close, Ok(ResolvedCloseOutcomeV15::Closed { payout: 33 }));
     assert_eq!(group.payout_snapshot, 100);
     assert_eq!(group.payout_snapshot_pnl_pos_tot, 300);
     assert_eq!(group.vault, 67);
@@ -4339,25 +4609,25 @@ fn proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay() 
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_close_partial_b_settlement_makes_progress_without_closing() {
+fn proof_v15_resolved_close_partial_b_settlement_makes_progress_without_closing() {
     let larger_target: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut account, 100).unwrap();
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.assets[0].b_long_num = if larger_target { 3 } else { 2 };
     group.resolve_market_not_atomic(10).unwrap();
 
     let outcome = group.close_resolved_account_not_atomic(&mut account, 1);
 
-    kani::cover!(!larger_target, "v14 resolved close partial B target two");
-    kani::cover!(larger_target, "v14 resolved close partial B target three");
-    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));
+    kani::cover!(!larger_target, "v15 resolved close partial B target two");
+    kani::cover!(larger_target, "v15 resolved close partial B target three");
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV15::ProgressOnly));
     assert!(account.legs[0].b_stale);
     assert!(account.legs[0].b_snap > 0);
     assert!(account.legs[0].b_snap < group.assets[0].b_long_num);
@@ -4369,17 +4639,17 @@ fn proof_v14_resolved_close_partial_b_settlement_makes_progress_without_closing(
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
+fn proof_v15_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     let blocker: u8 = kani::any();
     kani::assume(blocker < 8);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.vault = 10;
     account.pnl = 10;
     group.pnl_pos_tot = 10;
-    group.pnl_pos_bound_tot = 10;
+    set_junior_bound(&mut group, 10);
     group.resolve_market_not_atomic(1).unwrap();
     match blocker {
         0 => group.b_stale_account_count = 1,
@@ -4398,16 +4668,16 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
     let account_pnl_before = account.pnl;
     let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
 
-    kani::cover!(blocker == 0, "v14 resolved readiness B-stale blocker");
+    kani::cover!(blocker == 0, "v15 resolved readiness B-stale blocker");
     kani::cover!(
         blocker == 6,
-        "v14 resolved readiness stale short-count blocker"
+        "v15 resolved readiness stale short-count blocker"
     );
     kani::cover!(
         blocker == 7,
-        "v14 resolved readiness pending-domain-loss barrier blocker"
+        "v15 resolved readiness pending-domain-loss barrier blocker"
     );
-    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV15::ProgressOnly));
     assert_eq!(group.vault, vault_before);
     assert_eq!(group.pnl_pos_tot, pnl_pos_before);
     assert_eq!(group.pnl_pos_bound_tot, bound_before);
@@ -4418,36 +4688,36 @@ fn proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() {
+fn proof_v15_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut profitable =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposite =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [77; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [77; 32], owner));
     group.deposit_not_atomic(&mut profitable, 100).unwrap();
     group.deposit_not_atomic(&mut opposite, 100).unwrap();
     group
-        .attach_leg(&mut profitable, 1, SideV14::Long, 1)
+        .attach_leg(&mut profitable, 1, SideV15::Long, 1)
         .unwrap();
     group
-        .attach_leg(&mut opposite, 1, SideV14::Short, -1)
+        .attach_leg(&mut opposite, 1, SideV15::Short, -1)
         .unwrap();
     profitable.pnl = 5;
     group.pnl_pos_tot = 5;
     group.pnl_matured_pos_tot = 5;
-    group.pnl_pos_bound_tot = 5;
+    set_junior_bound(&mut group, 5);
     group.vault = group.c_tot + 5;
     group.pending_domain_loss_barriers[1] = 1;
     group
-        .full_account_refresh(&mut profitable, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut profitable, &[1; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     let result = group.convert_released_pnl_to_capital_not_atomic(&mut profitable);
 
     kani::cover!(
         result == Ok(5),
-        "v14 unrelated-domain positive-credit conversion remains reachable"
+        "v15 unrelated-domain positive-credit conversion remains reachable"
     );
     assert_eq!(result, Ok(5));
     assert_eq!(profitable.pnl, 0);
@@ -4462,14 +4732,14 @@ fn proof_v14_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_flat_close_returns_exact_capital() {
+fn proof_v15_resolved_flat_close_returns_exact_capital() {
     let amount: u16 = kani::any();
     kani::assume(amount > 0);
     kani::assume(amount <= 1_000);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
         .deposit_not_atomic(&mut account, amount as u128)
         .unwrap();
@@ -4479,7 +4749,7 @@ fn proof_v14_resolved_flat_close_returns_exact_capital() {
 
     assert_eq!(
         outcome,
-        Ok(ResolvedCloseOutcomeV14::Closed {
+        Ok(ResolvedCloseOutcomeV15::Closed {
             payout: amount as u128
         })
     );
@@ -4493,14 +4763,14 @@ fn proof_v14_resolved_flat_close_returns_exact_capital() {
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_flat_close_syncs_fee_before_terminal_payout() {
+fn proof_v15_resolved_flat_close_syncs_fee_before_terminal_payout() {
     let fee_rate: u8 = kani::any();
     kani::assume(fee_rate > 0);
     kani::assume(fee_rate <= 5);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 100).unwrap();
     group.resolve_market_not_atomic(10).unwrap();
 
@@ -4512,11 +4782,11 @@ fn proof_v14_resolved_flat_close_syncs_fee_before_terminal_payout() {
 
     kani::cover!(
         expected_fee > 0,
-        "v14 resolved terminal close positive fee sync reachable"
+        "v15 resolved terminal close positive fee sync reachable"
     );
     assert_eq!(
         outcome,
-        ResolvedCloseOutcomeV14::Closed {
+        ResolvedCloseOutcomeV15::Closed {
             payout: expected_payout
         }
     );
@@ -4533,27 +4803,27 @@ fn proof_v14_resolved_flat_close_syncs_fee_before_terminal_payout() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_profit_close_pays_snapshot_residual_and_clears_claim() {
+fn proof_v15_resolved_profit_close_pays_snapshot_residual_and_clears_claim() {
     let profit: u8 = kani::any();
     kani::assume(profit > 0);
     kani::assume(profit <= 20);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 10).unwrap();
     account.pnl = profit as i128;
     group.pnl_pos_tot = profit as u128;
-    group.pnl_pos_bound_tot = profit as u128;
+    set_junior_bound(&mut group, profit as u128);
     group.vault = group.c_tot + profit as u128;
     group.resolve_market_not_atomic(1).unwrap();
 
     let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
 
-    kani::cover!(profit > 1, "v14 resolved profit payout branch reachable");
+    kani::cover!(profit > 1, "v15 resolved profit payout branch reachable");
     assert_eq!(
         outcome,
-        Ok(ResolvedCloseOutcomeV14::Closed {
+        Ok(ResolvedCloseOutcomeV15::Closed {
             payout: 10 + profit as u128
         })
     );
@@ -4568,30 +4838,30 @@ fn proof_v14_resolved_profit_close_pays_snapshot_residual_and_clears_claim() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_bankrupt_liquidation_consumes_insurance_before_social_loss() {
+fn proof_v15_bankrupt_liquidation_consumes_insurance_before_social_loss() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.vault = 4;
     group.insurance = 4;
     account.pnl = -9;
     group.negative_pnl_account_count = 1;
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut account,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
@@ -4606,44 +4876,44 @@ fn proof_v14_bankrupt_liquidation_consumes_insurance_before_social_loss() {
 #[kani::proof]
 #[kani::unwind(55)]
 #[kani::solver(cadical)]
-fn proof_v14_domain_insurance_budget_caps_bankruptcy_spend() {
+fn proof_v15_domain_insurance_budget_caps_bankruptcy_spend() {
     let domain_budget: u8 = kani::any();
     kani::assume(domain_budget <= 4);
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.vault = 4;
     group.insurance = 4;
-    group.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    group.insurance_domain_budget = [0; V15_DOMAIN_COUNT];
     group.insurance_domain_budget[1] = domain_budget as u128;
     account.pnl = -9;
     group.negative_pnl_account_count = 1;
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut account,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(
         domain_budget == 0,
-        "v14 domain insurance proof covers zero budget"
+        "v15 domain insurance proof covers zero budget"
     );
     kani::cover!(
         domain_budget == 4,
-        "v14 domain insurance proof covers full local budget"
+        "v15 domain insurance proof covers full local budget"
     );
     assert_eq!(out.insurance_used, domain_budget as u128);
     assert_eq!(out.residual_booked, 9 - domain_budget as u128);
@@ -4658,38 +4928,38 @@ fn proof_v14_domain_insurance_budget_caps_bankruptcy_spend() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_long_liquidation_residual_charges_short_domain() {
+fn proof_v15_long_liquidation_residual_charges_short_domain() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.vault = 4;
     group.insurance = 4;
-    group.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    group.insurance_domain_budget = [0; V15_DOMAIN_COUNT];
     group.insurance_domain_budget[1] = 3;
     bankrupt.pnl = -5;
     group.negative_pnl_account_count = 1;
     group
-        .attach_leg(&mut bankrupt, 0, SideV14::Long, 1)
+        .attach_leg(&mut bankrupt, 0, SideV15::Long, 1)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut bankrupt,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
-    kani::cover!(true, "v14 long liquidation charges short domain");
+    kani::cover!(true, "v15 long liquidation charges short domain");
     assert_eq!(out.insurance_used, 3);
     assert_eq!(out.residual_booked, 2);
     assert_eq!(group.insurance_domain_spent[1], 3);
@@ -4702,38 +4972,38 @@ fn proof_v14_long_liquidation_residual_charges_short_domain() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_short_liquidation_residual_charges_long_domain() {
+fn proof_v15_short_liquidation_residual_charges_long_domain() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.vault = 4;
     group.insurance = 4;
-    group.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    group.insurance_domain_budget = [0; V15_DOMAIN_COUNT];
     group.insurance_domain_budget[0] = 3;
     bankrupt.pnl = -5;
     group.negative_pnl_account_count = 1;
     group
-        .attach_leg(&mut bankrupt, 0, SideV14::Short, -1)
+        .attach_leg(&mut bankrupt, 0, SideV15::Short, -1)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Long, 1)
+        .attach_leg(&mut opposing, 0, SideV15::Long, 1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut bankrupt,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
-    kani::cover!(true, "v14 short liquidation charges long domain");
+    kani::cover!(true, "v15 short liquidation charges long domain");
     assert_eq!(out.insurance_used, 3);
     assert_eq!(out.residual_booked, 2);
     assert_eq!(group.insurance_domain_spent[0], 3);
@@ -4746,40 +5016,40 @@ fn proof_v14_short_liquidation_residual_charges_long_domain() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
+fn proof_v15_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], owner));
     group.vault = 4;
     group.insurance = 4;
-    group.insurance_domain_budget = [0; V14_DOMAIN_COUNT];
+    group.insurance_domain_budget = [0; V15_DOMAIN_COUNT];
     group.insurance_domain_budget[0] = 4;
     bankrupt.pnl = -5;
     group.negative_pnl_account_count = 1;
     group
-        .attach_leg(&mut bankrupt, 0, SideV14::Long, 1)
+        .attach_leg(&mut bankrupt, 0, SideV15::Long, 1)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut bankrupt,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(
         out.residual_booked != 0,
-        "v14 unrelated insurance budget leaves bad-asset residual on domain"
+        "v15 unrelated insurance budget leaves bad-asset residual on domain"
     );
     assert_eq!(out.insurance_used, 0);
     assert_eq!(out.residual_booked, 5);
@@ -4787,7 +5057,7 @@ fn proof_v14_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
     assert_eq!(group.insurance_domain_spent[0], 0);
     assert_eq!(group.insurance_domain_spent[1], 0);
     assert_eq!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        group.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(0)
     );
     assert_eq!(bankrupt.pnl, 0);
@@ -4797,22 +5067,22 @@ fn proof_v14_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable() {
+fn proof_v15_bankrupt_liquidation_cannot_free_exposure_before_residual_durable() {
     let larger_residual: bool = kani::any();
     let residual = if larger_residual { -3 } else { -2 };
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group
-        .attach_leg(&mut bankrupt, 0, SideV14::Long, 4)
+        .attach_leg(&mut bankrupt, 0, SideV15::Long, 4)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -4)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -4)
         .unwrap();
     group.assets[0].b_short_num = u128::MAX;
     group.assets[0].social_loss_remainder_short_num = 10;
@@ -4825,30 +5095,30 @@ fn proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable()
 
     let result = group.liquidate_account_not_atomic(
         &mut bankrupt,
-        LiquidationRequestV14 {
+        LiquidationRequestV15 {
             asset_index: 0,
             close_q: 4,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::RecoveryRequired),
-        "v14 partial residual recovery path reachable"
+        result == Err(V15Error::RecoveryRequired),
+        "v15 partial residual recovery path reachable"
     );
     kani::cover!(
         !larger_residual,
-        "v14 residual durability proof covers two atoms"
+        "v15 residual durability proof covers two atoms"
     );
     kani::cover!(
         larger_residual,
-        "v14 residual durability proof covers three atoms"
+        "v15 residual durability proof covers three atoms"
     );
-    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(result, Err(V15Error::RecoveryRequired));
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+        Some(PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(bankrupt.active_bitmap, before_bitmap);
     assert_eq!(bankrupt.legs[0].basis_pos_q, before_basis);
@@ -4859,51 +5129,51 @@ fn proof_v14_bankrupt_liquidation_cannot_free_exposure_before_residual_durable()
 #[kani::proof]
 #[kani::unwind(55)]
 #[kani::solver(cadical)]
-fn proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once() {
+fn proof_v15_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once() {
     let insurance_units: u8 = kani::any();
     kani::assume(insurance_units <= 2);
     let insurance = insurance_units as u128;
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 10);
+    let mut cfg = V15Config::public_user_fund(1, 0, 10);
     cfg.max_price_move_bps_per_slot = 1;
     cfg.min_nonzero_mm_req = 12;
     cfg.min_nonzero_im_req = 13;
     cfg.liquidation_fee_bps = 0;
     cfg.liquidation_fee_cap = 1;
     cfg.min_liquidation_abs = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group.vault = insurance;
     group.insurance = insurance;
     account.pnl = -5;
     group.negative_pnl_account_count = 1;
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -1)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -1)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut account,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: 1,
                 fee_bps: 0,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(
         insurance == 0,
-        "v14 bankrupt liquidation zero-insurance path reachable"
+        "v15 bankrupt liquidation zero-insurance path reachable"
     );
     kani::cover!(
         insurance == 2,
-        "v14 bankrupt liquidation partial-insurance path reachable"
+        "v15 bankrupt liquidation partial-insurance path reachable"
     );
     assert_eq!(out.fee_charged, 0);
     assert_eq!(out.insurance_used, insurance);
@@ -4917,60 +5187,60 @@ fn proof_v14_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insuranc
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk() {
+fn proof_v15_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let senior_before = group.c_tot + group.insurance;
 
     let out = group
         .rebalance_reduce_position_not_atomic(
             &mut account,
-            RebalanceRequestV14 {
+            RebalanceRequestV15 {
                 asset_index: 0,
                 reduce_q: POS_SCALE / 2,
             },
-            &[1_000_000; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1_000_000; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(out.reduced_q == POS_SCALE / 2);
     assert_eq!(out.reduced_q, POS_SCALE / 2);
     assert!(account.legs[0].active);
-    assert_eq!(account.legs[0].side, SideV14::Long);
+    assert_eq!(account.legs[0].side, SideV15::Long);
     assert_eq!(account.legs[0].basis_pos_q.unsigned_abs(), POS_SCALE / 2);
     assert_eq!(group.c_tot + group.insurance, senior_before);
     assert!(account.health_cert.valid);
     assert!(account.health_cert.certified_worst_case_loss <= 500_000);
 
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [5; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut account, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut opposing, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     let senior_before = group.c_tot + group.insurance;
 
     let out = group
         .rebalance_reduce_position_not_atomic(
             &mut account,
-            RebalanceRequestV14 {
+            RebalanceRequestV15 {
                 asset_index: 0,
                 reduce_q: POS_SCALE,
             },
-            &[1_000_000; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1_000_000; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
@@ -4986,27 +5256,27 @@ fn proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk(
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_b_residual_booking_makes_durable_progress_or_fails_closed() {
+fn proof_v15_b_residual_booking_makes_durable_progress_or_fails_closed() {
     let residual_units: u8 = kani::any();
     kani::assume(residual_units <= 4);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Short, -1)
+        .attach_leg(&mut account, 0, SideV15::Short, -1)
         .unwrap();
 
     let before_b = group.assets[0].b_short_num;
     let residual = residual_units as u128;
     let result =
-        group.book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV14::Long, residual);
+        group.book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV15::Long, residual);
     if residual == 0 {
         assert_eq!(result.unwrap().remaining_after, 0);
         assert_eq!(group.assets[0].b_short_num, before_b);
     } else {
         let out = result.unwrap();
-        kani::cover!(out.booked_loss > 0, "v14 residual B booking reachable");
+        kani::cover!(out.booked_loss > 0, "v15 residual B booking reachable");
         assert!(out.booked_loss > 0);
         assert_eq!(out.explicit_loss, 0);
         assert_eq!(
@@ -5021,17 +5291,17 @@ fn proof_v14_b_residual_booking_makes_durable_progress_or_fails_closed() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_zero_weight_domain_residual_routes_to_recovery_without_mutation() {
+fn proof_v15_zero_weight_domain_residual_routes_to_recovery_without_mutation() {
     let bankrupt_long: bool = kani::any();
     let (market, _, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let bankrupt_side = if bankrupt_long {
-        SideV14::Long
+        SideV15::Long
     } else {
-        SideV14::Short
+        SideV15::Short
     };
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [2u8; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [2u8; 32], owner));
 
     let before_long = group.assets[0].explicit_unallocated_loss_long;
     let before_short = group.assets[0].explicit_unallocated_loss_short;
@@ -5040,16 +5310,16 @@ fn proof_v14_zero_weight_domain_residual_routes_to_recovery_without_mutation() {
 
     kani::cover!(
         bankrupt_long,
-        "v14 zero-weight short-domain recovery reachable"
+        "v15 zero-weight short-domain recovery reachable"
     );
     kani::cover!(
         !bankrupt_long,
-        "v14 zero-weight long-domain recovery reachable"
+        "v15 zero-weight long-domain recovery reachable"
     );
-    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(result, Err(V15Error::RecoveryRequired));
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+        Some(PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(group.assets[0].explicit_unallocated_loss_long, before_long);
     assert_eq!(
@@ -5058,9 +5328,9 @@ fn proof_v14_zero_weight_domain_residual_routes_to_recovery_without_mutation() {
     );
     assert!(!account.close_progress.active);
     let blocked_domain = if bankrupt_long {
-        SideV14::Short
+        SideV15::Short
     } else {
-        SideV14::Long
+        SideV15::Long
     };
     assert!(matches!(
         group.pending_domain_loss_barrier_count(0, blocked_domain),
@@ -5071,29 +5341,29 @@ fn proof_v14_zero_weight_domain_residual_routes_to_recovery_without_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_account_b_booking_advances_close_progress_or_fails_closed() {
+fn proof_v15_account_b_booking_advances_close_progress_or_fails_closed() {
     let residual_units: u8 = kani::any();
     kani::assume(residual_units > 0 && residual_units <= 4);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut opp = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    group.attach_leg(&mut opp, 0, SideV14::Short, -1).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut opp = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    group.attach_leg(&mut opp, 0, SideV15::Short, -1).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [7u8; 32], [8u8; 32]));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [7u8; 32], [8u8; 32]));
 
     let before_b = group.assets[0].b_short_num;
     let before_explicit = group.assets[0].explicit_unallocated_loss_short;
     let result = group.book_bankruptcy_residual_chunk_for_account(
         &mut bankrupt,
         0,
-        SideV14::Long,
+        SideV15::Long,
         residual_units as u128,
     );
 
     if let Ok(out) = result {
         kani::cover!(
             out.booked_loss > 0,
-            "v14 account B booking ledger path reachable"
+            "v15 account B booking ledger path reachable"
         );
         assert!(bankrupt.close_progress.active);
         assert!(bankrupt.close_progress.finalized);
@@ -5116,52 +5386,52 @@ fn proof_v14_account_b_booking_advances_close_progress_or_fails_closed() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_blocks_participants_until_residual_finalized() {
+fn proof_v15_pending_domain_barrier_blocks_participants_until_residual_finalized() {
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut participant =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
-    let mut joiner = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [5; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut joiner = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
 
     group
-        .attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
         .unwrap();
     let first = group
-        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2)
+        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 2)
         .unwrap();
     kani::cover!(
         first.booked_loss == 1,
-        "v14 pending domain barrier partial B booking reachable"
+        "v15 pending domain barrier partial B booking reachable"
     );
     assert_eq!(first.booked_loss, 1);
     assert!(matches!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        group.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(1)
     ));
     assert!(matches!(
         group.clear_leg(&mut participant, 0),
-        Err(V14Error::LockActive)
+        Err(V15Error::LockActive)
     ));
     assert!(matches!(
-        group.attach_leg(&mut joiner, 0, SideV14::Short, -1),
-        Err(V14Error::LockActive)
+        group.attach_leg(&mut joiner, 0, SideV15::Short, -1),
+        Err(V15Error::LockActive)
     ));
     assert!(matches!(
         group.h_lock_lane(Some(&participant), false),
-        Ok(HLockLaneV14::HMax)
+        Ok(HLockLaneV15::HMax)
     ));
 
     let second = group
-        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2)
+        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 2)
         .unwrap();
     assert_eq!(second.booked_loss, 1);
     assert!(bankrupt.close_progress.finalized);
     assert!(matches!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short),
+        group.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(0)
     ));
     assert!(matches!(group.clear_leg(&mut participant, 0), Ok(())));
@@ -5170,29 +5440,29 @@ fn proof_v14_pending_domain_barrier_blocks_participants_until_residual_finalized
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_blocks_trade_weight_escape_before_mutation() {
+fn proof_v15_pending_domain_barrier_blocks_trade_weight_escape_before_mutation() {
     let (market, _, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
     cfg.max_trading_fee_bps = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut participant =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     let mut counterparty =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [5; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
 
     group.deposit_not_atomic(&mut participant, 100).unwrap();
     group.deposit_not_atomic(&mut counterparty, 100).unwrap();
     group
-        .attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
         .unwrap();
     group
-        .attach_leg(&mut counterparty, 0, SideV14::Long, 10)
+        .attach_leg(&mut counterparty, 0, SideV15::Long, 10)
         .unwrap();
     group.pending_domain_loss_barriers[1] = 1;
     kani::cover!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short) == Ok(1),
-        "v14 pending domain barrier with bilateral trade escape attempt reachable"
+        group.pending_domain_loss_barrier_count(0, SideV15::Short) == Ok(1),
+        "v15 pending domain barrier with bilateral trade escape attempt reachable"
     );
 
     let before_vault = group.vault;
@@ -5222,16 +5492,16 @@ fn proof_v14_pending_domain_barrier_blocks_trade_weight_escape_before_mutation()
     let result = group.execute_trade_with_fee_not_atomic(
         &mut participant,
         &mut counterparty,
-        TradeRequestV14 {
+        TradeRequestV15 {
             asset_index: 0,
             size_q: 5,
             exec_price: POS_SCALE as u64,
             fee_bps: 1,
         },
-        &[POS_SCALE as u64; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[POS_SCALE as u64; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.insurance, before_insurance);
     assert_eq!(group.c_tot, before_c_tot);
@@ -5267,26 +5537,26 @@ fn proof_v14_pending_domain_barrier_blocks_trade_weight_escape_before_mutation()
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutation() {
+fn proof_v15_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut participant =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     group.deposit_not_atomic(&mut participant, 100).unwrap();
     group
-        .attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
         .unwrap();
     group
         .full_account_refresh(
             &mut participant,
-            &[POS_SCALE as u64; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[POS_SCALE as u64; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
     group.pending_domain_loss_barriers[1] = 1;
     kani::cover!(
-        group.pending_domain_loss_barrier_count(0, SideV14::Short) == Ok(1),
-        "v14 pending domain barrier with rebalance escape attempt reachable"
+        group.pending_domain_loss_barrier_count(0, SideV15::Short) == Ok(1),
+        "v15 pending domain barrier with rebalance escape attempt reachable"
     );
 
     let before_vault = group.vault;
@@ -5303,14 +5573,14 @@ fn proof_v14_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutati
     let before_loss_weight = participant.legs[0].loss_weight;
     let result = group.rebalance_reduce_position_not_atomic(
         &mut participant,
-        RebalanceRequestV14 {
+        RebalanceRequestV15 {
             asset_index: 0,
             reduce_q: 5,
         },
-        &[POS_SCALE as u64; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[POS_SCALE as u64; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(group.vault, before_vault);
     assert_eq!(group.insurance, before_insurance);
     assert_eq!(group.c_tot, before_c_tot);
@@ -5328,30 +5598,30 @@ fn proof_v14_pending_domain_barrier_blocks_rebalance_weight_escape_before_mutati
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
+fn proof_v15_new_close_cannot_overwrite_active_finalized_close_ledger() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut bankrupt, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut bankrupt, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 1, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 1, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
-    bankrupt.close_progress = CloseProgressLedgerV14 {
+    bankrupt.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: true,
         close_id: 7,
         asset_index: 0,
-        domain_side: SideV14::Short,
+        domain_side: SideV15::Short,
         gross_loss_at_close_start: 2,
         b_loss_booked: 2,
         residual_remaining: 0,
         drift_reference_slot: group.current_slot,
         max_close_slot: group.current_slot + 1,
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
     group.assets[1].k_long = -(100 * ADL_ONE as i128);
     let before_ledger = bankrupt.close_progress;
@@ -5359,19 +5629,19 @@ fn proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
 
     let result = group.liquidate_account_not_atomic(
         &mut bankrupt,
-        LiquidationRequestV14 {
+        LiquidationRequestV15 {
             asset_index: 1,
             close_q: POS_SCALE,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::LockActive),
-        "v14 active finalized close ledger blocks new close id"
+        result == Err(V15Error::LockActive),
+        "v15 active finalized close ledger blocks new close id"
     );
-    assert_eq!(result, Err(V14Error::LockActive));
+    assert_eq!(result, Err(V15Error::LockActive));
     assert_eq!(bankrupt.close_progress, before_ledger);
     assert_eq!(group.assets[1].b_short_num, before_b_short);
 }
@@ -5379,27 +5649,27 @@ fn proof_v14_new_close_cannot_overwrite_active_finalized_close_ledger() {
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
+fn proof_v15_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.max_bankrupt_close_chunks = 7;
     cfg.max_bankrupt_close_lifetime_slots = 5;
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     group.current_slot = 11;
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut participant =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [44; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [44; 32], owner));
     group
-        .attach_leg(&mut participant, 0, SideV14::Short, -10)
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
         .unwrap();
 
     let first =
-        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2);
+        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 2);
     kani::cover!(
         matches!(first, Ok(out) if out.booked_loss == 1),
-        "v14 first close chunk starts configured-lifetime ledger"
+        "v15 first close chunk starts configured-lifetime ledger"
     );
     assert!(matches!(first, Ok(out) if out.booked_loss == 1));
     let first_ledger = bankrupt.close_progress;
@@ -5414,10 +5684,10 @@ fn proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
 
     group.current_slot = 12;
     let second =
-        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV14::Long, 2);
+        group.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 2);
     kani::cover!(
         matches!(second, Ok(out) if out.booked_loss == 1),
-        "v14 close continuation finalizes without refreshing lifetime"
+        "v15 close continuation finalizes without refreshing lifetime"
     );
     assert!(matches!(second, Ok(out) if out.booked_loss == 1));
     assert!(bankrupt.close_progress.finalized);
@@ -5434,75 +5704,75 @@ fn proof_v14_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_account_shape_rejects_malformed_quantity_adl_close_progress() {
+fn proof_v15_account_shape_rejects_malformed_quantity_adl_close_progress() {
     let premature_adl: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
 
     if premature_adl {
-        account.close_progress = CloseProgressLedgerV14 {
+        account.close_progress = CloseProgressLedgerV15 {
             active: true,
             finalized: false,
             close_id: 1,
             asset_index: 0,
-            domain_side: SideV14::Short,
+            domain_side: SideV15::Short,
             gross_loss_at_close_start: 2,
             b_loss_booked: 1,
             residual_remaining: 1,
             quantity_adl_applied_q: 1,
-            ..CloseProgressLedgerV14::EMPTY
+            ..CloseProgressLedgerV15::EMPTY
         };
     } else {
         let mut group_for_leg =
-            MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+            MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
         group_for_leg
-            .attach_leg(&mut account, 0, SideV14::Long, 4)
+            .attach_leg(&mut account, 0, SideV15::Long, 4)
             .unwrap();
-        account.close_progress = CloseProgressLedgerV14 {
+        account.close_progress = CloseProgressLedgerV15 {
             active: true,
             finalized: true,
             close_id: 1,
             asset_index: 0,
-            domain_side: SideV14::Short,
+            domain_side: SideV15::Short,
             gross_loss_at_close_start: 1,
             explicit_loss_assigned: 1,
             residual_remaining: 0,
             quantity_adl_applied_q: 4,
-            ..CloseProgressLedgerV14::EMPTY
+            ..CloseProgressLedgerV15::EMPTY
         };
     }
 
     let result = group.validate_account_shape(&account);
 
-    kani::cover!(premature_adl, "v14 premature quantity ADL shape reachable");
+    kani::cover!(premature_adl, "v15 premature quantity ADL shape reachable");
     kani::cover!(
         !premature_adl,
-        "v14 quantity ADL with open closing leg shape reachable"
+        "v15 quantity ADL with open closing leg shape reachable"
     );
-    assert_eq!(result, Err(V14Error::InvalidLeg));
+    assert_eq!(result, Err(V15Error::InvalidLeg));
 }
 
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
+fn proof_v15_account_shape_rejects_close_progress_domain_mismatch_for_open_leg() {
     let closing_long: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let side = if closing_long {
-        SideV14::Long
+        SideV15::Long
     } else {
-        SideV14::Short
+        SideV15::Short
     };
     let signed_basis = if closing_long { 4 } else { -4 };
     group
         .attach_leg(&mut account, 0, side, signed_basis)
         .unwrap();
-    account.close_progress = CloseProgressLedgerV14 {
+    account.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: false,
         close_id: 1,
@@ -5511,44 +5781,44 @@ fn proof_v14_account_shape_rejects_close_progress_domain_mismatch_for_open_leg()
         gross_loss_at_close_start: 2,
         b_loss_booked: 1,
         residual_remaining: 1,
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
 
     let result = group.validate_account_shape(&account);
 
-    kani::cover!(closing_long, "v14 long close domain mismatch reachable");
-    kani::cover!(!closing_long, "v14 short close domain mismatch reachable");
-    assert_eq!(result, Err(V14Error::InvalidLeg));
+    kani::cover!(closing_long, "v15 long close domain mismatch reachable");
+    kani::cover!(!closing_long, "v15 short close domain mismatch reachable");
+    assert_eq!(result, Err(V15Error::InvalidLeg));
 }
 
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
+fn proof_v15_expired_close_progress_routes_recovery_before_durable_mutation() {
     let close_b_residual: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.current_slot = 2;
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], [8; 32]));
-    group.attach_leg(&mut account, 0, SideV14::Long, 4).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [9; 32], [8; 32]));
+    group.attach_leg(&mut account, 0, SideV15::Long, 4).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -4)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -4)
         .unwrap();
-    account.close_progress = CloseProgressLedgerV14 {
+    account.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: !close_b_residual,
         close_id: 1,
         asset_index: 0,
-        domain_side: SideV14::Short,
+        domain_side: SideV15::Short,
         gross_loss_at_close_start: 2,
         drift_reference_slot: 0,
         max_close_slot: 1,
         explicit_loss_assigned: if close_b_residual { 0 } else { 2 },
         residual_remaining: if close_b_residual { 2 } else { 0 },
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
     group.assets[0].a_short = ADL_ONE;
     let before_b = group.assets[0].b_short_num;
@@ -5558,14 +5828,14 @@ fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
 
     let result = if close_b_residual {
         group
-            .book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV14::Long, 2)
+            .book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV15::Long, 2)
             .map(|_| ())
     } else {
         group
             .apply_quantity_adl_after_residual_for_account_not_atomic(
                 &mut account,
                 0,
-                SideV14::Long,
+                SideV15::Long,
                 4,
             )
             .map(|_| ())
@@ -5573,16 +5843,16 @@ fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
 
     kani::cover!(
         close_b_residual,
-        "v14 expired B continuation recovery path reachable"
+        "v15 expired B continuation recovery path reachable"
     );
     kani::cover!(
         !close_b_residual,
-        "v14 expired quantity ADL continuation recovery path reachable"
+        "v15 expired quantity ADL continuation recovery path reachable"
     );
-    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(result, Err(V15Error::RecoveryRequired));
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+        Some(PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(group.assets[0].b_short_num, before_b);
     assert_eq!(group.assets[0].a_short, before_a);
@@ -5595,31 +5865,31 @@ fn proof_v14_expired_close_progress_routes_recovery_before_durable_mutation() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_stale_open_close_snapshot_routes_recovery_before_durable_mutation() {
+fn proof_v15_stale_open_close_snapshot_routes_recovery_before_durable_mutation() {
     let close_b_residual: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.current_slot = 1;
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let mut opposing =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
-    group.attach_leg(&mut account, 0, SideV14::Long, 4).unwrap();
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [10; 32], owner));
+    group.attach_leg(&mut account, 0, SideV15::Long, 4).unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -4)
+        .attach_leg(&mut opposing, 0, SideV15::Short, -4)
         .unwrap();
-    account.close_progress = CloseProgressLedgerV14 {
+    account.close_progress = CloseProgressLedgerV15 {
         active: true,
         finalized: !close_b_residual,
         close_id: 1,
         asset_index: 0,
-        domain_side: SideV14::Short,
+        domain_side: SideV15::Short,
         gross_loss_at_close_start: 2,
         drift_reference_slot: 0,
         max_close_slot: 10,
         explicit_loss_assigned: if close_b_residual { 0 } else { 2 },
         residual_remaining: if close_b_residual { 2 } else { 0 },
-        ..CloseProgressLedgerV14::EMPTY
+        ..CloseProgressLedgerV15::EMPTY
     };
     let before_ledger = account.close_progress;
     let before_b = group.assets[0].b_short_num;
@@ -5629,14 +5899,14 @@ fn proof_v14_stale_open_close_snapshot_routes_recovery_before_durable_mutation()
 
     let result = if close_b_residual {
         group
-            .book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV14::Long, 2)
+            .book_bankruptcy_residual_chunk_for_account(&mut account, 0, SideV15::Long, 2)
             .map(|_| ())
     } else {
         group
             .apply_quantity_adl_after_residual_for_account_not_atomic(
                 &mut account,
                 0,
-                SideV14::Long,
+                SideV15::Long,
                 4,
             )
             .map(|_| ())
@@ -5644,16 +5914,16 @@ fn proof_v14_stale_open_close_snapshot_routes_recovery_before_durable_mutation()
 
     kani::cover!(
         close_b_residual,
-        "v14 stale open close B continuation recovery path reachable"
+        "v15 stale open close B continuation recovery path reachable"
     );
     kani::cover!(
         !close_b_residual,
-        "v14 stale open close quantity ADL recovery path reachable"
+        "v15 stale open close quantity ADL recovery path reachable"
     );
-    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(result, Err(V15Error::RecoveryRequired));
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+        Some(PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(account.close_progress, before_ledger);
     assert_eq!(group.assets[0].b_short_num, before_b);
@@ -5665,26 +5935,26 @@ fn proof_v14_stale_open_close_snapshot_routes_recovery_before_durable_mutation()
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_invalid_trade_request_rejects_before_any_mutation() {
-    assert_invalid_trade_reverts(TradeRequestV14 {
+fn proof_v15_invalid_trade_request_rejects_before_any_mutation() {
+    assert_invalid_trade_reverts(TradeRequestV15 {
         asset_index: 1,
         size_q: POS_SCALE,
         exec_price: 100,
         fee_bps: 0,
     });
-    assert_invalid_trade_reverts(TradeRequestV14 {
+    assert_invalid_trade_reverts(TradeRequestV15 {
         asset_index: 0,
         size_q: 0,
         exec_price: 100,
         fee_bps: 0,
     });
-    assert_invalid_trade_reverts(TradeRequestV14 {
+    assert_invalid_trade_reverts(TradeRequestV15 {
         asset_index: 0,
         size_q: POS_SCALE,
         exec_price: 0,
         fee_bps: 0,
     });
-    assert_invalid_trade_reverts(TradeRequestV14 {
+    assert_invalid_trade_reverts(TradeRequestV15 {
         asset_index: 0,
         size_q: POS_SCALE,
         exec_price: 100,
@@ -5692,12 +5962,12 @@ fn proof_v14_invalid_trade_request_rejects_before_any_mutation() {
     });
 }
 
-fn assert_invalid_trade_reverts(request: TradeRequestV14) {
+fn assert_invalid_trade_reverts(request: TradeRequestV15) {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_trading_fee_bps = 10;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group.deposit_not_atomic(&mut long, 1_000).unwrap();
     group.deposit_not_atomic(&mut short, 1_000).unwrap();
     let before_group = group;
@@ -5708,10 +5978,10 @@ fn assert_invalid_trade_reverts(request: TradeRequestV14) {
         &mut long,
         &mut short,
         request,
-        &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
     assert_eq!(group, before_group);
     assert_eq!(long, before_long);
     assert_eq!(short, before_short);
@@ -5720,7 +5990,7 @@ fn assert_invalid_trade_reverts(request: TradeRequestV14) {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_price_accrual_refresh_matches_eager_mark_pnl() {
+fn proof_v15_price_accrual_refresh_matches_eager_mark_pnl() {
     assert_price_accrual_refresh_matches_eager_mark_pnl(101, 1, -1);
     assert_price_accrual_refresh_matches_eager_mark_pnl(99, -1, 1);
 }
@@ -5728,65 +5998,65 @@ fn proof_v14_price_accrual_refresh_matches_eager_mark_pnl() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_same_epoch_full_refresh_is_idempotent_after_price_up_settlement() {
+fn proof_v15_same_epoch_full_refresh_is_idempotent_after_price_up_settlement() {
     assert_same_epoch_refresh_idempotent_after_kf_settlement(101, 1);
 }
 
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_same_epoch_full_refresh_is_idempotent_after_price_down_settlement() {
+fn proof_v15_same_epoch_full_refresh_is_idempotent_after_price_down_settlement() {
     assert_same_epoch_refresh_idempotent_after_kf_settlement(99, -1);
 }
 
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
-fn proof_v14_sequential_kf_refresh_is_additive_not_compounding() {
+fn proof_v15_sequential_kf_refresh_is_additive_not_compounding() {
     let (market, account_id, owner) = concrete_ids();
-    let mut sequential = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut sequential = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     sequential.assets[0].effective_price = 100;
     sequential.assets[0].fund_px_last = 100;
     sequential.assets[0].raw_oracle_target_price = 100;
     let mut seq_account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     sequential
-        .attach_leg(&mut seq_account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut seq_account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     sequential
         .accrue_asset_to_not_atomic(0, 1, 101, 0, true)
         .unwrap();
     sequential
-        .full_account_refresh(&mut seq_account, &[101; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut seq_account, &[101; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     kani::cover!(
         seq_account.pnl == 1,
-        "v14 first sequential K/F refresh settles nonzero pnl"
+        "v15 first sequential K/F refresh settles nonzero pnl"
     );
 
     sequential
         .accrue_asset_to_not_atomic(0, 2, 102, 0, true)
         .unwrap();
     sequential
-        .full_account_refresh(&mut seq_account, &[102; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut seq_account, &[102; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
-    let mut direct = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut direct = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     direct.assets[0].effective_price = 100;
     direct.assets[0].fund_px_last = 100;
     direct.assets[0].raw_oracle_target_price = 100;
     let mut direct_account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     direct
-        .attach_leg(&mut direct_account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut direct_account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     direct
         .accrue_asset_to_not_atomic(0, 1, 102, 0, true)
         .unwrap();
     direct
-        .full_account_refresh(&mut direct_account, &[102; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut direct_account, &[102; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     assert_eq!(seq_account.pnl, 2);
@@ -5797,21 +6067,21 @@ fn proof_v14_sequential_kf_refresh_is_additive_not_compounding() {
 
 fn assert_same_epoch_refresh_idempotent_after_kf_settlement(new_price: u64, expected_pnl: i128) {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.assets[0].effective_price = 100;
     group.assets[0].fund_px_last = 100;
     group.assets[0].raw_oracle_target_price = 100;
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     group
         .accrue_asset_to_not_atomic(0, 1, new_price, 0, true)
         .unwrap();
     group
-        .full_account_refresh(&mut account, &[new_price; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[new_price; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     let pnl_after_first = account.pnl;
     let leg_after_first = account.legs[0];
@@ -5824,10 +6094,10 @@ fn assert_same_epoch_refresh_idempotent_after_kf_settlement(new_price: u64, expe
 
     kani::cover!(
         pnl_after_first == expected_pnl,
-        "v14 idempotent refresh exercises nonzero settled K/F pnl"
+        "v15 idempotent refresh exercises nonzero settled K/F pnl"
     );
     group
-        .full_account_refresh(&mut account, &[new_price; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut account, &[new_price; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     assert_eq!(account.pnl, pnl_after_first);
     assert_eq!(account.legs[0].active, leg_after_first.active);
@@ -5863,26 +6133,26 @@ fn assert_price_accrual_refresh_matches_eager_mark_pnl(
     expected_short_pnl: i128,
 ) {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.assets[0].effective_price = 100;
     group.assets[0].fund_px_last = 100;
     group.assets[0].raw_oracle_target_price = 100;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let out = group
         .accrue_asset_to_not_atomic(0, 1, new_price, 0, true)
         .unwrap();
     group
-        .full_account_refresh(&mut long, &[new_price; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut long, &[new_price; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     group
-        .full_account_refresh(&mut short, &[new_price; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut short, &[new_price; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     assert!(out.price_move_active);
@@ -5894,7 +6164,7 @@ fn assert_price_accrual_refresh_matches_eager_mark_pnl(
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_funding_accrual_refresh_matches_sign_and_floor() {
+fn proof_v15_funding_accrual_refresh_matches_sign_and_floor() {
     assert_funding_accrual_refresh_matches_sign_and_floor(10_000, -1, 1);
     assert_funding_accrual_refresh_matches_sign_and_floor(-10_000, 1, -1);
 }
@@ -5902,17 +6172,17 @@ fn proof_v14_funding_accrual_refresh_matches_sign_and_floor() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_funding_accrual_requires_bilateral_exposure() {
+fn proof_v15_funding_accrual_requires_bilateral_exposure() {
     let (market, account_id, owner) = concrete_ids();
-    let mut long_only = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut long_only = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     long_only.config.max_price_move_bps_per_slot = 9_999;
     long_only.config.max_abs_funding_e9_per_slot = 1;
     long_only.assets[0].effective_price = 1_000_000_000;
     long_only.assets[0].fund_px_last = 1_000_000_000;
     long_only.assets[0].raw_oracle_target_price = 1_000_000_000;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     long_only
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     let long_before = long_only.assets[0];
 
@@ -5921,7 +6191,7 @@ fn proof_v14_funding_accrual_requires_bilateral_exposure() {
         .unwrap();
     kani::cover!(
         long_only.assets[0].oi_eff_long_q != 0 && long_only.assets[0].oi_eff_short_q == 0,
-        "v14 funding no-op covers long-only exposure"
+        "v15 funding no-op covers long-only exposure"
     );
 
     assert!(!out.funding_active);
@@ -5929,15 +6199,15 @@ fn proof_v14_funding_accrual_requires_bilateral_exposure() {
     assert_eq!(long_only.assets[0].f_short_num, long_before.f_short_num);
     assert_eq!(long_only.funding_epoch, 0);
 
-    let mut short_only = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut short_only = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     short_only.config.max_price_move_bps_per_slot = 9_999;
     short_only.config.max_abs_funding_e9_per_slot = 1;
     short_only.assets[0].effective_price = 1_000_000_000;
     short_only.assets[0].fund_px_last = 1_000_000_000;
     short_only.assets[0].raw_oracle_target_price = 1_000_000_000;
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     short_only
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let short_before = short_only.assets[0];
 
@@ -5946,7 +6216,7 @@ fn proof_v14_funding_accrual_requires_bilateral_exposure() {
         .unwrap();
     kani::cover!(
         short_only.assets[0].oi_eff_short_q != 0 && short_only.assets[0].oi_eff_long_q == 0,
-        "v14 funding no-op covers short-only exposure"
+        "v15 funding no-op covers short-only exposure"
     );
 
     assert!(!out.funding_active);
@@ -5958,10 +6228,10 @@ fn proof_v14_funding_accrual_requires_bilateral_exposure() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_no_oi_funding_rate_does_not_mutate_k_or_f() {
+fn proof_v15_no_oi_funding_rate_does_not_mutate_k_or_f() {
     let positive_rate: bool = kani::any();
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_price_move_bps_per_slot = 9_999;
     group.config.max_abs_funding_e9_per_slot = 1;
     group.assets[0].effective_price = 100;
@@ -5976,11 +6246,11 @@ fn proof_v14_no_oi_funding_rate_does_not_mutate_k_or_f() {
 
     kani::cover!(
         positive_rate,
-        "v14 no-OI funding proof covers positive rate"
+        "v15 no-OI funding proof covers positive rate"
     );
     kani::cover!(
         !positive_rate,
-        "v14 no-OI funding proof covers negative rate"
+        "v15 no-OI funding proof covers negative rate"
     );
     assert!(!out.funding_active);
     assert!(!out.equity_active);
@@ -5995,40 +6265,40 @@ fn proof_v14_no_oi_funding_rate_does_not_mutate_k_or_f() {
 #[kani::proof]
 #[kani::unwind(50)]
 #[kani::solver(cadical)]
-fn proof_v14_permissionless_crank_accepts_configured_funding_rate_boundaries() {
+fn proof_v15_permissionless_crank_accepts_configured_funding_rate_boundaries() {
     let positive_rate: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.max_price_move_bps_per_slot = 9_999;
     cfg.max_abs_funding_e9_per_slot = 1;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     let supplied_rate = if positive_rate { 1 } else { -1 };
 
     let out = group
         .permissionless_crank_not_atomic(
             &mut account,
-            PermissionlessCrankRequestV14 {
+            PermissionlessCrankRequestV15 {
                 now_slot: 1,
                 asset_index: 0,
                 effective_price: 1,
                 funding_rate_e9: supplied_rate,
-                action: PermissionlessCrankActionV14::Refresh,
+                action: PermissionlessCrankActionV15::Refresh,
             },
-            &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[1; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
     kani::cover!(
         positive_rate && supplied_rate == group.config.max_abs_funding_e9_per_slot as i128,
-        "v14 permissionless crank accepts positive funding boundary"
+        "v15 permissionless crank accepts positive funding boundary"
     );
     kani::cover!(
         !positive_rate && supplied_rate == -(group.config.max_abs_funding_e9_per_slot as i128),
-        "v14 permissionless crank accepts negative funding boundary"
+        "v15 permissionless crank accepts negative funding boundary"
     );
-    assert_eq!(out, PermissionlessProgressOutcomeV14::AccountCurrent);
+    assert_eq!(out, PermissionlessProgressOutcomeV15::AccountCurrent);
     assert_eq!(group.current_slot, 1);
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.funding_epoch, 0);
@@ -6037,27 +6307,27 @@ fn proof_v14_permissionless_crank_accepts_configured_funding_rate_boundaries() {
 #[kani::proof]
 #[kani::unwind(100)]
 #[kani::solver(cadical)]
-fn proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
+fn proof_v15_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     let (market, _, _) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(2, 0, 1)).unwrap();
     let owner = [3; 32];
-    let mut a0_long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [31; 32], owner));
+    let mut a0_long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [31; 32], owner));
     let mut a0_short =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [32; 32], owner));
-    let mut a1_long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [33; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [32; 32], owner));
+    let mut a1_long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [33; 32], owner));
     let mut a1_short =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [34; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [34; 32], owner));
     group
-        .attach_leg(&mut a0_long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut a0_long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut a0_short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut a0_short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group
-        .attach_leg(&mut a1_long, 1, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut a1_long, 1, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut a1_short, 1, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut a1_short, 1, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let mut i = 0;
     while i < 2 {
@@ -6079,7 +6349,7 @@ fn proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
 
     kani::cover!(
         first.is_ok() && second.is_ok(),
-        "v14 same-slot cross-asset accrual covers both assets"
+        "v15 same-slot cross-asset accrual covers both assets"
     );
     assert!(first.is_ok());
     assert!(second.is_ok());
@@ -6097,9 +6367,9 @@ fn proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_funding_accrual_uses_only_bounded_segment_dt() {
+fn proof_v15_funding_accrual_uses_only_bounded_segment_dt() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_price_move_bps_per_slot = 4_999;
     group.config.max_abs_funding_e9_per_slot = 1;
     group.config.max_accrual_dt_slots = 2;
@@ -6107,13 +6377,13 @@ fn proof_v14_funding_accrual_uses_only_bounded_segment_dt() {
     group.assets[0].effective_price = 1_000_000_000;
     group.assets[0].fund_px_last = 1_000_000_000;
     group.assets[0].raw_oracle_target_price = 1_000_000_000;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
 
     let out = group
@@ -6121,7 +6391,7 @@ fn proof_v14_funding_accrual_uses_only_bounded_segment_dt() {
         .unwrap();
     kani::cover!(
         out.funding_active && out.dt == 2 && group.current_slot == 10,
-        "v14 funding stale catchup covers bounded segment dt"
+        "v15 funding stale catchup covers bounded segment dt"
     );
 
     assert_eq!(out.dt, 2);
@@ -6135,21 +6405,21 @@ fn proof_v14_funding_accrual_uses_only_bounded_segment_dt() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
+fn proof_v15_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.config.max_price_move_bps_per_slot = 9_999;
     group.config.max_abs_funding_e9_per_slot = 1;
     group.assets[0].effective_price = 999_999_999;
     group.assets[0].fund_px_last = 999_999_999;
     group.assets[0].raw_oracle_target_price = 999_999_999;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
 
     let out = group
@@ -6157,7 +6427,7 @@ fn proof_v14_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
         .unwrap();
     kani::cover!(
         out.price_move_active && out.funding_active,
-        "v14 combined mark and funding accrual reachable"
+        "v15 combined mark and funding accrual reachable"
     );
 
     assert_eq!(group.assets[0].k_long, ADL_ONE as i128);
@@ -6170,19 +6440,19 @@ fn proof_v14_combined_price_and_funding_accrual_keeps_k_and_f_separate() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_zero_funding_rate_advances_time_without_f_mutation() {
+fn proof_v15_zero_funding_rate_advances_time_without_f_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     group.assets[0].effective_price = 100;
     group.assets[0].fund_px_last = 100;
     group.assets[0].raw_oracle_target_price = 100;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let before = group.assets[0];
 
@@ -6191,7 +6461,7 @@ fn proof_v14_zero_funding_rate_advances_time_without_f_mutation() {
         .unwrap();
     kani::cover!(
         group.assets[0].oi_eff_long_q != 0 && group.assets[0].oi_eff_short_q != 0,
-        "v14 zero-rate funding proof covers bilateral exposure"
+        "v15 zero-rate funding proof covers bilateral exposure"
     );
 
     assert!(!out.funding_active);
@@ -6208,28 +6478,28 @@ fn assert_funding_accrual_refresh_matches_sign_and_floor(
     expected_short_pnl: i128,
 ) {
     let (market, account_id, owner) = concrete_ids();
-    let mut cfg = V14Config::public_user_fund(1, 0, 1);
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
     cfg.max_abs_funding_e9_per_slot = 10_000;
-    let mut group = MarketGroupV14::new(market, cfg).unwrap();
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
     group.assets[0].effective_price = 100_000;
     group.assets[0].fund_px_last = 100_000;
     group.assets[0].raw_oracle_target_price = 100_000;
-    let mut long = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut short = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+    let mut long = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut short = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
     group
-        .attach_leg(&mut long, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut long, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut short, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut short, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     let out = group
         .accrue_asset_to_not_atomic(0, 1, 100_000, funding_rate_e9, true)
         .unwrap();
     group
-        .full_account_refresh(&mut long, &[100_000; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut long, &[100_000; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
     group
-        .full_account_refresh(&mut short, &[100_000; V14_MAX_PORTFOLIO_ASSETS_N])
+        .full_account_refresh(&mut short, &[100_000; V15_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
 
     assert!(out.funding_active);
@@ -6241,44 +6511,44 @@ fn assert_funding_accrual_refresh_matches_sign_and_floor(
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_same_slot_exposed_price_move_rejects_before_mutation() {
+fn proof_v15_same_slot_exposed_price_move_rejects_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     let before = group;
 
     let result = group.accrue_asset_to_not_atomic(0, 0, 2, 0, true);
 
-    assert_eq!(result, Err(V14Error::NonProgress));
+    assert_eq!(result, Err(V15Error::NonProgress));
     assert_eq!(group, before);
 }
 
 #[kani::proof]
 #[kani::unwind(60)]
 #[kani::solver(cadical)]
-fn proof_v14_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
+fn proof_v15_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 10).unwrap();
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
 
     let out = group
         .liquidate_account_not_atomic(
             &mut account,
-            LiquidationRequestV14 {
+            LiquidationRequestV15 {
                 asset_index: 0,
                 close_q: POS_SCALE / 2,
                 fee_bps: 0,
             },
-            &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+            &[100; V15_MAX_PORTFOLIO_ASSETS_N],
         )
         .unwrap();
 
@@ -6293,18 +6563,18 @@ fn proof_v14_partial_liquidation_can_reduce_risk_without_forcing_full_close() {
 #[kani::proof]
 #[kani::unwind(70)]
 #[kani::solver(cadical)]
-fn proof_v14_partial_liquidation_cannot_socialize_residual_while_open_risk_remains() {
+fn proof_v15_partial_liquidation_cannot_socialize_residual_while_open_risk_remains() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
-    let mut opposing = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [4; 32], owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    let mut opposing = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
 
     group
-        .attach_leg(&mut bankrupt, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut bankrupt, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     group
-        .attach_leg(&mut opposing, 0, SideV14::Short, -(POS_SCALE as i128))
+        .attach_leg(&mut opposing, 0, SideV15::Short, -(POS_SCALE as i128))
         .unwrap();
     group.assets[0].k_long = -(100 * ADL_ONE as i128);
     let before_b_short = group.assets[0].b_short_num;
@@ -6314,22 +6584,22 @@ fn proof_v14_partial_liquidation_cannot_socialize_residual_while_open_risk_remai
 
     let result = group.liquidate_account_not_atomic(
         &mut bankrupt,
-        LiquidationRequestV14 {
+        LiquidationRequestV15 {
             asset_index: 0,
             close_q: POS_SCALE / 2,
             fee_bps: 0,
         },
-        &[1; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[1; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
     kani::cover!(
-        result == Err(V14Error::RecoveryRequired),
-        "v14 partial liquidation residual routes to recovery before B booking"
+        result == Err(V15Error::RecoveryRequired),
+        "v15 partial liquidation residual routes to recovery before B booking"
     );
-    assert_eq!(result, Err(V14Error::RecoveryRequired));
+    assert_eq!(result, Err(V15Error::RecoveryRequired));
     assert_eq!(
         group.recovery_reason,
-        Some(PermissionlessRecoveryReasonV14::ActiveBankruptCloseCannotProgress)
+        Some(PermissionlessRecoveryReasonV15::ActiveBankruptCloseCannotProgress)
     );
     assert_eq!(group.assets[0].b_short_num, before_b_short);
     assert_eq!(bankrupt.close_progress.b_loss_booked, before_b_loss_booked);
@@ -6340,28 +6610,28 @@ fn proof_v14_partial_liquidation_cannot_socialize_residual_while_open_risk_remai
 #[kani::proof]
 #[kani::unwind(45)]
 #[kani::solver(cadical)]
-fn proof_v14_liquidation_rejects_zero_close_before_mutation() {
+fn proof_v15_liquidation_rejects_zero_close_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
-        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .attach_leg(&mut account, 0, SideV15::Long, POS_SCALE as i128)
         .unwrap();
     let before_group = group;
     let before_account = account;
 
     let result = group.liquidate_account_not_atomic(
         &mut account,
-        LiquidationRequestV14 {
+        LiquidationRequestV15 {
             asset_index: 0,
             close_q: 0,
             fee_bps: 0,
         },
-        &[100; V14_MAX_PORTFOLIO_ASSETS_N],
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
     );
 
-    assert_eq!(result, Err(V14Error::InvalidConfig));
+    assert_eq!(result, Err(V15Error::InvalidConfig));
     assert_eq!(group, before_group);
     assert_eq!(account, before_account);
 }
@@ -6369,14 +6639,14 @@ fn proof_v14_liquidation_rejects_zero_close_before_mutation() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_liquidation_fee_floor_shortfall_charges_available_capital_only() {
+fn proof_v15_liquidation_fee_floor_shortfall_charges_available_capital_only() {
     let capital: u8 = kani::any();
     kani::assume(capital > 0);
     kani::assume(capital <= 20);
     let (market, account_id, owner) = symbolic_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group
         .deposit_not_atomic(&mut account, capital as u128)
         .unwrap();
@@ -6387,7 +6657,7 @@ fn proof_v14_liquidation_fee_floor_shortfall_charges_available_capital_only() {
 
     kani::cover!(
         charged < 40,
-        "v14 liquidation-fee floor shortfall fee path reachable"
+        "v15 liquidation-fee floor shortfall fee path reachable"
     );
     assert_eq!(charged, capital as u128);
     assert_eq!(account.capital, 0);
@@ -6400,20 +6670,20 @@ fn proof_v14_liquidation_fee_floor_shortfall_charges_available_capital_only() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v14_resolved_active_position_close_returns_progress_without_payout() {
+fn proof_v15_resolved_active_position_close_returns_progress_without_payout() {
     let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
-        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
     group.deposit_not_atomic(&mut account, 7).unwrap();
-    group.attach_leg(&mut account, 0, SideV14::Long, 1).unwrap();
+    group.attach_leg(&mut account, 0, SideV15::Long, 1).unwrap();
     group.resolve_market_not_atomic(1).unwrap();
     let before_vault = group.vault;
     let before_c_tot = group.c_tot;
 
     let outcome = group.close_resolved_account_not_atomic(&mut account, 0);
 
-    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV14::ProgressOnly));
+    assert_eq!(outcome, Ok(ResolvedCloseOutcomeV15::ProgressOnly));
     assert_ne!(account.active_bitmap, 0);
     assert_eq!(account.capital, 7);
     assert_eq!(group.vault, before_vault);
