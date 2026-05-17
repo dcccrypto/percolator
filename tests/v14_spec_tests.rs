@@ -1713,6 +1713,31 @@ fn v14_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
 }
 
 #[test]
+fn v14_pending_domain_loss_barrier_blocks_side_reset_before_residual_done() {
+    let mut g = group();
+    g.pending_domain_loss_barriers[0] = 1;
+    g.assets[0].k_long = 7;
+    g.assets[0].f_long_num = -3;
+    g.assets[0].b_long_num = 11;
+    g.assets[0].a_long = ADL_ONE - 1;
+    g.assets[0].epoch_long = 4;
+
+    let before = g;
+    assert_eq!(
+        g.begin_full_drain_reset(0, SideV14::Long),
+        Err(V14Error::LockActive),
+        "unbooked domain residual must block B/A/K/F/weight reset on that domain"
+    );
+    assert_eq!(g.assets[0].k_long, before.assets[0].k_long);
+    assert_eq!(g.assets[0].f_long_num, before.assets[0].f_long_num);
+    assert_eq!(g.assets[0].b_long_num, before.assets[0].b_long_num);
+    assert_eq!(g.assets[0].a_long, before.assets[0].a_long);
+    assert_eq!(g.assets[0].epoch_long, before.assets[0].epoch_long);
+    assert_eq!(g.assets[0].mode_long, before.assets[0].mode_long);
+    assert_eq!(g.pending_domain_loss_barriers[0], 1);
+}
+
+#[test]
 fn v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     let (market, _, _) = ids();
     let mut g = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 10)).unwrap();

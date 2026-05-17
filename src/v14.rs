@@ -3852,6 +3852,9 @@ impl MarketGroupV14 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V14Error::LockActive);
         }
+        if self.has_pending_domain_loss_barrier(asset_index, side)? {
+            return Err(V14Error::LockActive);
+        }
         let asset = &mut self.assets[asset_index];
         match side {
             SideV14::Long => {
