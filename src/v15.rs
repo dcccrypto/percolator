@@ -714,6 +714,7 @@ pub struct HealthCertV15 {
     pub cert_oracle_epoch: u64,
     pub cert_funding_epoch: u64,
     pub cert_risk_epoch: u64,
+    pub cert_asset_set_epoch: u64,
     pub active_bitmap_at_cert: u32,
     pub valid: bool,
 }
@@ -872,6 +873,7 @@ impl PortfolioAccountV15 {
                 cert_oracle_epoch: 0,
                 cert_funding_epoch: 0,
                 cert_risk_epoch: 0,
+                cert_asset_set_epoch: 0,
                 active_bitmap_at_cert: 0,
                 valid: false,
             },
@@ -1516,6 +1518,7 @@ pub struct HealthCertV15Account {
     pub cert_oracle_epoch: V15PodU64,
     pub cert_funding_epoch: V15PodU64,
     pub cert_risk_epoch: V15PodU64,
+    pub cert_asset_set_epoch: V15PodU64,
     pub active_bitmap_at_cert: V15PodU32,
     pub valid: u8,
 }
@@ -1531,6 +1534,7 @@ impl HealthCertV15Account {
             cert_oracle_epoch: V15PodU64::new(value.cert_oracle_epoch),
             cert_funding_epoch: V15PodU64::new(value.cert_funding_epoch),
             cert_risk_epoch: V15PodU64::new(value.cert_risk_epoch),
+            cert_asset_set_epoch: V15PodU64::new(value.cert_asset_set_epoch),
             active_bitmap_at_cert: V15PodU32::new(value.active_bitmap_at_cert),
             valid: encode_bool(value.valid),
         }
@@ -1546,6 +1550,7 @@ impl HealthCertV15Account {
             cert_oracle_epoch: self.cert_oracle_epoch.get(),
             cert_funding_epoch: self.cert_funding_epoch.get(),
             cert_risk_epoch: self.cert_risk_epoch.get(),
+            cert_asset_set_epoch: self.cert_asset_set_epoch.get(),
             active_bitmap_at_cert: self.active_bitmap_at_cert.get(),
             valid: decode_bool(self.valid)?,
         };
@@ -2833,6 +2838,7 @@ impl MarketGroupV15 {
             cert_oracle_epoch: self.oracle_epoch,
             cert_funding_epoch: self.funding_epoch,
             cert_risk_epoch: self.risk_epoch,
+            cert_asset_set_epoch: self.asset_set_epoch,
             active_bitmap_at_cert: account.active_bitmap,
             valid: true,
         };
@@ -2849,6 +2855,7 @@ impl MarketGroupV15 {
             || account.health_cert.cert_oracle_epoch != self.oracle_epoch
             || account.health_cert.cert_funding_epoch != self.funding_epoch
             || account.health_cert.cert_risk_epoch != self.risk_epoch
+            || account.health_cert.cert_asset_set_epoch != self.asset_set_epoch
             || account.health_cert.active_bitmap_at_cert != account.active_bitmap
         {
             return Err(V15Error::Stale);
@@ -3165,11 +3172,11 @@ impl MarketGroupV15 {
                 || position_delta_increases_risk(short_account, request.asset_index, short_delta)?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let touches_pending_domain_barrier =
-            self.position_delta_touches_pending_domain_loss_barrier(
+            self.position_delta_blocked_by_pending_domain_loss_barrier(
                 long_account,
                 request.asset_index,
                 long_delta,
-            )? || self.position_delta_touches_pending_domain_loss_barrier(
+            )? || self.position_delta_blocked_by_pending_domain_loss_barrier(
                 short_account,
                 request.asset_index,
                 short_delta,
@@ -3496,7 +3503,7 @@ impl MarketGroupV15 {
                 .ok_or(V15Error::ArithmeticOverflow)?,
             SideV15::Short => reduce_i128,
         };
-        if self.position_delta_touches_pending_domain_loss_barrier(
+        if self.position_delta_blocked_by_pending_domain_loss_barrier(
             account,
             request.asset_index,
             reduce_delta,
@@ -4436,8 +4443,10 @@ impl MarketGroupV15 {
                 || (self.mode == MarketModeV15::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
                 || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
                 || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
-                || (asset.oi_eff_long_q != 0) != (asset.loss_weight_sum_long != 0)
-                || (asset.oi_eff_short_q != 0) != (asset.loss_weight_sum_short != 0)
+                || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)
+                || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
+                || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
+                || (asset.loss_weight_sum_short != 0 && asset.stored_pos_count_short == 0)
                 || asset.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_dust_long_num >= SOCIAL_LOSS_DEN
@@ -5086,6 +5095,26 @@ impl MarketGroupV15 {
         Ok(false)
     }
 
+    fn position_delta_blocked_by_pending_domain_loss_barrier(
+        &self,
+        account: &PortfolioAccountV15,
+        asset_index: usize,
+        delta_q: i128,
+    ) -> V15Result<bool> {
+        if !self.position_delta_touches_pending_domain_loss_barrier(
+            account,
+            asset_index,
+            delta_q,
+        )? {
+            return Ok(false);
+        }
+        let current = signed_position(account.legs[asset_index]);
+        let next = current
+            .checked_add(delta_q)
+            .ok_or(V15Error::ArithmeticOverflow)?;
+        Ok(!same_side_risk_reduction_or_flat_obligation(current, next))
+    }
+
     fn available_domain_insurance(&self, domain: usize) -> u128 {
         if domain >= V15_DOMAIN_COUNT {
             return 0;
@@ -5362,7 +5391,11 @@ impl MarketGroupV15 {
         if asset_index >= self.config.max_portfolio_assets as usize {
             return Err(V15Error::InvalidLeg);
         }
-        if self.position_delta_touches_pending_domain_loss_barrier(account, asset_index, delta_q)? {
+        if self.position_delta_blocked_by_pending_domain_loss_barrier(
+            account,
+            asset_index,
+            delta_q,
+        )? {
             return Err(V15Error::LockActive);
         }
         self.settle_leg_kf_effects(account, asset_index)?;
@@ -5380,6 +5413,28 @@ impl MarketGroupV15 {
             return self.attach_leg(account, asset_index, side, new);
         }
         if new == 0 {
+            let leg = account.legs[asset_index];
+            if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+                let old_abs = leg.basis_pos_q.unsigned_abs();
+                let asset = &mut self.assets[asset_index];
+                match leg.side {
+                    SideV15::Long => {
+                        asset.oi_eff_long_q = asset
+                            .oi_eff_long_q
+                            .checked_sub(old_abs)
+                            .ok_or(V15Error::CounterUnderflow)?;
+                    }
+                    SideV15::Short => {
+                        asset.oi_eff_short_q = asset
+                            .oi_eff_short_q
+                            .checked_sub(old_abs)
+                            .ok_or(V15Error::CounterUnderflow)?;
+                    }
+                }
+                account.legs[asset_index].basis_pos_q = 0;
+                account.health_cert.valid = false;
+                return self.validate_account_shape(account);
+            }
             return self.clear_leg(account, asset_index);
         }
         if current.signum() != new.signum() {
@@ -5400,21 +5455,30 @@ impl MarketGroupV15 {
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
         let new_abs = new.unsigned_abs();
         let new_weight = loss_weight_for_basis(new_abs, old_leg.a_basis)?;
+        let preserve_pending_obligation_weight =
+            same_side_risk_reduction_or_flat_obligation(current, new)
+                && self.has_pending_domain_loss_barrier(asset_index, old_leg.side)?;
         let asset = &mut self.assets[asset_index];
         match old_leg.side {
             SideV15::Long => {
                 asset.oi_eff_long_q = adjust_u128(asset.oi_eff_long_q, old_abs, new_abs)?;
-                asset.loss_weight_sum_long =
-                    adjust_u128(asset.loss_weight_sum_long, old_leg.loss_weight, new_weight)?;
+                if !preserve_pending_obligation_weight {
+                    asset.loss_weight_sum_long =
+                        adjust_u128(asset.loss_weight_sum_long, old_leg.loss_weight, new_weight)?;
+                }
             }
             SideV15::Short => {
                 asset.oi_eff_short_q = adjust_u128(asset.oi_eff_short_q, old_abs, new_abs)?;
-                asset.loss_weight_sum_short =
-                    adjust_u128(asset.loss_weight_sum_short, old_leg.loss_weight, new_weight)?;
+                if !preserve_pending_obligation_weight {
+                    asset.loss_weight_sum_short =
+                        adjust_u128(asset.loss_weight_sum_short, old_leg.loss_weight, new_weight)?;
+                }
             }
         }
         account.legs[asset_index].basis_pos_q = new;
-        account.legs[asset_index].loss_weight = new_weight;
+        if !preserve_pending_obligation_weight {
+            account.legs[asset_index].loss_weight = new_weight;
+        }
         account.health_cert.valid = false;
         self.validate_account_shape(account)
     }
@@ -5930,18 +5994,30 @@ fn validate_basis(basis_pos_q: i128) -> V15Result<()> {
 }
 
 fn validate_active_leg(leg: PortfolioLegV15) -> V15Result<()> {
-    validate_basis(leg.basis_pos_q)?;
     validate_non_min_i128(leg.k_snap)?;
     validate_non_min_i128(leg.f_snap)?;
+    let current_loss_weight = if leg.basis_pos_q == 0 {
+        0
+    } else {
+        validate_basis(leg.basis_pos_q)?;
+        loss_weight_for_basis(leg.basis_pos_q.unsigned_abs(), leg.a_basis)?
+    };
     if !(MIN_A_SIDE..=ADL_ONE).contains(&leg.a_basis)
         || leg.loss_weight == 0
-        || leg.loss_weight != loss_weight_for_basis(leg.basis_pos_q.unsigned_abs(), leg.a_basis)?
+        || leg.loss_weight < current_loss_weight
+        || leg.loss_weight > SOCIAL_LOSS_DEN
         || leg.b_rem >= SOCIAL_LOSS_DEN
         || leg.b_epoch_snap != leg.epoch_snap
     {
         return Err(V15Error::InvalidLeg);
     }
     Ok(())
+}
+
+fn same_side_risk_reduction_or_flat_obligation(current: i128, next: i128) -> bool {
+    current != 0
+        && (next == 0 || current.signum() == next.signum())
+        && next.unsigned_abs() < current.unsigned_abs()
 }
 
 fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V15Result<u128> {
