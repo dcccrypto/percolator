@@ -1411,12 +1411,26 @@ fn proof_permissionless_progress_resolved_routes_to_resolved_close() {
     }
 }
 
-/// `permissionless_progress_not_atomic` short-circuits with
-/// `RecoveryRequired` when an active bankrupt-close is in flight. This
-/// is the defense-in-depth gate the Wave 11a-ii-B port adds while the
-/// full recovery resolver is deferred — surfaces a stable error
-/// instead of taking either of the two live-mode branches the
-/// dispatcher knows.
+/// `permissionless_progress_not_atomic` enters the active bankrupt-close
+/// dispatch branch when `active_close_present != 0`. Wave 11a-ii-C made
+/// this branch DO work (either continue the state machine via
+/// `continue_active_bankrupt_close_not_atomic` or invoke the recovery
+/// resolver via `active_bankrupt_close_recovery_required`) instead of
+/// returning a static `RecoveryRequired` gate.
+///
+/// On a freshly-init engine where `active_close_present = 1` is set
+/// without populating the rest of the state machine
+/// (`bankruptcy_hmax_lock_active`, `active_close_phase`,
+/// `active_close_close_price`, `active_close_residual_remaining`), the
+/// branch must REJECT — not silently advance — because the state is
+/// partial and unsafe to process. Wave 11a-ii-C's
+/// `validate_active_bankrupt_close_shape` returns `CorruptState` in
+/// this case, surfacing via `active_bankrupt_close_recovery_required`'s
+/// `?` propagation.
+///
+/// This harness pins the contract: with a partial active_close state
+/// the dispatcher MUST return an error (any error) — it must never
+/// take either of the two normal live-mode branches.
 #[kani::proof]
 #[kani::unwind(5)]
 #[kani::solver(cadical)]
@@ -1444,10 +1458,11 @@ fn proof_permissionless_progress_rejects_when_active_close_present() {
         resolved_fee_rate_per_slot: 0,
     };
 
-    assert_eq!(
-        engine.permissionless_progress_not_atomic(req),
-        Err(RiskError::RecoveryRequired)
-    );
+    // Partial active_close state must REJECT — never silently take the
+    // ordinary live-mode branches. Wave 11a-ii-C returns CorruptState
+    // via shape validation; Wave 11a-ii-B used to return RecoveryRequired.
+    // Either is acceptable; what matters is it's an Err.
+    assert!(engine.permissionless_progress_not_atomic(req).is_err());
 }
 
 /// `force_close_resolved_cursor_with_fee_not_atomic` rejects a non-Resolved
