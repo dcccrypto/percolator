@@ -1332,10 +1332,18 @@ struct AccrualSegmentPlan {
 // =============================================================================
 // Wave 12-L — symbol parity ports (toly upstream main)
 //
-// 3 struct types + 4 fns added for parallel API surface. None of these have
-// fork callers — they exist so future toly cherry-picks compile against
-// fork without adaptation. Fork's canonical keeper-progress entry point
-// remains `permissionless_progress_not_atomic` (Wave 11a-ii-C).
+// Structs and public fns that mirror upstream's decomposed API surface.
+// Wave 12-O wired the key operational helpers into production callers:
+//   - run_keeper_phase1_candidates  → keeper_crank_not_atomic Phase 1
+//   - advance_sweep_generation      → keeper_crank_not_atomic cursor wrap
+//   - clear_position_basis_q        → attach_effective_position_inner
+//   - rank/audit types + fns        → proofs_invariants.rs Kani harnesses
+//   - all B-tracking accessors      → have live callers, annotation removed
+//
+// 8 items remain #[allow(dead_code)]: constructors (from_keeper_request,
+// full_scan), no-pos equity specializations, stress-context variants, and
+// fused-accrual helper. These are pure API parity for external SDK/keeper
+// clients and upstream cherry-pick compatibility — not production gaps.
 // =============================================================================
 
 /// Pure Phase 2 cursor-scan outcome (Wave 12-L symbol parity port). The
