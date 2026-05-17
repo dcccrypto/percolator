@@ -7104,14 +7104,45 @@ impl RiskEngine {
     /// callers that must refuse normal positive-PnL settlement. Combines
     /// active bankrupt-close, hmax lock, stress consumption, neg-pnl
     /// account count, and the stale positive-PnL lock (toly engine
-    /// src/percolator.rs:3851-3857).
-    #[allow(dead_code)]
+    /// src/percolator.rs:3851-3857). Wave 12-G item 1 wired this into
+    /// `credit_account_from_insurance_not_atomic` (port of upstream 6500a2f).
     fn live_reconciliation_lock_active(&self) -> bool {
         self.active_close_present != 0
             || self.bankruptcy_hmax_lock_active
             || self.stress_consumed_bps_e9_since_envelope != 0
             || self.neg_pnl_account_count != 0
             || self.loss_stale_positive_pnl_lock_active()
+    }
+
+    /// Wave 12-G item 2 (port of upstream 2052807): predicate that returns
+    /// false for terminal-epoch reset participants (Resolved + ResetPending
+    /// + epoch = u64::MAX + account.adl_epoch_snap == side epoch). These
+    /// accounts are stale reset participants whose live loss-weight pool
+    /// was zeroed at recovery — they should not be counted as current
+    /// loss-weight contributors in side-sum reconciliation.
+    ///
+    /// Currently unwired (#[allow(dead_code)]): fork's resolved
+    /// settlement path at force_close_resolved_cursor uses a different
+    /// branch shape (rejects same-epoch nonzero-basis with CorruptState
+    /// at percolator.rs:10190). Safely wiring this helper into that path
+    /// requires audit-confirming the math against fork's
+    /// b-tracking weight subtraction logic (Wave 11a-i schema). Helper
+    /// kept additive so future maintainers don't re-derive it.
+    #[allow(dead_code)]
+    fn account_loss_weight_is_counted_in_side_sum(&self, idx: usize, side: Side) -> bool {
+        let account = &self.accounts[idx];
+        if account.b_epoch_snap != self.get_epoch_side(side) {
+            return false;
+        }
+        // Counter/epoch-overflow terminal recovery cannot advance the side
+        // epoch past u64::MAX. The side is nevertheless in ResetPending and
+        // its live loss-weight pool was zeroed at recovery; these
+        // positioned accounts are stale reset participants, not current
+        // loss-weight contributors.
+        !(self.market_mode == MarketMode::Resolved
+            && self.get_side_mode(side) == SideMode::ResetPending
+            && self.get_epoch_side(side) == u64::MAX
+            && account.adl_epoch_snap == self.get_epoch_side(side))
     }
 
     /// "Real" stress gate: any non-speculative reason a bankruptcy h-max
@@ -8965,7 +8996,19 @@ impl RiskEngine {
 
             self.touch_account_live_local(cidx, &mut ctx)?;
 
-            if !ctx.pending_reset_long && !ctx.pending_reset_short {
+            // Wave 12-G item 3 (port of upstream 1dc4466 "Allow local-current
+            // phase1 liquidation during catchup"): per-account
+            // `account_has_unsettled_live_effects` check replaces the
+            // upstream `loss_stale_after_accrual` market-wide flag. This
+            // lets phase1 liquidate an account that's individually current
+            // (no unsettled lazy A/K/F effects) even when the market still
+            // has loss-stale state elsewhere — the touch above already
+            // settled this account's local state, so the margin check below
+            // can trust the post-touch shape.
+            if !ctx.pending_reset_long
+                && !ctx.pending_reset_short
+                && !self.account_has_unsettled_live_effects(cidx)?
+            {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
@@ -10565,6 +10608,21 @@ impl RiskEngine {
         self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
         self.assert_public_postconditions()?;
         self.check_live_accrual_envelope(now_slot)?;
+        // Wave 12-G item 1 (port of upstream 6500a2f): refuse insurance
+        // reward credits while a live reconciliation is in flight. The
+        // `live_reconciliation_lock_active` predicate flags:
+        //   - active_close_present (bankrupt-close state machine running)
+        //   - bankruptcy_hmax_lock_active (lock armed pending settlement)
+        //   - stress_consumed_bps_e9_since_envelope (envelope mid-consume)
+        //   - neg_pnl_account_count (negative-PnL accounts unsettled)
+        //   - loss_stale_positive_pnl_lock_active (positive-PnL lock)
+        // Without this gate, an admin/keeper could credit insurance INTO
+        // an account during reconciliation, defeating the lock's purpose
+        // (the lock exists to prevent value transfers that would invalidate
+        // the in-flight settlement math).
+        if self.live_reconciliation_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
         let ins = self.insurance_fund.balance.get();
         if amount > ins {
             return Err(RiskError::InsufficientBalance);
