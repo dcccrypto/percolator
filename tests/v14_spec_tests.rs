@@ -572,6 +572,38 @@ fn v14_cross_margin_collateral_counted_once_and_not_below_loss_envelope() {
 }
 
 #[test]
+fn v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain() {
+    let mut g = group();
+    let mut a = account();
+    g.deposit_not_atomic(&mut a, 1).unwrap();
+    g.vault += 3;
+    g.attach_leg(&mut a, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut a, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    let _opp0 = attach_opposite(&mut g, 0, SideV14::Long, POS_SCALE, 9);
+    let _opp1 = attach_opposite(&mut g, 1, SideV14::Long, POS_SCALE, 10);
+    g.assets[0].k_long = -2 * ADL_ONE as i128;
+    g.assets[1].k_long = 3 * ADL_ONE as i128;
+
+    let cert = g
+        .full_account_refresh(&mut a, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(a.pnl, 1);
+    assert_eq!(cert.certified_equity, 2);
+    assert_eq!(cert.certified_maintenance_req, 2);
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(g.insurance_domain_spent, [0; V14_DOMAIN_COUNT]);
+    assert_eq!(g.pending_domain_loss_barriers, [0; V14_DOMAIN_COUNT]);
+    assert_eq!(g.assets[0].b_long_num, 0);
+    assert_eq!(g.assets[0].b_short_num, 0);
+    assert_eq!(g.assets[1].b_long_num, 0);
+    assert_eq!(g.assets[1].b_short_num, 0);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
 fn v14_b_stale_blocks_refresh_and_favorable_actions_without_scanning_market() {
     let mut g = group();
     let mut a = account();

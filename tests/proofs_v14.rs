@@ -2444,6 +2444,60 @@ fn proof_v14_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+fn proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV14::new(market, V14Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, account_id, owner));
+    let mut opp0 = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [9; 32], owner));
+    let mut opp1 = PortfolioAccountV14::empty(ProvenanceHeaderV14::new(market, [10; 32], owner));
+    group.deposit_not_atomic(&mut account, 1).unwrap();
+    group.vault = group.vault.checked_add(3).unwrap();
+    group
+        .attach_leg(&mut account, 0, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut account, 1, SideV14::Long, POS_SCALE as i128)
+        .unwrap();
+    group
+        .attach_leg(&mut opp0, 0, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group
+        .attach_leg(&mut opp1, 1, SideV14::Short, -(POS_SCALE as i128))
+        .unwrap();
+    group.assets[0].k_long = -2 * ADL_ONE as i128;
+    group.assets[1].k_long = 3 * ADL_ONE as i128;
+
+    let cert = group
+        .full_account_refresh(&mut account, &[1; V14_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    kani::cover!(
+        cert.certified_liq_deficit == 0,
+        "v14 positive leg support covers other-leg maintenance"
+    );
+    assert_eq!(account.pnl, 1);
+    assert_eq!(cert.certified_equity, 2);
+    assert_eq!(cert.certified_maintenance_req, 2);
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(group.insurance_domain_spent[0], 0);
+    assert_eq!(group.insurance_domain_spent[1], 0);
+    assert_eq!(group.insurance_domain_spent[2], 0);
+    assert_eq!(group.insurance_domain_spent[3], 0);
+    assert_eq!(group.pending_domain_loss_barriers[0], 0);
+    assert_eq!(group.pending_domain_loss_barriers[1], 0);
+    assert_eq!(group.pending_domain_loss_barriers[2], 0);
+    assert_eq!(group.pending_domain_loss_barriers[3], 0);
+    assert_eq!(group.assets[0].b_long_num, 0);
+    assert_eq!(group.assets[0].b_short_num, 0);
+    assert_eq!(group.assets[1].b_long_num, 0);
+    assert_eq!(group.assets[1].b_short_num, 0);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
 fn proof_v14_full_refresh_settles_and_scores_two_active_assets() {
     let capital_units: u8 = kani::any();
     kani::assume(capital_units <= 20);

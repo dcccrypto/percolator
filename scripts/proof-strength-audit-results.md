@@ -117,6 +117,7 @@ Focused incremental proofs added after the last completed full sweep:
 | `proof_v14_rebalance_reduce_position_preserves_senior_claims_and_reduces_risk` | 159s | PASS |
 | `proof_v14_pnl_pos_bound_tot_prevents_lazy_positive_pnl_first_mover_overpay` | 18s | PASS |
 | `proof_v14_health_certificate_bound_to_market_epochs_and_prices` | 52s | PASS |
+| `proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain` | 56.28634s | PASS |
 | `proof_v14_per_asset_slot_last_prevents_cross_asset_accrual_aliasing` | 27s | PASS |
 | `proof_v14_resolved_payout_readiness_uses_exact_counters_and_bounds` | 16.9s | PASS |
 | `proof_v14_reset_pending_epoch_start_snapshots_prevent_prior_epoch_resurrection` | 32s | PASS |
@@ -163,6 +164,8 @@ Each item below maps to production-code tests, Kani proofs, or both.
 
 | Spec §16 item | Coverage |
 |---|---|
+| `global_cross_margin_all_legs_support_maintenance` | `v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; `proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; existing full-refresh and cross-margin envelope tests/proofs |
+| `global_cross_margin_does_not_create_global_B_domain` | `v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; `proof_v14_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b_domain`; B-domain counters and pending barriers remain unchanged while cross-leg support satisfies maintenance |
 | `unbounded_global_accounts_no_full_market_scan_required` | `v14_permissionless_crank_does_not_require_full_market_scan`; `proof_v14_permissionless_crank_does_not_require_full_market_scan` |
 | `full_account_refresh_is_O_N_and_required_for_favorable_actions` | `v14_favorable_action_requires_current_full_account_refresh`; `proof_v14_favorable_action_requires_current_full_refresh`; `proof_v14_full_refresh_settles_and_scores_two_active_assets`; bounded `PortfolioLegV14` array coverage |
 | `certificate_bound_to_market_config_asset_slots_and_prices` | `v14_health_certificate_is_bound_to_market_epochs_and_prices`; `proof_v14_health_certificate_bound_to_market_epochs_and_prices`; favorable-action stale certificate rejection tests/proofs |
