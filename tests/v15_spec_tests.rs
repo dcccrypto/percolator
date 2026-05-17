@@ -3112,6 +3112,19 @@ fn v15_pending_domain_loss_barrier_blocks_other_participants_until_residual_done
         g.pending_domain_loss_barrier_count(0, SideV15::Short),
         Ok(0)
     );
+    assert_eq!(
+        g.clear_leg(&mut participant, 0),
+        Err(V15Error::Stale),
+        "participants must settle lazy B loss before clearing weight"
+    );
+    loop {
+        let chunk = g
+            .settle_account_b_chunk(&mut participant, 0, u128::MAX)
+            .unwrap();
+        if chunk.remaining_after == 0 {
+            break;
+        }
+    }
     g.clear_leg(&mut participant, 0).unwrap();
 }
 
@@ -3211,10 +3224,126 @@ fn v15_pending_domain_loss_barrier_allows_full_trade_exit_as_flat_weight_obligat
     assert_eq!(g.assets[0].oi_eff_long_q, 0);
     assert_eq!(g.assets[0].oi_eff_short_q, 0);
     assert_eq!(g.assets[0].loss_weight_sum_short, old_weight);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 1);
     assert_eq!(g.clear_leg(&mut participant, 0), Err(V15Error::LockActive));
 
     g.pending_domain_loss_barriers[1] = 0;
     g.clear_leg(&mut participant, 0).unwrap();
+    assert_eq!(g.assets[0].loss_weight_sum_short, 0);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 0);
+}
+
+#[test]
+fn v15_pending_obligation_blocks_side_reset_until_obligation_account_clears() {
+    let (market, _, owner) = ids();
+    let mut g = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 10)).unwrap();
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut counterparty =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+
+    g.deposit_not_atomic(&mut participant, 1_000).unwrap();
+    g.deposit_not_atomic(&mut counterparty, 1_000).unwrap();
+    g.attach_leg(&mut participant, 0, SideV15::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut counterparty, 0, SideV15::Long, POS_SCALE as i128)
+        .unwrap();
+    g.pending_domain_loss_barriers[1] = 1;
+    g.execute_trade_with_fee_not_atomic(
+        &mut participant,
+        &mut counterparty,
+        TradeRequestV15 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+    )
+    .unwrap();
+
+    assert_eq!(g.assets[0].oi_eff_short_q, 0);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 1);
+    g.pending_domain_loss_barriers[1] = 0;
+    let before = g;
+    assert_eq!(
+        g.begin_full_drain_reset(0, SideV15::Short),
+        Err(V15Error::LockActive),
+        "a flat pending-obligation leg must clear before side reset can wipe weights"
+    );
+    assert_eq!(
+        g.assets[0].loss_weight_sum_short,
+        before.assets[0].loss_weight_sum_short
+    );
+    assert_eq!(
+        g.assets[0].pending_obligation_count_short,
+        before.assets[0].pending_obligation_count_short
+    );
+    assert_eq!(g.assets[0].mode_short, before.assets[0].mode_short);
+
+    g.clear_leg(&mut participant, 0).unwrap();
+    g.begin_full_drain_reset(0, SideV15::Short).unwrap();
+    assert_eq!(g.assets[0].mode_short, SideModeV15::ResetPending);
+}
+
+#[test]
+fn v15_flat_pending_obligation_must_settle_b_loss_before_clear() {
+    let (market, _, owner) = ids();
+    let mut cfg = V15Config::public_user_fund(1, 0, 10);
+    cfg.public_b_chunk_atoms = 1;
+    let mut g = MarketGroupV15::new(market, cfg).unwrap();
+    let mut bankrupt = account();
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut counterparty =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+
+    g.deposit_not_atomic(&mut participant, 1_000).unwrap();
+    g.deposit_not_atomic(&mut counterparty, 1_000).unwrap();
+    g.attach_leg(&mut participant, 0, SideV15::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut counterparty, 0, SideV15::Long, POS_SCALE as i128)
+        .unwrap();
+    g.pending_domain_loss_barriers[1] = 1;
+
+    g.execute_trade_with_fee_not_atomic(
+        &mut participant,
+        &mut counterparty,
+        TradeRequestV15 {
+            asset_index: 0,
+            size_q: POS_SCALE,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        &[100; V15_MAX_PORTFOLIO_ASSETS_N],
+    )
+    .unwrap();
+    assert_eq!(participant.legs[0].basis_pos_q, 0);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 1);
+
+    g.pending_domain_loss_barriers[1] = 0;
+    g.book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 1)
+        .unwrap();
+    assert_eq!(
+        g.pending_domain_loss_barrier_count(0, SideV15::Short),
+        Ok(0)
+    );
+    assert_eq!(
+        g.clear_leg(&mut participant, 0),
+        Err(V15Error::Stale),
+        "zero-basis obligations still owe their loss-weight share of B"
+    );
+
+    loop {
+        let chunk = g
+            .settle_account_b_chunk(&mut participant, 0, u128::MAX)
+            .unwrap();
+        if chunk.remaining_after == 0 {
+            break;
+        }
+    }
+    g.clear_leg(&mut participant, 0).unwrap();
+    assert_eq!(g.assets[0].pending_obligation_count_short, 0);
     assert_eq!(g.assets[0].loss_weight_sum_short, 0);
 }
 
@@ -3289,11 +3418,13 @@ fn v15_pending_domain_loss_barrier_allows_rebalance_full_exit_as_flat_weight_obl
     assert_eq!(participant.legs[0].loss_weight, old_weight);
     assert_eq!(g.assets[0].oi_eff_short_q, 0);
     assert_eq!(g.assets[0].loss_weight_sum_short, old_weight);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 1);
     assert_eq!(g.clear_leg(&mut participant, 0), Err(V15Error::LockActive));
 
     g.pending_domain_loss_barriers[1] = 0;
     g.clear_leg(&mut participant, 0).unwrap();
     assert_eq!(g.assets[0].loss_weight_sum_short, 0);
+    assert_eq!(g.assets[0].pending_obligation_count_short, 0);
 }
 
 #[test]

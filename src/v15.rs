@@ -603,6 +603,8 @@ pub struct AssetStateV15 {
     pub stored_pos_count_short: u64,
     pub stale_account_count_long: u64,
     pub stale_account_count_short: u64,
+    pub pending_obligation_count_long: u64,
+    pub pending_obligation_count_short: u64,
     pub loss_weight_sum_long: u128,
     pub loss_weight_sum_short: u128,
     pub social_loss_remainder_long_num: u128,
@@ -645,6 +647,8 @@ impl Default for AssetStateV15 {
             stored_pos_count_short: 0,
             stale_account_count_long: 0,
             stale_account_count_short: 0,
+            pending_obligation_count_long: 0,
+            pending_obligation_count_short: 0,
             loss_weight_sum_long: 0,
             loss_weight_sum_short: 0,
             social_loss_remainder_long_num: 0,
@@ -1336,6 +1340,8 @@ pub struct AssetStateV15Account {
     pub stored_pos_count_short: V15PodU64,
     pub stale_account_count_long: V15PodU64,
     pub stale_account_count_short: V15PodU64,
+    pub pending_obligation_count_long: V15PodU64,
+    pub pending_obligation_count_short: V15PodU64,
     pub loss_weight_sum_long: V15PodU128,
     pub loss_weight_sum_short: V15PodU128,
     pub social_loss_remainder_long_num: V15PodU128,
@@ -1378,6 +1384,8 @@ impl AssetStateV15Account {
             stored_pos_count_short: V15PodU64::new(value.stored_pos_count_short),
             stale_account_count_long: V15PodU64::new(value.stale_account_count_long),
             stale_account_count_short: V15PodU64::new(value.stale_account_count_short),
+            pending_obligation_count_long: V15PodU64::new(value.pending_obligation_count_long),
+            pending_obligation_count_short: V15PodU64::new(value.pending_obligation_count_short),
             loss_weight_sum_long: V15PodU128::new(value.loss_weight_sum_long),
             loss_weight_sum_short: V15PodU128::new(value.loss_weight_sum_short),
             social_loss_remainder_long_num: V15PodU128::new(value.social_loss_remainder_long_num),
@@ -1420,6 +1428,8 @@ impl AssetStateV15Account {
             stored_pos_count_short: self.stored_pos_count_short.get(),
             stale_account_count_long: self.stale_account_count_long.get(),
             stale_account_count_short: self.stale_account_count_short.get(),
+            pending_obligation_count_long: self.pending_obligation_count_long.get(),
+            pending_obligation_count_short: self.pending_obligation_count_short.get(),
             loss_weight_sum_long: self.loss_weight_sum_long.get(),
             loss_weight_sum_short: self.loss_weight_sum_short.get(),
             social_loss_remainder_long_num: self.social_loss_remainder_long_num.get(),
@@ -2640,24 +2650,56 @@ impl MarketGroupV15 {
         if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
             return Err(V15Error::LockActive);
         }
-        let asset = &mut self.assets[asset_index];
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        if k_target != leg.k_snap || f_target != leg.f_snap {
+            return Err(V15Error::Stale);
+        }
+        if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+            return Err(V15Error::Stale);
+        }
+        let asset_snapshot = self.assets[asset_index];
         let prior_reset_epoch = match leg.side {
             SideV15::Long => {
-                asset.mode_long == SideModeV15::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
+                asset_snapshot.mode_long == SideModeV15::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset_snapshot.epoch_long)
             }
             SideV15::Short => {
-                asset.mode_short == SideModeV15::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
+                asset_snapshot.mode_short == SideModeV15::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset_snapshot.epoch_short)
             }
         };
+        let dust_after_clear = if !prior_reset_epoch && leg.b_rem != 0 {
+            let current_dust = match leg.side {
+                SideV15::Long => asset_snapshot.social_loss_dust_long_num,
+                SideV15::Short => asset_snapshot.social_loss_dust_short_num,
+            };
+            let new_dust = current_dust
+                .checked_add(leg.b_rem)
+                .ok_or(V15Error::ArithmeticOverflow)?;
+            if new_dust >= SOCIAL_LOSS_DEN {
+                return Err(V15Error::RecoveryRequired);
+            }
+            Some(new_dust)
+        } else {
+            None
+        };
+        let asset = &mut self.assets[asset_index];
         match leg.side {
             SideV15::Long => {
                 asset.stored_pos_count_long = asset
                     .stored_pos_count_long
                     .checked_sub(1)
                     .ok_or(V15Error::CounterUnderflow)?;
+                if leg.basis_pos_q == 0 && leg.loss_weight != 0 {
+                    asset.pending_obligation_count_long = asset
+                        .pending_obligation_count_long
+                        .checked_sub(1)
+                        .ok_or(V15Error::CounterUnderflow)?;
+                }
                 if !prior_reset_epoch {
+                    if let Some(new_dust) = dust_after_clear {
+                        asset.social_loss_dust_long_num = new_dust;
+                    }
                     asset.oi_eff_long_q = asset
                         .oi_eff_long_q
                         .checked_sub(leg.basis_pos_q.unsigned_abs())
@@ -2673,7 +2715,16 @@ impl MarketGroupV15 {
                     .stored_pos_count_short
                     .checked_sub(1)
                     .ok_or(V15Error::CounterUnderflow)?;
+                if leg.basis_pos_q == 0 && leg.loss_weight != 0 {
+                    asset.pending_obligation_count_short = asset
+                        .pending_obligation_count_short
+                        .checked_sub(1)
+                        .ok_or(V15Error::CounterUnderflow)?;
+                }
                 if !prior_reset_epoch {
+                    if let Some(new_dust) = dust_after_clear {
+                        asset.social_loss_dust_short_num = new_dust;
+                    }
                     asset.oi_eff_short_q = asset
                         .oi_eff_short_q
                         .checked_sub(leg.basis_pos_q.unsigned_abs())
@@ -4228,6 +4279,9 @@ impl MarketGroupV15 {
                 if asset.oi_eff_long_q != 0 {
                     return Err(V15Error::InvalidLeg);
                 }
+                if asset.pending_obligation_count_long != 0 {
+                    return Err(V15Error::LockActive);
+                }
                 quarantine_remainder(
                     &mut asset.social_loss_remainder_long_num,
                     &mut asset.social_loss_dust_long_num,
@@ -4249,6 +4303,9 @@ impl MarketGroupV15 {
             SideV15::Short => {
                 if asset.oi_eff_short_q != 0 {
                     return Err(V15Error::InvalidLeg);
+                }
+                if asset.pending_obligation_count_short != 0 {
+                    return Err(V15Error::LockActive);
                 }
                 quarantine_remainder(
                     &mut asset.social_loss_remainder_short_num,
@@ -4447,6 +4504,10 @@ impl MarketGroupV15 {
                 || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
                 || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
                 || (asset.loss_weight_sum_short != 0 && asset.stored_pos_count_short == 0)
+                || asset.pending_obligation_count_long > asset.stored_pos_count_long
+                || asset.pending_obligation_count_short > asset.stored_pos_count_short
+                || (asset.pending_obligation_count_long != 0 && asset.loss_weight_sum_long == 0)
+                || (asset.pending_obligation_count_short != 0 && asset.loss_weight_sum_short == 0)
                 || asset.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
                 || asset.social_loss_dust_long_num >= SOCIAL_LOSS_DEN
@@ -4609,6 +4670,8 @@ impl MarketGroupV15 {
             || asset.stored_pos_count_short != 0
             || asset.stale_account_count_long != 0
             || asset.stale_account_count_short != 0
+            || asset.pending_obligation_count_long != 0
+            || asset.pending_obligation_count_short != 0
             || asset.loss_weight_sum_long != 0
             || asset.loss_weight_sum_short != 0
             || asset.social_loss_remainder_long_num != 0
@@ -5423,12 +5486,20 @@ impl MarketGroupV15 {
                             .oi_eff_long_q
                             .checked_sub(old_abs)
                             .ok_or(V15Error::CounterUnderflow)?;
+                        asset.pending_obligation_count_long = asset
+                            .pending_obligation_count_long
+                            .checked_add(1)
+                            .ok_or(V15Error::CounterOverflow)?;
                     }
                     SideV15::Short => {
                         asset.oi_eff_short_q = asset
                             .oi_eff_short_q
                             .checked_sub(old_abs)
                             .ok_or(V15Error::CounterUnderflow)?;
+                        asset.pending_obligation_count_short = asset
+                            .pending_obligation_count_short
+                            .checked_add(1)
+                            .ok_or(V15Error::CounterOverflow)?;
                     }
                 }
                 account.legs[asset_index].basis_pos_q = 0;

@@ -5787,6 +5787,136 @@ fn proof_v15_pending_domain_barrier_allows_full_trade_exit_as_flat_weight_obliga
     assert!(group.clear_leg(&mut participant, 0).is_ok());
     assert_eq!(group.assets[0].loss_weight_sum_short, 0);
     assert_eq!(group.assets[0].stored_pos_count_short, 0);
+    assert_eq!(group.assets[0].pending_obligation_count_short, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v15_pending_obligation_blocks_side_reset_until_clear() {
+    let (market, _, owner) = concrete_ids();
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut counterparty =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+
+    group.deposit_not_atomic(&mut participant, 100).unwrap();
+    group.deposit_not_atomic(&mut counterparty, 100).unwrap();
+    group
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
+        .unwrap();
+    group
+        .attach_leg(&mut counterparty, 0, SideV15::Long, 10)
+        .unwrap();
+    group.pending_domain_loss_barriers[1] = 1;
+    group
+        .execute_trade_with_fee_not_atomic(
+            &mut participant,
+            &mut counterparty,
+            TradeRequestV15 {
+                asset_index: 0,
+                size_q: 10,
+                exec_price: POS_SCALE as u64,
+                fee_bps: 0,
+            },
+            &[POS_SCALE as u64; V15_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    group.pending_domain_loss_barriers[1] = 0;
+    kani::cover!(
+        group.assets[0].pending_obligation_count_short == 1 && group.assets[0].oi_eff_short_q == 0,
+        "v15 flat pending obligation before side reset reachable"
+    );
+
+    let before_weight = group.assets[0].loss_weight_sum_short;
+    let before_count = group.assets[0].pending_obligation_count_short;
+    let before_epoch = group.assets[0].epoch_short;
+    let before_mode = group.assets[0].mode_short;
+    let before_risk_epoch = group.risk_epoch;
+    let reset_while_obligated = group.begin_full_drain_reset(0, SideV15::Short);
+
+    assert_eq!(reset_while_obligated, Err(V15Error::LockActive));
+    assert_eq!(group.assets[0].loss_weight_sum_short, before_weight);
+    assert_eq!(group.assets[0].pending_obligation_count_short, before_count);
+    assert_eq!(group.assets[0].epoch_short, before_epoch);
+    assert_eq!(group.assets[0].mode_short, before_mode);
+    assert_eq!(group.risk_epoch, before_risk_epoch);
+
+    assert!(group.clear_leg(&mut participant, 0).is_ok());
+    assert_eq!(group.assets[0].pending_obligation_count_short, 0);
+    assert!(group.begin_full_drain_reset(0, SideV15::Short).is_ok());
+    assert_eq!(group.assets[0].mode_short, SideModeV15::ResetPending);
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v15_flat_pending_obligation_cannot_clear_before_b_settlement() {
+    let (market, _, owner) = concrete_ids();
+    let mut cfg = V15Config::public_user_fund(1, 0, 1);
+    cfg.public_b_chunk_atoms = 1;
+    let mut group = MarketGroupV15::new(market, cfg).unwrap();
+    let mut bankrupt = PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [3; 32], owner));
+    let mut participant =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [4; 32], owner));
+    let mut counterparty =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, [5; 32], owner));
+
+    group.deposit_not_atomic(&mut participant, 100).unwrap();
+    group.deposit_not_atomic(&mut counterparty, 100).unwrap();
+    group
+        .attach_leg(&mut participant, 0, SideV15::Short, -10)
+        .unwrap();
+    group
+        .attach_leg(&mut counterparty, 0, SideV15::Long, 10)
+        .unwrap();
+    group.pending_domain_loss_barriers[1] = 1;
+    group
+        .execute_trade_with_fee_not_atomic(
+            &mut participant,
+            &mut counterparty,
+            TradeRequestV15 {
+                asset_index: 0,
+                size_q: 10,
+                exec_price: POS_SCALE as u64,
+                fee_bps: 0,
+            },
+            &[POS_SCALE as u64; V15_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+    group.pending_domain_loss_barriers[1] = 0;
+    group
+        .book_bankruptcy_residual_chunk_for_account(&mut bankrupt, 0, SideV15::Long, 1)
+        .unwrap();
+
+    kani::cover!(
+        participant.legs[0].basis_pos_q == 0
+            && participant.legs[0].loss_weight != 0
+            && group.assets[0].pending_obligation_count_short == 1
+            && group.assets[0].b_short_num > participant.legs[0].b_snap,
+        "v15 flat pending obligation with unsettled B loss reachable"
+    );
+
+    let before_weight = group.assets[0].loss_weight_sum_short;
+    let before_count = group.assets[0].pending_obligation_count_short;
+    let before_stored = group.assets[0].stored_pos_count_short;
+    let before_basis = participant.legs[0].basis_pos_q;
+    let before_loss_weight = participant.legs[0].loss_weight;
+    let before_b_snap = participant.legs[0].b_snap;
+    let before_b_rem = participant.legs[0].b_rem;
+    let stale_clear = group.clear_leg(&mut participant, 0);
+
+    assert_eq!(stale_clear, Err(V15Error::Stale));
+    assert_eq!(group.assets[0].loss_weight_sum_short, before_weight);
+    assert_eq!(group.assets[0].pending_obligation_count_short, before_count);
+    assert_eq!(group.assets[0].stored_pos_count_short, before_stored);
+    assert_eq!(participant.legs[0].basis_pos_q, before_basis);
+    assert_eq!(participant.legs[0].loss_weight, before_loss_weight);
+    assert_eq!(participant.legs[0].b_snap, before_b_snap);
+    assert_eq!(participant.legs[0].b_rem, before_b_rem);
 }
 
 #[kani::proof]
@@ -5859,6 +5989,7 @@ fn proof_v15_pending_domain_barrier_allows_rebalance_full_exit_as_flat_weight_ob
     assert!(group.clear_leg(&mut participant, 0).is_ok());
     assert_eq!(group.assets[0].loss_weight_sum_short, 0);
     assert_eq!(group.assets[0].stored_pos_count_short, 0);
+    assert_eq!(group.assets[0].pending_obligation_count_short, 0);
 }
 
 #[kani::proof]
