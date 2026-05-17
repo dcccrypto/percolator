@@ -102,6 +102,11 @@ pub const POS_SCALE: u128 = 1_000_000;
 /// ADL_ONE = 1e15 (spec §1.3)
 pub const ADL_ONE: u128 = 1_000_000_000_000_000;
 
+/// SOCIAL_WEIGHT_SCALE = ADL_ONE (spec §1.2, v12.20.6, Wave 12-L symbol parity).
+/// Used by `loss_weight_for_basis` to scale per-account basis into the
+/// (0, SOCIAL_LOSS_DEN] loss-weight space.
+pub const SOCIAL_WEIGHT_SCALE: u128 = ADL_ONE;
+
 /// MIN_A_SIDE = 1e14 (spec §1.4)
 pub const MIN_A_SIDE: u128 = 100_000_000_000_000;
 
@@ -1217,6 +1222,73 @@ pub struct PermissionlessProgressRequest<'a> {
     pub resolved_fee_rate_per_slot: u128,
 }
 
+impl<'a> PermissionlessProgressRequest<'a> {
+    /// Wave 12-L symbol parity port — promote a `KeeperCrankRequest` into a
+    /// `PermissionlessProgressRequest` by attaching the
+    /// authenticated-recovery target, account hint, and resolved-mode
+    /// settlement parameters. Mirrors upstream's constructor.
+    #[allow(dead_code)]
+    pub fn from_keeper_request(
+        req: KeeperCrankRequest<'a>,
+        authenticated_raw_target_price: u64,
+        account_hint: Option<u16>,
+        resolved_scan_limit: u64,
+        resolved_fee_rate_per_slot: u128,
+    ) -> Self {
+        Self {
+            now_slot: req.now_slot,
+            oracle_price: req.oracle_price,
+            authenticated_raw_target_price,
+            ordered_candidates: req.ordered_candidates,
+            account_hint,
+            max_revalidations: req.max_revalidations,
+            max_candidate_inspections: req.max_candidate_inspections,
+            funding_rate_e9: req.funding_rate_e9,
+            admit_h_min: req.admit_h_min,
+            admit_h_max: req.admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt: req
+                .admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit: req.rr_touch_limit,
+            rr_scan_limit: req.rr_scan_limit,
+            resolved_scan_limit,
+            resolved_fee_rate_per_slot,
+        }
+    }
+}
+
+impl<'a> KeeperCrankRequest<'a> {
+    /// Wave 12-L symbol parity port — construct a `KeeperCrankRequest` for
+    /// the full-scan keeper path with the inspection cap set to
+    /// `MAX_TOUCHED_PER_INSTRUCTION` and the Phase-2 scan budget set to
+    /// `u64::MAX` (no cap). Mirrors upstream's `full_scan` constructor.
+    #[allow(dead_code)]
+    pub fn full_scan(
+        now_slot: u64,
+        oracle_price: u64,
+        ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        funding_rate_e9: i128,
+        admit_h_min: u64,
+        admit_h_max: u64,
+        admit_h_max_consumption_threshold_bps_opt: Option<u128>,
+        rr_touch_limit: u64,
+    ) -> Self {
+        Self {
+            now_slot,
+            oracle_price,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+            rr_scan_limit: u64::MAX,
+        }
+    }
+}
+
 // ============================================================================
 // Small Helpers
 // ============================================================================
@@ -1255,6 +1327,72 @@ struct AccrualSegmentPlan {
     f_long: i128,
     f_short: i128,
     consumed_this_step: u128,
+}
+
+// =============================================================================
+// Wave 12-L — symbol parity ports (toly upstream main)
+//
+// 3 struct types + 4 fns added for parallel API surface. None of these have
+// fork callers — they exist so future toly cherry-picks compile against
+// fork without adaptation. Fork's canonical keeper-progress entry point
+// remains `permissionless_progress_not_atomic` (Wave 11a-ii-C).
+// =============================================================================
+
+/// Pure Phase 2 cursor-scan outcome (Wave 12-L symbol parity port). The
+/// keeper path computes this before mutating cursor/generation state, then
+/// performs the materialized touches.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phase2ScanOutcome {
+    pub next_cursor: u64,
+    pub inspected: u64,
+    pub touched: u64,
+    pub stress_counted_inspected: u64,
+    pub wrapped: bool,
+}
+
+/// O(1) audit view for permissionless-progress proofs (Wave 12-L symbol
+/// parity port). This is not used to authorize mutations; it exposes
+/// durable rank components that honest public progress calls should
+/// monotonically reduce or route to recovery.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionlessProgressRank {
+    pub live_catchup_slots: u64,
+    pub stress_envelope_indices: u64,
+    pub active_close_residual_atoms: u128,
+    pub resolved_blocker_units: u64,
+}
+
+impl PermissionlessProgressRank {
+    /// Strict public progress ordering for permissionless-market liveness.
+    /// The ordering is intentionally not a full state comparison: bounded
+    /// live catchup may start or restart a stress envelope while still
+    /// reducing the more important stale-loss rank. Terminal recovery is
+    /// represented by the dispatcher outcome, not by this rank relation.
+    #[allow(dead_code)]
+    pub fn strictly_reduces_from(&self, before: &Self) -> bool {
+        self.live_catchup_slots < before.live_catchup_slots
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms < before.active_close_residual_atoms)
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms == before.active_close_residual_atoms
+                && self.resolved_blocker_units < before.resolved_blocker_units)
+            || (self.live_catchup_slots == before.live_catchup_slots
+                && self.active_close_residual_atoms == before.active_close_residual_atoms
+                && self.resolved_blocker_units == before.resolved_blocker_units
+                && self.stress_envelope_indices < before.stress_envelope_indices)
+    }
+}
+
+/// O(1) account-local progress view for known blockers (Wave 12-L symbol
+/// parity port). Cursor/proof-packing wrappers can use this to audit that
+/// a supplied account touch reduces its own B-stale rank instead of
+/// relying on any full-market scan.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionlessAccountProgressRank {
+    pub account_b_remaining_num: u128,
 }
 
 /// Determine which side a signed position is on. Positive = long, negative = short.
@@ -2846,6 +2984,20 @@ impl RiskEngine {
         Ok(())
     }
 
+    /// Zero the position basis and reset ADL/funding snapshots back to the
+    /// terminal-account neutral state (Wave 12-L symbol parity port). Used
+    /// by terminal-close paths after settlement; fork callers reach this via
+    /// `set_position_basis_q(0)` plus inline field resets.
+    #[allow(dead_code)]
+    fn clear_position_basis_q(&mut self, idx: usize) -> Result<()> {
+        self.set_position_basis_q(idx, 0i128)?;
+        self.accounts[idx].adl_a_basis = ADL_ONE;
+        self.accounts[idx].adl_k_snap = 0i128;
+        self.accounts[idx].f_snap = 0i128;
+        self.accounts[idx].adl_epoch_snap = 0;
+        Ok(())
+    }
+
     /// attach_effective_position (spec §4.5)
     test_visible! {
     fn attach_effective_position(&mut self, idx: usize, new_eff_pos_q: i128) -> Result<()> {
@@ -3333,6 +3485,29 @@ impl RiskEngine {
             Side::Long => self.loss_weight_sum_long = v,
             Side::Short => self.loss_weight_sum_short = v,
         }
+    }
+
+    /// Compute the loss-weight numerator for a given position basis
+    /// (Wave 12-L symbol parity port). `w = abs_basis * SOCIAL_WEIGHT_SCALE
+    /// / a_basis`, clamped to (0, SOCIAL_LOSS_DEN]. Returns `CorruptState`
+    /// for zero inputs and `Overflow` if the computed weight escapes the
+    /// scale invariant.
+    #[allow(dead_code)]
+    fn loss_weight_for_basis(abs_basis: u128, a_basis: u128) -> Result<u128> {
+        if abs_basis == 0 || a_basis == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        let w = mul_div_ceil_u256(
+            U256::from_u128(abs_basis),
+            U256::from_u128(SOCIAL_WEIGHT_SCALE),
+            U256::from_u128(a_basis),
+        )
+        .try_into_u128()
+        .ok_or(RiskError::Overflow)?;
+        if w == 0 || w > SOCIAL_LOSS_DEN {
+            return Err(RiskError::Overflow);
+        }
+        Ok(w)
     }
 
     #[allow(dead_code)]
@@ -4873,6 +5048,58 @@ impl RiskEngine {
         }
     }
 
+    /// Eq_trade_open_raw_i specialization for accounts with no open position
+    /// (Wave 12-L symbol parity port). When an account has zero
+    /// position_basis_q the global-aggregate adjustment in
+    /// `account_equity_trade_open_raw` is mathematically a no-op — only the
+    /// account-local cap + fee_debt + (negative) PnL matter. This is the
+    /// upstream signature; fork callers prefer the general fn.
+    #[allow(dead_code)]
+    fn account_equity_trade_open_no_pos_raw(
+        &self,
+        account: &Account,
+        candidate_trade_pnl: i128,
+    ) -> i128 {
+        let trade_gain = if candidate_trade_pnl > 0 {
+            candidate_trade_pnl as u128
+        } else {
+            0u128
+        };
+        let pnl_trade_open = account
+            .pnl
+            .checked_sub(trade_gain as i128)
+            .unwrap_or(i128::MIN + 1);
+        let cap = I256::from_u128(account.capital.get());
+        let neg_pnl = I256::from_i128(if pnl_trade_open < 0 {
+            pnl_trade_open
+        } else {
+            0i128
+        });
+        let fee_debt = I256::from_u128(fee_debt_u128_checked(account.fee_credits.get()));
+        let result = cap
+            .checked_add(neg_pnl)
+            .expect("I256 add")
+            .checked_sub(fee_debt)
+            .expect("I256 sub");
+        result.try_into_i128().unwrap_or(i128::MIN + 1)
+    }
+
+    /// Eq_withdraw_raw_i specialization for accounts with no open position
+    /// (Wave 12-L symbol parity port). Mirrors upstream's no-position fast
+    /// path; fork callers normally use `account_equity_withdraw_raw`.
+    #[allow(dead_code)]
+    fn account_equity_withdraw_no_pos_raw(&self, account: &Account) -> i128 {
+        let cap = I256::from_u128(account.capital.get());
+        let neg_pnl = I256::from_i128(if account.pnl < 0 { account.pnl } else { 0i128 });
+        let fee_debt = I256::from_u128(fee_debt_u128_checked(account.fee_credits.get()));
+        let sum = cap
+            .checked_add(neg_pnl)
+            .expect("I256 add")
+            .checked_sub(fee_debt)
+            .expect("I256 sub");
+        sum.try_into_i128().unwrap_or(i128::MIN + 1)
+    }
+
     /// is_above_initial_margin_trade_open (spec §9.1 + §3.5):
     /// Uses Eq_trade_open_raw_i for risk-increasing trade approval.
     pub fn is_above_initial_margin_trade_open(
@@ -4883,6 +5110,37 @@ impl RiskEngine {
         candidate_trade_pnl: i128,
     ) -> bool {
         let eq = self.account_equity_trade_open_raw(account, idx, candidate_trade_pnl);
+        let Ok(eff) = self.effective_pos_q_checked(idx, false) else {
+            return false;
+        };
+        if eff == 0 {
+            return eq >= 0;
+        }
+        let Ok(not) = self.notional_checked(idx, oracle_price, false) else {
+            return false;
+        };
+        let proportional = mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
+        let im_req = core::cmp::max(proportional, self.params.min_nonzero_im_req);
+        let im_req_i128 = if im_req > i128::MAX as u128 {
+            i128::MAX
+        } else {
+            im_req as i128
+        };
+        eq >= im_req_i128
+    }
+
+    /// No-position specialization of `is_above_initial_margin_trade_open`
+    /// (Wave 12-L symbol parity port). Same predicate but uses
+    /// `account_equity_trade_open_no_pos_raw` for the equity side.
+    #[allow(dead_code)]
+    fn is_above_initial_margin_trade_open_no_pos(
+        &self,
+        account: &Account,
+        idx: usize,
+        oracle_price: u64,
+        candidate_trade_pnl: i128,
+    ) -> bool {
+        let eq = self.account_equity_trade_open_no_pos_raw(account, candidate_trade_pnl);
         let Ok(eff) = self.effective_pos_q_checked(idx, false) else {
             return false;
         };
@@ -5337,6 +5595,93 @@ impl RiskEngine {
 
     }
 
+    /// Stress-aware variant of `append_or_route_new_reserve` (Wave 12-L
+    /// symbol parity port). When `stress_active` is true, all new reserves
+    /// land in the pending bucket regardless of scheduled state — preserves
+    /// pre-stress reservation ordering. Fork callers wrap the unstressed
+    /// helper + check stress separately.
+    #[allow(dead_code)]
+    fn append_or_route_new_reserve_with_stress(
+        &mut self,
+        idx: usize,
+        reserve_add: u128,
+        now_slot: u64,
+        h_lock: u64,
+        stress_active: bool,
+    ) -> Result<()> {
+        self.validate_reserve_shape(idx)?;
+        let a = &mut self.accounts[idx];
+        if stress_active {
+            if a.pending_present == 0 {
+                a.pending_present = 1;
+                a.pending_remaining_q = reserve_add;
+                a.pending_horizon = h_lock;
+                a.pending_created_slot = now_slot;
+            } else {
+                a.pending_remaining_q = a
+                    .pending_remaining_q
+                    .checked_add(reserve_add)
+                    .ok_or(RiskError::Overflow)?;
+                a.pending_horizon = core::cmp::max(a.pending_horizon, h_lock);
+            }
+            a.reserved_pnl = a
+                .reserved_pnl
+                .checked_add(reserve_add)
+                .ok_or(RiskError::Overflow)?;
+            return Ok(());
+        }
+        if a.sched_present == 0 && a.pending_present != 0 {
+            a.sched_present = 1;
+            a.sched_remaining_q = a.pending_remaining_q;
+            a.sched_anchor_q = a.pending_remaining_q;
+            a.sched_start_slot = now_slot;
+            a.sched_horizon = a.pending_horizon;
+            a.sched_release_q = 0;
+            a.pending_present = 0;
+            a.pending_remaining_q = 0;
+            a.pending_horizon = 0;
+            a.pending_created_slot = 0;
+        }
+        if a.sched_present == 0 {
+            a.sched_present = 1;
+            a.sched_remaining_q = reserve_add;
+            a.sched_anchor_q = reserve_add;
+            a.sched_start_slot = now_slot;
+            a.sched_horizon = h_lock;
+            a.sched_release_q = 0;
+        } else if a.sched_present != 0
+            && a.pending_present == 0
+            && a.sched_start_slot == now_slot
+            && a.sched_horizon == h_lock
+            && a.sched_release_q == 0
+        {
+            a.sched_remaining_q = a
+                .sched_remaining_q
+                .checked_add(reserve_add)
+                .ok_or(RiskError::Overflow)?;
+            a.sched_anchor_q = a
+                .sched_anchor_q
+                .checked_add(reserve_add)
+                .ok_or(RiskError::Overflow)?;
+        } else if a.pending_present == 0 {
+            a.pending_present = 1;
+            a.pending_remaining_q = reserve_add;
+            a.pending_horizon = h_lock;
+            a.pending_created_slot = now_slot;
+        } else {
+            a.pending_remaining_q = a
+                .pending_remaining_q
+                .checked_add(reserve_add)
+                .ok_or(RiskError::Overflow)?;
+            a.pending_horizon = core::cmp::max(a.pending_horizon, h_lock);
+        }
+        a.reserved_pnl = a
+            .reserved_pnl
+            .checked_add(reserve_add)
+            .ok_or(RiskError::Overflow)?;
+        Ok(())
+    }
+
     /// apply_reserve_loss_newest_first (spec §4.4) — consume from pending first, then scheduled.
     test_visible! {
     fn apply_reserve_loss_newest_first(&mut self, idx: usize, reserve_loss: u128) -> Result<()> {
@@ -5704,6 +6049,107 @@ impl RiskEngine {
     }
     }
 
+    /// Context-aware variant of `advance_profit_warmup` (Wave 12-L symbol
+    /// parity port). Threads an `InstructionContext` through the promotion
+    /// path so callers can observe positive-PnL usability transitions and
+    /// honor the stress gate. Fork callers reach this behavior through
+    /// `advance_profit_warmup` + explicit ctx checks at call sites.
+    #[allow(dead_code)]
+    fn advance_profit_warmup_with_context(
+        &mut self,
+        idx: usize,
+        ctx: &mut InstructionContext,
+    ) -> Result<()> {
+        self.validate_reserve_shape(idx)?;
+        if self.stress_gate_active(ctx) {
+            return Ok(());
+        }
+        let r = self.accounts[idx].reserved_pnl;
+        if r == 0 {
+            return Ok(());
+        }
+        if self.accounts[idx].sched_present == 0 && self.accounts[idx].pending_present != 0 {
+            ctx.mark_positive_pnl_usability();
+            let a = &mut self.accounts[idx];
+            a.sched_present = 1;
+            a.sched_remaining_q = a.pending_remaining_q;
+            a.sched_anchor_q = a.pending_remaining_q;
+            a.sched_start_slot = self.current_slot;
+            a.sched_horizon = a.pending_horizon;
+            a.sched_release_q = 0;
+            a.pending_present = 0;
+            a.pending_remaining_q = 0;
+            a.pending_horizon = 0;
+            a.pending_created_slot = 0;
+        }
+        if self.accounts[idx].sched_present == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        if self.current_slot < self.accounts[idx].sched_start_slot {
+            return Err(RiskError::CorruptState);
+        }
+        let elapsed = (self.current_slot - self.accounts[idx].sched_start_slot) as u128;
+        let a = &mut self.accounts[idx];
+        if a.sched_horizon == 0 {
+            return Err(RiskError::CorruptState);
+        }
+        let sched_total = if elapsed >= a.sched_horizon as u128 {
+            a.sched_anchor_q
+        } else {
+            mul_div_floor_u128(a.sched_anchor_q, elapsed, a.sched_horizon as u128)
+        };
+        if sched_total < a.sched_release_q {
+            return Err(RiskError::CorruptState);
+        }
+        let sched_increment = sched_total - a.sched_release_q;
+        let release = core::cmp::min(a.sched_remaining_q, sched_increment);
+        if release > 0 {
+            ctx.mark_positive_pnl_usability();
+            a.sched_remaining_q = a
+                .sched_remaining_q
+                .checked_sub(release)
+                .ok_or(RiskError::CorruptState)?;
+            a.reserved_pnl = a
+                .reserved_pnl
+                .checked_sub(release)
+                .ok_or(RiskError::CorruptState)?;
+            self.pnl_matured_pos_tot = self
+                .pnl_matured_pos_tot
+                .checked_add(release)
+                .ok_or(RiskError::Overflow)?;
+        }
+        self.accounts[idx].sched_release_q = sched_total;
+        if self.accounts[idx].sched_remaining_q == 0 {
+            self.accounts[idx].sched_present = 0;
+            self.accounts[idx].sched_anchor_q = 0;
+            self.accounts[idx].sched_start_slot = 0;
+            self.accounts[idx].sched_horizon = 0;
+            self.accounts[idx].sched_release_q = 0;
+            if self.accounts[idx].pending_present != 0 {
+                let a = &mut self.accounts[idx];
+                a.sched_present = 1;
+                a.sched_remaining_q = a.pending_remaining_q;
+                a.sched_anchor_q = a.pending_remaining_q;
+                a.sched_start_slot = self.current_slot;
+                a.sched_horizon = a.pending_horizon;
+                a.sched_release_q = 0;
+                a.pending_present = 0;
+                a.pending_remaining_q = 0;
+                a.pending_horizon = 0;
+                a.pending_created_slot = 0;
+            }
+        }
+        if self.accounts[idx].reserved_pnl == 0
+            && (self.accounts[idx].sched_present != 0 || self.accounts[idx].pending_present != 0)
+        {
+            return Err(RiskError::CorruptState);
+        }
+        if self.pnl_matured_pos_tot > self.pnl_pos_tot {
+            return Err(RiskError::CorruptState);
+        }
+        Ok(())
+    }
+
     // ========================================================================
     // Loss settlement and profit conversion (spec §7)
     // ========================================================================
@@ -6030,6 +6476,20 @@ impl RiskEngine {
     /// On a fresh market every field already starts at NO_SLOT/0/false so
     /// the helper is a structural no-op for this branch.
     ///
+    /// Wave 12-L symbol parity port — advance the sweep generation and stamp
+    /// the wrap slot. Fork callers reach this via the inline pattern at
+    /// `keeper_crank_not_atomic` (see L9199). Added as a named helper so
+    /// upstream's API maps cleanly.
+    #[allow(dead_code)]
+    fn advance_sweep_generation(&mut self, now_slot: u64) -> Result<()> {
+        self.sweep_generation = self
+            .sweep_generation
+            .checked_add(1)
+            .ok_or(RiskError::Overflow)?;
+        self.last_sweep_generation_advance_slot = now_slot;
+        Ok(())
+    }
+
     /// Mirrors toly engine `clear_stress_envelope`
     /// (toly-engine src/percolator.rs:6263-6269).
     pub fn clear_stress_envelope(&mut self) {
@@ -6535,6 +6995,70 @@ impl RiskEngine {
             f_short,
             consumed_this_step,
         })
+    }
+
+    /// Internal one-shot accrual that plans + commits a single market
+    /// segment (Wave 12-L symbol parity port). Fork keeper paths call
+    /// `plan_accrual_segment` then apply the plan inline; this helper
+    /// fuses both steps to mirror upstream's API. Atomic — either every
+    /// field commits or nothing changes.
+    #[allow(dead_code)]
+    fn accrue_market_segment_to_internal(
+        &mut self,
+        accrual_slot: u64,
+        current_slot_after: u64,
+        stress_start_slot_after: u64,
+        oracle_price: u64,
+        funding_rate_e9: i128,
+    ) -> Result<()> {
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+        if funding_rate_e9.unsigned_abs() > self.params.max_abs_funding_e9_per_slot as u128 {
+            return Err(RiskError::Overflow);
+        }
+        if current_slot_after < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if accrual_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+        if accrual_slot > current_slot_after || stress_start_slot_after > current_slot_after {
+            return Err(RiskError::Overflow);
+        }
+
+        let plan = self.plan_accrual_segment(accrual_slot, oracle_price, funding_rate_e9)?;
+
+        let new_stress_consumed = self
+            .stress_consumed_bps_e9_since_envelope
+            .saturating_add(plan.consumed_this_step);
+        let mut stress_remaining = self.stress_envelope_remaining_indices;
+        let mut stress_start_slot = self.stress_envelope_start_slot;
+        let mut stress_start_generation = self.stress_envelope_start_generation;
+        if plan.consumed_this_step > 0 {
+            stress_remaining = self.params.max_accounts;
+            stress_start_slot = stress_start_slot_after;
+            stress_start_generation = self.sweep_generation;
+        }
+
+        self.adl_coeff_long = plan.k_long;
+        self.adl_coeff_short = plan.k_short;
+        self.f_long_num = plan.f_long;
+        self.f_short_num = plan.f_short;
+        self.current_slot = current_slot_after;
+        self.last_market_slot = accrual_slot;
+        self.last_oracle_price = oracle_price;
+        self.fund_px_last = oracle_price;
+        self.stress_consumed_bps_e9_since_envelope = new_stress_consumed;
+        self.stress_envelope_remaining_indices = stress_remaining;
+        self.stress_envelope_start_slot = stress_start_slot;
+        self.stress_envelope_start_generation = stress_start_generation;
+
+        self.assert_public_postconditions()?;
+        Ok(())
     }
 
     /// `true` iff the next accrual call would produce an equity-active
@@ -8885,6 +9409,232 @@ impl RiskEngine {
     /// `(account_idx, optional liquidation policy hint)`.
     ///
     /// Two-phase: Phase 1 runs keeper-priority liquidation; Phase 2 always
+    /// Wave 12-L symbol parity port — O(1) audit rank for the whole
+    /// permissionless progress surface at a given slot. Computes the
+    /// 4-tuple (live_catchup_slots, stress_envelope_indices,
+    /// active_close_residual_atoms, resolved_blocker_units) without
+    /// mutating engine state. Honest public progress calls should produce
+    /// a rank that `strictly_reduces_from` the prior rank.
+    #[allow(dead_code)]
+    pub fn permissionless_progress_rank_for_now(
+        &self,
+        now_slot: u64,
+    ) -> Result<PermissionlessProgressRank> {
+        if now_slot < self.last_market_slot || now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        let live_catchup_slots = if self.market_mode == MarketMode::Live
+            && (self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0)
+        {
+            now_slot
+                .checked_sub(self.last_market_slot)
+                .ok_or(RiskError::Overflow)?
+        } else {
+            0
+        };
+        let reconciliation_envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        let stress_envelope_indices = if reconciliation_envelope_active {
+            self.stress_envelope_remaining_indices
+        } else {
+            0
+        };
+        let active_close_residual_atoms = if self.active_close_present != 0 {
+            self.validate_active_bankrupt_close_shape()?;
+            self.active_close_residual_remaining
+        } else {
+            0
+        };
+        let resolved_blocker_units = if self.market_mode == MarketMode::Resolved {
+            (self.num_used_accounts as u64)
+                .checked_add(self.stored_pos_count_long)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stored_pos_count_short)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stale_account_count_long)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.stale_account_count_short)
+                .ok_or(RiskError::Overflow)?
+                .checked_add(self.neg_pnl_account_count)
+                .ok_or(RiskError::Overflow)?
+        } else {
+            0
+        };
+        Ok(PermissionlessProgressRank {
+            live_catchup_slots,
+            stress_envelope_indices,
+            active_close_residual_atoms,
+            resolved_blocker_units,
+        })
+    }
+
+    /// Wave 12-L symbol parity port — O(1) per-account audit rank. Returns
+    /// the account's remaining B-numerator (relative to its side's
+    /// `b_target_for_account`) so cursor wrappers can audit that an
+    /// individual account touch reduces its own stale rank.
+    #[allow(dead_code)]
+    pub fn permissionless_account_progress_rank(
+        &self,
+        idx: u16,
+    ) -> Result<PermissionlessAccountProgressRank> {
+        let i = idx as usize;
+        self.validate_touched_account_shape(i)?;
+        let account_b_remaining_num = match side_of_i128(self.accounts[i].position_basis_q) {
+            Some(side) => {
+                let target = self.b_target_for_account(i, side)?;
+                if self.accounts[i].b_snap > target {
+                    return Err(RiskError::CorruptState);
+                }
+                target - self.accounts[i].b_snap
+            }
+            None => {
+                if self.accounts[i].loss_weight != 0
+                    || self.accounts[i].b_snap != 0
+                    || self.accounts[i].b_rem != 0
+                {
+                    return Err(RiskError::CorruptState);
+                }
+                0
+            }
+        };
+        Ok(PermissionlessAccountProgressRank {
+            account_b_remaining_num,
+        })
+    }
+
+    /// Wave 12-L symbol parity port — pure Phase-2 cursor-scan outcome
+    /// (computes touched/inspected/wrap state without mutating). Fork's
+    /// keeper inlines the equivalent logic in `keeper_crank_not_atomic`
+    /// Phase-2 sweep; this helper exposes upstream's analyzable form.
+    #[allow(dead_code)]
+    fn phase2_scan_outcome(
+        &self,
+        wrap_bound: u64,
+        rr_touch_limit: u64,
+        rr_scan_limit: u64,
+        stress_active: bool,
+        wrap_allowed: bool,
+        same_slot_as_stress_start: bool,
+    ) -> Result<Phase2ScanOutcome> {
+        let mut i = self.rr_cursor_position;
+        let scan_cap = core::cmp::min(rr_scan_limit, wrap_bound);
+        let mut touched = 0u64;
+        let mut inspected = 0u64;
+        let mut stress_counted_inspected = 0u64;
+        let mut wrapped = false;
+        if rr_touch_limit == 0 || rr_scan_limit == 0 {
+            if wrap_bound == 0 || i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            return Ok(Phase2ScanOutcome {
+                next_cursor: i,
+                inspected,
+                touched,
+                stress_counted_inspected,
+                wrapped,
+            });
+        }
+        while inspected < scan_cap && touched < rr_touch_limit {
+            if wrap_bound == 0 || i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            if i == wrap_bound - 1 && !wrap_allowed {
+                break;
+            }
+            if self.is_used(i as usize) {
+                touched = touched.checked_add(1).ok_or(RiskError::Overflow)?;
+            }
+            i = i.checked_add(1).ok_or(RiskError::Overflow)?;
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            if stress_active && wrap_allowed && !same_slot_as_stress_start {
+                stress_counted_inspected = stress_counted_inspected
+                    .checked_add(1)
+                    .ok_or(RiskError::Overflow)?;
+            }
+            if i == wrap_bound {
+                i = 0;
+                wrapped = true;
+                break;
+            }
+        }
+        Ok(Phase2ScanOutcome {
+            next_cursor: i,
+            inspected,
+            touched,
+            stress_counted_inspected,
+            wrapped,
+        })
+    }
+
+    /// Wave 12-L symbol parity port — Phase-1 candidate loop. Iterates
+    /// the keeper's ordered candidate list, touching each used account
+    /// and liquidating those below maintenance margin. Returns
+    /// (num_liquidations, protective_progress_was_made).
+    #[allow(dead_code)]
+    fn run_keeper_phase1_candidates(
+        &mut self,
+        ctx: &mut InstructionContext,
+        now_slot: u64,
+        oracle_price: u64,
+        ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
+        max_revalidations: u16,
+        max_candidate_inspections: u16,
+    ) -> Result<(u32, bool)> {
+        let mut inspected: u16 = 0;
+        let mut attempts: u16 = 0;
+        let mut num_liquidations: u32 = 0;
+        let mut protective_progress = false;
+        for &(candidate_idx, ref hint) in ordered_candidates {
+            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
+                break;
+            }
+            if ctx.pending_reset_long || ctx.pending_reset_short {
+                break;
+            }
+            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+            if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
+                continue;
+            }
+            if candidate_idx as u64 >= self.params.max_accounts {
+                continue;
+            }
+            attempts = attempts.checked_add(1).ok_or(RiskError::Overflow)?;
+            let cidx = candidate_idx as usize;
+            self.touch_account_live_local(cidx, ctx)?;
+            protective_progress = true;
+            if !ctx.pending_reset_long
+                && !ctx.pending_reset_short
+                && !self.account_has_unsettled_live_effects(cidx)?
+            {
+                let eff = self.effective_pos_q_checked(cidx, false)?;
+                if eff != 0
+                    && !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price)
+                {
+                    if let Some(policy) =
+                        self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
+                    {
+                        match self.liquidate_at_oracle_internal(
+                            candidate_idx,
+                            now_slot,
+                            oracle_price,
+                            policy,
+                            ctx,
+                        ) {
+                            Ok(true) => {
+                                num_liquidations = num_liquidations
+                                    .checked_add(1)
+                                    .ok_or(RiskError::Overflow)?;
+                            }
+                            Ok(false) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+        }
+        Ok((num_liquidations, protective_progress))
+    }
+
     /// runs a mandatory structural sweep over the next `rr_window_size`
     /// materialized-account indices starting from `rr_cursor_position`. On
     /// cursor wraparound past `params.max_accounts`, `sweep_generation`
@@ -10474,6 +11224,103 @@ impl RiskEngine {
         self.free_slot(idx)?;
         self.sweep_empty_market_surplus_to_insurance()?;
 
+        self.assert_public_postconditions()?;
+        Ok(capital.get())
+    }
+
+    /// Resolved-mode terminal close that also syncs maintenance fees at the
+    /// frozen anchor slot before settling (Wave 12-L symbol parity port).
+    /// Fork callers reach the equivalent behavior by calling
+    /// `sync_account_fee_to_slot` + `close_resolved_terminal_not_atomic`
+    /// in sequence via wrapper-side Wave 12-F-5 policy. This helper fuses
+    /// both steps into a single atomic settlement to mirror upstream's API.
+    ///
+    /// Returns the capital amount released back to the caller's vault on
+    /// success. Atomic: any error leaves state untouched.
+    #[allow(dead_code)]
+    pub fn close_resolved_terminal_with_fee_not_atomic(
+        &mut self,
+        idx: u16,
+        fee_rate_per_slot: u128,
+    ) -> Result<u128> {
+        if self.market_mode != MarketMode::Resolved {
+            return Err(RiskError::Unauthorized);
+        }
+        self.validate_touched_account_shape(idx as usize)?;
+        if self.current_slot != self.resolved_slot {
+            return Err(RiskError::CorruptState);
+        }
+        let i = idx as usize;
+        if self.accounts[i].position_basis_q != 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        if self.accounts[i].pnl < 0 {
+            return Err(RiskError::Undercollateralized);
+        }
+        if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
+            return Err(RiskError::Unauthorized);
+        }
+        self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
+        self.prepare_account_for_resolved_touch(i);
+        if self.accounts[i].pnl > 0 {
+            if self.resolved_payout_ready == 0 {
+                self.pnl_matured_pos_tot = self.pnl_pos_tot;
+                let senior = self
+                    .c_tot
+                    .get()
+                    .checked_add(self.insurance_fund.balance.get())
+                    .unwrap_or(u128::MAX);
+                let residual = if self.vault.get() >= senior {
+                    self.vault.get() - senior
+                } else {
+                    0u128
+                };
+                let h_den = self.pnl_matured_pos_tot;
+                let h_num = if h_den == 0 {
+                    0
+                } else {
+                    core::cmp::min(residual, h_den)
+                };
+                self.resolved_payout_h_num = h_num;
+                self.resolved_payout_h_den = h_den;
+                self.resolved_payout_ready = 1;
+            }
+            if self.accounts[i].reserved_pnl != 0 {
+                return Err(RiskError::CorruptState);
+            }
+            let released = self.released_pos_checked(i, false)?;
+            if released > 0 {
+                if self.resolved_payout_h_den == 0 {
+                    return Err(RiskError::CorruptState);
+                }
+                let y = wide_mul_div_floor_u128(
+                    released,
+                    self.resolved_payout_h_num,
+                    self.resolved_payout_h_den,
+                );
+                self.set_pnl_with_reserve(i, 0i128, ReserveMode::NoPositiveIncreaseAllowed, None)?;
+                let new_cap = self.accounts[i]
+                    .capital
+                    .get()
+                    .checked_add(y)
+                    .ok_or(RiskError::Overflow)?;
+                self.set_capital(i, new_cap)?;
+            }
+        }
+        self.fee_debt_sweep(i)?;
+        self.validate_fee_credits_shape(i)?;
+        let fc = self.accounts[i].fee_credits.get();
+        if fc < 0 {
+            self.accounts[i].fee_credits = I128::ZERO;
+        }
+        let capital = self.accounts[i].capital;
+        if capital > self.vault {
+            return Err(RiskError::InsufficientBalance);
+        }
+        self.vault = self.vault - capital;
+        self.set_capital(i, 0)?;
+        self.free_slot(idx)?;
+        self.sweep_empty_market_surplus_to_insurance()?;
         self.assert_public_postconditions()?;
         Ok(capital.get())
     }
