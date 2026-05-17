@@ -7,8 +7,8 @@ use percolator::v15::{
     PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
     PermissionlessRecoveryReasonV15, PortfolioAccountV15, PortfolioAccountV15Account,
     PortfolioLegV15, ProvenanceHeaderV15, RebalanceRequestV15, ResolvedCloseOutcomeV15,
-    ResolvedPayoutLedgerV15, SideModeV15, SideV15, TradeRequestV15, V15Config, V15Error,
-    V15PodI128, V15PodU32, V15_DOMAIN_COUNT, V15_MAX_PORTFOLIO_ASSETS_N,
+    ResolvedPayoutLedgerV15, ResolvedPayoutReceiptV15, SideModeV15, SideV15, TradeRequestV15,
+    V15Config, V15Error, V15PodI128, V15PodU32, V15_DOMAIN_COUNT, V15_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, MAX_OI_SIDE_Q, MAX_POSITION_ABS_Q, MAX_PROTOCOL_FEE_ABS, MAX_VAULT_TVL,
@@ -296,6 +296,33 @@ fn proof_v15_account_shape_rejects_malformed_persistent_economic_state() {
     kani::cover!(dirty_case == 2, "v15 shape rejects i128 min fee credit");
     kani::cover!(dirty_case == 3, "v15 shape rejects over-reserved pnl");
     assert_eq!(group.validate_account_shape(&account), Err(expected));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v15_account_shape_rejects_noncanonical_resolved_receipt_finalization() {
+    let finalized: bool = kani::any();
+    let (market, account_id, owner) = concrete_ids();
+    let group = MarketGroupV15::new(market, V15Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV15::empty(ProvenanceHeaderV15::new(market, account_id, owner));
+    account.resolved_payout_receipt = ResolvedPayoutReceiptV15 {
+        present: true,
+        prior_bound_contribution_num: BOUND_SCALE,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: 1,
+        paid_effective: if finalized { 0 } else { 1 },
+        finalized,
+    };
+
+    kani::cover!(finalized, "v15 shape rejects finalized underpaid receipt");
+    kani::cover!(
+        !finalized,
+        "v15 shape rejects unfinalized fully-paid receipt"
+    );
+    let result = group.validate_account_shape(&account);
+    assert!(matches!(result, Err(V15Error::InvalidLeg)));
 }
 
 #[kani::proof]

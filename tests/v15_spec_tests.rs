@@ -5,10 +5,10 @@ use percolator::v15::{
     PermissionlessCrankRequestV15, PermissionlessProgressOutcomeV15,
     PermissionlessRecoveryReasonV15, PortfolioAccountV15, PortfolioAccountV15Account,
     PortfolioLegV15, PortfolioLegV15Account, ProvenanceHeaderV15, ProvenanceHeaderV15Account,
-    RebalanceRequestV15, ResolvedCloseOutcomeV15, ResolvedPayoutLedgerV15, SideModeV15, SideV15,
-    TradeRequestV15, V15Config, V15ConfigAccount, V15Error, V15OptionalRecoveryReasonAccount,
-    V15PodI128, V15PodU128, V15PodU16, V15PodU32, V15PodU64, V15_DOMAIN_COUNT,
-    V15_MAX_PORTFOLIO_ASSETS_N,
+    RebalanceRequestV15, ResolvedCloseOutcomeV15, ResolvedPayoutLedgerV15,
+    ResolvedPayoutReceiptV15, SideModeV15, SideV15, TradeRequestV15, V15Config, V15ConfigAccount,
+    V15Error, V15OptionalRecoveryReasonAccount, V15PodI128, V15PodU128, V15PodU16, V15PodU32,
+    V15PodU64, V15_DOMAIN_COUNT, V15_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE, MAX_PROTOCOL_FEE_ABS, POS_SCALE,
@@ -1145,6 +1145,39 @@ fn v15_account_shape_rejects_malformed_persistent_economic_state() {
     over_reserved.reserved_pnl = 2;
     assert_eq!(
         g.validate_account_shape(&over_reserved),
+        Err(V15Error::InvalidLeg)
+    );
+}
+
+#[test]
+fn v15_account_shape_rejects_noncanonical_resolved_receipt_finalization() {
+    let g = group();
+
+    let mut unfinalized_paid = account();
+    unfinalized_paid.resolved_payout_receipt = ResolvedPayoutReceiptV15 {
+        present: true,
+        prior_bound_contribution_num: BOUND_SCALE,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: 1,
+        paid_effective: 1,
+        finalized: false,
+    };
+    assert_eq!(
+        g.validate_account_shape(&unfinalized_paid),
+        Err(V15Error::InvalidLeg)
+    );
+
+    let mut finalized_underpaid = account();
+    finalized_underpaid.resolved_payout_receipt = ResolvedPayoutReceiptV15 {
+        present: true,
+        prior_bound_contribution_num: BOUND_SCALE,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: 1,
+        paid_effective: 0,
+        finalized: true,
+    };
+    assert_eq!(
+        g.validate_account_shape(&finalized_underpaid),
         Err(V15Error::InvalidLeg)
     );
 }
