@@ -4523,6 +4523,39 @@ fn proof_v16_dead_leg_forfeit_does_not_credit_positive_kf_delta() {
 }
 
 #[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(cadical)]
+fn proof_v16_dead_leg_forfeit_partial_b_progress_does_not_detach() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    group.mode = MarketModeV16::Recovery;
+    group.attach_leg(&mut account, 0, SideV16::Long, 1).unwrap();
+    group.assets[0].b_long_num = 2;
+
+    let out = group
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, 1)
+        .unwrap();
+
+    kani::cover!(
+        !out.detached && account.legs[0].b_stale,
+        "v16 dead-leg forfeit partial B progress before detach"
+    );
+    assert!(!out.detached);
+    assert_eq!(out.loss_settled, 0);
+    assert_eq!(out.principal_used, 0);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(account.legs[0].b_snap, 1);
+    assert!(account.legs[0].b_stale);
+    assert!(account.b_stale_state);
+    assert!(account.legs[0].active);
+    assert_eq!(group.assets[0].oi_eff_long_q, 1);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_dead_leg_forfeit_books_loss_to_opposing_domain_only() {

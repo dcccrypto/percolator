@@ -5802,6 +5802,29 @@ fn v16_dead_leg_forfeit_is_unavailable_for_normal_live_leg() {
 }
 
 #[test]
+fn v16_dead_leg_forfeit_returns_partial_b_progress_before_detach() {
+    let mut g = group();
+    let mut a = account();
+    g.mode = MarketModeV16::Recovery;
+    g.attach_leg(&mut a, 0, SideV16::Long, 1).unwrap();
+    g.assets[0].b_long_num = 2;
+
+    let out = g.forfeit_recovery_leg_not_atomic(&mut a, 0, 1).unwrap();
+
+    assert!(!out.detached);
+    assert_eq!(out.loss_settled, 0);
+    assert_eq!(out.principal_used, 0);
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(out.residual_booked, 0);
+    assert_eq!(a.legs[0].b_snap, 1);
+    assert!(a.legs[0].b_stale);
+    assert!(a.b_stale_state);
+    assert!(a.legs[0].active);
+    assert_eq!(g.assets[0].oi_eff_long_q, 1);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
 fn v16_dead_leg_forfeit_detaches_without_crediting_positive_pnl() {
     let mut g = group();
     let mut a = account();
