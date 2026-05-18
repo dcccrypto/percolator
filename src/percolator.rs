@@ -4493,7 +4493,15 @@ impl RiskEngine {
     fn begin_full_drain_reset(&mut self, side: Side) -> Result<()> {
         // Require OI_eff_side == 0
         if self.get_oi_eff(side) != 0 { return Err(RiskError::CorruptState); }
+        if self.get_side_mode(side) == SideMode::ResetPending {
+            return Err(RiskError::CorruptState);
+        }
         self.validate_persistent_global_signed_shape()?;
+        // Pre-compute before any mutation so overflow aborts atomically.
+        let next_epoch = self
+            .get_epoch_side(side)
+            .checked_add(1)
+            .ok_or(RiskError::Overflow)?;
 
         // K_epoch_start_side = K_side
         let k = self.get_k_side(side);
@@ -4536,12 +4544,10 @@ impl RiskEngine {
             }
         }
 
-        // Increment epoch
+        // Increment epoch (using pre-validated next_epoch for atomicity)
         match side {
-            Side::Long => self.adl_epoch_long = self.adl_epoch_long.checked_add(1)
-                .ok_or(RiskError::Overflow)?,
-            Side::Short => self.adl_epoch_short = self.adl_epoch_short.checked_add(1)
-                .ok_or(RiskError::Overflow)?,
+            Side::Long => self.adl_epoch_long = next_epoch,
+            Side::Short => self.adl_epoch_short = next_epoch,
         }
 
         // A_side = ADL_ONE
@@ -10122,6 +10128,10 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        if self.loss_stale_positive_pnl_lock_active() {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
@@ -10133,6 +10143,9 @@ impl RiskEngine {
         // Reject if convert would mutate released-PnL bookkeeping based on
         // stale K/F/A_basis/epoch.
         if self.account_has_unsettled_live_effects(idx as usize)? {
+            return Err(RiskError::Undercollateralized);
+        }
+        if self.stress_gate_active(&ctx) {
             return Err(RiskError::Undercollateralized);
         }
 
@@ -11410,6 +11423,10 @@ impl RiskEngine {
         if self.neg_pnl_account_count != 0 {
             return false;
         }
+        // All matured PnL must equal total positive PnL (spec §4.7).
+        if self.pnl_matured_pos_tot != self.pnl_pos_tot {
+            return false;
+        }
         // All counters agree: market is ready. The payout_ready flag is a
         // one-way latch: once set, the snapshot h_num/h_den is locked for
         // all remaining positive payouts. We accept either latch-set or
@@ -11922,6 +11939,9 @@ impl RiskEngine {
         self.check_live_accrual_envelope(now_slot)?;
         if fee_abs > MAX_PROTOCOL_FEE_ABS {
             return Err(RiskError::Overflow);
+        }
+        if fee_abs > 0 {
+            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
         }
 
         self.current_slot = now_slot;
