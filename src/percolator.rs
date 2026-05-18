@@ -362,6 +362,10 @@ pub struct InstructionContext {
     /// Per-instruction sticky set: accounts that required admit_h_max.
     /// Bitmap indexed by storage slot for O(1) membership test/insert.
     pub h_max_sticky_bitmap: [u64; BITMAP_WORDS],
+    /// Set to true by finalize_touched_accounts_post_live after computing
+    /// the snapshot. A second call returns CorruptState (double-finalize guard).
+    /// Mirrors toly InstructionContext.finalized (toly:~L466).
+    pub finalized: bool,
 }
 
 impl InstructionContext {
@@ -380,6 +384,7 @@ impl InstructionContext {
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
             h_max_sticky_bitmap: [0; BITMAP_WORDS],
+            finalized: false,
         }
     }
 
@@ -398,6 +403,7 @@ impl InstructionContext {
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
             h_max_sticky_bitmap: [0; BITMAP_WORDS],
+            finalized: false,
         }
     }
 
@@ -424,6 +430,7 @@ impl InstructionContext {
             touched_accounts: [0; MAX_TOUCHED_PER_INSTRUCTION],
             touched_count: 0,
             h_max_sticky_bitmap: [0; BITMAP_WORDS],
+            finalized: false,
         }
     }
 
@@ -6255,7 +6262,9 @@ impl RiskEngine {
                 }
             }
             self.absorb_protocol_loss(loss);
-            self.set_pnl(idx, 0i128)?;
+            // (H-4) Use set_pnl_with_reserve with NoPositiveIncreaseAllowed to match
+            // toly exactly (toly:7146).
+            self.set_pnl_with_reserve(idx, 0i128, ReserveMode::NoPositiveIncreaseAllowed, None)?;
         }
         Ok(())
     }
@@ -6304,7 +6313,11 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live { return Err(RiskError::Unauthorized); }
         self.validate_touched_account_shape(idx)?;
         if !ctx.add_touched(idx as u16) {
-            return Err(RiskError::Overflow); // touched-set capacity exceeded
+            return Err(RiskError::Overflow); // finalized context or touched-set capacity exceeded
+        }
+        // (M-2) Track partial B settlement — mirrors toly (toly:7196-7198).
+        if self.account_has_unsettled_b(idx)? {
+            ctx.partial_b_settlement_active = true;
         }
 
         // Step 4: accelerate outstanding reserve if h=1 admits (spec §4.9)
@@ -6325,9 +6338,10 @@ impl RiskEngine {
         self.settle_losses_with_context(idx, Some(ctx))?;
 
         // Step 7: resolve flat negative — pass Some(ctx) so a Live flat-and-
-        // negative account arms the lock before the protocol-loss absorb
-        // (mirrors toly:7214).
-        if self.effective_pos_q_checked(idx, false)? == 0 && self.accounts[idx].pnl < 0 {
+        // negative account arms the lock before the protocol-loss absorb.
+        // (M-3) Use position_basis_q == 0 instead of effective_pos_q_checked
+        // to match toly exactly (toly:7213).
+        if self.accounts[idx].position_basis_q == 0 && self.accounts[idx].pnl < 0 {
             self.resolve_flat_negative_with_context(idx, Some(ctx))?;
         }
 
@@ -6344,19 +6358,32 @@ impl RiskEngine {
         &mut self,
         idx: usize,
         is_whole: bool,
+        stress_active: bool,
+        ctx: &mut InstructionContext,
     ) -> Result<()> {
-        // Whole-only flat auto-conversion
-        if is_whole
+        // Whole-only flat auto-conversion.
+        // (H-5) stress_active guard: do not auto-convert during stress — mirrors
+        // toly (toly:7234).
+        if !stress_active
+            && is_whole
             && self.accounts[idx].position_basis_q == 0
             && self.accounts[idx].pnl > 0
         {
             let released = self.released_pos_checked(idx, false)?;
             if released > 0 {
+                // (M-9) mark PnL usability after releasing — mirrors toly (toly:7241).
+                ctx.mark_positive_pnl_usability();
                 self.consume_released_pnl(idx, released)?;
                 let new_cap = self.accounts[idx].capital.get()
                     .checked_add(released).ok_or(RiskError::Overflow)?;
                 self.set_capital(idx, new_cap)?;
             }
+        }
+
+        // (H-6) Skip fee sweep if the account still has unsettled live effects —
+        // mirrors toly (toly:7250-7252).
+        if self.market_mode == MarketMode::Live && self.account_has_unsettled_live_effects(idx)? {
+            return Ok(());
         }
 
         // Fee-debt sweep
@@ -6366,7 +6393,12 @@ impl RiskEngine {
     }
 
     test_visible! {
-    fn finalize_touched_accounts_post_live(&mut self, ctx: &InstructionContext) -> Result<()> {
+    fn finalize_touched_accounts_post_live(&mut self, ctx: &mut InstructionContext) -> Result<()> {
+        // (M-4) Double-finalize guard: mirrors toly (toly:7260-7262).
+        if ctx.finalized {
+            return Err(RiskError::CorruptState);
+        }
+        let stress_active = self.stress_gate_active(ctx);
         // Step 1: compute shared snapshot
         let senior_sum = self.c_tot.get().checked_add(
             self.insurance_fund.balance.get()).unwrap_or(u128::MAX);
@@ -6378,13 +6410,15 @@ impl RiskEngine {
             core::cmp::min(residual, h_snapshot_den)
         };
         let is_whole = h_snapshot_den > 0 && h_snapshot_num == h_snapshot_den;
+        // (M-4) Mark finalized after snapshot, before iteration — mirrors toly (toly:7275).
+        ctx.finalized = true;
 
         // Step 2: iterate touched accounts in ascending order.
         // `add_touched` preserves order, so no sort pass is required.
         let count = ctx.touched_count as usize;
         for ti in 0..count {
             let idx = ctx.touched_accounts[ti] as usize;
-            self.finalize_touched_account_post_live_with_snapshot(idx, is_whole)?;
+            self.finalize_touched_account_post_live_with_snapshot(idx, is_whole, stress_active, ctx)?;
         }
         Ok(())
     }
@@ -8409,7 +8443,7 @@ impl RiskEngine {
         }
 
         // Finalize touched (whole-only conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Step 4: require amount <= C_i
         if self.accounts[idx as usize].capital.get() < amount {
@@ -8506,7 +8540,7 @@ impl RiskEngine {
         self.touch_account_live_local(idx as usize, &mut ctx)?;
 
         // Step 4: finalize (shared snapshot, whole-only conversion, fee-sweep)
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Steps 5-6: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -8889,7 +8923,7 @@ impl RiskEngine {
         )?;
 
         // Finalize touched accounts (shared snapshot conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Steps 16-17: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -9266,7 +9300,7 @@ impl RiskEngine {
 
         // Step 5: finalize AFTER liquidation — post-liquidation flat accounts
         // get whole-only conversion and fee sweep
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // End-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -9906,7 +9940,7 @@ impl RiskEngine {
         self.convert_released_pnl_core(idx as usize, x_req, oracle_price)?;
 
         // Step 11: finalize after explicit conversion.
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Steps 12-13: end-of-instruction resets
         self.schedule_end_of_instruction_resets(&mut ctx)?;
@@ -9958,7 +9992,7 @@ impl RiskEngine {
             return Err(RiskError::Undercollateralized);
         }
 
-        self.finalize_touched_accounts_post_live(&ctx)?;
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
 
         // Position must be zero
         let eff = self.effective_pos_q_checked(idx as usize, false)?;
