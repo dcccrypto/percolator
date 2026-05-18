@@ -5477,6 +5477,49 @@ fn v16_worst_case_hinted_progress_actions_are_total_and_bounded() {
 }
 
 #[test]
+fn v16_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual() {
+    let mut g = group();
+    let mut victim = account();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 1, 105);
+    g.attach_leg(&mut victim, 0, SideV16::Long, 1)
+        .unwrap();
+    g.vault = 1;
+    g.insurance = 1;
+    victim.pnl = -3;
+    g.negative_pnl_account_count = 1;
+
+    let out = g
+        .permissionless_crank_not_atomic(
+            &mut victim,
+            PermissionlessCrankRequestV16 {
+                now_slot: 1,
+                asset_index: 0,
+                effective_price: 1,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
+                    asset_index: 0,
+                    close_q: 1,
+                    fee_bps: 0,
+                }),
+            },
+            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
+    assert_eq!(victim.pnl, 0);
+    assert_eq!(victim.active_bitmap, 0);
+    assert_eq!(g.insurance, 0);
+    assert_eq!(g.negative_pnl_account_count, 0);
+    assert_eq!(g.assets[0].oi_eff_long_q, 0);
+    assert_eq!(g.assets[0].oi_eff_short_q, 0);
+    assert!(g.bankruptcy_hlock_active);
+    assert_eq!(g.slot_last, 1);
+    assert_eq!(g.current_slot, 1);
+    assert_eq!(g.assert_public_invariants(), Ok(()));
+}
+
+#[test]
 fn v16_resolved_close_is_bounded_and_fee_current() {
     let mut g = group();
     let mut a = account();

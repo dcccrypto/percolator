@@ -5232,6 +5232,90 @@ fn proof_v16_worst_case_hinted_progress_actions_are_total_and_bounded() {
     }
 }
 
+fn assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(
+    loss_atoms: u128,
+    insurance_atoms: u128,
+) {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut victim =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let mut opposite = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [9; 32], owner));
+    group
+        .attach_leg(&mut victim, 0, SideV16::Long, 1)
+        .unwrap();
+    group
+        .attach_leg(&mut opposite, 0, SideV16::Short, -1)
+        .unwrap();
+    group.vault = insurance_atoms;
+    group.insurance = insurance_atoms;
+    victim.pnl = -(loss_atoms as i128);
+    group.negative_pnl_account_count = 1;
+
+    let out = group
+        .permissionless_crank_not_atomic(
+            &mut victim,
+            PermissionlessCrankRequestV16 {
+                now_slot: 1,
+                asset_index: 0,
+                effective_price: 1,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
+                    asset_index: 0,
+                    close_q: 1,
+                    fee_bps: 0,
+                }),
+            },
+            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    let expected_insurance_used = loss_atoms.min(insurance_atoms);
+
+    assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
+    assert_eq!(group.vault, insurance_atoms);
+    assert_eq!(group.insurance, insurance_atoms - expected_insurance_used);
+    assert_eq!(victim.pnl, 0);
+    assert_eq!(victim.active_bitmap, 0);
+    assert_eq!(group.negative_pnl_account_count, 0);
+    assert_eq!(group.assets[0].oi_eff_long_q, 0);
+    assert_eq!(group.assets[0].oi_eff_short_q, 0);
+    assert_eq!(group.slot_last, 1);
+    assert_eq!(group.current_slot, 1);
+    assert!(group.bankruptcy_hlock_active);
+    assert_eq!(group.assert_public_invariants(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(95)]
+#[kani::solver(cadical)]
+fn proof_v16_permissionless_crank_liquidation_fully_insured_advances_accrual() {
+    assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(2, 3);
+    kani::cover!(true, "v16 permissionless crank liquidation fully insured path");
+}
+
+#[kani::proof]
+#[kani::unwind(95)]
+#[kani::solver(cadical)]
+fn proof_v16_permissionless_crank_liquidation_insurance_plus_residual_advances_accrual() {
+    assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(3, 1);
+    kani::cover!(
+        true,
+        "v16 permissionless crank liquidation insurance plus residual path"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(95)]
+#[kani::solver(cadical)]
+fn proof_v16_permissionless_crank_liquidation_uninsured_residual_advances_accrual() {
+    assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(2, 0);
+    kani::cover!(
+        true,
+        "v16 permissionless crank liquidation uninsured residual path"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
