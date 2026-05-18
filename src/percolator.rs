@@ -2611,19 +2611,12 @@ impl RiskEngine {
         // Step 1: sticky check (spec §4.7 step 1).
         if ctx.is_h_max_sticky(idx as u16) { return Ok(admit_h_max); }
 
-        // Step 2: consumption-threshold gate (spec §4.7 step 2).
-        // If cumulative price-move consumption this generation reaches the
-        // configured threshold, force `admit_h_max`; `None` disables this gate.
-        let threshold_opt = ctx.admit_h_max_consumption_threshold_bps_opt_shared;
-        let admitted_h_eff = if let Some(threshold) = threshold_opt {
-            if self.price_move_consumed_bps_this_generation >= threshold {
-                admit_h_max
-            } else {
-                // Step 3: residual-scarcity lane.
-                self.admission_residual_lane(fresh_positive_pnl, admit_h_min, admit_h_max)?
-            }
+        // Step 2/3: stress gate or residual-scarcity lane.
+        // Mirrors toly: stress_gate_active(ctx) replaces the inline
+        // consumption-threshold check (toly:2255-2258).
+        let admitted_h_eff = if self.stress_gate_active(ctx) {
+            admit_h_max
         } else {
-            // No threshold gate — pure residual-scarcity lane.
             self.admission_residual_lane(fresh_positive_pnl, admit_h_min, admit_h_max)?
         };
 
@@ -2640,11 +2633,13 @@ impl RiskEngine {
     }
 
     /// Post-impact residual-scarcity admission lane (spec §4.7 step 3).
-    /// Factored out so the consumption-threshold gate (step 2) can either
-    /// bypass it (returning admit_h_max unconditionally) or delegate to it.
+    /// Factored out so the stress gate (step 2) can either bypass it
+    /// (returning admit_h_max unconditionally) or delegate to it.
+    /// Mirrors toly (toly:2276-2297): ignores fresh_positive_pnl and
+    /// returns admit_h_min if residual > 0, else admit_h_max.
     fn admission_residual_lane(
         &self,
-        fresh_positive_pnl: u128,
+        _fresh_positive_pnl: u128,
         admit_h_min: u64,
         admit_h_max: u64,
     ) -> Result<u64> {
@@ -2658,11 +2653,7 @@ impl RiskEngine {
             .get()
             .checked_sub(senior)
             .ok_or(RiskError::CorruptState)?;
-        let matured_plus_fresh = self
-            .pnl_matured_pos_tot
-            .checked_add(fresh_positive_pnl)
-            .ok_or(RiskError::Overflow)?;
-        Ok(if matured_plus_fresh <= residual {
+        Ok(if residual > 0 {
             admit_h_min
         } else {
             admit_h_max
@@ -2677,7 +2668,7 @@ impl RiskEngine {
     fn admit_outstanding_reserve_on_touch(
         &mut self,
         idx: usize,
-        ctx: &InstructionContext,
+        ctx: &mut InstructionContext,
     ) -> Result<()> {
         if self.market_mode != MarketMode::Live { return Ok(()); }
 
@@ -2693,10 +2684,9 @@ impl RiskEngine {
         if ctx.admit_h_min_shared != 0 {
             return Ok(());
         }
-        if let Some(threshold) = ctx.admit_h_max_consumption_threshold_bps_opt_shared {
-            if self.price_move_consumed_bps_this_generation >= threshold {
-                return Ok(());
-            }
+        // Use stress_gate_active(ctx) to match toly (toly:2323-2325).
+        if self.stress_gate_active(ctx) {
+            return Ok(());
         }
 
         let senior = self.c_tot.get()
@@ -2709,7 +2699,7 @@ impl RiskEngine {
             .checked_add(reserve_total)
             .ok_or(RiskError::Overflow)?;
 
-        if new_matured > residual {
+        if residual == 0 {
             // Does not admit — no mutation.
             return Ok(());
         }
@@ -2720,6 +2710,7 @@ impl RiskEngine {
         }
 
         // Phase 2: all checks passed — commit.
+        ctx.mark_positive_pnl_usability();
         self.pnl_matured_pos_tot = new_matured;
         let a = &mut self.accounts[idx];
         a.sched_present = 0;
