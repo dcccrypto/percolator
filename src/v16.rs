@@ -7990,7 +7990,6 @@ impl MarketGroupV16 {
         asset_index: usize,
         delta_q: i128,
     ) -> V16Result<bool> {
-        self.validate_account_shape(account)?;
         if delta_q == 0 {
             return Ok(false);
         }
