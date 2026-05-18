@@ -9690,11 +9690,9 @@ impl RiskEngine {
     }
     } // end test_visible! run_keeper_phase1_candidates
 
-    /// runs a mandatory structural sweep over the next `rr_window_size`
-    /// materialized-account indices starting from `rr_cursor_position`. On
-    /// cursor wraparound past `params.max_accounts`, `sweep_generation`
-    /// increments by 1 and `price_move_consumed_bps_this_generation` resets
-    /// to 0.
+    /// keeper_crank_not_atomic: thin wrapper that builds a `KeeperCrankRequest`
+    /// for a full-scan crank and delegates to `keeper_crank_with_request_not_atomic`.
+    /// Mirrors toly engine `keeper_crank_not_atomic` (toly:8542-8565).
     pub fn keeper_crank_not_atomic(
         &mut self,
         now_slot: u64,
@@ -9705,179 +9703,19 @@ impl RiskEngine {
         admit_h_min: u64,
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
-        rr_window_size: u64,
+        rr_touch_limit: u64,
     ) -> Result<CrankOutcome> {
-        // Pre-state invariant check catches corrupt inputs like
-        // rr_cursor_position out of range or ready-snapshot inconsistency
-        // before mutation.
-        self.assert_public_postconditions()?;
-
-        // Step 1 (spec §9.0): validate inputs pre-mutation.
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
-
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-
-        // Combined Phase 1 + Phase 2 touched-account budget must fit the
-        // runtime ctx capacity.
-        let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_window_size);
-        if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
-            return Err(RiskError::Overflow);
-        }
-
-        // Step 2: initialize instruction context with threshold gate wired in.
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
-
-        // Steps 3-4: validate time monotonicity.
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        if now_slot < self.last_market_slot {
-            return Err(RiskError::Overflow);
-        }
-
-        // Wave 11f (defense-in-depth): if a bankrupt-close residual is in
-        // flight, advance the state machine by one chunk via the core
-        // helper and return early without touching liquidation. The outer
-        // dispatcher `permissionless_progress_not_atomic` (Wave 11a-ii-C)
-        // already routes active-close cases through
-        // `continue_active_bankrupt_close_not_atomic`, but the keeper-crank
-        // path itself is the chokepoint where toly enforces the gate
-        // (toly:8905-8911). Mirroring the gate here closes the
-        // architectural seam — any future direct caller of
-        // `keeper_crank_not_atomic` (test fixture, audit-crank, new
-        // wrapper tag, direct SDK invocation) sees the gate regardless
-        // of how the call was issued.
-        if self.active_close_present != 0 {
-            self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
-            self.assert_public_postconditions()?;
-            return Ok(CrankOutcome {
-                num_liquidations: 0,
-            });
-        }
-
-        // Step 5: accrue_market_to exactly once.
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-
-        // Step 6: current_slot = now_slot.
-        self.current_slot = now_slot;
-
-        // E-5: compute loss_stale gate after accrual so it reflects
-        // whether last_market_slot fell behind current_slot post-accrue.
-        let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
-
-        // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
-        // Delegates to run_keeper_phase1_candidates which contains the
-        // Wave 12-G item 3 `account_has_unsettled_live_effects` gate and
-        // the full liquidation dispatch loop.
-        let max_candidate_inspections = core::cmp::min(
-            MAX_TOUCHED_PER_INSTRUCTION as u16,
-            max_revalidations.saturating_mul(4),
-        );
-        // E-4: pre-arm bankruptcy_hmax_lock before Phase 1 if any candidate
-        // has a bankruptcy tail (mirrors toly keeper_crank_with_request_not_atomic).
-        self.pretrigger_bankruptcy_hmax_for_candidates(
-            &mut ctx,
-            ordered_candidates,
-            max_revalidations,
-            max_candidate_inspections,
-        )?;
-        let (num_liquidations, _) = self.run_keeper_phase1_candidates(
-            &mut ctx,
+        self.keeper_crank_with_request_not_atomic(KeeperCrankRequest::full_scan(
             now_slot,
             oracle_price,
             ordered_candidates,
             max_revalidations,
-            max_candidate_inspections,
-            loss_stale_after_accrual,
-        )?;
-
-        // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
-        // Runs unconditionally — including when Phase 1 exited early on a
-        // pending reset. Phase 2 does NOT execute liquidations, does NOT
-        // count against max_revalidations, and does NOT break on pending
-        // reset. Its job is to deterministically walk the next
-        // rr_window_size indices, touching materialized accounts so
-        // warmup/reserve state advances uniformly across the deployment.
-        //
-        // Cursor wrap bound: params.max_accounts (runtime slab capacity).
-        // Generation turnover is proportional to the real deployment size;
-        // the spec's theoretical 1e6 bound was collapsed onto this runtime
-        // value so compact shards do not spend most of a generation
-        // walking non-existent index space.
-        let wrap_bound = self.params.max_accounts;
-        let cursor_start = self.rr_cursor_position;
-        let sweep_end_u64 = cursor_start.saturating_add(rr_window_size);
-        let sweep_end = core::cmp::min(sweep_end_u64, wrap_bound);
-
-        // Wave 12-I: track inspected count for stress envelope progress.
-        // Each USED-account inspection consumes one of the envelope's
-        // remaining indices (matches toly upstream's
-        // `phase2.stress_counted_inspected` counter).
-        let mut i = cursor_start;
-        let mut stress_counted_inspected: u64 = 0;
-        while i < sweep_end {
-            let iu = i as usize;
-            if self.is_used(iu) {
-                self.touch_account_live_local(iu, &mut ctx)?;
-                stress_counted_inspected =
-                    stress_counted_inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            }
-            i += 1;
-        }
-
-        // E-4: pre-arm bankruptcy_hmax_lock after phase 2 scan if any inspected
-        // account has a bankruptcy tail (mirrors toly keeper_crank_with_request_not_atomic).
-        self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, stress_counted_inspected)?;
-
-        // Advance cursor; on wraparound reset and bump generation.
-        if sweep_end >= wrap_bound {
-            self.rr_cursor_position = 0;
-            // advance_sweep_generation increments sweep_generation and stamps
-            // last_sweep_generation_advance_slot. The fork additionally resets
-            // price_move_consumed_bps_this_generation which upstream does inline.
-            self.advance_sweep_generation(now_slot)?;
-            self.price_move_consumed_bps_this_generation = 0;
-        } else {
-            self.rr_cursor_position = sweep_end;
-        }
-
-        // Wave 12-I (port of upstream apply_stress_envelope_progress wire-up):
-        // decrement the envelope's remaining-indices counter by the inspections
-        // performed this crank. If `ctx.stress_envelope_restarted` was set
-        // earlier in this instruction, treat the consumption as zero so the
-        // restart's freshly-stamped envelope is not pre-consumed by inspections
-        // that happened BEFORE the restart. Once the counter drops to zero
-        // (with the generation/slot guards) the envelope clears, allowing the
-        // bankruptcy_hmax_lock to release and live insurance withdrawals to
-        // pass `withdraw_live_insurance_not_atomic`'s stress gate again.
-        let counted = if ctx.stress_envelope_restarted {
-            0
-        } else {
-            stress_counted_inspected
-        };
-        self.apply_stress_envelope_progress(now_slot, counted)?;
-
-        // Finalize: compute fresh snapshot from post-mutation state, apply
-        // whole-only conversion + fee sweep to all tracked accounts.
-        self.finalize_touched_accounts_post_live(&ctx)?;
-
-        // End-of-instruction resets (spec §9.7 steps 9-10).
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
-
-        self.assert_public_postconditions()?;
-        Ok(CrankOutcome { num_liquidations })
+            funding_rate_e9,
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+            rr_touch_limit,
+        ))
     }
 
     /// Validate a keeper-supplied liquidation-policy hint (spec §11.1 rule 3).
@@ -10550,15 +10388,10 @@ impl RiskEngine {
     }
 
     /// Wave 11a-ii-B: request-object adapter around the existing fork
-    /// `keeper_crank_not_atomic`. Unpacks the request and dispatches to
-    /// the positional-arg keeper. New toly-side fields not consumed by
-    /// the fork's keeper (`max_candidate_inspections`, `rr_scan_limit`)
-    /// are forwarded structurally but ignored — the fork's keeper
-    /// applies its own internal caps and scan-bound logic.
-    ///
-    /// Mirrors toly engine `keeper_crank_with_request_not_atomic`
-    /// (toly:8848-9069) at the request-shape level. Used by
-    /// `permissionless_progress_not_atomic`'s Live default branch.
+    /// Full keeper-crank implementation. Performs bounded accrual, pre-accrual
+    /// equity-active check, Phase 1 liquidation, Phase 2 round-robin sweep, and
+    /// end-of-instruction resets. Mirrors toly engine
+    /// `keeper_crank_with_request_not_atomic` (toly:8848-9069) exactly.
     pub fn keeper_crank_with_request_not_atomic(
         &mut self,
         req: KeeperCrankRequest<'_>,
@@ -10568,25 +10401,226 @@ impl RiskEngine {
             oracle_price,
             ordered_candidates,
             max_revalidations,
-            max_candidate_inspections: _,
+            max_candidate_inspections,
             funding_rate_e9,
             admit_h_min,
             admit_h_max,
             admit_h_max_consumption_threshold_bps_opt,
             rr_touch_limit,
-            rr_scan_limit: _,
+            rr_scan_limit,
         } = req;
-        self.keeper_crank_not_atomic(
+
+        // Pre-state invariant check catches corrupt inputs like
+        // rr_cursor_position out of range or ready-snapshot inconsistency
+        // before mutation.
+        self.assert_public_postconditions()?;
+
+        // Step 1 (spec §9.0): validate inputs pre-mutation.
+        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+
+        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+            return Err(RiskError::Overflow);
+        }
+
+        if self.market_mode != MarketMode::Live {
+            return Err(RiskError::Unauthorized);
+        }
+
+        // Combined Phase 1 + Phase 2 touched-account budget must fit the
+        // runtime ctx capacity. In Phase 2, rr_touch_limit is a touched-account
+        // budget; unused slots are authenticated by the engine bitmap and do
+        // not consume touched-account capacity.
+        let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_touch_limit);
+        if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
+            return Err(RiskError::Overflow);
+        }
+
+        // Step 2: initialize instruction context with threshold gate wired in.
+        let mut ctx = InstructionContext::new_with_admission_and_threshold(
+            admit_h_min,
+            admit_h_max,
+            admit_h_max_consumption_threshold_bps_opt,
+        );
+
+        // Steps 3-4: validate time monotonicity.
+        if now_slot < self.current_slot {
+            return Err(RiskError::Overflow);
+        }
+        if now_slot < self.last_market_slot {
+            return Err(RiskError::Overflow);
+        }
+
+        if self.active_close_present != 0 {
+            self.continue_active_bankrupt_close_core(now_slot, &mut ctx)?;
+            self.assert_public_postconditions()?;
+            return Ok(CrankOutcome {
+                num_liquidations: 0,
+            });
+        }
+
+        // Compute whether this accrual is equity-active (price or funding drains equity).
+        // When equity-active and the dt exceeds max_accrual_dt_slots, clamp to one
+        // bounded segment so each crank advances at most one dt envelope.
+        let equity_active_accrual =
+            self.keeper_accrual_is_equity_active(now_slot, oracle_price, funding_rate_e9);
+        let remaining_dt = now_slot
+            .checked_sub(self.last_market_slot)
+            .ok_or(RiskError::Overflow)?;
+        let accrual_slot =
+            if equity_active_accrual && remaining_dt > self.params.max_accrual_dt_slots {
+                self.last_market_slot
+                    .checked_add(self.params.max_accrual_dt_slots)
+                    .ok_or(RiskError::Overflow)?
+            } else {
+                now_slot
+            };
+
+        // Pre-accrual check: when equity-active, verify that at least one
+        // candidate or Phase-2 slot exists that constitutes protective progress.
+        // Reject with Undercollateralized if no progress is possible.
+        if equity_active_accrual
+            && !self.keeper_has_possible_protective_progress(
+                now_slot,
+                ordered_candidates,
+                max_revalidations,
+                max_candidate_inspections,
+                rr_touch_limit,
+                rr_scan_limit,
+            )?
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        // Step 5: accrue once using the bounded accrual_slot. current_slot and
+        // stress_start_slot_after are always now_slot so public time advances
+        // even when the accrual itself is clamped.
+        self.accrue_market_segment_to_internal(
+            accrual_slot,
+            now_slot,
+            now_slot,
+            oracle_price,
+            funding_rate_e9,
+        )?;
+        let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
+
+        // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            max_candidate_inspections,
+        );
+        // Pre-arm bankruptcy_hmax_lock before Phase 1 if any candidate has a bankruptcy tail.
+        self.pretrigger_bankruptcy_hmax_for_candidates(
+            &mut ctx,
+            ordered_candidates,
+            max_revalidations,
+            max_candidate_inspections,
+        )?;
+        let (num_liquidations, mut protective_progress) = self.run_keeper_phase1_candidates(
+            &mut ctx,
             now_slot,
             oracle_price,
             ordered_candidates,
             max_revalidations,
-            funding_rate_e9,
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
+            max_candidate_inspections,
+            loss_stale_after_accrual,
+        )?;
+
+        // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
+        // Runs unconditionally — including when Phase 1 exited early on a
+        // pending reset. Phase 2 does NOT execute liquidations, does NOT
+        // count against max_revalidations, and does NOT break on pending
+        // reset. Its job is to deterministically walk index space, skip unused
+        // slots, and touch up to rr_touch_limit materialized accounts so
+        // warmup/reserve state advances uniformly across the deployment.
+        //
+        // Cursor wrap bound: params.max_accounts (runtime slab capacity).
+        let wrap_bound = self.params.max_accounts;
+        let reconciliation_envelope_active =
+            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+        let same_slot_as_stress_start =
+            reconciliation_envelope_active && self.stress_envelope_start_slot == now_slot;
+        let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
+            || now_slot > self.last_sweep_generation_advance_slot;
+
+        let phase2 = self.phase2_scan_outcome(
+            wrap_bound,
             rr_touch_limit,
-        )
+            rr_scan_limit,
+            reconciliation_envelope_active,
+            wrap_allowed,
+            same_slot_as_stress_start,
+        )?;
+        self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
+
+        let phase2_guard_prev = ctx.speculative_hmax_guard_active;
+        let phase2_guard_enabled = phase2.touched > 0
+            && !phase2_guard_prev
+            && !ctx.bankruptcy_hmax_candidate_active
+            && !self.bankruptcy_hmax_lock_active;
+        if phase2_guard_enabled {
+            ctx.speculative_hmax_guard_active = true;
+        }
+
+        let mut touch_i = self.rr_cursor_position;
+        let mut replayed_inspected = 0u64;
+        let mut replayed_touched = 0u64;
+        while replayed_inspected < phase2.inspected {
+            if wrap_bound == 0 || touch_i >= wrap_bound {
+                return Err(RiskError::CorruptState);
+            }
+            let iu = touch_i as usize;
+            if self.is_used(iu) {
+                self.touch_account_live_local(iu, &mut ctx)?;
+                replayed_touched = replayed_touched.checked_add(1).ok_or(RiskError::Overflow)?;
+            }
+            touch_i = touch_i.checked_add(1).ok_or(RiskError::Overflow)?;
+            replayed_inspected = replayed_inspected
+                .checked_add(1)
+                .ok_or(RiskError::Overflow)?;
+            if touch_i == wrap_bound {
+                touch_i = 0;
+                break;
+            }
+        }
+        if phase2_guard_enabled
+            && !ctx.stress_envelope_restarted
+            && !self.bankruptcy_hmax_lock_active
+        {
+            ctx.speculative_hmax_guard_active = phase2_guard_prev;
+        }
+        if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
+            return Err(RiskError::CorruptState);
+        }
+        if phase2.inspected > 0 {
+            protective_progress = true;
+        }
+
+        if phase2.wrapped && wrap_allowed {
+            self.advance_sweep_generation(now_slot)?;
+        }
+        self.rr_cursor_position = phase2.next_cursor;
+        let stress_counted_inspected = if ctx.stress_envelope_restarted {
+            0
+        } else {
+            phase2.stress_counted_inspected
+        };
+        self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
+
+        if equity_active_accrual && !protective_progress {
+            return Err(RiskError::Undercollateralized);
+        }
+
+        // Finalize: compute fresh snapshot from post-mutation state, apply
+        // whole-only conversion + fee sweep to all tracked accounts.
+        self.finalize_touched_accounts_post_live(&mut ctx)?;
+
+        // End-of-instruction resets (spec §9.7 steps 9-10).
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx)?;
+
+        self.assert_public_postconditions()?;
+        Ok(CrankOutcome { num_liquidations })
     }
 
     /// Wave 11a-ii-B: engine-owned permissionless progress dispatcher.
