@@ -173,10 +173,16 @@ fn proof_v16_expired_fresh_backing_requires_refresh_before_source_credit_convers
         "v16 expired fresh backing blocks still-certified source-credit conversion"
     );
     assert_eq!(stale_conversion, Err(V16Error::Stale));
-    assert_eq!(before, (account.capital, account.pnl, group.c_tot, group.insurance));
+    assert_eq!(
+        before,
+        (account.capital, account.pnl, group.c_tot, group.insurance)
+    );
 
     group.full_account_refresh(&mut account, &prices).unwrap();
-    assert_eq!(group.source_credit[0].credit_rate_num, CREDIT_RATE_SCALE * 3 / 4);
+    assert_eq!(
+        group.source_credit[0].credit_rate_num,
+        CREDIT_RATE_SCALE * 3 / 4
+    );
     let converted = group
         .convert_released_pnl_to_capital_not_atomic(&mut account)
         .unwrap();
@@ -544,7 +550,10 @@ fn proof_v16_release_account_source_lien_restores_insurance_backing_when_unneede
     seed_insurance_source_lien_state(&mut group, &mut account, 5);
     assert_eq!(account.source_lien_effective_reserved[0], 5);
     assert_eq!(account.source_lien_counterparty_backing_num[0], 0);
-    assert_eq!(account.source_lien_insurance_backing_num[0], 5 * BOUND_SCALE);
+    assert_eq!(
+        account.source_lien_insurance_backing_num[0],
+        5 * BOUND_SCALE
+    );
     set_account_capital_for_canonical_fixture(&mut group, &mut account, 5);
     group.deposit_not_atomic(&mut account, 5).unwrap();
 
@@ -2488,8 +2497,7 @@ fn proof_v16_negative_kf_settlement_falls_back_to_global_residual_when_source_ba
 fn proof_v16_full_refresh_reserves_counterparty_backing_from_new_capital_backed_loss() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut loser =
-        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let mut loser = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
     let mut opposite =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [94; 32], owner));
     group.deposit_not_atomic(&mut loser, 1_000).unwrap();
@@ -2532,10 +2540,8 @@ fn proof_v16_full_refresh_reserves_counterparty_backing_from_new_capital_backed_
 fn proof_v16_passive_backing_consumption_preserves_senior_accounting_without_wrapper_injection() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut loser =
-        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    let mut winner =
-        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [95; 32], owner));
+    let mut loser = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let mut winner = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [95; 32], owner));
     group.deposit_not_atomic(&mut loser, 1_000).unwrap();
     group
         .attach_leg(&mut loser, 0, SideV16::Long, POS_SCALE as i128)
@@ -2549,6 +2555,19 @@ fn proof_v16_passive_backing_consumption_preserves_senior_accounting_without_wra
     group
         .full_account_refresh(&mut loser, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
+    group
+        .full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(winner.capital, 0);
+    assert_eq!(winner.pnl, 500);
+    assert_eq!(group.source_credit[0].spent_backing_num, 0);
+    assert_eq!(
+        group.source_credit[0].fresh_reserved_backing_num,
+        500 * BOUND_SCALE
+    );
+
+    group.clear_leg(&mut winner, 0).unwrap();
+    group.clear_leg(&mut loser, 0).unwrap();
     group
         .full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
@@ -3933,7 +3952,10 @@ fn proof_v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_wit
     assert_eq!(account.pnl, 2);
     assert_eq!(account.capital, 0);
     assert_eq!(group.c_tot, 0);
-    assert_eq!(group.source_credit[0].fresh_reserved_backing_num, BOUND_SCALE);
+    assert_eq!(
+        group.source_credit[0].fresh_reserved_backing_num,
+        BOUND_SCALE
+    );
     assert_eq!(cert.certified_equity, 2);
     assert_eq!(cert.certified_maintenance_req, 2);
     assert_eq!(cert.certified_liq_deficit, 0);
@@ -3960,7 +3982,9 @@ fn assert_full_refresh_settles_and_scores_two_active_assets(capital_units: u128)
     let mut opp0 = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [9; 32], owner));
     let mut opp1 = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [10; 32], owner));
     if capital_units != 0 {
-        group.deposit_not_atomic(&mut account, capital_units).unwrap();
+        group
+            .deposit_not_atomic(&mut account, capital_units)
+            .unwrap();
     }
 
     group
@@ -5770,13 +5794,11 @@ fn proof_v16_released_pnl_conversion_is_residual_bounded_and_conserves_vault() {
 #[kani::proof]
 #[kani::unwind(90)]
 #[kani::solver(cadical)]
-fn proof_v16_open_source_backed_conversion_locks_withdrawal_until_source_exposure_clears() {
+fn proof_v16_source_backed_open_conversion_rejects_before_mutation() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    let mut counterparty =
-        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
     let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
 
     group.vault = 100;
@@ -5789,33 +5811,33 @@ fn proof_v16_open_source_backed_conversion_locks_withdrawal_until_source_exposur
     group
         .attach_leg(&mut account, 0, SideV16::Short, -(POS_SCALE as i128))
         .unwrap();
-    group
-        .attach_leg(&mut counterparty, 0, SideV16::Long, POS_SCALE as i128)
-        .unwrap();
     group.full_account_refresh(&mut account, &prices).unwrap();
 
-    let converted = group
-        .convert_released_pnl_to_capital_not_atomic(&mut account)
-        .unwrap();
-
     kani::cover!(
-        account.source_converted_capital_lock[0] != 0,
-        "v16 source-backed open conversion creates withdrawal lock"
+        account.active_bitmap != 0 && account.source_claim_bound_num[0] != 0,
+        "v16 source-backed open conversion has active source exposure"
     );
-    assert_eq!(converted, 4);
-    assert_eq!(account.capital, 4);
-    assert_eq!(account.source_converted_capital_lock[0], 4);
-    let vault_before = group.vault;
-    let capital_before = account.capital;
-    let locked_before = account.source_converted_capital_lock[0];
-    let withdraw = group.withdraw_not_atomic(&mut account, 1, &prices);
-    assert_eq!(withdraw, Err(V16Error::LockActive));
-    assert_eq!(group.vault, vault_before);
-    assert_eq!(account.capital, capital_before);
-    assert_eq!(account.source_converted_capital_lock[0], locked_before);
-
-    group.clear_leg(&mut account, 0).unwrap();
-    assert_eq!(account.source_converted_capital_lock[0], 0);
+    let before = (
+        account.capital,
+        account.pnl,
+        account.source_claim_bound_num[0],
+        group.c_tot,
+        group.source_credit[0].fresh_reserved_backing_num,
+        group.source_credit[0].spent_backing_num,
+    );
+    let open_convert = group.convert_released_pnl_to_capital_not_atomic(&mut account);
+    assert_eq!(open_convert, Err(V16Error::LockActive));
+    assert_eq!(
+        before,
+        (
+            account.capital,
+            account.pnl,
+            account.source_claim_bound_num[0],
+            group.c_tot,
+            group.source_credit[0].fresh_reserved_backing_num,
+            group.source_credit[0].spent_backing_num,
+        )
+    );
 }
 
 #[kani::proof]
@@ -6812,7 +6834,10 @@ fn assert_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_o
 #[kani::solver(cadical)]
 fn proof_v16_bankrupt_liquidation_excludes_fee_from_residual_with_zero_insurance() {
     assert_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once(0);
-    kani::cover!(true, "v16 bankrupt liquidation zero-insurance path reachable");
+    kani::cover!(
+        true,
+        "v16 bankrupt liquidation zero-insurance path reachable"
+    );
 }
 
 #[kani::proof]
@@ -6820,7 +6845,10 @@ fn proof_v16_bankrupt_liquidation_excludes_fee_from_residual_with_zero_insurance
 #[kani::solver(cadical)]
 fn proof_v16_bankrupt_liquidation_spends_one_insurance_atom_once() {
     assert_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once(1);
-    kani::cover!(true, "v16 bankrupt liquidation one-insurance path reachable");
+    kani::cover!(
+        true,
+        "v16 bankrupt liquidation one-insurance path reachable"
+    );
 }
 
 #[kani::proof]
@@ -6828,7 +6856,10 @@ fn proof_v16_bankrupt_liquidation_spends_one_insurance_atom_once() {
 #[kani::solver(cadical)]
 fn proof_v16_bankrupt_liquidation_spends_two_insurance_atoms_once() {
     assert_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_once(2);
-    kani::cover!(true, "v16 bankrupt liquidation partial-insurance path reachable");
+    kani::cover!(
+        true,
+        "v16 bankrupt liquidation partial-insurance path reachable"
+    );
 }
 
 #[kani::proof]

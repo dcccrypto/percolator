@@ -351,7 +351,7 @@ fn v16_convert_released_pnl_requires_realizable_source_credit_when_claim_is_attr
 }
 
 #[test]
-fn v16_open_source_backed_conversion_locks_withdrawal_until_source_position_closes() {
+fn v16_source_backed_conversion_waits_until_source_position_closes() {
     let mut g = group();
     let mut attacker = account();
     let mut lp = account_with_id(77);
@@ -368,23 +368,23 @@ fn v16_open_source_backed_conversion_locks_withdrawal_until_source_position_clos
         .unwrap();
     g.full_account_refresh(&mut attacker, &prices).unwrap();
 
-    let converted = g
-        .convert_released_pnl_to_capital_not_atomic(&mut attacker)
-        .unwrap();
-
-    assert_eq!(converted, 10);
-    assert_eq!(attacker.capital, 10);
-    assert_eq!(attacker.source_converted_capital_lock[0], 10);
     assert_eq!(
-        g.withdraw_not_atomic(&mut attacker, 1, &prices),
+        g.convert_released_pnl_to_capital_not_atomic(&mut attacker),
         Err(V16Error::LockActive),
-        "source-backed unrealized PnL may become margin capital but not withdrawable capital"
+        "source-backed open-position PnL may support margin but must not become withdrawable capital"
     );
-    assert_eq!(attacker.capital, 10);
+    assert_eq!(attacker.capital, 0);
+    assert_eq!(attacker.pnl, 10);
 
     g.clear_leg(&mut attacker, 0).unwrap();
     g.clear_leg(&mut lp, 0).unwrap();
-    assert_eq!(attacker.source_converted_capital_lock[0], 0);
+    g.full_account_refresh(&mut attacker, &prices).unwrap();
+
+    let converted = g
+        .convert_released_pnl_to_capital_not_atomic(&mut attacker)
+        .unwrap();
+    assert_eq!(converted, 10);
+    assert_eq!(attacker.capital, 10);
     g.withdraw_not_atomic(&mut attacker, converted, &prices)
         .unwrap();
     assert_eq!(attacker.capital, 0);
@@ -408,8 +408,7 @@ fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() 
 
     let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
     g.full_account_refresh(&mut a, &prices).unwrap();
-    g.accrue_asset_to_not_atomic(0, 1, 1, 0, true)
-        .unwrap();
+    g.accrue_asset_to_not_atomic(0, 1, 1, 0, true).unwrap();
     assert_eq!(g.current_slot, 1);
     assert!(a.health_cert.valid);
     assert_eq!(a.health_cert.cert_oracle_epoch, g.oracle_epoch);
@@ -426,7 +425,10 @@ fn v16_expired_fresh_backing_requires_refresh_before_source_credit_conversion() 
 
     g.full_account_refresh(&mut a, &prices).unwrap();
     assert_eq!(g.source_backing_buckets[0].fresh_unliened_backing_num, 0);
-    assert_eq!(g.source_credit[0].credit_rate_num, CREDIT_RATE_SCALE * 3 / 4);
+    assert_eq!(
+        g.source_credit[0].credit_rate_num,
+        CREDIT_RATE_SCALE * 3 / 4
+    );
     let converted = g
         .convert_released_pnl_to_capital_not_atomic(&mut a)
         .unwrap();
@@ -1616,9 +1618,29 @@ fn v16_passive_backing_consumption_preserves_senior_accounting_without_wrapper_i
         .unwrap();
     g.full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
         .unwrap();
-    assert_eq!(g.source_credit[0].fresh_reserved_backing_num, 500 * BOUND_SCALE);
+    assert_eq!(
+        g.source_credit[0].fresh_reserved_backing_num,
+        500 * BOUND_SCALE
+    );
     assert_eq!(winner.pnl, 500);
 
+    assert_eq!(
+        g.convert_released_pnl_to_capital_not_atomic(&mut winner),
+        Err(V16Error::LockActive),
+        "passively backed source PnL is margin credit while the source position remains open"
+    );
+    assert_eq!(winner.capital, 0);
+    assert_eq!(winner.pnl, 500);
+    assert_eq!(g.source_credit[0].spent_backing_num, 0);
+    assert_eq!(
+        g.source_credit[0].fresh_reserved_backing_num,
+        500 * BOUND_SCALE
+    );
+
+    g.clear_leg(&mut winner, 0).unwrap();
+    g.clear_leg(&mut loser, 0).unwrap();
+    g.full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
     let converted = g
         .convert_released_pnl_to_capital_not_atomic(&mut winner)
         .unwrap();
@@ -3464,8 +3486,7 @@ fn v16_e2e_trade_mark_close_convert_withdraw_conserves() {
         "short mark loss should no longer remain withdrawable account capital"
     );
     assert_eq!(
-        g.source_credit[1].fresh_reserved_backing_num,
-        BOUND_SCALE,
+        g.source_credit[1].fresh_reserved_backing_num, BOUND_SCALE,
         "short loss refresh should reserve backing without wrapper injection"
     );
 
