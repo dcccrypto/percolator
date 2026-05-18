@@ -3407,6 +3407,83 @@ impl MarketGroupV16 {
         Ok(cert)
     }
 
+    fn recertify_account_after_trade_delta(
+        &self,
+        account: &mut PortfolioAccountV16,
+        asset_index: usize,
+        old_abs_q: u128,
+        price: u64,
+    ) -> V16Result<HealthCertV16> {
+        if asset_index >= self.config.max_portfolio_assets as usize
+            || price == 0
+            || price > MAX_ORACLE_PRICE
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let existing = account.health_cert;
+        let new_abs_q = signed_position(account.legs[asset_index]).unsigned_abs();
+        let old_notional = risk_notional_ceil(old_abs_q, price)?;
+        let new_notional = risk_notional_ceil(new_abs_q, price)?;
+        let old_initial = margin_requirement(
+            old_notional,
+            self.config.initial_margin_bps,
+            self.config.min_nonzero_im_req,
+        )?;
+        let old_maintenance = margin_requirement(
+            old_notional,
+            self.config.maintenance_margin_bps,
+            self.config.min_nonzero_mm_req,
+        )?;
+        let new_initial = margin_requirement(
+            new_notional,
+            self.config.initial_margin_bps,
+            self.config.min_nonzero_im_req,
+        )?;
+        let new_maintenance = margin_requirement(
+            new_notional,
+            self.config.maintenance_margin_bps,
+            self.config.min_nonzero_mm_req,
+        )?;
+        let initial_req = existing
+            .certified_initial_req
+            .checked_sub(old_initial)
+            .and_then(|v| v.checked_add(new_initial))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let maintenance_req = existing
+            .certified_maintenance_req
+            .checked_sub(old_maintenance)
+            .and_then(|v| v.checked_add(new_maintenance))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let worst_case_loss = existing
+            .certified_worst_case_loss
+            .checked_sub(old_notional)
+            .and_then(|v| v.checked_add(new_notional))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let equity = self.account_haircut_equity(account)?;
+        let certified_liq_deficit = if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            let e = equity as u128;
+            maintenance_req.saturating_sub(e)
+        };
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: initial_req,
+            certified_maintenance_req: maintenance_req,
+            certified_liq_deficit,
+            certified_worst_case_loss: worst_case_loss,
+            cert_oracle_epoch: self.oracle_epoch,
+            cert_funding_epoch: self.funding_epoch,
+            cert_risk_epoch: self.risk_epoch,
+            cert_asset_set_epoch: self.asset_set_epoch,
+            active_bitmap_at_cert: account.active_bitmap,
+            valid: true,
+        };
+        account.health_cert = cert;
+        self.validate_account_shape(account)?;
+        Ok(cert)
+    }
+
     pub fn sync_account_fee_to_slot_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
@@ -4372,15 +4449,89 @@ impl MarketGroupV16 {
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
-    fn settle_account_for_position_action_not_atomic(
+    fn settle_account_for_position_action_and_refresh_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
-    ) -> V16Result<()> {
-        self.settle_account_side_effects_not_atomic(account, self.config.public_b_chunk_atoms)?;
+        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+    ) -> V16Result<HealthCertV16> {
+        self.validate_account_shape(account)?;
+        self.reconcile_account_source_credit_liens_not_atomic(account)?;
+        let n = self.config.max_portfolio_assets as usize;
+        let mut initial_req = 0u128;
+        let mut maintenance_req = 0u128;
+        let mut worst_case_loss = 0u128;
+        for i in 0..n {
+            if !account.legs[i].active {
+                continue;
+            }
+            self.settle_leg_kf_effects(account, i)?;
+            if self.b_target_for_leg(i, account.legs[i])? > account.legs[i].b_snap {
+                self.mark_leg_b_stale(account, i)?;
+                let chunk = self.settle_account_b_chunk(
+                    account,
+                    i,
+                    self.config.public_b_chunk_atoms,
+                )?;
+                if chunk.remaining_after != 0 {
+                    return Err(V16Error::BStale);
+                }
+            }
+            let price = effective_prices[i];
+            if price == 0 || price > MAX_ORACLE_PRICE {
+                return Err(V16Error::InvalidConfig);
+            }
+            let risk_notional =
+                risk_notional_ceil(account.legs[i].basis_pos_q.unsigned_abs(), price)?;
+            let leg_initial = margin_requirement(
+                risk_notional,
+                self.config.initial_margin_bps,
+                self.config.min_nonzero_im_req,
+            )?;
+            let leg_maintenance = margin_requirement(
+                risk_notional,
+                self.config.maintenance_margin_bps,
+                self.config.min_nonzero_mm_req,
+            )?;
+            initial_req = initial_req
+                .checked_add(leg_initial)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            maintenance_req = maintenance_req
+                .checked_add(leg_maintenance)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            worst_case_loss = worst_case_loss
+                .checked_add(risk_notional)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
         if account.b_stale_state || has_b_stale_leg(account) {
             return Err(V16Error::BStale);
         }
-        Ok(())
+        if account.stale_state {
+            self.clear_account_stale(account)?;
+        }
+        self.settle_negative_pnl_from_principal(account)?;
+        let equity = self.account_haircut_equity(account)?;
+        let certified_liq_deficit = if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            let e = equity as u128;
+            maintenance_req.saturating_sub(e)
+        };
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: initial_req,
+            certified_maintenance_req: maintenance_req,
+            certified_liq_deficit,
+            certified_worst_case_loss: worst_case_loss,
+            cert_oracle_epoch: self.oracle_epoch,
+            cert_funding_epoch: self.funding_epoch,
+            cert_risk_epoch: self.risk_epoch,
+            cert_asset_set_epoch: self.asset_set_epoch,
+            active_bitmap_at_cert: account.active_bitmap,
+            valid: true,
+        };
+        account.health_cert = cert;
+        self.validate_account_shape(account)?;
+        Ok(cert)
     }
 
     pub fn accrue_asset_to_not_atomic(
@@ -4539,8 +4690,14 @@ impl MarketGroupV16 {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        self.settle_account_for_position_action_not_atomic(long_account)?;
-        self.settle_account_for_position_action_not_atomic(short_account)?;
+        self.settle_account_for_position_action_and_refresh_not_atomic(
+            long_account,
+            effective_prices,
+        )?;
+        self.settle_account_for_position_action_and_refresh_not_atomic(
+            short_account,
+            effective_prices,
+        )?;
 
         let long_delta =
             i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -4575,12 +4732,25 @@ impl MarketGroupV16 {
 
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
+        let long_old_abs = signed_position(long_account.legs[request.asset_index]).unsigned_abs();
+        let short_old_abs =
+            signed_position(short_account.legs[request.asset_index]).unsigned_abs();
         self.charge_account_fee_current_not_atomic(long_account, fee)?;
         self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
-        self.full_account_refresh(long_account, effective_prices)?;
-        self.full_account_refresh(short_account, effective_prices)?;
+        self.recertify_account_after_trade_delta(
+            long_account,
+            request.asset_index,
+            long_old_abs,
+            effective_prices[request.asset_index],
+        )?;
+        self.recertify_account_after_trade_delta(
+            short_account,
+            request.asset_index,
+            short_old_abs,
+            effective_prices[request.asset_index],
+        )?;
         if risk_increasing && !locked {
             self.create_initial_margin_source_lien_if_needed(long_account)?;
             self.create_initial_margin_source_lien_if_needed(short_account)?;
