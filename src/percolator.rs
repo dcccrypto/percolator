@@ -3812,6 +3812,8 @@ impl RiskEngine {
         // surfaces BEFORE any mutation. Same validate-then-mutate contract
         // as top_up_insurance_fund and deposit_fee_credits.
         self.assert_public_postconditions()?;
+        // (M-1) Reject accrual during active bankrupt-close — mirrors toly (toly:4683).
+        self.ensure_no_active_bankrupt_close()?;
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
@@ -8306,6 +8308,8 @@ impl RiskEngine {
         if self.market_mode != MarketMode::Live {
             return Err(RiskError::Unauthorized);
         }
+        // (M-5) Reject deposit during active bankrupt-close — mirrors toly (toly:7325).
+        self.ensure_no_active_bankrupt_close()?;
         // Time monotonicity (spec §10.3 step 1)
         if now_slot < self.current_slot {
             return Err(RiskError::Overflow);
@@ -8427,20 +8431,32 @@ impl RiskEngine {
             admit_h_max_consumption_threshold_bps_opt,
         );
 
+        // (H-7) Pre-accrual loss_stale check for positioned accounts — mirrors
+        // toly (toly:7447-7451).
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 2: accrue market
         self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
         self.current_slot = now_slot;
 
+        // (H-7) Post-accrual loss_stale check — reject if accrual created new stale state
+        // for positioned accounts, mirrors toly (toly:7456-7460).
+        if self.loss_stale_positive_pnl_lock_active()
+            && self.accounts[idx as usize].position_basis_q != 0
+        {
+            return Err(RiskError::Undercollateralized);
+        }
+
         // Step 3: live local touch
         self.touch_account_live_local(idx as usize, &mut ctx)?;
-
-        // PORT (ENG-PORT-3 / CRITICAL-7): post-touch invariant guard.
-        // Withdraw must reject if the account's snaps disagree with the side's
-        // current aggregates after touch — finalize_touched would otherwise
-        // sweep fees against capital based on stale K/F.
         if self.account_has_unsettled_live_effects(idx as usize)? {
             return Err(RiskError::Undercollateralized);
         }
+        let stress_active = self.stress_gate_active(&ctx);
 
         // Finalize touched (whole-only conversion + fee sweep)
         self.finalize_touched_accounts_post_live(&mut ctx)?;
@@ -8463,9 +8479,13 @@ impl RiskEngine {
         // by other accounts' conversions.
         let eff = self.effective_pos_q_checked(idx as usize, false)?;
         if eff != 0 {
-            // Post-withdrawal equity: current withdraw equity minus withdrawal amount
-            let eq_withdraw =
-                self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize);
+            // (H-8) Branch on stress_active: use no-pos equity formula during stress
+            // to avoid counting diluted matured PnL — mirrors toly (toly:7491-7495).
+            let eq_withdraw = if stress_active {
+                self.account_equity_withdraw_no_pos_raw(&self.accounts[idx as usize])
+            } else {
+                self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize)
+            };
             let notional = self.notional_checked(idx as usize, oracle_price, false)?;
             // eff != 0 here, so always enforce min_nonzero_im_req. The
             // risk notional itself is ceil-rounded, but proportional IM can
