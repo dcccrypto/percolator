@@ -18,10 +18,11 @@ use crate::{
 };
 
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
+pub const V16_MAX_MARKET_SLOTS_N: usize = 64;
 pub const V16_ACTIVE_BITMAP_WORDS: usize = (V16_MAX_PORTFOLIO_ASSETS_N + 63) / 64;
 pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
-pub const V16_DOMAIN_COUNT: usize = V16_MAX_PORTFOLIO_ASSETS_N * 2;
+pub const V16_DOMAIN_COUNT: usize = V16_MAX_MARKET_SLOTS_N * 2;
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 16;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
@@ -219,6 +220,7 @@ impl ProvenanceHeaderV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V16Config {
     pub max_portfolio_assets: u16,
+    pub max_market_slots: u32,
     pub min_nonzero_mm_req: u128,
     pub min_nonzero_im_req: u128,
     pub h_min: u64,
@@ -254,8 +256,23 @@ pub struct V16Config {
 
 impl V16Config {
     pub const fn public_user_fund(max_portfolio_assets: u16, h_min: u64, h_max: u64) -> Self {
+        Self::public_user_fund_with_market_slots(
+            max_portfolio_assets,
+            max_portfolio_assets as u32,
+            h_min,
+            h_max,
+        )
+    }
+
+    pub const fn public_user_fund_with_market_slots(
+        max_portfolio_assets: u16,
+        max_market_slots: u32,
+        h_min: u64,
+        h_max: u64,
+    ) -> Self {
         Self {
             max_portfolio_assets,
+            max_market_slots,
             min_nonzero_mm_req: 1,
             min_nonzero_im_req: 2,
             h_min,
@@ -653,6 +670,9 @@ impl V16Config {
     pub fn validate_public_user_fund_shape(&self) -> V16Result<()> {
         if self.max_portfolio_assets == 0
             || self.max_portfolio_assets as usize > V16_MAX_PORTFOLIO_ASSETS_N
+            || self.max_market_slots == 0
+            || self.max_market_slots as usize > V16_MAX_MARKET_SLOTS_N
+            || self.max_portfolio_assets as u32 > self.max_market_slots
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -1237,7 +1257,7 @@ pub struct MarketGroupV16 {
     pub funding_epoch: u64,
     pub slot_last: u64,
     pub current_slot: u64,
-    pub assets: [AssetStateV16; V16_MAX_PORTFOLIO_ASSETS_N],
+    pub assets: [AssetStateV16; V16_MAX_MARKET_SLOTS_N],
     pub bankruptcy_hlock_active: bool,
     pub threshold_stress_active: bool,
     pub loss_stale_active: bool,
@@ -1929,6 +1949,7 @@ impl ProvenanceHeaderV16Account {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct V16ConfigAccount {
     pub max_portfolio_assets: V16PodU16,
+    pub max_market_slots: V16PodU32,
     pub min_nonzero_mm_req: V16PodU128,
     pub min_nonzero_im_req: V16PodU128,
     pub h_min: V16PodU64,
@@ -1966,6 +1987,7 @@ impl V16ConfigAccount {
     pub fn from_runtime(value: &V16Config) -> Self {
         Self {
             max_portfolio_assets: V16PodU16::new(value.max_portfolio_assets),
+            max_market_slots: V16PodU32::new(value.max_market_slots),
             min_nonzero_mm_req: V16PodU128::new(value.min_nonzero_mm_req),
             min_nonzero_im_req: V16PodU128::new(value.min_nonzero_im_req),
             h_min: V16PodU64::new(value.h_min),
@@ -2017,6 +2039,7 @@ impl V16ConfigAccount {
     pub fn try_to_runtime(&self) -> V16Result<V16Config> {
         let out = V16Config {
             max_portfolio_assets: self.max_portfolio_assets.get(),
+            max_market_slots: self.max_market_slots.get(),
             min_nonzero_mm_req: self.min_nonzero_mm_req.get(),
             min_nonzero_im_req: self.min_nonzero_im_req.get(),
             h_min: self.h_min.get(),
@@ -2571,13 +2594,47 @@ impl MarketGroupV16HeaderAccount {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    pub fn grow_asset_slot_capacity_not_atomic(
+        &mut self,
+        new_asset_slot_capacity: u32,
+        new_max_market_slots: u32,
+    ) -> V16Result<()> {
+        let mut config = self.config.try_to_runtime()?;
+        let old_capacity = self.asset_slot_capacity.get();
+        if decode_market_mode(self.mode)? != MarketModeV16::Live
+            || new_asset_slot_capacity < old_capacity
+            || new_asset_slot_capacity as usize > V16_MAX_MARKET_SLOTS_N
+            || new_max_market_slots < config.max_market_slots
+            || new_max_market_slots > new_asset_slot_capacity
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        config.max_market_slots = new_max_market_slots;
+        config.validate_public_user_fund_shape()?;
+        self.asset_slot_capacity = V16PodU32::new(new_asset_slot_capacity);
+        self.config = V16ConfigAccount::from_runtime(&config);
+        self.asset_set_epoch = V16PodU64::new(
+            self.asset_set_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.risk_epoch = V16PodU64::new(
+            self.risk_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        Ok(())
+    }
+
     #[cfg(not(target_os = "solana"))]
     pub fn from_runtime_with_capacity(
         value: &MarketGroupV16,
         asset_slot_capacity: usize,
     ) -> V16Result<Self> {
         if asset_slot_capacity > u32::MAX as usize
-            || asset_slot_capacity < value.config.max_portfolio_assets as usize
+            || asset_slot_capacity < value.config.max_market_slots as usize
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -2628,14 +2685,14 @@ impl MarketGroupV16HeaderAccount {
         let config = self.config.try_to_runtime()?;
         let capacity = self.asset_slot_capacity.get() as usize;
         if slots.len() != capacity
-            || capacity != config.max_portfolio_assets as usize
-            || capacity > V16_MAX_PORTFOLIO_ASSETS_N
+            || capacity != config.max_market_slots as usize
+            || capacity > V16_MAX_MARKET_SLOTS_N
         {
             return Err(V16Error::InvalidConfig);
         }
-        let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut assets = [AssetStateV16::default(); V16_MAX_MARKET_SLOTS_N];
         let mut i = 0usize;
-        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+        while i < V16_MAX_MARKET_SLOTS_N {
             assets[i].lifecycle = AssetLifecycleV16::Disabled;
             assets[i].market_id = 0;
             i += 1;
@@ -2699,7 +2756,7 @@ impl MarketGroupV16HeaderAccount {
     ) -> V16Result<()> {
         let config = self.config.try_to_runtime()?;
         let capacity = self.asset_slot_capacity.get();
-        if asset_index >= capacity || asset_index as usize >= config.max_portfolio_assets as usize {
+        if asset_index >= capacity || asset_index as usize >= config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         if decode_market_mode(self.mode)? != MarketModeV16::Live
@@ -3329,7 +3386,7 @@ pub struct MarketGroupV16Account {
     pub funding_epoch: V16PodU64,
     pub slot_last: V16PodU64,
     pub current_slot: V16PodU64,
-    pub asset_slots: [EngineAssetSlotV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
+    pub asset_slots: [EngineAssetSlotV16Account; V16_MAX_MARKET_SLOTS_N],
     pub bankruptcy_hlock_active: u8,
     pub threshold_stress_active: u8,
     pub loss_stale_active: u8,
@@ -3351,9 +3408,9 @@ impl Default for MarketGroupV16Account {
 impl MarketGroupV16Account {
     #[cfg(not(target_os = "solana"))]
     pub fn from_runtime(value: &MarketGroupV16) -> Self {
-        let mut asset_slots = [EngineAssetSlotV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut asset_slots = [EngineAssetSlotV16Account::default(); V16_MAX_MARKET_SLOTS_N];
         let mut i = 0;
-        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+        while i < V16_MAX_MARKET_SLOTS_N {
             asset_slots[i] = EngineAssetSlotV16Account::from_runtime_group_slot(value, i).unwrap();
             i += 1;
         }
@@ -3398,7 +3455,7 @@ impl MarketGroupV16Account {
 
     #[cfg(not(target_os = "solana"))]
     pub fn try_to_runtime(&self) -> V16Result<MarketGroupV16> {
-        let assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let assets = [AssetStateV16::default(); V16_MAX_MARKET_SLOTS_N];
         let insurance_domain_budget = [0u128; V16_DOMAIN_COUNT];
         let insurance_domain_spent = [0u128; V16_DOMAIN_COUNT];
         let pending_domain_loss_barriers = [0u64; V16_DOMAIN_COUNT];
@@ -3449,7 +3506,7 @@ impl MarketGroupV16Account {
         };
         let mut out = out;
         let mut i = 0;
-        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+        while i < V16_MAX_MARKET_SLOTS_N {
             self.asset_slots[i].write_runtime_group_slot(&mut out, i)?;
             i += 1;
         }
@@ -3467,11 +3524,11 @@ impl MarketGroupV16 {
     #[cfg(not(target_os = "solana"))]
     pub fn new(market_group_id: [u8; 32], config: V16Config) -> V16Result<Self> {
         config.validate_public_user_fund()?;
-        let n = config.max_portfolio_assets as usize;
-        let mut assets = [AssetStateV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let n = config.max_market_slots as usize;
+        let mut assets = [AssetStateV16::default(); V16_MAX_MARKET_SLOTS_N];
         let mut source_backing_buckets = [BackingBucketV16::EMPTY; V16_DOMAIN_COUNT];
         let mut i = 0usize;
-        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+        while i < V16_MAX_MARKET_SLOTS_N {
             if i < n {
                 assets[i].market_id = (i as u64).checked_add(1).ok_or(V16Error::CounterOverflow)?;
                 let long_domain = i.checked_mul(2).ok_or(V16Error::CounterOverflow)?;
@@ -3549,7 +3606,7 @@ impl MarketGroupV16 {
             if ledger.active
                 || ledger.finalized
                 || ledger.close_id == 0
-                || ledger.asset_index as usize >= self.config.max_portfolio_assets as usize
+                || ledger.asset_index as usize >= self.config.max_market_slots as usize
                 || ledger.drift_reference_slot > ledger.max_close_slot
                 || ledger.has_irreversible_progress()
                 || ledger.residual_remaining != ledger.gross_loss_at_close_start
@@ -3565,7 +3622,7 @@ impl MarketGroupV16 {
             return Ok(());
         }
         if ledger.close_id == 0
-            || ledger.asset_index as usize >= self.config.max_portfolio_assets as usize
+            || ledger.asset_index as usize >= self.config.max_market_slots as usize
             || ledger.market_id != self.assets[ledger.asset_index as usize].market_id
             || ledger.drift_reference_slot > ledger.max_close_slot
             || ledger.max_close_slot < ledger.drift_reference_slot
@@ -3616,11 +3673,18 @@ impl MarketGroupV16 {
         self.validate_close_progress_ledger(account.close_progress)?;
         self.validate_resolved_payout_receipt(account.resolved_payout_receipt)?;
 
-        let n = self.config.max_portfolio_assets as usize;
-        let mut seen_assets = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let active_leg_cap = self.config.max_portfolio_assets as usize;
+        let n = self.config.max_market_slots as usize;
+        let mut seen_assets = [false; V16_MAX_MARKET_SLOTS_N];
         for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
             let bit = active_bitmap_get(account.active_bitmap, slot);
             let leg = account.legs[slot];
+            if slot >= active_leg_cap {
+                if bit || leg != PortfolioLegV16::EMPTY {
+                    return Err(V16Error::HiddenLeg);
+                }
+                continue;
+            }
             if bit != leg.active {
                 return Err(V16Error::HiddenLeg);
             }
@@ -3750,7 +3814,7 @@ impl MarketGroupV16 {
     }
 
     fn validate_account_source_credit_shape(&self, account: &PortfolioAccountV16) -> V16Result<()> {
-        let configured_domains = self.config.max_portfolio_assets as usize * 2;
+        let configured_domains = self.config.max_market_slots as usize * 2;
         let mut d = 0;
         while d < V16_DOMAIN_COUNT {
             let numeric_zero_source_domain = account.source_claim_bound_num[d] == 0
@@ -3915,7 +3979,7 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
         optional_deposit: u128,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<()> {
         self.validate_account_shape(account)?;
         let ledger = account.close_progress;
@@ -4139,7 +4203,7 @@ impl MarketGroupV16 {
         old_abs_q: u128,
         price: u64,
     ) -> V16Result<HealthCertV16> {
-        if asset_index >= self.config.max_portfolio_assets as usize
+        if asset_index >= self.config.max_market_slots as usize
             || price == 0
             || price > MAX_ORACLE_PRICE
         {
@@ -4331,7 +4395,7 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
         amount: u128,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<()> {
         if amount == 0 {
             return Ok(());
@@ -4390,7 +4454,7 @@ impl MarketGroupV16 {
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<u128> {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -4481,7 +4545,7 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
     ) -> V16Result<u128> {
-        let configured_domains = self.config.max_portfolio_assets as usize * 2;
+        let configured_domains = self.config.max_market_slots as usize * 2;
         let mut impaired_effective = 0u128;
         let mut d = 0;
         while d < configured_domains {
@@ -4707,7 +4771,7 @@ impl MarketGroupV16 {
         basis_pos_q: i128,
     ) -> V16Result<()> {
         self.validate_portfolio_account_provenance(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         self.require_asset_active_for_risk_increase(asset_index)?;
@@ -4807,7 +4871,7 @@ impl MarketGroupV16 {
         asset_index: usize,
     ) -> V16Result<()> {
         self.validate_account_shape(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
@@ -4919,7 +4983,7 @@ impl MarketGroupV16 {
         asset_index: usize,
     ) -> V16Result<()> {
         self.validate_account_shape(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let leg_slot = self.require_active_leg_slot_for_asset(account, asset_index)?;
@@ -4969,7 +5033,7 @@ impl MarketGroupV16 {
     }
 
     fn asset_has_target_effective_lag(&self, asset_index: usize) -> V16Result<bool> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let asset = self.assets[asset_index];
@@ -4990,7 +5054,7 @@ impl MarketGroupV16 {
     pub fn full_account_refresh(
         &mut self,
         account: &mut PortfolioAccountV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<HealthCertV16> {
         self.validate_account_shape(account)?;
         self.reconcile_account_source_credit_liens_not_atomic(account)?;
@@ -5022,10 +5086,7 @@ impl MarketGroupV16 {
                 continue;
             }
             let asset_index = leg.asset_index as usize;
-            let price = effective_prices[asset_index];
-            if price == 0 || price > MAX_ORACLE_PRICE {
-                return Err(V16Error::InvalidConfig);
-            }
+            let price = effective_price_at(effective_prices, asset_index)?;
             let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
             let leg_initial = margin_requirement(
                 risk_notional,
@@ -5100,7 +5161,7 @@ impl MarketGroupV16 {
         endpoint_delta_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
         self.validate_account_shape(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let leg = self.active_leg_for_asset(account, asset_index)?;
@@ -5226,11 +5287,11 @@ impl MarketGroupV16 {
     fn settle_account_for_position_action_and_refresh_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<HealthCertV16> {
         self.validate_account_shape(account)?;
         self.reconcile_account_source_credit_liens_not_atomic(account)?;
-        let n = self.config.max_portfolio_assets as usize;
+        let n = self.config.max_market_slots as usize;
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
         let mut worst_case_loss = 0u128;
@@ -5253,10 +5314,7 @@ impl MarketGroupV16 {
                     return Err(V16Error::BStale);
                 }
             }
-            let price = effective_prices[i];
-            if price == 0 || price > MAX_ORACLE_PRICE {
-                return Err(V16Error::InvalidConfig);
-            }
+            let price = effective_price_at(effective_prices, i)?;
             let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
             let leg_initial = margin_requirement(
                 risk_notional,
@@ -5321,7 +5379,7 @@ impl MarketGroupV16 {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        if asset_index >= self.config.max_portfolio_assets as usize
+        if asset_index >= self.config.max_market_slots as usize
             || effective_price == 0
             || effective_price > MAX_ORACLE_PRICE
             || funding_rate_e9.unsigned_abs() > self.config.max_abs_funding_e9_per_slot as u128
@@ -5420,7 +5478,7 @@ impl MarketGroupV16 {
         long_account: &mut PortfolioAccountV16,
         short_account: &mut PortfolioAccountV16,
         request: TradeRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<TradeOutcomeV16> {
         let mut staged_group = *self;
         let mut staged_long = *long_account;
@@ -5442,7 +5500,7 @@ impl MarketGroupV16 {
         long_account: &mut PortfolioAccountV16,
         short_account: &mut PortfolioAccountV16,
         request: TradeRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<TradeOutcomeV16> {
         self.execute_trade_with_fee_inner(long_account, short_account, request, effective_prices)
     }
@@ -5452,9 +5510,9 @@ impl MarketGroupV16 {
         long_account: &mut PortfolioAccountV16,
         short_account: &mut PortfolioAccountV16,
         request: TradeRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<TradeOutcomeV16> {
-        if request.asset_index >= self.config.max_portfolio_assets as usize
+        if request.asset_index >= self.config.max_market_slots as usize
             || request.size_q == 0
             || request.size_q > MAX_TRADE_SIZE_Q
             || request.exec_price == 0
@@ -5526,13 +5584,13 @@ impl MarketGroupV16 {
             long_account,
             request.asset_index,
             long_old_abs,
-            effective_prices[request.asset_index],
+            effective_price_at(effective_prices, request.asset_index)?,
         )?;
         self.recertify_account_after_trade_delta(
             short_account,
             request.asset_index,
             short_old_abs,
-            effective_prices[request.asset_index],
+            effective_price_at(effective_prices, request.asset_index)?,
         )?;
         if risk_increasing && !locked {
             self.create_initial_margin_source_lien_if_needed(long_account)?;
@@ -5558,12 +5616,12 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
         request: LiquidationRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<LiquidationOutcomeV16> {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        if request.asset_index >= self.config.max_portfolio_assets as usize
+        if request.asset_index >= self.config.max_market_slots as usize
             || request.close_q == 0
             || request.fee_bps
                 > self
@@ -5617,7 +5675,10 @@ impl MarketGroupV16 {
             return Err(V16Error::RecoveryRequired);
         }
         self.preflight_liquidation_residual_durability(request.asset_index, leg.side, account)?;
-        let fee_notional = risk_notional_ceil(close_q, effective_prices[request.asset_index])?;
+        let fee_notional = risk_notional_ceil(
+            close_q,
+            effective_price_at(effective_prices, request.asset_index)?,
+        )?;
         let fee = checked_fee_bps(fee_notional, request.fee_bps)?
             .max(self.config.min_liquidation_abs)
             .min(self.config.liquidation_fee_cap);
@@ -5692,7 +5753,7 @@ impl MarketGroupV16 {
         b_delta_budget: u128,
     ) -> V16Result<DeadLegForfeitOutcomeV16> {
         self.validate_account_shape(account)?;
-        if asset_index >= self.config.max_portfolio_assets as usize || b_delta_budget == 0 {
+        if asset_index >= self.config.max_market_slots as usize || b_delta_budget == 0 {
             return Err(V16Error::InvalidLeg);
         }
         let leg = self.active_leg_for_asset(account, asset_index)?;
@@ -5816,13 +5877,12 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
         request: RebalanceRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<RebalanceOutcomeV16> {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
-        if request.asset_index >= self.config.max_portfolio_assets as usize || request.reduce_q == 0
-        {
+        if request.asset_index >= self.config.max_market_slots as usize || request.reduce_q == 0 {
             return Err(V16Error::InvalidConfig);
         }
         self.require_asset_live_reducible(request.asset_index)?;
@@ -5865,7 +5925,7 @@ impl MarketGroupV16 {
         &mut self,
         account: &mut PortfolioAccountV16,
         request: PermissionlessCrankRequestV16,
-        effective_prices: &[u64; V16_MAX_PORTFOLIO_ASSETS_N],
+        effective_prices: &[u64],
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_account_shape(account)?;
         if self.mode != MarketModeV16::Live
@@ -5876,7 +5936,7 @@ impl MarketGroupV16 {
         let protective_progress = match request.action {
             PermissionlessCrankActionV16::Refresh => {
                 let touches_accrued_asset = request.asset_index
-                    < self.config.max_portfolio_assets as usize
+                    < self.config.max_market_slots as usize
                     && self
                         .active_leg_slot_for_asset(account, request.asset_index)?
                         .is_some();
@@ -6286,7 +6346,7 @@ impl MarketGroupV16 {
         bankrupt_side: SideV16,
         residual_remaining: u128,
     ) -> V16Result<BResidualBookingOutcomeV16> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         if residual_remaining == 0 {
@@ -6480,7 +6540,7 @@ impl MarketGroupV16 {
             return Ok(());
         }
         let asset_index = ledger.asset_index as usize;
-        if asset_index < self.config.max_portfolio_assets as usize
+        if asset_index < self.config.max_market_slots as usize
             && self
                 .active_leg_slot_for_asset(account, asset_index)?
                 .is_some()
@@ -6500,7 +6560,7 @@ impl MarketGroupV16 {
         bankrupt_side: SideV16,
         close_q: u128,
     ) -> V16Result<QuantityAdlOutcomeV16> {
-        if asset_index >= self.config.max_portfolio_assets as usize || close_q == 0 {
+        if asset_index >= self.config.max_market_slots as usize || close_q == 0 {
             return Err(V16Error::InvalidLeg);
         }
         let opp = opposite_side(bankrupt_side);
@@ -6581,7 +6641,7 @@ impl MarketGroupV16 {
     }
 
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::LockActive);
         }
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
@@ -6658,7 +6718,7 @@ impl MarketGroupV16 {
         asset_index: usize,
         side: SideV16,
     ) -> V16Result<()> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let asset = &mut self.assets[asset_index];
@@ -6821,12 +6881,12 @@ impl MarketGroupV16 {
             if self.pending_domain_loss_barriers[d] > 1 {
                 return Err(V16Error::InvalidConfig);
             }
-            if d >= self.config.max_portfolio_assets as usize * 2
+            if d >= self.config.max_market_slots as usize * 2
                 && self.pending_domain_loss_barriers[d] != 0
             {
                 return Err(V16Error::InvalidConfig);
             }
-            if d >= self.config.max_portfolio_assets as usize * 2 {
+            if d >= self.config.max_market_slots as usize * 2 {
                 if self.source_credit[d] != SourceCreditStateV16::EMPTY
                     || self.source_backing_buckets[d] != BackingBucketV16::EMPTY
                     || self.insurance_credit_reservations[d] != InsuranceCreditReservationV16::EMPTY
@@ -6854,7 +6914,7 @@ impl MarketGroupV16 {
         if live_source_credit_insurance_atoms > self.insurance {
             return Err(V16Error::InvalidConfig);
         }
-        for i in 0..self.config.max_portfolio_assets as usize {
+        for i in 0..self.config.max_market_slots as usize {
             let asset = self.assets[i];
             if matches!(asset.lifecycle, AssetLifecycleV16::Disabled) {
                 if asset.market_id != 0 {
@@ -7287,7 +7347,7 @@ impl MarketGroupV16 {
             .ok_or(V16Error::CounterOverflow)?;
         let mut live_source_credit_insurance_atoms = 0u128;
         let mut d = 0;
-        while d < self.config.max_portfolio_assets as usize * 2 {
+        while d < self.config.max_market_slots as usize * 2 {
             let reserved_num = if d == domain {
                 new_reserved
             } else {
@@ -7539,7 +7599,7 @@ impl MarketGroupV16 {
         let mut remaining = effective_credit;
         let mut d = 0;
         while d < V16_DOMAIN_COUNT && remaining != 0 {
-            if d >= self.config.max_portfolio_assets as usize * 2 {
+            if d >= self.config.max_market_slots as usize * 2 {
                 break;
             }
             let rate = self.source_credit[d].credit_rate_num;
@@ -7628,7 +7688,7 @@ impl MarketGroupV16 {
         let mut insurance_credit_consumed = 0u128;
         let mut d = 0;
         while d < V16_DOMAIN_COUNT && remaining != 0 {
-            if d >= self.config.max_portfolio_assets as usize * 2 {
+            if d >= self.config.max_market_slots as usize * 2 {
                 break;
             }
             let rate = self.source_credit[d].credit_rate_num;
@@ -7835,7 +7895,7 @@ impl MarketGroupV16 {
     }
 
     fn validate_source_domain_index(&self, domain: usize) -> V16Result<()> {
-        if domain >= self.config.max_portfolio_assets as usize * 2 {
+        if domain >= self.config.max_market_slots as usize * 2 {
             return Err(V16Error::InvalidLeg);
         }
         Ok(())
@@ -8047,7 +8107,7 @@ impl MarketGroupV16 {
     }
 
     fn side_mode_for(&self, asset_index: usize, side: SideV16) -> V16Result<SideModeV16> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let asset = self.assets[asset_index];
@@ -8058,7 +8118,7 @@ impl MarketGroupV16 {
     }
 
     fn validate_configured_asset_index(&self, asset_index: usize) -> V16Result<()> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         Ok(())
@@ -8770,7 +8830,7 @@ impl MarketGroupV16 {
     }
 
     fn insurance_domain_index(&self, asset_index: usize, side: SideV16) -> V16Result<usize> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let domain = asset_index
@@ -8843,7 +8903,7 @@ impl MarketGroupV16 {
         if delta_q == 0 {
             return Ok(false);
         }
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         let current = signed_position(self.active_leg_for_asset(account, asset_index)?);
@@ -8982,7 +9042,7 @@ impl MarketGroupV16 {
         bankrupt_side: SideV16,
         residual_remaining: u128,
     ) -> V16Result<u128> {
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         if residual_remaining == 0 {
@@ -9049,7 +9109,7 @@ impl MarketGroupV16 {
         {
             return false;
         }
-        let active_domains = self.config.max_portfolio_assets as usize * 2;
+        let active_domains = self.config.max_market_slots as usize * 2;
         let mut d = 0;
         while d < active_domains {
             if self.pending_domain_loss_barriers[d] != 0 {
@@ -9057,7 +9117,7 @@ impl MarketGroupV16 {
             }
             d += 1;
         }
-        for i in 0..self.config.max_portfolio_assets as usize {
+        for i in 0..self.config.max_market_slots as usize {
             let asset = self.assets[i];
             if asset.stored_pos_count_long != 0
                 || asset.stored_pos_count_short != 0
@@ -9188,7 +9248,7 @@ impl MarketGroupV16 {
         if delta_q == 0 {
             return Ok(());
         }
-        if asset_index >= self.config.max_portfolio_assets as usize {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
         }
         if self.position_delta_blocked_by_pending_domain_loss_barrier(
@@ -9820,6 +9880,16 @@ fn validate_basis_or_zero(basis_pos_q: i128) -> V16Result<()> {
     }
 }
 
+fn effective_price_at(effective_prices: &[u64], asset_index: usize) -> V16Result<u64> {
+    let price = *effective_prices
+        .get(asset_index)
+        .ok_or(V16Error::InvalidConfig)?;
+    if price == 0 || price > MAX_ORACLE_PRICE {
+        return Err(V16Error::InvalidConfig);
+    }
+    Ok(price)
+}
+
 fn signed_position(leg: PortfolioLegV16) -> i128 {
     if !leg.active {
         0
@@ -9899,7 +9969,7 @@ fn validate_basis(basis_pos_q: i128) -> V16Result<()> {
 fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
     validate_non_min_i128(leg.k_snap)?;
     validate_non_min_i128(leg.f_snap)?;
-    if leg.asset_index as usize >= V16_DOMAIN_COUNT / 2 {
+    if leg.asset_index as usize >= V16_MAX_MARKET_SLOTS_N {
         return Err(V16Error::InvalidLeg);
     }
     let current_loss_weight = if leg.basis_pos_q == 0 {

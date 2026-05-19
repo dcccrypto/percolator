@@ -1678,7 +1678,7 @@ fn proof_v16_portfolio_leg_wire_roundtrip_preserves_asset_index() {
 }
 
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(150)]
 #[kani::solver(cadical)]
 fn proof_v16_validate_account_shape_binds_compact_leg_slot_to_asset_identity() {
     let raw_idx: u8 = kani::any();
@@ -3244,7 +3244,7 @@ fn proof_v16_attach_then_clear_leg_restores_account_local_counters_for_long() {
 }
 
 #[kani::proof]
-#[kani::unwind(80)]
+#[kani::unwind(150)]
 #[kani::solver(cadical)]
 fn proof_v16_compact_leg_slots_preserve_asset_identity() {
     let (market, account_id, owner) = concrete_ids();
@@ -3280,6 +3280,54 @@ fn proof_v16_compact_leg_slots_preserve_asset_identity() {
     assert_eq!(account.legs[1].asset_index, 1);
     assert_eq!(account.active_bitmap, bitmap(&[0, 1]));
     assert_eq!(group.validate_account_shape(&account), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(150)]
+#[kani::solver(cadical)]
+fn proof_v16_market_slot_can_exceed_active_leg_cap() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(
+        market,
+        V16Config::public_user_fund_with_market_slots(4, 32, 0, 1),
+    )
+    .unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let asset_index = 17usize;
+
+    group
+        .attach_leg(&mut account, asset_index, SideV16::Long, 11)
+        .unwrap();
+    assert_eq!(account.active_bitmap, bitmap(&[0]));
+    assert!(account.legs[0].active);
+    assert_eq!(account.legs[0].asset_index as usize, asset_index);
+    assert_eq!(
+        account.legs[0].market_id,
+        group.assets[asset_index].market_id
+    );
+    assert_eq!(group.assets[asset_index].oi_eff_long_q, 11);
+    assert_eq!(group.validate_account_shape(&account), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_config_separates_active_leg_and_market_slot_caps() {
+    let valid = V16Config::public_user_fund_with_market_slots(4, 32, 0, 1);
+    assert_eq!(valid.validate_public_user_fund(), Ok(()));
+
+    let too_many_active_legs = V16Config::public_user_fund_with_market_slots(33, 32, 0, 1);
+    assert_eq!(
+        too_many_active_legs.validate_public_user_fund_shape(),
+        Err(V16Error::InvalidConfig)
+    );
+
+    let too_many_market_slots = V16Config::public_user_fund_with_market_slots(4, 65, 0, 1);
+    assert_eq!(
+        too_many_market_slots.validate_public_user_fund_shape(),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[kani::proof]

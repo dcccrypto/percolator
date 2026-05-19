@@ -10,7 +10,7 @@ use percolator::v16::{
     SideV16, SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
-    V16_DOMAIN_COUNT, V16_MAX_PORTFOLIO_ASSETS_N,
+    V16_DOMAIN_COUNT, V16_MAX_MARKET_SLOTS_N, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE,
@@ -2734,6 +2734,68 @@ fn v16_portfolio_legs_are_compact_slots_keyed_by_asset_identity() {
     assert_eq!(leg_2.market_id, g.assets[2].market_id);
     assert_eq!(a.active_bitmap, bitmap(&[0, 1]));
     assert_eq!(g.validate_account_shape(&a), Ok(()));
+}
+
+#[test]
+fn v16_market_slots_can_exceed_portfolio_active_leg_cap() {
+    let mut g = MarketGroupV16::new(
+        ids().0,
+        V16Config::public_user_fund_with_market_slots(4, 32, 0, 10),
+    )
+    .unwrap();
+    let mut a = account();
+    let asset_index = 17usize;
+
+    g.attach_leg(&mut a, asset_index, SideV16::Long, 13)
+        .unwrap();
+
+    let (slot, leg) = active_leg_for_asset(&a, asset_index).unwrap();
+    assert_eq!(slot, 0);
+    assert_eq!(a.active_bitmap, bitmap(&[0]));
+    assert_eq!(leg.asset_index as usize, asset_index);
+    assert_eq!(leg.market_id, g.assets[asset_index].market_id);
+    assert_eq!(g.assets[asset_index].oi_eff_long_q, 13);
+    assert_eq!(
+        g.source_backing_buckets[asset_index * 2].market_id,
+        g.assets[asset_index].market_id
+    );
+
+    let prices = [100u64; V16_MAX_MARKET_SLOTS_N];
+    g.full_account_refresh(&mut a, &prices).unwrap();
+    assert!(a.health_cert.valid);
+}
+
+#[test]
+fn v16_dynamic_header_can_grow_and_activate_appended_market_slot() {
+    let g = MarketGroupV16::new(
+        ids().0,
+        V16Config::public_user_fund_with_market_slots(4, 16, 0, 10),
+    )
+    .unwrap();
+    let mut header = MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, 16).unwrap();
+    header.grow_asset_slot_capacity_not_atomic(32, 32).unwrap();
+    let config = header.config.try_to_runtime().unwrap();
+    assert_eq!(header.asset_slot_capacity.get(), 32);
+    assert_eq!(config.max_portfolio_assets, 4);
+    assert_eq!(config.max_market_slots, 32);
+
+    let mut appended_slot = EngineAssetSlotV16Account::default();
+    let next_market_id = header.next_market_id.get();
+    header
+        .activate_empty_asset_slot_not_atomic(17, &mut appended_slot, 123, g.current_slot)
+        .unwrap();
+    let activated = appended_slot.asset.try_to_runtime().unwrap();
+    assert_eq!(activated.market_id, next_market_id);
+    assert_eq!(activated.effective_price, 123);
+    assert_eq!(
+        appended_slot
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .market_id,
+        activated.market_id
+    );
+    assert_eq!(header.next_market_id.get(), next_market_id + 1);
 }
 
 #[test]
