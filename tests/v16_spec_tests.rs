@@ -882,6 +882,8 @@ fn v16_counterparty_lien_lifecycle_never_inflates_available_backing() {
     g.consume_source_credit_lien_from_counterparty_not_atomic(0, 20)
         .unwrap();
     assert_eq!(g.source_credit[0].spent_backing_num, 20);
+    assert_eq!(g.source_credit[0].provider_receivable_num, 20);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 20);
     assert_eq!(g.source_credit_available_backing_num(0), Ok(80));
 
     g.create_source_credit_lien_from_counterparty_not_atomic(0, 10)
@@ -895,6 +897,74 @@ fn v16_counterparty_lien_lifecycle_never_inflates_available_backing() {
     g.expire_source_backing_bucket_not_atomic(0, 10).unwrap();
     assert_eq!(g.source_credit_available_backing_num(0), Ok(0));
     assert_eq!(g.source_credit[0].credit_rate_num, 0);
+}
+
+#[test]
+fn v16_consumed_counterparty_backing_is_refilled_by_future_source_backing() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 80)
+        .unwrap();
+    g.consume_source_credit_lien_from_counterparty_not_atomic(0, 80)
+        .unwrap();
+
+    assert_eq!(g.source_credit[0].spent_backing_num, 80);
+    assert_eq!(g.source_credit[0].provider_receivable_num, 80);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 80);
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(20));
+
+    g.add_fresh_counterparty_backing_not_atomic(0, 50, 10)
+        .unwrap();
+    assert_eq!(g.source_credit[0].provider_receivable_num, 30);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 30);
+    assert_eq!(g.source_credit[0].fresh_reserved_backing_num, 70);
+    assert_eq!(g.source_backing_buckets[0].fresh_unliened_backing_num, 70);
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(70));
+
+    g.add_fresh_counterparty_backing_not_atomic(0, 50, 10)
+        .unwrap();
+    assert_eq!(g.source_credit[0].provider_receivable_num, 0);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 0);
+    assert_eq!(g.source_credit[0].fresh_reserved_backing_num, 120);
+    assert_eq!(g.source_backing_buckets[0].fresh_unliened_backing_num, 120);
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(120));
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
+fn v16_fully_consumed_backing_bucket_can_be_refilled_without_losing_receivable() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 40, 40)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 40, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 40)
+        .unwrap();
+    g.consume_source_credit_lien_from_counterparty_not_atomic(0, 40)
+        .unwrap();
+
+    assert_eq!(
+        g.source_backing_buckets[0].status,
+        percolator::v16::BackingBucketStatusV16::Expired
+    );
+    assert_eq!(g.source_credit[0].provider_receivable_num, 40);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 40);
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(0));
+
+    g.add_fresh_counterparty_backing_not_atomic(0, 20, 20)
+        .unwrap();
+    assert_eq!(
+        g.source_backing_buckets[0].status,
+        percolator::v16::BackingBucketStatusV16::Fresh
+    );
+    assert_eq!(g.source_credit[0].provider_receivable_num, 20);
+    assert_eq!(g.source_backing_buckets[0].consumed_liened_backing_num, 20);
+    assert_eq!(g.source_credit[0].fresh_reserved_backing_num, 20);
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(20));
+    g.assert_public_invariants().unwrap();
 }
 
 #[test]
@@ -931,6 +1001,32 @@ fn v16_counterparty_lien_consume_source_overflow_rejects_before_mutation() {
     g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
         .unwrap();
     g.source_credit[0].spent_backing_num = u128::MAX;
+
+    let source_before = g.source_credit[0];
+    let bucket_before = g.source_backing_buckets[0];
+    let risk_epoch_before = g.risk_epoch;
+
+    assert_eq!(
+        g.consume_source_credit_lien_from_counterparty_not_atomic(0, 1),
+        Err(V16Error::CounterOverflow)
+    );
+    assert_eq!(g.source_credit[0], source_before);
+    assert_eq!(g.source_backing_buckets[0], bucket_before);
+    assert_eq!(g.risk_epoch, risk_epoch_before);
+}
+
+#[test]
+fn v16_counterparty_lien_consume_receivable_overflow_rejects_before_mutation() {
+    let mut g = group();
+    g.add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    g.create_source_credit_lien_from_counterparty_not_atomic(0, 30)
+        .unwrap();
+    g.source_credit[0].provider_receivable_num = u128::MAX;
+    g.source_credit[0].spent_backing_num = u128::MAX;
+    g.source_backing_buckets[0].consumed_liened_backing_num = u128::MAX;
 
     let source_before = g.source_credit[0];
     let bucket_before = g.source_backing_buckets[0];
@@ -2388,10 +2484,80 @@ fn v16_passive_backing_consumption_preserves_senior_accounting_without_wrapper_i
     assert_eq!(winner.capital, 500);
     assert_eq!(winner.pnl, 0);
     assert_eq!(g.source_credit[0].spent_backing_num, 500 * BOUND_SCALE);
+    assert_eq!(
+        g.source_credit[0].provider_receivable_num,
+        500 * BOUND_SCALE
+    );
     assert_eq!(g.source_credit[0].fresh_reserved_backing_num, 0);
     assert_eq!(
         g.c_tot, g.vault,
         "counterparty-backed conversion must not inflate senior account capital above vault stock"
+    );
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
+fn v16_future_capital_backed_loss_refills_consumed_counterparty_backing() {
+    let mut g = group();
+    let mut first_loser = account();
+    let mut second_loser = account_with_id(49);
+    let mut winner = account_with_id(50);
+    let mut second_opposing = account_with_id(51);
+
+    g.deposit_not_atomic(&mut first_loser, 1_000).unwrap();
+    g.deposit_not_atomic(&mut second_loser, 1_000).unwrap();
+    g.attach_leg(&mut first_loser, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut winner, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].k_long = -(500 * ADL_ONE as i128);
+    g.assets[0].k_short = 500 * ADL_ONE as i128;
+
+    g.full_account_refresh(&mut first_loser, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.clear_leg(&mut first_loser, 0).unwrap();
+    g.clear_leg(&mut winner, 0).unwrap();
+    g.full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(
+        g.convert_released_pnl_to_capital_not_atomic(&mut winner),
+        Ok(500)
+    );
+    assert_eq!(
+        g.source_credit[0].provider_receivable_num,
+        500 * BOUND_SCALE
+    );
+    assert_eq!(g.source_credit_available_backing_num(0), Ok(0));
+
+    g.attach_leg(&mut second_loser, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(
+        &mut second_opposing,
+        0,
+        SideV16::Short,
+        -(POS_SCALE as i128),
+    )
+    .unwrap();
+    g.assets[0].k_long = -(700 * ADL_ONE as i128);
+    g.full_account_refresh(&mut second_loser, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(second_loser.capital, 800);
+    assert_eq!(second_loser.pnl, 0);
+    assert_eq!(
+        g.source_credit[0].provider_receivable_num,
+        300 * BOUND_SCALE,
+        "new source-domain capital backing must first repay the outstanding provider receivable"
+    );
+    assert_eq!(
+        g.source_backing_buckets[0].consumed_liened_backing_num,
+        300 * BOUND_SCALE
+    );
+    assert_eq!(
+        g.source_credit_available_backing_num(0),
+        Ok(200 * BOUND_SCALE)
     );
     g.assert_public_invariants().unwrap();
 }

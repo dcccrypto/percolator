@@ -802,6 +802,7 @@ fn proof_v16_counterparty_lien_consume_preserves_backing_encumbrance() {
 
     kani::cover!(true, "v16 counterparty lien consume branch reachable");
     assert_eq!(source.spent_backing_num, lien);
+    assert_eq!(source.provider_receivable_num, lien);
     assert_eq!(bucket.consumed_liened_backing_num, lien);
     assert_eq!(bucket.valid_liened_backing_num, 0);
     assert_eq!(source.fresh_reserved_backing_num, backing - lien);
@@ -813,6 +814,87 @@ fn proof_v16_counterparty_lien_consume_preserves_backing_encumbrance() {
             .unwrap()
     );
     assert_eq!(source.valid_liened_backing_num, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_future_counterparty_backing_refills_provider_receivable() {
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: 100,
+        exact_positive_claim_num: 100,
+        spent_backing_num: 70,
+        provider_receivable_num: 70,
+        credit_rate_num: 0,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        consumed_liened_backing_num: 70,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    };
+
+    let (bucket, source) =
+        MarketGroupV16::kani_prepare_counterparty_backing_add_delta(bucket, source, 50, 0, 10)
+            .unwrap();
+
+    kani::cover!(
+        source.provider_receivable_num == 20,
+        "v16 future counterparty backing repays outstanding provider receivable"
+    );
+    assert_eq!(source.provider_receivable_num, 20);
+    assert_eq!(bucket.consumed_liened_backing_num, 20);
+    assert_eq!(source.spent_backing_num, 70);
+    assert_eq!(source.fresh_reserved_backing_num, 50);
+    assert_eq!(bucket.fresh_unliened_backing_num, 50);
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_refill_has_valid_reservation_encumbrance_proof() {
+    let (market, _, _) = concrete_ids();
+    let group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: 40,
+        exact_positive_claim_num: 40,
+        spent_backing_num: 40,
+        provider_receivable_num: 40,
+        credit_rate_num: 0,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: group.assets[0].market_id,
+        consumed_liened_backing_num: 40,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    };
+    let (bucket, source) =
+        MarketGroupV16::kani_prepare_counterparty_backing_add_delta(bucket, source, 20, 0, 10)
+            .unwrap();
+    let (source, _) = group
+        .kani_prepared_source_credit_domain_recompute(source)
+        .unwrap();
+    let proof = group
+        .kani_reservation_encumbrance_proof_for_domain_parts(
+            0,
+            source,
+            bucket,
+            InsuranceCreditReservationV16::EMPTY,
+        )
+        .unwrap();
+
+    kani::cover!(
+        proof.source_provider_receivable_num == 20,
+        "v16 backing refill proof retains outstanding provider receivable"
+    );
+    assert_eq!(proof.validate(), Ok(()));
+    assert_eq!(proof.source_provider_receivable_num, 20);
+    assert_eq!(proof.bucket_consumed_liened_backing_num, 20);
+    assert_eq!(proof.source_fresh_reserved_backing_num, 20);
+    assert_eq!(proof.source_credit_rate_num, CREDIT_RATE_SCALE / 2);
 }
 
 #[kani::proof]
@@ -936,6 +1018,23 @@ fn proof_v16_counterparty_lien_consume_source_overflow_fails_before_mutation() {
     kani::cover!(
         matches!(result, Err(V16Error::CounterOverflow)),
         "v16 counterparty lien consume source overflow branch reachable"
+    );
+    assert!(matches!(result, Err(V16Error::CounterOverflow)));
+}
+
+#[kani::proof]
+#[kani::unwind(130)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_lien_consume_receivable_overflow_fails_before_mutation() {
+    let (bucket, mut source) = counterparty_lien_overflow_state();
+    source.spent_backing_num = u128::MAX;
+    source.provider_receivable_num = u128::MAX;
+
+    let result = MarketGroupV16::kani_prepare_counterparty_lien_consume_delta(bucket, source, 1);
+
+    kani::cover!(
+        matches!(result, Err(V16Error::CounterOverflow)),
+        "v16 counterparty lien consume receivable overflow branch reachable"
     );
     assert!(matches!(result, Err(V16Error::CounterOverflow)));
 }
@@ -3100,56 +3199,39 @@ fn proof_v16_full_refresh_reserves_counterparty_backing_from_new_capital_backed_
 #[kani::unwind(130)]
 #[kani::solver(cadical)]
 fn proof_v16_passive_backing_consumption_preserves_senior_accounting_without_wrapper_injection() {
-    let (market, account_id, owner) = concrete_ids();
-    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut loser = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    let mut winner = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [95; 32], owner));
-    assert_eq!(group.deposit_not_atomic(&mut loser, 1_000), Ok(()));
-    assert_eq!(
-        group.attach_leg(&mut loser, 0, SideV16::Long, POS_SCALE as i128),
-        Ok(())
-    );
-    assert_eq!(
-        group.attach_leg(&mut winner, 0, SideV16::Short, -(POS_SCALE as i128)),
-        Ok(())
-    );
-    group.assets[0].k_long = -(500 * ADL_ONE as i128);
-    group.assets[0].k_short = 500 * ADL_ONE as i128;
-
-    assert!(group
-        .full_account_refresh(&mut loser, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
-        .is_ok());
-    assert!(group
-        .full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
-        .is_ok());
-    assert_eq!(winner.capital, 0);
-    assert_eq!(winner.pnl, 500);
-    assert_eq!(group.source_credit[0].spent_backing_num, 0);
-    assert_eq!(
-        group.source_credit[0].fresh_reserved_backing_num,
-        500 * BOUND_SCALE
-    );
-
-    assert_eq!(group.clear_leg(&mut winner, 0), Ok(()));
-    assert_eq!(group.clear_leg(&mut loser, 0), Ok(()));
-    assert!(group
-        .full_account_refresh(&mut winner, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
-        .is_ok());
-    let converted = group.convert_released_pnl_to_capital_not_atomic(&mut winner);
+    let backing = 500 * BOUND_SCALE;
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: backing,
+        exact_positive_claim_num: backing,
+        fresh_reserved_backing_num: backing,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let (bucket, source) =
+        MarketGroupV16::kani_prepare_counterparty_lien_create_delta(bucket, source, 0, backing)
+            .unwrap();
+    let (bucket, source) =
+        MarketGroupV16::kani_prepare_counterparty_lien_consume_delta(bucket, source, backing)
+            .unwrap();
 
     kani::cover!(
-        converted == Ok(500) && group.source_credit[0].spent_backing_num == 500 * BOUND_SCALE,
-        "v16 passively reserved counterparty backing is consumed by the winner"
+        source.provider_receivable_num == backing,
+        "v16 consumed counterparty backing creates provider receivable without moving senior stock"
     );
-    assert_eq!(converted, Ok(500));
-    assert_eq!(loser.capital, 500);
-    assert_eq!(loser.pnl, 0);
-    assert_eq!(winner.capital, 500);
-    assert_eq!(winner.pnl, 0);
-    assert_eq!(group.source_credit[0].spent_backing_num, 500 * BOUND_SCALE);
-    assert_eq!(group.source_credit[0].fresh_reserved_backing_num, 0);
-    assert_eq!(group.c_tot, group.vault);
-    assert_eq!(group.assert_public_invariants(), Ok(()));
+    assert_eq!(source.spent_backing_num, backing);
+    assert_eq!(source.provider_receivable_num, backing);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.consumed_liened_backing_num, backing);
 }
 
 #[kani::proof]

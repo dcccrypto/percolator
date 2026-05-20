@@ -839,6 +839,7 @@ pub struct SourceCreditStateV16 {
     pub exact_positive_claim_num: u128,
     pub fresh_reserved_backing_num: u128,
     pub spent_backing_num: u128,
+    pub provider_receivable_num: u128,
     pub valid_liened_backing_num: u128,
     pub impaired_liened_backing_num: u128,
     pub insurance_credit_reserved_num: u128,
@@ -854,6 +855,7 @@ impl SourceCreditStateV16 {
         exact_positive_claim_num: 0,
         fresh_reserved_backing_num: 0,
         spent_backing_num: 0,
+        provider_receivable_num: 0,
         valid_liened_backing_num: 0,
         impaired_liened_backing_num: 0,
         insurance_credit_reserved_num: 0,
@@ -1562,8 +1564,11 @@ pub struct ReservationEncumbranceProofV16 {
     pub exact_positive_claim_num: u128,
     pub positive_claim_bound_num: u128,
     pub source_fresh_reserved_backing_num: u128,
+    pub source_spent_backing_num: u128,
+    pub source_provider_receivable_num: u128,
     pub bucket_fresh_unliened_backing_num: u128,
     pub bucket_valid_liened_backing_num: u128,
+    pub bucket_consumed_liened_backing_num: u128,
     pub source_valid_liened_backing_num: u128,
     pub source_impaired_liened_backing_num: u128,
     pub bucket_impaired_liened_backing_num: u128,
@@ -1583,6 +1588,8 @@ impl ReservationEncumbranceProofV16 {
             .checked_add(self.bucket_valid_liened_backing_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if self.source_fresh_reserved_backing_num != fresh_reserved
+            || self.source_provider_receivable_num != self.bucket_consumed_liened_backing_num
+            || self.source_spent_backing_num < self.source_provider_receivable_num
             || self.source_valid_liened_backing_num != self.bucket_valid_liened_backing_num
             || self.source_impaired_liened_backing_num != self.bucket_impaired_liened_backing_num
             || self.source_insurance_credit_reserved_num
@@ -1606,7 +1613,8 @@ impl ReservationEncumbranceProofV16 {
             fresh_reserved_backing_num: self.source_fresh_reserved_backing_num,
             valid_liened_backing_num: self.source_valid_liened_backing_num,
             impaired_liened_backing_num: self.source_impaired_liened_backing_num,
-            spent_backing_num: 0,
+            spent_backing_num: self.source_spent_backing_num,
+            provider_receivable_num: self.source_provider_receivable_num,
             insurance_credit_reserved_num: self.source_insurance_credit_reserved_num,
             valid_liened_insurance_num: self.source_valid_liened_insurance_num,
             impaired_liened_insurance_num: self.source_impaired_liened_insurance_num,
@@ -2107,6 +2115,7 @@ pub struct SourceCreditStateV16Account {
     pub exact_positive_claim_num: V16PodU128,
     pub fresh_reserved_backing_num: V16PodU128,
     pub spent_backing_num: V16PodU128,
+    pub provider_receivable_num: V16PodU128,
     pub valid_liened_backing_num: V16PodU128,
     pub impaired_liened_backing_num: V16PodU128,
     pub insurance_credit_reserved_num: V16PodU128,
@@ -2123,6 +2132,7 @@ impl SourceCreditStateV16Account {
             exact_positive_claim_num: V16PodU128::new(value.exact_positive_claim_num),
             fresh_reserved_backing_num: V16PodU128::new(value.fresh_reserved_backing_num),
             spent_backing_num: V16PodU128::new(value.spent_backing_num),
+            provider_receivable_num: V16PodU128::new(value.provider_receivable_num),
             valid_liened_backing_num: V16PodU128::new(value.valid_liened_backing_num),
             impaired_liened_backing_num: V16PodU128::new(value.impaired_liened_backing_num),
             insurance_credit_reserved_num: V16PodU128::new(value.insurance_credit_reserved_num),
@@ -2139,6 +2149,7 @@ impl SourceCreditStateV16Account {
             exact_positive_claim_num: self.exact_positive_claim_num.get(),
             fresh_reserved_backing_num: self.fresh_reserved_backing_num.get(),
             spent_backing_num: self.spent_backing_num.get(),
+            provider_receivable_num: self.provider_receivable_num.get(),
             valid_liened_backing_num: self.valid_liened_backing_num.get(),
             impaired_liened_backing_num: self.impaired_liened_backing_num.get(),
             insurance_credit_reserved_num: self.insurance_credit_reserved_num.get(),
@@ -7649,23 +7660,15 @@ impl MarketGroupV16 {
         if amount == 0 || expiry_slot <= self.current_slot {
             return Err(V16Error::InvalidConfig);
         }
-        let bucket = &mut self.source_backing_buckets[domain];
-        match bucket.status {
-            BackingBucketStatusV16::Empty => {
-                bucket.status = BackingBucketStatusV16::Fresh;
-                bucket.expiry_slot = expiry_slot;
-            }
-            BackingBucketStatusV16::Fresh if bucket.expiry_slot == expiry_slot => {}
-            _ => return Err(V16Error::LockActive),
-        }
-        bucket.fresh_unliened_backing_num = bucket
-            .fresh_unliened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        self.source_credit[domain].fresh_reserved_backing_num = self.source_credit[domain]
-            .fresh_reserved_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
+        let (bucket, source) = Self::prepare_counterparty_backing_add_delta(
+            self.source_backing_buckets[domain],
+            self.source_credit[domain],
+            amount,
+            self.current_slot,
+            expiry_slot,
+        )?;
+        self.source_backing_buckets[domain] = bucket;
+        self.source_credit[domain] = source;
         self.recompute_source_credit_domain_after_mutation(domain)
     }
 
@@ -7896,6 +7899,46 @@ impl MarketGroupV16 {
         Ok((bucket, source))
     }
 
+    fn prepare_counterparty_backing_add_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+        current_slot: u64,
+        expiry_slot: u64,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 || expiry_slot <= current_slot {
+            return Err(V16Error::InvalidConfig);
+        }
+        if source.provider_receivable_num != bucket.consumed_liened_backing_num
+            || source.spent_backing_num < source.provider_receivable_num
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        match bucket.status {
+            BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired => {
+                bucket.status = BackingBucketStatusV16::Fresh;
+                bucket.expiry_slot = expiry_slot;
+            }
+            BackingBucketStatusV16::Fresh if bucket.expiry_slot == expiry_slot => {}
+            _ => return Err(V16Error::LockActive),
+        }
+        let refill = amount.min(source.provider_receivable_num);
+        if refill > bucket.consumed_liened_backing_num {
+            return Err(V16Error::CounterUnderflow);
+        }
+        bucket.consumed_liened_backing_num -= refill;
+        source.provider_receivable_num -= refill;
+        bucket.fresh_unliened_backing_num = bucket
+            .fresh_unliened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        source.fresh_reserved_backing_num = source
+            .fresh_reserved_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        Ok((bucket, source))
+    }
+
     fn prepare_counterparty_lien_release_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -7948,6 +7991,10 @@ impl MarketGroupV16 {
             .spent_backing_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
+        let next_source_receivable = source
+            .provider_receivable_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
         bucket.valid_liened_backing_num = next_bucket_valid;
         bucket.consumed_liened_backing_num = next_bucket_consumed;
         if bucket.fresh_unliened_backing_num == 0
@@ -7959,6 +8006,7 @@ impl MarketGroupV16 {
         source.valid_liened_backing_num = next_source_valid;
         source.fresh_reserved_backing_num = next_source_fresh_reserved;
         source.spent_backing_num = next_source_spent;
+        source.provider_receivable_num = next_source_receivable;
         Ok((bucket, source))
     }
 
@@ -8023,6 +8071,23 @@ impl MarketGroupV16 {
         amount: u128,
     ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
         Self::prepare_counterparty_lien_consume_delta(bucket, source, amount)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_backing_add_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+        current_slot: u64,
+        expiry_slot: u64,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        Self::prepare_counterparty_backing_add_delta(
+            bucket,
+            source,
+            amount,
+            current_slot,
+            expiry_slot,
+        )
     }
 
     #[cfg(kani)]
@@ -8906,8 +8971,11 @@ impl MarketGroupV16 {
             exact_positive_claim_num: source.exact_positive_claim_num,
             positive_claim_bound_num: source.positive_claim_bound_num,
             source_fresh_reserved_backing_num: source.fresh_reserved_backing_num,
+            source_spent_backing_num: source.spent_backing_num,
+            source_provider_receivable_num: source.provider_receivable_num,
             bucket_fresh_unliened_backing_num: bucket.fresh_unliened_backing_num,
             bucket_valid_liened_backing_num: bucket.valid_liened_backing_num,
+            bucket_consumed_liened_backing_num: bucket.consumed_liened_backing_num,
             source_valid_liened_backing_num: source.valid_liened_backing_num,
             source_impaired_liened_backing_num: source.impaired_liened_backing_num,
             bucket_impaired_liened_backing_num: bucket.impaired_liened_backing_num,
@@ -8977,6 +9045,7 @@ impl MarketGroupV16 {
     fn validate_source_credit_state_shape_static(state: SourceCreditStateV16) -> V16Result<()> {
         if state.exact_positive_claim_num > state.positive_claim_bound_num
             || state.credit_rate_num > CREDIT_RATE_SCALE
+            || state.spent_backing_num < state.provider_receivable_num
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -9063,6 +9132,7 @@ impl MarketGroupV16 {
             .checked_add(bucket.valid_liened_backing_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if source.fresh_reserved_backing_num != fresh_reserved
+            || source.provider_receivable_num != bucket.consumed_liened_backing_num
             || source.valid_liened_backing_num != bucket.valid_liened_backing_num
             || source.impaired_liened_backing_num != bucket.impaired_liened_backing_num
             || source.insurance_credit_reserved_num != reservation.insurance_credit_reserved_num

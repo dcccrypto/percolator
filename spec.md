@@ -250,6 +250,7 @@ SourceCreditState[D] {
 
     fresh_reserved_backing_num          // sum over Fresh buckets of fresh_unliened + valid_liened
     spent_backing_num                   // cumulative audit/cap counter; not a live subtrahend
+    provider_receivable_num             // outstanding consumed counterparty backing to be refilled
     valid_liened_backing_num            // sum over Fresh buckets of valid_liened
     impaired_liened_backing_num         // expired/stale lien backing, not usable for new credit
 
@@ -287,11 +288,15 @@ else:
 
 `spent_backing_num` is cumulative audit state paired with consumed liens and reduced claims. It MUST NOT be subtracted from `available_backing_num` because consumed backing is already removed from `fresh_reserved_backing_num`. Counting spent backing as both removed from fresh backing and as a live subtrahend is forbidden.
 
+`provider_receivable_num` is the outstanding principal refill owed to consumed counterparty backing for the source domain. It is not usable credit by itself and is not added to `available_backing_num`. Any future source-domain counterparty backing inflow MUST atomically reduce `provider_receivable_num` and the matching bucket `consumed_liened_backing_num` before the inflow is treated as excess new backing. The cumulative `spent_backing_num` is not reduced by refill.
+
 At all times:
 ```text
 fresh_reserved_backing_num = sum_FreshBuckets(fresh_unliened_backing_num + valid_liened_backing_num)
 valid_liened_backing_num   = sum_FreshBuckets(valid_liened_backing_num)
+provider_receivable_num    = sum_Buckets(consumed_liened_backing_num)
 fresh_reserved_backing_num >= valid_liened_backing_num
+spent_backing_num >= provider_receivable_num
 insurance_credit_reserved_num >= valid_liened_insurance_num + impaired_liened_insurance_num
 ```
 
@@ -343,7 +348,7 @@ Backing freshness is maintained with bounded rotating buckets:
 BackingBucket[D, expiry_bucket] {
     fresh_unliened_backing_num
     valid_liened_backing_num
-    consumed_liened_backing_num       // cumulative audit, already removed from fresh backing
+    consumed_liened_backing_num       // outstanding consumed principal to be refilled
     impaired_liened_backing_num
     status in {Fresh, Expired, Impaired}
 }
@@ -368,7 +373,18 @@ consume_lien_backing(bucket, amount):
     SourceCreditState.valid_liened_backing_num -= amount
     SourceCreditState.fresh_reserved_backing_num -= amount
     SourceCreditState.spent_backing_num += amount
+    SourceCreditState.provider_receivable_num += amount
     reduce or finalize the locked source-domain claim in the same atomic step
+
+add_fresh_counterparty_backing(bucket, amount):
+    require amount > 0 and bucket accepts the target freshness epoch
+    refill = min(amount, SourceCreditState.provider_receivable_num)
+    require refill <= bucket.consumed_liened_backing_num
+    bucket.consumed_liened_backing_num -= refill
+    SourceCreditState.provider_receivable_num -= refill
+    bucket.fresh_unliened_backing_num += amount
+    SourceCreditState.fresh_reserved_backing_num += amount
+    // spent_backing_num unchanged: it remains cumulative audit state
 
 release_lien_backing(bucket, amount):
     require bucket.valid_liened_backing_num >= amount
@@ -387,6 +403,10 @@ impair_lien_backing(bucket, amount):
 ```
 
 A consumed lien MUST NOT remain in `bucket.valid_liened_backing_num`. A released lien MUST NOT remain in `SourceCreditState.valid_liened_backing_num`. An impaired lien MUST NOT remain in fresh backing. These equalities are load-bearing invariants, not implementation suggestions.
+
+Consumed counterparty backing is recoverable principal, not a fee. Refill MUST be deterministic and source-domain local: a future inflow for domain `D` refills `D`'s outstanding consumed backing before it can be interpreted as excess new backing for another domain or another instance. Refill does not resurrect a consumed claim, does not reduce cumulative `spent_backing_num`, and does not create token value; it only moves independently locked backing back into the Fresh bucket while lowering the outstanding receivable.
+
+Backing fee schedules are wrapper/product policy: the wrapper may choose a fee rate from time, utilization, market profile, or provider terms. Any fee that changes account capital, provider accounting, insurance, vault stock, source credit, or backing availability MUST be charged through an engine transition with a balanced `TokenValueFlowProof` and the same source-domain freshness/lien checks. The wrapper MUST NOT hand-edit backing-fee ledger state outside the engine.
 
 Unliened backing in an expired bucket contributes zero. Liened backing in an expiring bucket MUST NOT cause `available_backing_num` underflow or inflation. On expiry, the engine MUST do one of the following before any credit-rate read:
 1. refresh and roll the bucket forward with a full account proof;
@@ -833,7 +853,9 @@ For every source domain:
 positive_claim_bound_num >= true positive claims owed by source domain * BOUND_SCALE
 fresh_reserved_backing_num = sum_FreshBuckets(fresh_unliened_backing_num + valid_liened_backing_num)
 valid_liened_backing_num   = sum_FreshBuckets(valid_liened_backing_num)
+provider_receivable_num    = sum_Buckets(consumed_liened_backing_num)
 fresh_reserved_backing_num >= valid_liened_backing_num
+spent_backing_num >= provider_receivable_num
 spent_backing_num is cumulative audit state and is not a live available-backing subtrahend
 insurance_credit_reserved_num is backed by a unique canonical insurance-credit reservation
 valid_liened_insurance_num + impaired_liened_insurance_num <= insurance_credit_reserved_num
@@ -933,6 +955,8 @@ Those labels are encumbrance, reservation, or bound state over already-counted q
 ```text
 fresh_reserved_backing_num == sum(Fresh bucket fresh_unliened + valid_liened)
 valid_liened_backing_num == sum(Fresh bucket valid_liened)
+provider_receivable_num == sum(bucket consumed_liened_backing_num)
+spent_backing_num >= provider_receivable_num
 impaired_liened_backing_num == sum(Impaired bucket impaired_liened)
 insurance_credit_reserved_num >= valid_liened_insurance_num + impaired_liened_insurance_num
 source_credit_reserved_num is unique and canonical in InsuranceLedger
@@ -1468,65 +1492,68 @@ Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close c
 38. `lien_consumption_removes_backing_from_fresh_reserved_and_claim_bound`.
 39. `lien_release_moves_valid_liened_to_fresh_unliened_without_changing_fresh_reserved`.
 40. `source_available_backing_recomputes_from_bucket_sums`.
-41. `expired_liened_bucket_marks_liens_impaired_in_bounded_work`.
-42. `credit_rate_num_bounded_below_and_above`.
-43. `lien_creation_requires_required_backing_le_available_backing`.
-44. `locked_face_claim_excluded_from_soft_credit`.
-45. `withdrawal_uses_conservative_sum_negative_leg_pnl_not_aggregate_min`.
-46. `close_drift_reserve_has_backed_loss_capacity_or_recovers`.
-47. `pulled_forward_obligation_credit_not_socialized_again`.
-48. `claim_bound_bucket_formula_never_understates_source_domain_claims`.
-49. `claim_bound_bucket_out_of_range_fails_closed_or_rebuckets`.
-50. `credit_rate_recomputation_is_bounded_by_domain_count_and_bucket_count`.
-51. `no_circular_credit_without_external_senior_backing`.
-52. `soft_maintenance_credit_does_not_create_payout_or_residual_cure`.
-53. `settlement_quality_credit_consumes_backing_and_locks_face_claim`.
-54. `fake_asset_profit_cannot_buy_unbacked_other_asset_risk`.
-55. `backing_consumption_reduces_loser_capital_and_preserves_senior_invariants`.
-56. `residuals_charged_only_to_asset_opposing_side_domain`.
-57. `no_global_B_index`.
-58. `cross_instance_ui_aggregation_not_health_or_collateral_proof`.
-59. `mutable_asset_activation_requires_full_envelope_proofs`.
-60. `asset_cannot_activate_with_nonzero_or_unreconciled_state`.
-61. `activation_invalidates_or_scopes_certs_fail_closed`.
-62. `full_account_refresh_required_for_favorable_actions`.
-63. `verified_maker_exemption_requires_engine_verified_post_trade_health_cert`.
-64. `pending_obligation_credit_decrements_origin_residual_once`.
-65. `aggregate_due_drift_credit_is_O_1_before_b_booking`.
-66. `participant_finalization_pulls_forward_pending_obligation`.
-67. `phantom_weight_without_backing_reverts`.
-68. `preemptive_close_priority_prevents_hold_and_wait_deadlock`.
-69. `preempted_close_restart_cannot_double_book_residual`.
-70. `close_id_and_drift_anchors_immutable`.
-71. `bankrupt_close_progress_decreases_net_of_close_drift`.
-72. `cure_and_cancel_checks_before_consuming_new_deposit`.
-73. `quantity_adl_and_account_finalization_atomic_or_barriered`.
-74. `domain_lock_does_not_block_asset_wide_kf_accrual`.
-75. `B_booking_exact_remainder_conservation`.
-76. `zero_weight_domain_residual_cannot_clear_without_backing`.
-77. `uncollectible_fees_forgiven_not_socialized`.
-78. `resolved_payout_uses_source_domain_or_conservative_aggregate_rates`.
-79. `resolved_receipt_underbound_halts_payout_or_recovers`.
-80. `recovery_fallback_price_within_configured_deviation_envelope`.
-81. `recovery_fallback_value_transfer_bound_computed_per_account_and_domain`.
-82. `fallback_recovery_rejects_unverified_or_out_of_envelope_reference_price`.
-83. `dead_leg_forfeit_uses_bounded_fallback_or_zero_positive_payout`.
-84. `dead_leg_forfeit_books_to_bankruptcy_domain`.
-85. `no_single_instruction_full_market_scan_required`.
-86. `global_accumulator_not_account_health_proof`.
-87. `canonical_single_leg_per_asset`.
-88. `N_too_large_rejects_public_initialization_or_activation`.
-89. `pending_obligation_exposure_counted_exactly_once_in_health_test`.
-90. `equity_side_penalties_disjoint_from_requirement_side_penalties`.
-91. `hedge_credit_reduced_requirement_covers_combined_loss_envelope`.
-92. `cross_close_priority_is_strict_total_order`.
-93. `equal_priority_livelock_impossible`.
-94. `B_booking_triggers_source_claim_bound_and_credit_rate_recompute_or_conservative_lowering`.
-95. `settlement_rounding_residue_credits_unallocated_surplus_and_flow_proof_balances`.
-96. `rounding_residue_never_used_for_health_backing_insurance_or_payout`.
-97. `stock_reconciliation_includes_settlement_rounding_residue_total`.
-98. `funded_close_drift_reserve_maps_to_one_stock_or_reservation_class`.
-99. `per_class_stock_reconciliation_matches_o1_ledgers_where_available`.
+41. `lien_consumption_creates_provider_receivable_matching_bucket_consumed`.
+42. `future_source_backing_refills_provider_receivable_before_excess_new_backing`.
+43. `backing_refill_preserves_reservation_encumbrance_proof`.
+44. `expired_liened_bucket_marks_liens_impaired_in_bounded_work`.
+45. `credit_rate_num_bounded_below_and_above`.
+46. `lien_creation_requires_required_backing_le_available_backing`.
+47. `locked_face_claim_excluded_from_soft_credit`.
+48. `withdrawal_uses_conservative_sum_negative_leg_pnl_not_aggregate_min`.
+49. `close_drift_reserve_has_backed_loss_capacity_or_recovers`.
+50. `pulled_forward_obligation_credit_not_socialized_again`.
+51. `claim_bound_bucket_formula_never_understates_source_domain_claims`.
+52. `claim_bound_bucket_out_of_range_fails_closed_or_rebuckets`.
+53. `credit_rate_recomputation_is_bounded_by_domain_count_and_bucket_count`.
+54. `no_circular_credit_without_external_senior_backing`.
+55. `soft_maintenance_credit_does_not_create_payout_or_residual_cure`.
+56. `settlement_quality_credit_consumes_backing_and_locks_face_claim`.
+57. `fake_asset_profit_cannot_buy_unbacked_other_asset_risk`.
+58. `backing_consumption_reduces_loser_capital_and_preserves_senior_invariants`.
+59. `residuals_charged_only_to_asset_opposing_side_domain`.
+60. `no_global_B_index`.
+61. `cross_instance_ui_aggregation_not_health_or_collateral_proof`.
+62. `mutable_asset_activation_requires_full_envelope_proofs`.
+63. `asset_cannot_activate_with_nonzero_or_unreconciled_state`.
+64. `activation_invalidates_or_scopes_certs_fail_closed`.
+65. `full_account_refresh_required_for_favorable_actions`.
+66. `verified_maker_exemption_requires_engine_verified_post_trade_health_cert`.
+67. `pending_obligation_credit_decrements_origin_residual_once`.
+68. `aggregate_due_drift_credit_is_O_1_before_b_booking`.
+69. `participant_finalization_pulls_forward_pending_obligation`.
+70. `phantom_weight_without_backing_reverts`.
+71. `preemptive_close_priority_prevents_hold_and_wait_deadlock`.
+72. `preempted_close_restart_cannot_double_book_residual`.
+73. `close_id_and_drift_anchors_immutable`.
+74. `bankrupt_close_progress_decreases_net_of_close_drift`.
+75. `cure_and_cancel_checks_before_consuming_new_deposit`.
+76. `quantity_adl_and_account_finalization_atomic_or_barriered`.
+77. `domain_lock_does_not_block_asset_wide_kf_accrual`.
+78. `B_booking_exact_remainder_conservation`.
+79. `zero_weight_domain_residual_cannot_clear_without_backing`.
+80. `uncollectible_fees_forgiven_not_socialized`.
+81. `resolved_payout_uses_source_domain_or_conservative_aggregate_rates`.
+82. `resolved_receipt_underbound_halts_payout_or_recovers`.
+83. `recovery_fallback_price_within_configured_deviation_envelope`.
+84. `recovery_fallback_value_transfer_bound_computed_per_account_and_domain`.
+85. `fallback_recovery_rejects_unverified_or_out_of_envelope_reference_price`.
+86. `dead_leg_forfeit_uses_bounded_fallback_or_zero_positive_payout`.
+87. `dead_leg_forfeit_books_to_bankruptcy_domain`.
+88. `no_single_instruction_full_market_scan_required`.
+89. `global_accumulator_not_account_health_proof`.
+90. `canonical_single_leg_per_asset`.
+91. `N_too_large_rejects_public_initialization_or_activation`.
+92. `pending_obligation_exposure_counted_exactly_once_in_health_test`.
+93. `equity_side_penalties_disjoint_from_requirement_side_penalties`.
+94. `hedge_credit_reduced_requirement_covers_combined_loss_envelope`.
+95. `cross_close_priority_is_strict_total_order`.
+96. `equal_priority_livelock_impossible`.
+97. `B_booking_triggers_source_claim_bound_and_credit_rate_recompute_or_conservative_lowering`.
+98. `settlement_rounding_residue_credits_unallocated_surplus_and_flow_proof_balances`.
+99. `rounding_residue_never_used_for_health_backing_insurance_or_payout`.
+100. `stock_reconciliation_includes_settlement_rounding_residue_total`.
+101. `funded_close_drift_reserve_maps_to_one_stock_or_reservation_class`.
+102. `per_class_stock_reconciliation_matches_o1_ledgers_where_available`.
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
