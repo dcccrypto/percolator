@@ -727,6 +727,7 @@ fn v16_stock_reconciliation_proof_decomposes_vault_into_single_stock_classes() {
             token_vault: 20,
             senior_capital_total: 11,
             insurance_capital: 3,
+            backing_provider_earnings: 0,
             settlement_rounding_residue_total: 0,
             unallocated_protocol_surplus: 6,
         }
@@ -740,6 +741,7 @@ fn v16_stock_reconciliation_proof_rejects_unaccounted_vault_atoms() {
         token_vault: 20,
         senior_capital_total: 11,
         insurance_capital: 3,
+        backing_provider_earnings: 0,
         settlement_rounding_residue_total: 0,
         unallocated_protocol_surplus: 5,
     };
@@ -1120,6 +1122,189 @@ fn v16_source_credit_lien_aggregate_proof_tracks_account_backing_split() {
         }
     );
     assert!(proof.validate().is_ok());
+}
+
+#[test]
+fn v16_backing_utilization_fee_collects_from_lien_holder_to_provider_earnings() {
+    let (market, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
+    cfg.min_nonzero_im_req = 15;
+    cfg.backing_fee_base_rate_e9_per_slot = 1_000_000_000;
+    cfg.backing_fee_kink_util_bps = 8_000;
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+    let mut long = account_with_id(10);
+    g.deposit_not_atomic(&mut long, 100).unwrap();
+    g.vault = g.vault.checked_add(10).unwrap();
+    g.add_account_source_positive_pnl_not_atomic(&mut long, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 10 * POS_SCALE, 11);
+    g.withdraw_not_atomic(&mut long, 90, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(
+        long.source_lien_counterparty_backing_num[0],
+        5 * BOUND_SCALE
+    );
+    assert_eq!(long.source_lien_fee_last_slot[0], 0);
+
+    g.current_slot = 1;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(long.source_lien_fee_last_slot[0], 1);
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 0);
+
+    g.current_slot = 2;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(long.capital, 5);
+    assert_eq!(g.c_tot, 5);
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 5);
+    assert_eq!(
+        g.stock_reconciliation_proof()
+            .unwrap()
+            .backing_provider_earnings,
+        5
+    );
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
+fn v16_uncollectible_backing_utilization_fee_is_forgiven_not_socialized() {
+    let (market, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
+    cfg.min_nonzero_im_req = 11;
+    cfg.backing_fee_base_rate_e9_per_slot = 1_000_000_000;
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+    let mut long = account_with_id(10);
+    g.deposit_not_atomic(&mut long, 11).unwrap();
+    g.vault = g.vault.checked_add(10).unwrap();
+    g.add_account_source_positive_pnl_not_atomic(&mut long, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 10 * POS_SCALE, 11);
+    g.withdraw_not_atomic(&mut long, 10, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(
+        long.source_lien_counterparty_backing_num[0],
+        10 * BOUND_SCALE
+    );
+
+    g.current_slot = 1;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.current_slot = 2;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(long.capital, 0);
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 1);
+    assert_eq!(g.insurance, 0);
+    assert_eq!(g.assets[0].b_long_num, 0);
+    assert_eq!(g.assets[0].b_short_num, 0);
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
+fn v16_backing_provider_earnings_withdraw_only_releases_accrued_fees() {
+    let (market, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
+    cfg.min_nonzero_im_req = 15;
+    cfg.backing_fee_base_rate_e9_per_slot = 1_000_000_000;
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+    let mut long = account_with_id(10);
+    g.deposit_not_atomic(&mut long, 100).unwrap();
+    g.vault = g.vault.checked_add(10).unwrap();
+    g.add_account_source_positive_pnl_not_atomic(&mut long, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 10 * POS_SCALE, 11);
+    g.withdraw_not_atomic(&mut long, 90, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.current_slot = 1;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.current_slot = 2;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 5);
+    let vault_before = g.vault;
+
+    assert_eq!(
+        g.withdraw_backing_provider_earnings_not_atomic(0, 6),
+        Err(V16Error::CounterUnderflow)
+    );
+    assert_eq!(g.vault, vault_before);
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 5);
+
+    g.withdraw_backing_provider_earnings_not_atomic(0, 5)
+        .unwrap();
+    assert_eq!(g.vault, vault_before - 5);
+    assert_eq!(g.source_backing_buckets[0].utilization_fee_earnings, 0);
+    assert_eq!(g.c_tot, 5);
+    g.assert_public_invariants().unwrap();
+}
+
+#[test]
+fn v16_zero_copy_backing_provider_earnings_withdraw_preserves_stock() {
+    let (market, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund(1, 0, 10);
+    cfg.min_nonzero_im_req = 15;
+    cfg.backing_fee_base_rate_e9_per_slot = 1_000_000_000;
+    let mut g = MarketGroupV16::new(market, cfg).unwrap();
+    let mut long = account_with_id(10);
+    g.deposit_not_atomic(&mut long, 100).unwrap();
+    g.vault = g.vault.checked_add(10).unwrap();
+    g.add_account_source_positive_pnl_not_atomic(&mut long, 0, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 10 * BOUND_SCALE, 10)
+        .unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Long, 10 * POS_SCALE as i128)
+        .unwrap();
+    let _opposite = attach_opposite(&mut g, 0, SideV16::Long, 10 * POS_SCALE, 11);
+    g.withdraw_not_atomic(&mut long, 90, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.current_slot = 1;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    g.current_slot = 2;
+    g.full_account_refresh(&mut long, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+    let vault_before = g.vault;
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let preserved_wrapper = markets[0].wrapper;
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market_view
+        .withdraw_backing_provider_earnings_not_atomic(0, 5)
+        .unwrap();
+    assert_eq!(market_view.header.vault.get(), vault_before - 5);
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .backing_long
+            .utilization_fee_earnings
+            .get(),
+        0
+    );
+    assert_eq!(market_view.markets[0].wrapper, preserved_wrapper);
+    market_view.validate_shape().unwrap();
 }
 
 #[test]
@@ -8239,6 +8424,7 @@ fn v16_bankrupt_liquidation_consumes_insurance_before_social_loss() {
             token_vault: 4,
             senior_capital_total: 0,
             insurance_capital: 0,
+            backing_provider_earnings: 0,
             settlement_rounding_residue_total: 0,
             unallocated_protocol_surplus: 4,
         }

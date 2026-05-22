@@ -1,7 +1,8 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    account_equity, account_equity_from_parts, risk_notional_ceil, AssetLifecycleV16,
+    account_equity, account_equity_from_parts, kani_apply_backing_provider_earnings_withdraw,
+    kani_apply_backing_utilization_fee_charge, risk_notional_ceil, AssetLifecycleV16,
     BResidualBookingOutcomeV16, BackingBucketStatusV16, BackingBucketV16, CloseProgressLedgerV16,
     DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     InsuranceCreditReservationV16, LiquidationRequestV16, Market, MarketGroupV16,
@@ -795,12 +796,138 @@ fn proof_v16_stock_reconciliation_decomposes_vault_without_aliasing() {
             token_vault: group.vault,
             senior_capital_total: group.c_tot,
             insurance_capital: group.insurance,
+            backing_provider_earnings: 0,
             settlement_rounding_residue_total: 0,
             unallocated_protocol_surplus: surplus as u128,
         }
     );
     assert_eq!(proof.validate(), Ok(()));
     group.assert_public_invariants().unwrap();
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_fee_helper_is_lien_bounded() {
+    let lien_units: u8 = kani::any();
+    let backing_units: u8 = kani::any();
+    let dt: u8 = kani::any();
+    let charge_full_rate: bool = kani::any();
+    kani::assume(backing_units > 0);
+    kani::assume(backing_units <= 4);
+    kani::assume(lien_units <= backing_units);
+    kani::assume(dt <= 4);
+
+    let mut config = V16Config::public_user_fund(1, 0, 1);
+    config.backing_fee_base_rate_e9_per_slot = if charge_full_rate { 1_000_000_000 } else { 0 };
+    config.backing_fee_kink_util_bps = 8_000;
+    let lien_num = lien_units as u128 * BOUND_SCALE;
+    let backing_num = backing_units as u128 * BOUND_SCALE;
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: backing_num,
+        valid_liened_backing_num: lien_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let fee = MarketGroupV16::backing_utilization_fee_quote_atoms_for_lien(
+        config, source, lien_num, 0, dt as u64,
+    )
+    .unwrap();
+
+    kani::cover!(
+        charge_full_rate && lien_units != 0 && dt != 0,
+        "v16 backing utilization fee positive path reachable"
+    );
+    assert!(fee <= lien_units as u128 * dt as u128);
+    if !charge_full_rate || lien_units == 0 || dt == 0 {
+        assert_eq!(fee, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_fee_charge_is_loss_junior_and_capped_by_capital() {
+    let capital: u8 = kani::any();
+    let c_tot_extra: u8 = kani::any();
+    let earnings: u8 = kani::any();
+    let fee: u8 = kani::any();
+    let pnl_case: bool = kani::any();
+    kani::assume(capital <= 20);
+    kani::assume(c_tot_extra <= 20);
+    kani::assume(earnings <= 20);
+    kani::assume(fee <= 20);
+    let c_tot = capital as u128 + c_tot_extra as u128;
+    let pnl = if pnl_case { 1 } else { -1 };
+
+    let (charged, next_capital, next_c_tot, next_earnings) =
+        kani_apply_backing_utilization_fee_charge(
+            capital as u128,
+            c_tot,
+            earnings as u128,
+            pnl,
+            fee as u128,
+        )
+        .unwrap();
+
+    kani::cover!(
+        pnl_case && fee > capital,
+        "v16 backing fee capital cap reachable"
+    );
+    kani::cover!(
+        !pnl_case && fee != 0,
+        "v16 backing fee negative pnl forgiveness reachable"
+    );
+    if pnl < 0 || fee == 0 {
+        assert_eq!(charged, 0);
+        assert_eq!(next_capital, capital as u128);
+        assert_eq!(next_c_tot, c_tot);
+        assert_eq!(next_earnings, earnings as u128);
+    } else {
+        assert_eq!(charged, (fee.min(capital)) as u128);
+        assert_eq!(next_capital, capital as u128 - charged);
+        assert_eq!(next_c_tot, c_tot - charged);
+        assert_eq!(next_earnings, earnings as u128 + charged);
+    }
+    assert!(charged <= capital as u128);
+    assert_eq!(next_c_tot + next_earnings, c_tot + earnings as u128);
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_provider_earnings_withdraw_cannot_exceed_accrued_fees() {
+    let vault: u8 = kani::any();
+    let earnings: u8 = kani::any();
+    let withdraw_amount: u8 = kani::any();
+    kani::assume(vault <= 20);
+    kani::assume(earnings <= vault);
+    kani::assume(withdraw_amount <= 20);
+
+    let result = kani_apply_backing_provider_earnings_withdraw(
+        vault as u128,
+        earnings as u128,
+        withdraw_amount as u128,
+    );
+
+    kani::cover!(
+        withdraw_amount > earnings,
+        "v16 provider earnings over-withdraw rejection reachable"
+    );
+    kani::cover!(
+        withdraw_amount <= earnings,
+        "v16 provider earnings bounded withdraw reachable"
+    );
+    if withdraw_amount > earnings {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    } else {
+        let (next_vault, next_earnings) = result.unwrap();
+        assert_eq!(next_vault, vault as u128 - withdraw_amount as u128);
+        assert_eq!(next_earnings, earnings as u128 - withdraw_amount as u128);
+        assert!(next_earnings <= next_vault);
+        assert_eq!(next_vault - next_earnings, vault as u128 - earnings as u128);
+    }
 }
 
 #[kani::proof]

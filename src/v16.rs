@@ -26,6 +26,83 @@ pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 16;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
+pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
+pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
+pub const MAX_BACKING_FEE_UTIL_BPS: u64 = 10_000;
+
+fn apply_backing_utilization_fee_charge(
+    account_capital: u128,
+    group_c_tot: u128,
+    bucket_earnings: u128,
+    account_pnl: i128,
+    requested_fee: u128,
+) -> V16Result<(u128, u128, u128, u128)> {
+    if requested_fee == 0 || account_pnl < 0 {
+        return Ok((0, account_capital, group_c_tot, bucket_earnings));
+    }
+    let charged = requested_fee.min(account_capital);
+    if charged == 0 {
+        return Ok((0, account_capital, group_c_tot, bucket_earnings));
+    }
+    let next_account_capital = account_capital
+        .checked_sub(charged)
+        .ok_or(V16Error::CounterUnderflow)?;
+    let next_group_c_tot = group_c_tot
+        .checked_sub(charged)
+        .ok_or(V16Error::CounterUnderflow)?;
+    let next_bucket_earnings = bucket_earnings
+        .checked_add(charged)
+        .ok_or(V16Error::CounterOverflow)?;
+    Ok((
+        charged,
+        next_account_capital,
+        next_group_c_tot,
+        next_bucket_earnings,
+    ))
+}
+
+fn apply_backing_provider_earnings_withdraw(
+    vault: u128,
+    bucket_earnings: u128,
+    amount: u128,
+) -> V16Result<(u128, u128)> {
+    if amount == 0 {
+        return Ok((vault, bucket_earnings));
+    }
+    if bucket_earnings < amount {
+        return Err(V16Error::CounterUnderflow);
+    }
+    let next_vault = vault
+        .checked_sub(amount)
+        .ok_or(V16Error::CounterUnderflow)?;
+    Ok((next_vault, bucket_earnings - amount))
+}
+
+#[cfg(kani)]
+pub fn kani_apply_backing_utilization_fee_charge(
+    account_capital: u128,
+    group_c_tot: u128,
+    bucket_earnings: u128,
+    account_pnl: i128,
+    requested_fee: u128,
+) -> V16Result<(u128, u128, u128, u128)> {
+    apply_backing_utilization_fee_charge(
+        account_capital,
+        group_c_tot,
+        bucket_earnings,
+        account_pnl,
+        requested_fee,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_apply_backing_provider_earnings_withdraw(
+    vault: u128,
+    bucket_earnings: u128,
+    amount: u128,
+) -> V16Result<(u128, u128)> {
+    apply_backing_provider_earnings_withdraw(vault, bucket_earnings, amount)
+}
 
 #[inline]
 pub fn v16_domain_count_for_market_slots(max_market_slots: u32) -> V16Result<usize> {
@@ -245,6 +322,10 @@ pub struct V16Config {
     pub asset_activation_cooldown_slots: u64,
     pub public_b_chunk_atoms: u128,
     pub max_recovery_fallback_deviation_bps: u64,
+    pub backing_fee_base_rate_e9_per_slot: u64,
+    pub backing_fee_kink_util_bps: u64,
+    pub backing_fee_slope_at_kink_e9_per_slot: u64,
+    pub backing_fee_slope_above_kink_e9_per_slot: u64,
     pub backing_freshness_buckets: u8,
     pub margin_mode_realizable_full_shared_cross_margin: bool,
     pub source_credit_lien_required: bool,
@@ -297,6 +378,10 @@ impl V16Config {
             asset_activation_cooldown_slots: 1,
             public_b_chunk_atoms: MAX_VAULT_TVL,
             max_recovery_fallback_deviation_bps: MAX_RECOVERY_FALLBACK_DEVIATION_BPS,
+            backing_fee_base_rate_e9_per_slot: 0,
+            backing_fee_kink_util_bps: 8_000,
+            backing_fee_slope_at_kink_e9_per_slot: 0,
+            backing_fee_slope_above_kink_e9_per_slot: 0,
             backing_freshness_buckets: V16_BACKING_BUCKETS_PER_DOMAIN as u8,
             margin_mode_realizable_full_shared_cross_margin: true,
             source_credit_lien_required: true,
@@ -701,8 +786,19 @@ impl V16Config {
             || self.asset_activation_cooldown_slots == 0
             || self.public_b_chunk_atoms == 0
             || self.max_recovery_fallback_deviation_bps > MAX_RECOVERY_FALLBACK_DEVIATION_BPS
+            || self.backing_fee_kink_util_bps == 0
+            || self.backing_fee_kink_util_bps >= MAX_BACKING_FEE_UTIL_BPS
             || self.backing_freshness_buckets == 0
             || self.backing_freshness_buckets as usize > V16_BACKING_BUCKETS_PER_DOMAIN
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        if self
+            .backing_fee_base_rate_e9_per_slot
+            .checked_add(self.backing_fee_slope_at_kink_e9_per_slot)
+            .and_then(|v| v.checked_add(self.backing_fee_slope_above_kink_e9_per_slot))
+            .ok_or(V16Error::InvalidConfig)?
+            > MAX_BACKING_FEE_RATE_E9_PER_SLOT
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -870,6 +966,7 @@ pub struct BackingBucketV16 {
     pub valid_liened_backing_num: u128,
     pub consumed_liened_backing_num: u128,
     pub impaired_liened_backing_num: u128,
+    pub utilization_fee_earnings: u128,
     pub expiry_slot: u64,
     pub status: BackingBucketStatusV16,
 }
@@ -881,6 +978,7 @@ impl BackingBucketV16 {
         valid_liened_backing_num: 0,
         consumed_liened_backing_num: 0,
         impaired_liened_backing_num: 0,
+        utilization_fee_earnings: 0,
         expiry_slot: 0,
         status: BackingBucketStatusV16::Empty,
     };
@@ -892,6 +990,7 @@ impl BackingBucketV16 {
             valid_liened_backing_num: 0,
             consumed_liened_backing_num: 0,
             impaired_liened_backing_num: 0,
+            utilization_fee_earnings: 0,
             expiry_slot: 0,
             status: BackingBucketStatusV16::Empty,
         }
@@ -902,6 +1001,7 @@ impl BackingBucketV16 {
             && self.valid_liened_backing_num == 0
             && self.consumed_liened_backing_num == 0
             && self.impaired_liened_backing_num == 0
+            && self.utilization_fee_earnings == 0
             && self.expiry_slot == 0
             && self.status == BackingBucketStatusV16::Empty
     }
@@ -1174,6 +1274,7 @@ impl<'a> PortfolioV16View<'a> {
                 && source.source_lien_effective_reserved.get() == 0
                 && source.source_lien_counterparty_backing_num.get() == 0
                 && source.source_lien_insurance_backing_num.get() == 0
+                && source.source_lien_fee_last_slot.get() == 0
                 && source.source_claim_impaired_num.get() == 0
                 && source.source_lien_impaired_effective_reserved.get() == 0;
             if numeric_zero_source_domain {
@@ -1244,6 +1345,12 @@ impl<'a> PortfolioV16View<'a> {
                 return Err(V16Error::InvalidLeg);
             }
             if proof.impaired_effective_credit_reserved != 0 && proof.impaired_face_claim_num == 0 {
+                return Err(V16Error::InvalidLeg);
+            }
+            if (source.source_lien_counterparty_backing_num.get() == 0
+                && source.source_lien_fee_last_slot.get() != 0)
+                || source.source_lien_fee_last_slot.get() > market.header.current_slot.get()
+            {
                 return Err(V16Error::InvalidLeg);
             }
             d += 1;
@@ -1625,6 +1732,7 @@ pub struct PortfolioAccountV16 {
     pub source_lien_effective_reserved: Vec<u128>,
     pub source_lien_counterparty_backing_num: Vec<u128>,
     pub source_lien_insurance_backing_num: Vec<u128>,
+    pub source_lien_fee_last_slot: Vec<u64>,
     pub source_claim_impaired_num: Vec<u128>,
     pub source_lien_impaired_effective_reserved: Vec<u128>,
     pub fee_credits: i128,
@@ -1657,6 +1765,7 @@ impl PortfolioAccountV16 {
             source_lien_effective_reserved: Vec::new(),
             source_lien_counterparty_backing_num: Vec::new(),
             source_lien_insurance_backing_num: Vec::new(),
+            source_lien_fee_last_slot: Vec::new(),
             source_claim_impaired_num: Vec::new(),
             source_lien_impaired_effective_reserved: Vec::new(),
             fee_credits: 0,
@@ -1699,6 +1808,7 @@ impl PortfolioAccountV16 {
             .resize(domain_count, 0);
         self.source_lien_insurance_backing_num
             .resize(domain_count, 0);
+        self.source_lien_fee_last_slot.resize(domain_count, 0);
         self.source_claim_impaired_num.resize(domain_count, 0);
         self.source_lien_impaired_effective_reserved
             .resize(domain_count, 0);
@@ -1714,6 +1824,7 @@ impl PortfolioAccountV16 {
             .min(self.source_lien_effective_reserved.len())
             .min(self.source_lien_counterparty_backing_num.len())
             .min(self.source_lien_insurance_backing_num.len())
+            .min(self.source_lien_fee_last_slot.len())
             .min(self.source_claim_impaired_num.len())
             .min(self.source_lien_impaired_effective_reserved.len())
     }
@@ -2109,6 +2220,7 @@ pub struct StockReconciliationProofV16 {
     pub token_vault: u128,
     pub senior_capital_total: u128,
     pub insurance_capital: u128,
+    pub backing_provider_earnings: u128,
     pub settlement_rounding_residue_total: u128,
     pub unallocated_protocol_surplus: u128,
 }
@@ -2118,6 +2230,7 @@ impl StockReconciliationProofV16 {
         let accounted = self
             .senior_capital_total
             .checked_add(self.insurance_capital)
+            .and_then(|v| v.checked_add(self.backing_provider_earnings))
             .and_then(|v| v.checked_add(self.settlement_rounding_residue_total))
             .and_then(|v| v.checked_add(self.unallocated_protocol_surplus))
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -2469,6 +2582,10 @@ pub struct V16ConfigAccount {
     pub asset_activation_cooldown_slots: V16PodU64,
     pub public_b_chunk_atoms: V16PodU128,
     pub max_recovery_fallback_deviation_bps: V16PodU64,
+    pub backing_fee_base_rate_e9_per_slot: V16PodU64,
+    pub backing_fee_kink_util_bps: V16PodU64,
+    pub backing_fee_slope_at_kink_e9_per_slot: V16PodU64,
+    pub backing_fee_slope_above_kink_e9_per_slot: V16PodU64,
     pub backing_freshness_buckets: u8,
     pub margin_mode_realizable_full_shared_cross_margin: u8,
     pub source_credit_lien_required: u8,
@@ -2510,6 +2627,16 @@ impl V16ConfigAccount {
             public_b_chunk_atoms: V16PodU128::new(value.public_b_chunk_atoms),
             max_recovery_fallback_deviation_bps: V16PodU64::new(
                 value.max_recovery_fallback_deviation_bps,
+            ),
+            backing_fee_base_rate_e9_per_slot: V16PodU64::new(
+                value.backing_fee_base_rate_e9_per_slot,
+            ),
+            backing_fee_kink_util_bps: V16PodU64::new(value.backing_fee_kink_util_bps),
+            backing_fee_slope_at_kink_e9_per_slot: V16PodU64::new(
+                value.backing_fee_slope_at_kink_e9_per_slot,
+            ),
+            backing_fee_slope_above_kink_e9_per_slot: V16PodU64::new(
+                value.backing_fee_slope_above_kink_e9_per_slot,
             ),
             backing_freshness_buckets: value.backing_freshness_buckets,
             margin_mode_realizable_full_shared_cross_margin: encode_bool(
@@ -2559,6 +2686,12 @@ impl V16ConfigAccount {
             asset_activation_cooldown_slots: self.asset_activation_cooldown_slots.get(),
             public_b_chunk_atoms: self.public_b_chunk_atoms.get(),
             max_recovery_fallback_deviation_bps: self.max_recovery_fallback_deviation_bps.get(),
+            backing_fee_base_rate_e9_per_slot: self.backing_fee_base_rate_e9_per_slot.get(),
+            backing_fee_kink_util_bps: self.backing_fee_kink_util_bps.get(),
+            backing_fee_slope_at_kink_e9_per_slot: self.backing_fee_slope_at_kink_e9_per_slot.get(),
+            backing_fee_slope_above_kink_e9_per_slot: self
+                .backing_fee_slope_above_kink_e9_per_slot
+                .get(),
             backing_freshness_buckets: self.backing_freshness_buckets,
             margin_mode_realizable_full_shared_cross_margin: decode_bool(
                 self.margin_mode_realizable_full_shared_cross_margin,
@@ -2649,6 +2782,7 @@ pub struct BackingBucketV16Account {
     pub valid_liened_backing_num: V16PodU128,
     pub consumed_liened_backing_num: V16PodU128,
     pub impaired_liened_backing_num: V16PodU128,
+    pub utilization_fee_earnings: V16PodU128,
     pub expiry_slot: V16PodU64,
     pub status: u8,
 }
@@ -2661,6 +2795,7 @@ impl BackingBucketV16Account {
             valid_liened_backing_num: V16PodU128::new(value.valid_liened_backing_num),
             consumed_liened_backing_num: V16PodU128::new(value.consumed_liened_backing_num),
             impaired_liened_backing_num: V16PodU128::new(value.impaired_liened_backing_num),
+            utilization_fee_earnings: V16PodU128::new(value.utilization_fee_earnings),
             expiry_slot: V16PodU64::new(value.expiry_slot),
             status: encode_backing_bucket_status(value.status),
         }
@@ -2673,6 +2808,7 @@ impl BackingBucketV16Account {
             valid_liened_backing_num: self.valid_liened_backing_num.get(),
             consumed_liened_backing_num: self.consumed_liened_backing_num.get(),
             impaired_liened_backing_num: self.impaired_liened_backing_num.get(),
+            utilization_fee_earnings: self.utilization_fee_earnings.get(),
             expiry_slot: self.expiry_slot.get(),
             status: decode_backing_bucket_status(self.status)?,
         };
@@ -3722,11 +3858,13 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         if self.header.vault.get() > MAX_VAULT_TVL {
             return Err(V16Error::InvalidConfig);
         }
+        let backing_provider_earnings = self.total_backing_provider_earnings()?;
         let senior = self
             .header
             .c_tot
             .get()
             .checked_add(self.header.insurance.get())
+            .and_then(|v| v.checked_add(backing_provider_earnings))
             .ok_or(V16Error::ArithmeticOverflow)?;
         if self.header.c_tot.get() > self.header.vault.get()
             || self.header.insurance.get() > self.header.vault.get()
@@ -3821,6 +3959,20 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
+    }
+
+    fn total_backing_provider_earnings(&self) -> V16Result<u128> {
+        let mut total = 0u128;
+        let mut i = 0usize;
+        while i < self.markets.len() {
+            let slot = self.markets[i].engine_slot();
+            total = total
+                .checked_add(slot.backing_long.utilization_fee_earnings.get())
+                .and_then(|v| v.checked_add(slot.backing_short.utilization_fee_earnings.get()))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            i += 1;
+        }
+        Ok(total)
     }
 
     fn validate_asset_shape_for_view(
@@ -4042,18 +4194,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    fn validate_source_domain_ledger_current(&self, domain: usize) -> V16Result<()> {
+    fn validate_source_domain_ledger(&self, domain: usize) -> V16Result<()> {
         let source = self.source_credit_for_domain_shape(domain)?;
         let bucket = self.backing_bucket_for_domain(domain)?;
         let reservation = self.insurance_reservation_for_domain(domain)?;
         let (asset_index, _) = self.domain_asset_side(domain)?;
         let market_id = self.markets[asset_index].engine.asset.market_id.get();
-        MarketGroupV16::validate_source_domain_ledger_parts(
-            market_id,
-            source,
-            bucket,
-            reservation,
-        )?;
+        MarketGroupV16::validate_source_domain_ledger_parts(market_id, source, bucket, reservation)
+    }
+
+    fn validate_source_domain_ledger_current(&self, domain: usize) -> V16Result<()> {
+        self.validate_source_domain_ledger(domain)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
         if bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot <= self.header.current_slot.get()
         {
@@ -4145,6 +4297,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
             .validate()
+    }
+
+    pub fn withdraw_backing_provider_earnings_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        let (next_vault, next_earnings) = apply_backing_provider_earnings_withdraw(
+            self.header.vault.get(),
+            bucket.utilization_fee_earnings,
+            amount,
+        )?;
+        bucket.utilization_fee_earnings = next_earnings;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
     }
 
     fn account_source_claim_bound_sum_num(account: &PortfolioV16View<'_>) -> V16Result<u128> {
@@ -4976,6 +5150,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
+        self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if decode_bool(account.header.stale_state)? {
             self.clear_account_stale(account)?;
         }
@@ -5028,6 +5203,82 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             );
         }
         Ok(())
+    }
+
+    fn collect_account_backing_utilization_fees_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        account.validate_with_market(&self.as_view())?;
+        let mut total_charged = 0u128;
+        let domain_count = self
+            .configured_domain_count()?
+            .min(account.source_domains.len());
+        let mut d = 0usize;
+        while d < domain_count {
+            total_charged = total_charged
+                .checked_add(
+                    self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, d)?,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(total_charged)
+    }
+
+    fn collect_account_backing_utilization_fee_for_domain_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        self.domain_asset_side(domain)?;
+        if domain >= account.source_domains.len() {
+            return Err(V16Error::InvalidLeg);
+        }
+        let lien_backing_num = account.source_domains[domain]
+            .source_lien_counterparty_backing_num
+            .get();
+        if lien_backing_num == 0 {
+            account.source_domains[domain].source_lien_fee_last_slot = V16PodU64::new(0);
+            return Ok(0);
+        }
+        let last_slot = account.source_domains[domain]
+            .source_lien_fee_last_slot
+            .get();
+        if last_slot == 0 {
+            account.source_domains[domain].source_lien_fee_last_slot =
+                V16PodU64::new(self.header.current_slot.get());
+            return Ok(0);
+        }
+        let fee = MarketGroupV16::backing_utilization_fee_quote_atoms_for_lien(
+            self.header.config.try_to_runtime()?,
+            self.source_credit_for_domain(domain)?,
+            lien_backing_num,
+            last_slot,
+            self.header.current_slot.get(),
+        )?;
+        account.source_domains[domain].source_lien_fee_last_slot =
+            V16PodU64::new(self.header.current_slot.get());
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        let (charged, next_capital, next_c_tot, next_earnings) =
+            apply_backing_utilization_fee_charge(
+                account.header.capital.get(),
+                self.header.c_tot.get(),
+                bucket.utilization_fee_earnings,
+                account.header.pnl.get(),
+                fee,
+            )?;
+        if charged == 0 {
+            return Ok(0);
+        }
+        account.header.capital = V16PodU128::new(next_capital);
+        self.header.c_tot = V16PodU128::new(next_c_tot);
+        bucket.utilization_fee_earnings = next_earnings;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        account.header.health_cert.valid = 0;
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(charged)
     }
 
     fn mark_leg_b_stale(
@@ -5190,6 +5441,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         price_override: Option<(usize, u64)>,
     ) -> V16Result<HealthCertV16> {
+        self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
         {
             return Err(V16Error::BStale);
@@ -6665,6 +6917,7 @@ pub struct PortfolioSourceDomainV16Account {
     pub source_lien_effective_reserved: V16PodU128,
     pub source_lien_counterparty_backing_num: V16PodU128,
     pub source_lien_insurance_backing_num: V16PodU128,
+    pub source_lien_fee_last_slot: V16PodU64,
     pub source_claim_impaired_num: V16PodU128,
     pub source_lien_impaired_effective_reserved: V16PodU128,
 }
@@ -6693,6 +6946,7 @@ impl PortfolioSourceDomainV16Account {
             source_lien_insurance_backing_num: V16PodU128::new(
                 value.source_lien_insurance_backing_num[domain],
             ),
+            source_lien_fee_last_slot: V16PodU64::new(value.source_lien_fee_last_slot[domain]),
             source_claim_impaired_num: V16PodU128::new(value.source_claim_impaired_num[domain]),
             source_lien_impaired_effective_reserved: V16PodU128::new(
                 value.source_lien_impaired_effective_reserved[domain],
@@ -6716,6 +6970,7 @@ impl PortfolioSourceDomainV16Account {
             self.source_lien_counterparty_backing_num.get();
         value.source_lien_insurance_backing_num[domain] =
             self.source_lien_insurance_backing_num.get();
+        value.source_lien_fee_last_slot[domain] = self.source_lien_fee_last_slot.get();
         value.source_claim_impaired_num[domain] = self.source_claim_impaired_num.get();
         value.source_lien_impaired_effective_reserved[domain] =
             self.source_lien_impaired_effective_reserved.get();
@@ -6825,6 +7080,7 @@ impl PortfolioAccountV16Account {
             source_lien_effective_reserved: Vec::new(),
             source_lien_counterparty_backing_num: Vec::new(),
             source_lien_insurance_backing_num: Vec::new(),
+            source_lien_fee_last_slot: Vec::new(),
             source_claim_impaired_num: Vec::new(),
             source_lien_impaired_effective_reserved: Vec::new(),
             fee_credits: self.fee_credits.get(),
@@ -7227,6 +7483,7 @@ impl MarketGroupV16 {
                 && account.source_lien_effective_reserved[d] == 0
                 && account.source_lien_counterparty_backing_num[d] == 0
                 && account.source_lien_insurance_backing_num[d] == 0
+                && account.source_lien_fee_last_slot[d] == 0
                 && account.source_claim_impaired_num[d] == 0
                 && account.source_lien_impaired_effective_reserved[d] == 0;
             if numeric_zero_source_domain {
@@ -7278,6 +7535,12 @@ impl MarketGroupV16 {
             }
             if account.source_lien_impaired_effective_reserved[d] != 0
                 && account.source_claim_impaired_num[d] == 0
+            {
+                return Err(V16Error::InvalidLeg);
+            }
+            if (account.source_lien_counterparty_backing_num[d] == 0
+                && account.source_lien_fee_last_slot[d] != 0)
+                || account.source_lien_fee_last_slot[d] > self.current_slot
             {
                 return Err(V16Error::InvalidLeg);
             }
@@ -8180,6 +8443,7 @@ impl MarketGroupV16 {
                 account.source_lien_effective_reserved[d] = 0;
                 account.source_lien_counterparty_backing_num[d] = 0;
                 account.source_lien_insurance_backing_num[d] = 0;
+                account.source_lien_fee_last_slot[d] = 0;
                 Self::clear_account_source_claim_market_id_if_empty(account, d);
             }
             d += 1;
@@ -8287,6 +8551,7 @@ impl MarketGroupV16 {
             .checked_add(face)
             .ok_or(V16Error::CounterOverflow)?;
         account.source_lien_counterparty_backing_num[domain] = 0;
+        account.source_lien_fee_last_slot[domain] = 0;
         account.source_lien_effective_reserved[domain] = account.source_lien_effective_reserved
             [domain]
             .checked_sub(effective)
@@ -9088,6 +9353,7 @@ impl MarketGroupV16 {
             self.settle_leg_kf_effects_at_slot(account, slot)?;
             self.reject_if_leg_b_target_advanced(account, slot)?;
         }
+        self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if account.stale_state {
             self.clear_account_stale(account)?;
         }
@@ -9103,6 +9369,7 @@ impl MarketGroupV16 {
         effective_prices: &[u64],
     ) -> V16Result<HealthCertV16> {
         self.reconcile_account_source_credit_liens_not_atomic(account)?;
+        self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if account.b_stale_state || has_b_stale_leg(account) {
             return Err(V16Error::BStale);
         }
@@ -9113,6 +9380,82 @@ impl MarketGroupV16 {
         let cert = self.compute_account_health_cert(account, effective_prices, true)?;
         account.health_cert = cert;
         Ok(cert)
+    }
+
+    fn collect_account_backing_utilization_fees_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<u128> {
+        self.validate_account_shape(account)?;
+        let mut total_charged = 0u128;
+        let domain_count = self
+            .configured_domain_count()?
+            .min(account.source_domain_capacity());
+        let mut d = 0usize;
+        while d < domain_count {
+            total_charged = total_charged
+                .checked_add(
+                    self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, d)?,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(total_charged)
+    }
+
+    fn collect_account_backing_utilization_fee_for_domain_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        domain: usize,
+    ) -> V16Result<u128> {
+        self.validate_source_domain_index(domain)?;
+        if domain >= account.source_domain_capacity() {
+            return Err(V16Error::InvalidLeg);
+        }
+        let lien_backing_num = account.source_lien_counterparty_backing_num[domain];
+        if lien_backing_num == 0 {
+            account.source_lien_fee_last_slot[domain] = 0;
+            return Ok(0);
+        }
+        if account.source_lien_fee_last_slot[domain] == 0 {
+            account.source_lien_fee_last_slot[domain] = self.current_slot;
+            return Ok(0);
+        }
+        let fee = Self::backing_utilization_fee_quote_atoms_for_lien(
+            self.config,
+            self.source_credit[domain],
+            lien_backing_num,
+            account.source_lien_fee_last_slot[domain],
+            self.current_slot,
+        )?;
+        account.source_lien_fee_last_slot[domain] = self.current_slot;
+        let (charged, next_capital, next_c_tot, next_earnings) =
+            apply_backing_utilization_fee_charge(
+                account.capital,
+                self.c_tot,
+                self.source_backing_buckets[domain].utilization_fee_earnings,
+                account.pnl,
+                fee,
+            )?;
+        if charged == 0 {
+            return Ok(0);
+        }
+        account.capital = next_capital;
+        self.c_tot = next_c_tot;
+        self.source_backing_buckets[domain].utilization_fee_earnings = next_earnings;
+        account.health_cert.valid = false;
+        self.validate_account_shape(account)?;
+        self.validate_source_domain_ledger(domain)?;
+        Ok(charged)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_collect_account_backing_utilization_fee_for_domain(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        domain: usize,
+    ) -> V16Result<u128> {
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)
     }
 
     fn reject_if_leg_b_target_advanced(
@@ -11164,10 +11507,24 @@ impl MarketGroupV16 {
         )
     }
 
+    fn total_backing_provider_earnings(&self) -> V16Result<u128> {
+        let mut total = 0u128;
+        let mut d = 0usize;
+        while d < self.source_backing_buckets.len() {
+            total = total
+                .checked_add(self.source_backing_buckets[d].utilization_fee_earnings)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(total)
+    }
+
     pub fn stock_reconciliation_proof(&self) -> V16Result<StockReconciliationProofV16> {
+        let backing_provider_earnings = self.total_backing_provider_earnings()?;
         let senior = self
             .c_tot
             .checked_add(self.insurance)
+            .and_then(|v| v.checked_add(backing_provider_earnings))
             .ok_or(V16Error::ArithmeticOverflow)?;
         if senior > self.vault {
             return Err(V16Error::InvalidConfig);
@@ -11176,6 +11533,7 @@ impl MarketGroupV16 {
             token_vault: self.vault,
             senior_capital_total: self.c_tot,
             insurance_capital: self.insurance,
+            backing_provider_earnings,
             settlement_rounding_residue_total: 0,
             unallocated_protocol_surplus: self.vault - senior,
         })
@@ -11187,9 +11545,11 @@ impl MarketGroupV16 {
             return Err(V16Error::InvalidConfig);
         }
         self.validate_resolved_payout_ledger()?;
+        let backing_provider_earnings = self.total_backing_provider_earnings()?;
         let senior = self
             .c_tot
             .checked_add(self.insurance)
+            .and_then(|v| v.checked_add(backing_provider_earnings))
             .ok_or(V16Error::ArithmeticOverflow)?;
         if self.c_tot > self.vault || self.insurance > self.vault || senior > self.vault {
             return Err(V16Error::InvalidConfig);
@@ -11460,6 +11820,26 @@ impl MarketGroupV16 {
         self.source_backing_buckets[domain] = bucket;
         self.source_credit[domain] = source;
         self.recompute_source_credit_domain_after_mutation(domain)
+    }
+
+    pub fn withdraw_backing_provider_earnings_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.validate_source_domain_index(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (next_vault, next_earnings) = apply_backing_provider_earnings_withdraw(
+            self.vault,
+            self.source_backing_buckets[domain].utilization_fee_earnings,
+            amount,
+        )?;
+        self.source_backing_buckets[domain].utilization_fee_earnings = next_earnings;
+        self.vault = next_vault;
+        self.validate_source_domain_ledger(domain)?;
+        self.assert_public_invariants()
     }
 
     fn fresh_counterparty_backing_expiry_slot(&self, domain: usize) -> V16Result<u64> {
@@ -12095,6 +12475,7 @@ impl MarketGroupV16 {
             && account.source_lien_effective_reserved[domain] == 0
             && account.source_lien_counterparty_backing_num[domain] == 0
             && account.source_lien_insurance_backing_num[domain] == 0
+            && account.source_lien_fee_last_slot[domain] == 0
             && account.source_claim_impaired_num[domain] == 0
             && account.source_lien_impaired_effective_reserved[domain] == 0
         {
@@ -12200,6 +12581,8 @@ impl MarketGroupV16 {
         if Self::source_claim_unliened_num(account, domain)? < required_face_num {
             return Err(V16Error::LockActive);
         }
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
+        let prior_counterparty_backing = account.source_lien_counterparty_backing_num[domain];
         let backing_source =
             self.create_source_credit_lien_backing_not_atomic(domain, required_backing_num)?;
         account.source_claim_liened_num[domain] = account.source_claim_liened_num[domain]
@@ -12219,6 +12602,9 @@ impl MarketGroupV16 {
                     .source_lien_counterparty_backing_num[domain]
                     .checked_add(required_backing_num)
                     .ok_or(V16Error::ArithmeticOverflow)?;
+                if prior_counterparty_backing == 0 {
+                    account.source_lien_fee_last_slot[domain] = self.current_slot;
+                }
             }
             SourceCreditBackingSourceV16::Insurance => {
                 account.source_claim_insurance_liened_num[domain] = account
@@ -12977,6 +13363,83 @@ impl MarketGroupV16 {
             return Err(V16Error::Stale);
         }
         Ok(())
+    }
+
+    pub fn backing_utilization_rate_e9_for_source_state(
+        config: V16Config,
+        source: SourceCreditStateV16,
+    ) -> V16Result<u64> {
+        config.validate_public_user_fund_shape()?;
+        if source.valid_liened_backing_num == 0 {
+            return Ok(0);
+        }
+        if source.fresh_reserved_backing_num == 0
+            || source.valid_liened_backing_num > source.fresh_reserved_backing_num
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let util_bps = U256::from_u128(source.valid_liened_backing_num)
+            .checked_mul(U256::from_u64(MAX_BACKING_FEE_UTIL_BPS))
+            .and_then(|v| v.checked_div(U256::from_u128(source.fresh_reserved_backing_num)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)? as u64;
+        let kink = config.backing_fee_kink_util_bps;
+        let rate = if util_bps <= kink {
+            let slope = U256::from_u64(config.backing_fee_slope_at_kink_e9_per_slot)
+                .checked_mul(U256::from_u64(util_bps))
+                .and_then(|v| v.checked_div(U256::from_u64(kink)))
+                .and_then(|v| v.try_into_u128())
+                .ok_or(V16Error::ArithmeticOverflow)? as u64;
+            config
+                .backing_fee_base_rate_e9_per_slot
+                .checked_add(slope)
+                .ok_or(V16Error::ArithmeticOverflow)?
+        } else {
+            let above_den = MAX_BACKING_FEE_UTIL_BPS
+                .checked_sub(kink)
+                .ok_or(V16Error::InvalidConfig)?;
+            let above_num = util_bps.checked_sub(kink).ok_or(V16Error::InvalidConfig)?;
+            let above_slope = U256::from_u64(config.backing_fee_slope_above_kink_e9_per_slot)
+                .checked_mul(U256::from_u64(above_num))
+                .and_then(|v| v.checked_div(U256::from_u64(above_den)))
+                .and_then(|v| v.try_into_u128())
+                .ok_or(V16Error::ArithmeticOverflow)? as u64;
+            config
+                .backing_fee_base_rate_e9_per_slot
+                .checked_add(config.backing_fee_slope_at_kink_e9_per_slot)
+                .and_then(|v| v.checked_add(above_slope))
+                .ok_or(V16Error::ArithmeticOverflow)?
+        };
+        if rate > MAX_BACKING_FEE_RATE_E9_PER_SLOT {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(rate)
+    }
+
+    pub fn backing_utilization_fee_quote_atoms_for_lien(
+        config: V16Config,
+        source: SourceCreditStateV16,
+        lien_backing_num: u128,
+        from_slot: u64,
+        to_slot: u64,
+    ) -> V16Result<u128> {
+        if lien_backing_num == 0 || to_slot <= from_slot {
+            return Ok(0);
+        }
+        let rate = Self::backing_utilization_rate_e9_for_source_state(config, source)?;
+        if rate == 0 {
+            return Ok(0);
+        }
+        let dt = to_slot - from_slot;
+        let den = BACKING_FEE_RATE_DEN_E9
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        U256::from_u128(lien_backing_num)
+            .checked_mul(U256::from_u64(rate))
+            .and_then(|v| v.checked_mul(U256::from_u64(dt)))
+            .and_then(|v| v.checked_div(U256::from_u128(den)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     fn validate_resolved_payout_ledger(&self) -> V16Result<()> {
