@@ -1,25 +1,25 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    account_equity, account_equity_from_parts, risk_notional_ceil, AssetLifecycleV16, BResidualBookingOutcomeV16,
-    BackingBucketStatusV16, BackingBucketV16, CloseProgressLedgerV16, DeadLegForfeitOutcomeV16,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, InsuranceCreditReservationV16,
-    LiquidationRequestV16, Market, MarketGroupV16, MarketGroupV16View,
-    MarketGroupV16HeaderAccount, MarketModeV16, PermissionlessCrankActionV16,
+    account_equity, account_equity_from_parts, risk_notional_ceil, AssetLifecycleV16,
+    BResidualBookingOutcomeV16, BackingBucketStatusV16, BackingBucketV16, CloseProgressLedgerV16,
+    DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    InsuranceCreditReservationV16, LiquidationRequestV16, Market, MarketGroupV16,
+    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
     RebalanceRequestV16, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
-    ResolvedPayoutReceiptV16, SideModeV16, SideV16, SourceCreditLienAggregateProofV16,
-    SourceCreditStateV16, StockReconciliationProofV16, TradeRequestV16, RiskScoreV16,
-    V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU64, V16Result,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    ResolvedPayoutReceiptV16, RiskScoreV16, SideModeV16, SideV16,
+    SourceCreditLienAggregateProofV16, SourceCreditStateV16, StockReconciliationProofV16,
+    TradeRequestV16, V16ActiveBitmap, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU64,
+    V16Result, V16_MAX_PORTFOLIO_ASSETS_N,
 };
+use percolator::wide_math::U256;
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_OI_SIDE_Q, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q,
     MAX_PROTOCOL_FEE_ABS, MAX_VAULT_TVL, POS_SCALE, SOCIAL_LOSS_DEN,
 };
-use percolator::wide_math::U256;
 
 fn symbolic_ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     let market: [u8; 32] = kani::any();
@@ -4597,8 +4597,7 @@ fn proof_v16_dynamic_realloc_layout_capacity_not_fixed_by_proof_window() {
     let capacity = KANI_MARKET_SLOTS_N + 5;
     let slot_len = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride::<Wrapper>();
     let account_len =
-        MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<Wrapper>(capacity)
-            .unwrap();
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<Wrapper>(capacity).unwrap();
     let last_offset =
         MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<Wrapper>(capacity - 1).unwrap();
 
@@ -4631,8 +4630,7 @@ fn proof_v16_dynamic_realloc_layout_rejects_bad_lengths() {
     type Wrapper = [u8; 31];
     let capacity = KANI_MARKET_SLOTS_N + 5;
     let account_len =
-        MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<Wrapper>(capacity)
-            .unwrap();
+        MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<Wrapper>(capacity).unwrap();
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
     let bad_len = match case {
         0 => header_len - 1,
@@ -4646,7 +4644,7 @@ fn proof_v16_dynamic_realloc_layout_rejects_bad_lengths() {
         )
     } else {
         MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len::<Wrapper>(
-            bad_len
+            bad_len,
         )
         .map(|_| ())
     };
@@ -4673,11 +4671,8 @@ fn proof_v16_dynamic_header_runtime_conversion_rejects_slot_length_mismatch() {
     let too_many_slots: bool = kani::any();
     let supplied_len = if too_many_slots { 2 } else { 0 };
 
-    let result = MarketGroupV16HeaderAccount::kani_validate_dynamic_market_slots_len(
-        supplied_len,
-        1,
-        1,
-    );
+    let result =
+        MarketGroupV16HeaderAccount::kani_validate_dynamic_market_slots_len(supplied_len, 1, 1);
 
     kani::cover!(
         !too_many_slots,
@@ -4893,7 +4888,10 @@ fn proof_v16_asset_activation_cooldown_fails_before_lifecycle_mutation() {
     assert_eq!(result, Err(V16Error::LockActive));
     assert_eq!(group.assets[1], before_asset_1);
     assert_eq!(group.asset_activation_count, before_activation_count);
-    assert_eq!(group.last_asset_activation_slot, before_last_activation_slot);
+    assert_eq!(
+        group.last_asset_activation_slot,
+        before_last_activation_slot
+    );
     assert_eq!(group.risk_epoch, before_risk_epoch);
     assert_eq!(group.asset_set_epoch, before_asset_set_epoch);
 }
@@ -5475,13 +5473,7 @@ fn proof_v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_wit
     let source_support =
         MarketGroupV16::kani_source_credit_state_realizable_support_for_face(source, 2).unwrap();
     let cert = group
-        .kani_build_account_health_cert_from_equity_parts(
-            bitmap(&[0, 1]),
-            2,
-            2,
-            2,
-            2,
-        )
+        .kani_build_account_health_cert_from_equity_parts(bitmap(&[0, 1]), 2, 2, 2, 2)
         .unwrap();
 
     kani::cover!(
@@ -5579,8 +5571,14 @@ fn assert_full_refresh_settles_and_scores_two_active_assets(capital_units: u128)
 
     assert_eq!(risk0, expected_loss0);
     assert_eq!(risk1, expected_loss1);
-    assert_eq!(cert.certified_worst_case_loss, expected_loss0 + expected_loss1);
-    assert_eq!(cert.certified_maintenance_req, expected_loss0 + expected_loss1);
+    assert_eq!(
+        cert.certified_worst_case_loss,
+        expected_loss0 + expected_loss1
+    );
+    assert_eq!(
+        cert.certified_maintenance_req,
+        expected_loss0 + expected_loss1
+    );
     assert_eq!(cert.certified_initial_req, expected_loss0 + expected_loss1);
     assert_eq!(equity, capital_units as i128 - 2);
     assert_eq!(cert.certified_equity, equity);
@@ -7351,7 +7349,7 @@ fn proof_v16_loss_stale_blocks_risk_increasing_trade_before_mutation() {
             size_q: 1,
             exec_price: 1,
             fee_bps: 0,
-        }
+        },
     );
 
     kani::cover!(
@@ -8937,7 +8935,10 @@ fn proof_v16_long_liquidation_residual_charges_short_domain() {
         .kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual)
         .unwrap();
 
-    kani::cover!(out.booked_loss == 2, "v16 long liquidation charges short domain");
+    kani::cover!(
+        out.booked_loss == 2,
+        "v16 long liquidation charges short domain"
+    );
     assert_eq!(insurance_used, 3);
     assert_eq!(out.booked_loss, 2);
     assert_eq!(out.explicit_loss, 0);
@@ -8974,7 +8975,10 @@ fn proof_v16_short_liquidation_residual_charges_long_domain() {
         .kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Short, residual)
         .unwrap();
 
-    kani::cover!(out.booked_loss == 2, "v16 short liquidation charges long domain");
+    kani::cover!(
+        out.booked_loss == 2,
+        "v16 short liquidation charges long domain"
+    );
     assert_eq!(insurance_used, 3);
     assert_eq!(out.booked_loss, 2);
     assert_eq!(out.explicit_loss, 0);
@@ -11359,9 +11363,13 @@ fn proof_v16_liquidation_fee_floor_shortfall_charges_available_capital_only() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    group.kani_deposit_core(&mut account, capital as u128).unwrap();
+    group
+        .kani_deposit_core(&mut account, capital as u128)
+        .unwrap();
 
-    let charged = group.kani_charge_account_fee_current(&mut account, 40).unwrap();
+    let charged = group
+        .kani_charge_account_fee_current(&mut account, 40)
+        .unwrap();
 
     kani::cover!(
         charged < 40,

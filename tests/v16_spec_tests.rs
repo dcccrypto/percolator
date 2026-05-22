@@ -1,9 +1,8 @@
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, AssetStateV16Account,
     CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account,
-    LiquidationRequestV16, Market, MarketGroupV16, MarketGroupV16View,
-    MarketGroupV16ViewMut,
-    MarketGroupV16HeaderAccount, MarketModeV16, PermissionlessCrankActionV16,
+    LiquidationRequestV16, Market, MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
@@ -218,13 +217,13 @@ fn v16_zero_copy_market_view_deposit_mutates_pod_without_runtime_vecs() {
         PortfolioAccountV16Account::source_domains_from_runtime(&runtime_account).unwrap();
     let preserved_wrapper = markets[0].wrapper;
 
-    let mut account_view = percolator::v16::PortfolioV16ViewMut::new(
-        &mut account_header,
-        &mut source_domains,
-    );
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
     let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
-    market_view.deposit_not_atomic(&mut account_view, 17).unwrap();
+    market_view
+        .deposit_not_atomic(&mut account_view, 17)
+        .unwrap();
 
     assert_eq!(account_view.header.capital.get(), 17);
     assert_eq!(market_view.header.vault.get(), 17);
@@ -388,6 +387,210 @@ fn v16_zero_copy_withdraw_rejects_nonflat_until_view_refresh_exists() {
     );
     assert_eq!(account_view.header.capital.get(), 100);
     assert_eq!(market_view.header.vault.get(), 100);
+}
+
+#[test]
+fn v16_zero_copy_full_refresh_settles_kf_like_runtime_without_vecs() {
+    let mut g = group();
+    let mut a = account();
+    let mut opposing = account_with_id(90);
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.deposit_not_atomic(&mut opposing, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].k_long = ADL_ONE as i128;
+
+    let mut runtime_g = g.clone();
+    let mut runtime_a = a.clone();
+    let expected = runtime_g
+        .full_account_refresh(&mut runtime_a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&a);
+    let mut source_domains =
+        vec![
+            PortfolioSourceDomainV16Account::default();
+            percolator::v16::v16_domain_count_for_market_slots(g.config.max_market_slots).unwrap()
+        ];
+
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let cert = market_view
+        .full_account_refresh_not_atomic(&mut account_view)
+        .unwrap();
+
+    assert_eq!(cert, expected);
+    assert_eq!(account_view.header.pnl.get(), runtime_a.pnl);
+    assert_eq!(
+        account_view.header.legs[0].k_snap.get(),
+        runtime_a.legs[0].k_snap
+    );
+    assert_eq!(
+        account_view.source_domains[1].source_claim_bound_num.get(),
+        runtime_a.source_claim_bound_num[1]
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_short
+            .positive_claim_bound_num
+            .get(),
+        runtime_g.source_credit[1].positive_claim_bound_num
+    );
+    assert_eq!(market_view.header.pnl_pos_tot.get(), runtime_g.pnl_pos_tot);
+    market_view.validate_shape().unwrap();
+    account_view
+        .validate_with_market(&market_view.as_view())
+        .unwrap();
+}
+
+#[test]
+fn v16_zero_copy_full_refresh_marks_b_stale_like_runtime_without_vecs() {
+    let mut g = group();
+    let mut a = account();
+    let mut opposing = account_with_id(91);
+    g.deposit_not_atomic(&mut a, 100).unwrap();
+    g.deposit_not_atomic(&mut opposing, 100).unwrap();
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.assets[0].b_long_num = 1;
+
+    let mut runtime_g = g.clone();
+    let mut runtime_a = a.clone();
+    assert_eq!(
+        runtime_g.full_account_refresh(&mut runtime_a, &[1; V16_MAX_PORTFOLIO_ASSETS_N]),
+        Err(V16Error::BStale)
+    );
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&a);
+    let mut source_domains =
+        vec![
+            PortfolioSourceDomainV16Account::default();
+            percolator::v16::v16_domain_count_for_market_slots(g.config.max_market_slots).unwrap()
+        ];
+
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(
+        market_view.full_account_refresh_not_atomic(&mut account_view),
+        Err(V16Error::BStale)
+    );
+    assert_eq!(account_view.header.b_stale_state, 1);
+    assert_eq!(account_view.header.legs[0].b_stale, 1);
+    assert_eq!(market_view.header.b_stale_account_count.get(), 1);
+}
+
+#[test]
+fn v16_zero_copy_trade_updates_positions_like_runtime_without_vecs() {
+    let mut g = group();
+    let mut long = account();
+    let mut short = account_with_id(92);
+    g.deposit_not_atomic(&mut long, 100).unwrap();
+    g.deposit_not_atomic(&mut short, 100).unwrap();
+    let request = TradeRequestV16 {
+        asset_index: 0,
+        size_q: POS_SCALE,
+        exec_price: 1,
+        fee_bps: 0,
+    };
+
+    let mut runtime_g = g.clone();
+    let mut runtime_long = long.clone();
+    let mut runtime_short = short.clone();
+    let expected = runtime_g
+        .execute_trade_with_fee_in_place_not_atomic(
+            &mut runtime_long,
+            &mut runtime_short,
+            request,
+            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut long_header = PortfolioAccountV16Account::from_runtime(&long);
+    let mut short_header = PortfolioAccountV16Account::from_runtime(&short);
+    let mut long_sources =
+        vec![
+            PortfolioSourceDomainV16Account::default();
+            percolator::v16::v16_domain_count_for_market_slots(g.config.max_market_slots).unwrap()
+        ];
+    let mut short_sources = long_sources.clone();
+
+    let mut long_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut long_header, &mut long_sources);
+    let mut short_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut short_header, &mut short_sources);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let outcome = market_view
+        .execute_trade_with_fee_in_place_not_atomic(&mut long_view, &mut short_view, request)
+        .unwrap();
+
+    assert_eq!(outcome, expected);
+    assert_eq!(
+        long_view.header.legs[0].try_to_runtime().unwrap(),
+        runtime_long.legs[0]
+    );
+    assert_eq!(
+        short_view.header.legs[0].try_to_runtime().unwrap(),
+        runtime_short.legs[0]
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .oi_eff_long_q,
+        runtime_g.assets[0].oi_eff_long_q
+    );
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .oi_eff_short_q,
+        runtime_g.assets[0].oi_eff_short_q
+    );
+    market_view.validate_shape().unwrap();
+    long_view
+        .validate_with_market(&market_view.as_view())
+        .unwrap();
+    short_view
+        .validate_with_market(&market_view.as_view())
+        .unwrap();
 }
 
 #[test]
