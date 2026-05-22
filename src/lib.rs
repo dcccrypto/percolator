@@ -5,7 +5,7 @@
 //! backing.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 

@@ -1718,6 +1718,9 @@ fn v16_persisted_account_wire_structs_are_bytemuck_pod() {
     assert_pod_zeroable::<V16ConfigAccount>();
     assert_pod_zeroable::<AssetStateV16Account>();
     assert_pod_zeroable::<EngineAssetSlotV16Account>();
+    assert_pod_zeroable::<Market<()>>();
+    assert_pod_zeroable::<Market<[u8; 8]>>();
+    assert_pod_zeroable::<Market<[u8; 24]>>();
     assert_pod_zeroable::<PortfolioLegV16Account>();
     assert_pod_zeroable::<HealthCertV16Account>();
     assert_pod_zeroable::<PortfolioSourceDomainV16Account>();
@@ -1727,6 +1730,14 @@ fn v16_persisted_account_wire_structs_are_bytemuck_pod() {
     assert_eq!(core::mem::align_of::<PortfolioSourceDomainV16Account>(), 1);
     assert_eq!(core::mem::align_of::<MarketGroupV16HeaderAccount>(), 1);
     assert_eq!(core::mem::align_of::<EngineAssetSlotV16Account>(), 1);
+    assert_eq!(
+        core::mem::size_of::<Market<[u8; 8]>>(),
+        8 + core::mem::size_of::<EngineAssetSlotV16Account>()
+    );
+    assert_eq!(
+        core::mem::size_of::<Market<[u8; 24]>>(),
+        24 + core::mem::size_of::<EngineAssetSlotV16Account>()
+    );
 }
 
 #[test]

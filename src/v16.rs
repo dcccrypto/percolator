@@ -939,12 +939,47 @@ impl Default for InsuranceCreditReservationV16 {
     }
 }
 
+/// Wrapper-owned bytes embedded beside the engine market slot.
+///
+/// # Safety
+///
+/// Implementors must be valid `bytemuck::Pod` / `Zeroable` values, and
+/// `Market<Self>` must not contain inter-field or trailing padding. A wrapper
+/// can satisfy this by using an alignment-1 byte wrapper, or by proving its
+/// alignment divides `size_of::<EngineAssetSlotV16Account>()`.
+#[allow(unsafe_code)]
+pub unsafe trait MarketWrapperPod: bytemuck::Pod + bytemuck::Zeroable {}
+
+#[allow(unsafe_code)]
+unsafe impl MarketWrapperPod for () {}
+#[allow(unsafe_code)]
+unsafe impl MarketWrapperPod for u8 {}
+
+macro_rules! impl_market_wrapper_pod_for_byte_arrays {
+    ($($n:expr),* $(,)?) => {
+        $(
+            #[allow(unsafe_code)]
+            unsafe impl MarketWrapperPod for [u8; $n] {}
+        )*
+    };
+}
+
+impl_market_wrapper_pod_for_byte_arrays!(
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+    25, 26, 27, 28, 29, 30, 31, 32, 64, 128, 256, 512, 1024,
+);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Market<T> {
     pub wrapper: T,
     pub engine: EngineAssetSlotV16Account,
 }
+
+#[allow(unsafe_code)]
+unsafe impl<T: MarketWrapperPod> bytemuck::Zeroable for Market<T> {}
+#[allow(unsafe_code)]
+unsafe impl<T: MarketWrapperPod> bytemuck::Pod for Market<T> {}
 
 impl<T> Market<T> {
     pub const fn new(wrapper: T, engine: EngineAssetSlotV16Account) -> Self {
@@ -1035,7 +1070,10 @@ impl<'a> PortfolioV16ViewMut<'a> {
 }
 
 impl<'a> PortfolioV16View<'a> {
-    pub fn validate_with_market<T>(&self, market: &MarketGroupV16View<'_, T>) -> V16Result<()> {
+    pub fn validate_with_market<T>(
+        &self,
+        market: &MarketGroupV16View<'_, T>,
+    ) -> V16Result<()> {
         let config = market.header.config.try_to_runtime()?;
         if self.header.provenance_header.market_group_id != market.header.market_group_id
             || self.header.owner != self.header.provenance_header.owner
@@ -1343,7 +1381,10 @@ impl<'a> PortfolioV16View<'a> {
 }
 
 impl<'a> PortfolioV16ViewMut<'a> {
-    pub fn validate_with_market<T>(&self, market: &MarketGroupV16View<'_, T>) -> V16Result<()> {
+    pub fn validate_with_market<T>(
+        &self,
+        market: &MarketGroupV16View<'_, T>,
+    ) -> V16Result<()> {
         self.as_view().validate_with_market(market)
     }
 }
@@ -3187,11 +3228,13 @@ impl Default for MarketGroupV16HeaderAccount {
 }
 
 impl MarketGroupV16HeaderAccount {
-    pub fn dynamic_asset_slot_stride<T>() -> usize {
+    pub fn dynamic_asset_slot_stride<T: MarketWrapperPod>() -> usize {
         core::mem::size_of::<Market<T>>()
     }
 
-    pub fn dynamic_market_group_account_len<T>(asset_slot_capacity: usize) -> V16Result<usize> {
+    pub fn dynamic_market_group_account_len<T: MarketWrapperPod>(
+        asset_slot_capacity: usize,
+    ) -> V16Result<usize> {
         let slot_len = Self::dynamic_asset_slot_stride::<T>();
         core::mem::size_of::<Self>()
             .checked_add(
@@ -3202,7 +3245,9 @@ impl MarketGroupV16HeaderAccount {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
-    pub fn dynamic_asset_slot_offset<T>(asset_index: usize) -> V16Result<usize> {
+    pub fn dynamic_asset_slot_offset<T: MarketWrapperPod>(
+        asset_index: usize,
+    ) -> V16Result<usize> {
         let slot_len = Self::dynamic_asset_slot_stride::<T>();
         core::mem::size_of::<Self>()
             .checked_add(
@@ -3213,7 +3258,9 @@ impl MarketGroupV16HeaderAccount {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
-    pub fn dynamic_asset_slot_capacity_from_account_len<T>(account_len: usize) -> V16Result<usize> {
+    pub fn dynamic_asset_slot_capacity_from_account_len<T: MarketWrapperPod>(
+        account_len: usize,
+    ) -> V16Result<usize> {
         let header_len = core::mem::size_of::<Self>();
         if account_len < header_len {
             return Err(V16Error::InvalidConfig);
@@ -3226,7 +3273,7 @@ impl MarketGroupV16HeaderAccount {
         Ok(trailing_len / slot_len)
     }
 
-    pub fn validate_dynamic_market_group_account_len<T>(
+    pub fn validate_dynamic_market_group_account_len<T: MarketWrapperPod>(
         account_len: usize,
         asset_slot_capacity: usize,
     ) -> V16Result<()> {
