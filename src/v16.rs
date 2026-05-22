@@ -4229,6 +4229,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
+        self.recompute_source_credit_domain_after_mutation(domain)?;
+        self.reservation_encumbrance_proof_for_domain(domain)?
+            .validate()?;
+        self.validate_shape()
+    }
+
+    pub fn recompute_source_credit_rate_not_atomic(&mut self, domain: usize) -> V16Result<u128> {
+        self.recompute_source_credit_domain_after_mutation(domain)?;
+        let rate = self.source_credit_for_domain(domain)?.credit_rate_num;
+        self.reservation_encumbrance_proof_for_domain(domain)?
+            .validate()?;
+        self.validate_shape()?;
+        Ok(rate)
+    }
+
+    pub fn add_source_positive_claim_bound_not_atomic(
+        &mut self,
+        domain: usize,
+        claim_bound_num: u128,
+        exact_claim_num: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if exact_claim_num > claim_bound_num {
+            return Err(V16Error::InvalidConfig);
+        }
+        let source = MarketGroupV16::prepare_source_positive_claim_bound_delta(
+            self.source_credit_for_domain(domain)?,
+            claim_bound_num,
+            exact_claim_num,
+        )?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.refresh_source_credit_domain_after_mutation(domain)
+    }
+
     fn reservation_encumbrance_proof_for_domain(
         &self,
         domain: usize,
@@ -4331,6 +4366,58 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
             .validate()
+    }
+
+    pub fn add_fresh_counterparty_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> V16Result<()> {
+        self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)?;
+        self.validate_shape()
+    }
+
+    pub fn expire_source_backing_bucket_not_atomic(
+        &mut self,
+        domain: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh || now_slot < bucket.expiry_slot {
+            return Err(V16Error::Stale);
+        }
+        let mut source = self.source_credit_for_domain(domain)?;
+        let expired_unliened = bucket.fresh_unliened_backing_num;
+        let expired_liened = bucket.valid_liened_backing_num;
+        let expired_total = expired_unliened
+            .checked_add(expired_liened)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if source.fresh_reserved_backing_num < expired_total
+            || source.valid_liened_backing_num < expired_liened
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        source.fresh_reserved_backing_num -= expired_total;
+        source.valid_liened_backing_num -= expired_liened;
+        source.impaired_liened_backing_num = source
+            .impaired_liened_backing_num
+            .checked_add(expired_liened)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.fresh_unliened_backing_num = 0;
+        bucket.valid_liened_backing_num = 0;
+        bucket.impaired_liened_backing_num = bucket
+            .impaired_liened_backing_num
+            .checked_add(expired_liened)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.status = if expired_liened == 0 && bucket.impaired_liened_backing_num == 0 {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Impaired
+        };
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.refresh_source_credit_domain_after_mutation(domain)
     }
 
     pub fn withdraw_backing_provider_earnings_not_atomic(
@@ -4578,7 +4665,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
-    fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
+    pub fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
         MarketGroupV16::available_backing_num_for_source_credit_state(
             self.source_credit_for_domain(domain)?,
         )

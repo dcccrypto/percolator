@@ -1,9 +1,9 @@
 use percolator::v16::{
     account_equity, risk_notional_ceil, AssetLifecycleV16, AssetStateV16Account,
-    CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account,
-    LiquidationRequestV16, Market, MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    BackingBucketStatusV16, CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16Account, LiquidationRequestV16, Market, MarketGroupV16,
+    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, RebalanceRequestV16, ReservationEncumbranceProofV16,
@@ -1509,6 +1509,55 @@ fn v16_zero_copy_backing_provider_earnings_withdraw_preserves_stock() {
             .utilization_fee_earnings
             .get(),
         0
+    );
+    assert_eq!(market_view.markets[0].wrapper, preserved_wrapper);
+    market_view.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_zero_copy_source_backing_lifecycle_without_runtime_vecs() {
+    let g = group();
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let preserved_wrapper = markets[0].wrapper;
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market_view
+        .add_source_positive_claim_bound_not_atomic(0, 100, 100)
+        .unwrap();
+    assert_eq!(market_view.source_credit_available_backing_num(0), Ok(0));
+
+    market_view
+        .add_fresh_counterparty_backing_not_atomic(0, 100, 10)
+        .unwrap();
+    assert_eq!(market_view.source_credit_available_backing_num(0), Ok(100));
+    assert_eq!(
+        market_view.recompute_source_credit_rate_not_atomic(0),
+        Ok(CREDIT_RATE_SCALE)
+    );
+    assert_eq!(market_view.markets[0].wrapper, preserved_wrapper);
+
+    market_view
+        .expire_source_backing_bucket_not_atomic(0, 10)
+        .unwrap();
+    assert_eq!(market_view.source_credit_available_backing_num(0), Ok(0));
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .source_credit_long
+            .credit_rate_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market_view.markets[0].engine.backing_long.status,
+        BackingBucketStatusV16::Expired as u8
     );
     assert_eq!(market_view.markets[0].wrapper, preserved_wrapper);
     market_view.validate_shape().unwrap();
