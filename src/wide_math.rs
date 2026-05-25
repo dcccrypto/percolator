@@ -670,8 +670,8 @@ impl I256 {
 
     pub fn checked_add(self, rhs: I256) -> Option<I256> {
         let (lo, carry) = self.0[0].overflowing_add(rhs.0[0]);
-        let (hi, overflow1) = self.0[1].overflowing_add(rhs.0[1]);
-        let (hi, overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
+        let (hi, _overflow1) = self.0[1].overflowing_add(rhs.0[1]);
+        let (hi, _overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
         let result = I256([lo, hi]);
 
         // Signed overflow: if both operands have the same sign and the result
@@ -698,8 +698,8 @@ impl I256 {
                 // This is valid only if self is non-negative (result fits in I256).
                 // self - MIN: we'll do it directly.
                 let (lo, borrow) = self.0[0].overflowing_sub(rhs.0[0]);
-                let (hi, underflow1) = self.0[1].overflowing_sub(rhs.0[1]);
-                let (hi, underflow2) = hi.overflowing_sub(if borrow { 1 } else { 0 });
+                let (hi, _underflow1) = self.0[1].overflowing_sub(rhs.0[1]);
+                let (hi, _underflow2) = hi.overflowing_sub(if borrow { 1 } else { 0 });
                 let result = I256([lo, hi]);
                 // Check: subtracting a negative from anything should not make it
                 // more negative. self - MIN where MIN is negative. If self >= 0,
