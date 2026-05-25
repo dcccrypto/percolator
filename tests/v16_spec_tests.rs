@@ -1163,6 +1163,31 @@ fn v16_account_source_claim_equity_is_capped_by_source_credit_rate() {
 }
 
 #[test]
+fn v16_live_positive_pnl_without_source_claim_has_no_credit_or_conversion() {
+    let mut g = group();
+    let mut a = account();
+    a.pnl = 10;
+    g.pnl_pos_tot = 10;
+    g.pnl_pos_bound_tot = 10;
+    g.pnl_pos_bound_tot_num = 10 * BOUND_SCALE;
+    g.vault = 100;
+    let prices = [1; V16_MAX_PORTFOLIO_ASSETS_N];
+
+    let cert = g.full_account_refresh(&mut a, &prices).unwrap();
+    assert_eq!(
+        cert.certified_equity, 0,
+        "live positive PnL must not support health without source attribution"
+    );
+    assert!(
+        matches!(
+            g.convert_released_pnl_to_capital_not_atomic(&mut a),
+            Err(V16Error::LockActive)
+        ),
+        "live positive PnL must not be converted without source attribution"
+    );
+}
+
+#[test]
 fn v16_source_backed_equity_ignores_unrelated_global_junior_bound() {
     let mut g = group();
     let mut a = account();
@@ -4067,10 +4092,10 @@ fn v16_full_refresh_haircuts_positive_pnl_credit_when_junior_claims_are_impaired
     let mut g = group();
     let mut a = account();
     g.deposit_not_atomic(&mut a, 10).unwrap();
-    a.pnl = 100;
-    g.pnl_pos_tot = 100;
-    set_junior_bound(&mut g, 100);
-    g.vault = g.c_tot + g.insurance + 25;
+    g.add_account_source_positive_pnl_not_atomic(&mut a, 0, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 25 * BOUND_SCALE, 10)
+        .unwrap();
 
     let cert = g
         .full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
@@ -4084,13 +4109,12 @@ fn v16_full_refresh_haircuts_positive_pnl_credit_when_junior_claims_are_impaired
 fn v16_full_refresh_uses_haircut_bounded_support_for_negative_kf_delta_when_impaired() {
     let mut g = group();
     let mut a = account();
+    g.add_account_source_positive_pnl_not_atomic(&mut a, 1, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(1, 50 * BOUND_SCALE, 10)
+        .unwrap();
     g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
         .unwrap();
-
-    a.pnl = 100;
-    g.pnl_pos_tot = 100;
-    set_junior_bound(&mut g, 100);
-    g.vault = 50;
     g.assets[0].k_long = -(100 * ADL_ONE as i128);
 
     let cert = g
@@ -4141,7 +4165,7 @@ fn v16_negative_kf_settlement_uses_realizable_source_credit_before_principal() {
 }
 
 #[test]
-fn v16_negative_kf_settlement_falls_back_to_global_residual_when_source_backing_is_absent() {
+fn v16_source_attributed_negative_kf_settlement_does_not_use_global_residual() {
     let mut g = group();
     let mut a = account();
     let mut opposing = account_with_id(46);
@@ -4160,14 +4184,44 @@ fn v16_negative_kf_settlement_falls_back_to_global_residual_when_source_backing_
         .unwrap();
 
     assert_eq!(
-        a.pnl, -50,
-        "source-attributed claims with no backing must still fall back to global residual support"
+        a.pnl, -100,
+        "source-attributed losses must not consume unrelated global residual support"
     );
     assert_eq!(g.source_credit[0].spent_backing_num, 0);
     assert_eq!(g.pnl_pos_tot, 0);
     assert_eq!(g.pnl_pos_bound_tot, 0);
     assert_eq!(g.negative_pnl_account_count, 1);
-    assert_eq!(cert.certified_equity, -50);
+    assert_eq!(cert.certified_equity, -100);
+}
+
+#[test]
+fn v16_source_domain_positive_kf_loss_cure_does_not_use_global_residual() {
+    let mut g = group();
+    let mut a = account();
+    let mut opposing = account_with_id(47);
+    a.pnl = -100;
+    g.negative_pnl_account_count = 1;
+    g.attach_leg(&mut a, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut opposing, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.vault = 50;
+    g.assets[0].k_long = 100 * ADL_ONE as i128;
+    assert_eq!(g.source_credit[1].fresh_reserved_backing_num, 0);
+
+    let cert = g
+        .full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
+        .unwrap();
+
+    assert_eq!(
+        a.pnl, -100,
+        "source-domain positive K/F must not cure losses using unrelated global residual support"
+    );
+    assert_eq!(g.source_credit[1].spent_backing_num, 0);
+    assert_eq!(g.pnl_pos_tot, 0);
+    assert_eq!(g.pnl_pos_bound_tot, 0);
+    assert_eq!(g.negative_pnl_account_count, 1);
+    assert_eq!(cert.certified_equity, -100);
 }
 
 #[test]
@@ -4357,13 +4411,13 @@ fn v16_full_refresh_uses_haircut_bounded_new_positive_kf_to_cure_prior_loss() {
         .unwrap();
 
     assert_eq!(
-        a.pnl, -50,
-        "new positive K/F support must cure prior losses only at haircut value"
+        a.pnl, -100,
+        "new positive K/F support without source backing must not cure prior losses from global residual"
     );
     assert_eq!(g.pnl_pos_tot, 0);
     assert_eq!(g.pnl_pos_bound_tot, 0);
     assert_eq!(g.negative_pnl_account_count, 1);
-    assert_eq!(cert.certified_equity, -50);
+    assert_eq!(cert.certified_equity, -100);
 }
 
 #[test]
@@ -4538,8 +4592,8 @@ fn v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b
     let _opp0 = attach_opposite(&mut g, 0, SideV16::Long, POS_SCALE, 9);
     let _opp1 = attach_opposite(&mut g, 1, SideV16::Long, POS_SCALE, 10);
     g.assets[0].k_long = -2 * ADL_ONE as i128;
-    g.assets[1].k_long = 3 * ADL_ONE as i128;
-    g.add_fresh_counterparty_backing_not_atomic(3, 2 * BOUND_SCALE, 10)
+    g.assets[1].k_long = 4 * ADL_ONE as i128;
+    g.add_fresh_counterparty_backing_not_atomic(3, 5 * BOUND_SCALE, 10)
         .unwrap();
 
     let cert = g
@@ -4547,13 +4601,13 @@ fn v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_without_b
         .unwrap();
 
     assert_eq!(
-        a.pnl, 2,
+        a.pnl, 3,
         "the negative leg's capital-backed loss is reserved before the positive leg is credited"
     );
     assert_eq!(a.capital, 0);
     assert_eq!(g.c_tot, 0);
     assert_eq!(g.source_credit[0].fresh_reserved_backing_num, BOUND_SCALE);
-    assert_eq!(cert.certified_equity, 2);
+    assert_eq!(cert.certified_equity, 3);
     assert_eq!(cert.certified_maintenance_req, 2);
     assert_eq!(cert.certified_liq_deficit, 0);
     assert_eq!(
@@ -6905,11 +6959,14 @@ fn v16_hlock_rejects_risk_increasing_trade_that_needs_positive_pnl_credit() {
     let mut long = account();
     let mut short = account();
     short.provenance_header.portfolio_account_id = [4; 32];
-    long.pnl = 200;
-    short.pnl = 200;
-    g.pnl_pos_tot = 400;
-    set_junior_bound(&mut g, 400);
-    g.vault = 400;
+    g.add_account_source_positive_pnl_not_atomic(&mut long, 0, 200)
+        .unwrap();
+    g.add_account_source_positive_pnl_not_atomic(&mut short, 1, 200)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 200 * BOUND_SCALE, 10)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(1, 200 * BOUND_SCALE, 10)
+        .unwrap();
     g.threshold_stress_active = true;
 
     let before = (g.clone(), long.clone(), short.clone());
@@ -6974,11 +7031,11 @@ fn v16_hlock_rejects_reducing_trade_that_needs_positive_pnl_credit() {
     let mut weak_short = account();
     let mut strong_long = account();
     strong_long.provenance_header.portfolio_account_id = [4; 32];
-    weak_short.pnl = 100;
-    g.pnl_pos_tot = 100;
-    set_junior_bound(&mut g, 100);
+    g.add_account_source_positive_pnl_not_atomic(&mut weak_short, 0, 100)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 100 * BOUND_SCALE, 10)
+        .unwrap();
     g.deposit_not_atomic(&mut strong_long, 10_000).unwrap();
-    g.vault = g.c_tot + g.insurance + 100;
     g.attach_leg(&mut weak_short, 0, SideV16::Short, -(POS_SCALE as i128))
         .unwrap();
     g.attach_leg(&mut strong_long, 0, SideV16::Long, POS_SCALE as i128)
@@ -7005,9 +7062,10 @@ fn v16_released_pnl_conversion_burns_face_claim_under_global_impairment() {
     let mut g = group();
     let mut a = account();
     g.deposit_not_atomic(&mut a, 10).unwrap();
-    a.pnl = 50;
-    g.pnl_pos_tot = 50;
-    set_junior_bound(&mut g, 50);
+    g.add_account_source_positive_pnl_not_atomic(&mut a, 0, 50)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 7 * BOUND_SCALE, 10)
+        .unwrap();
     g.pnl_matured_pos_tot = 50;
     g.vault = g.c_tot + 7;
     g.full_account_refresh(&mut a, &[1; V16_MAX_PORTFOLIO_ASSETS_N])
@@ -8777,10 +8835,11 @@ fn v16_pending_domain_loss_barrier_does_not_freeze_unrelated_positive_credit() {
     g.deposit_not_atomic(&mut opposite, 100).unwrap();
     g.attach_leg(&mut profitable, 1, SideV16::Long, 10).unwrap();
     g.attach_leg(&mut opposite, 1, SideV16::Short, -10).unwrap();
-    profitable.pnl = 5;
-    g.pnl_pos_tot = 5;
+    g.add_account_source_positive_pnl_not_atomic(&mut profitable, 0, 5)
+        .unwrap();
+    g.add_fresh_counterparty_backing_not_atomic(0, 5 * BOUND_SCALE, 10)
+        .unwrap();
     g.pnl_matured_pos_tot = 5;
-    set_junior_bound(&mut g, 5);
     g.vault = g.c_tot + 5;
     g.pending_domain_loss_barriers[1] = 1;
     g.full_account_refresh(&mut profitable, &[1; V16_MAX_PORTFOLIO_ASSETS_N])

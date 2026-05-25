@@ -2,12 +2,12 @@
 
 use percolator::v16::{
     account_equity, account_equity_from_parts, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, risk_notional_ceil, AssetLifecycleV16,
-    BResidualBookingOutcomeV16, BackingBucketStatusV16, BackingBucketV16, CloseProgressLedgerV16,
-    DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    InsuranceCreditReservationV16, LiquidationRequestV16, Market, MarketGroupV16,
-    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    kani_apply_backing_utilization_fee_charge, kani_validate_positive_pnl_source_attribution,
+    risk_notional_ceil, AssetLifecycleV16, BResidualBookingOutcomeV16, BackingBucketStatusV16,
+    BackingBucketV16, CloseProgressLedgerV16, DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account,
+    HLockLaneV16, HealthCertV16, InsuranceCreditReservationV16, LiquidationRequestV16, Market,
+    MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, ProvenanceHeaderV16,
     RebalanceRequestV16, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
@@ -3541,9 +3541,9 @@ fn proof_v16_negative_kf_settlement_consumes_realizable_source_credit_before_pri
 }
 
 #[kani::proof]
-#[kani::unwind(16)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v16_negative_kf_settlement_falls_back_to_global_residual_when_source_backing_absent() {
+fn proof_v16_source_attributed_negative_kf_settlement_does_not_use_global_residual() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
@@ -3570,14 +3570,100 @@ fn proof_v16_negative_kf_settlement_falls_back_to_global_residual_when_source_ba
         .unwrap();
 
     kani::cover!(
-        group.source_credit[0].spent_backing_num == 0 && account.pnl == -50,
-        "v16 source-attributed loss settlement falls back to global residual support"
+        group.source_credit[0].spent_backing_num == 0 && group.vault > group.c_tot,
+        "v16 source-attributed loss settlement has unrelated global residual available"
     );
-    assert_eq!(account.pnl, -50);
+    assert_eq!(account.pnl, -100);
     assert_eq!(group.source_credit[0].spent_backing_num, 0);
     assert_eq!(group.pnl_pos_tot, 0);
     assert_eq!(group.pnl_pos_bound_tot, 0);
     assert_eq!(group.negative_pnl_account_count, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_source_domain_positive_kf_loss_cure_does_not_use_global_residual() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len());
+    account.pnl = -100;
+    group.negative_pnl_account_count = 1;
+    group.source_backing_buckets[1] = BackingBucketV16::empty_for_market(group.assets[0].market_id);
+    group.vault = 50;
+
+    group
+        .kani_apply_signed_kf_delta_to_pnl(&mut account, 100, Some(1))
+        .unwrap();
+
+    kani::cover!(
+        group.vault > group.c_tot,
+        "v16 source-domain positive K/F loss cure has unrelated global residual available"
+    );
+    assert_eq!(account.pnl, -100);
+    assert_eq!(group.source_credit[1].spent_backing_num, 0);
+    assert_eq!(group.pnl_pos_tot, 0);
+    assert_eq!(group.pnl_pos_bound_tot, 0);
+    assert_eq!(group.negative_pnl_account_count, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_live_positive_pnl_requires_source_attribution() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len());
+    account.pnl = 10;
+    group.pnl_pos_tot = 10;
+    group.pnl_pos_bound_tot = 10;
+    group.pnl_pos_bound_tot_num = 10 * BOUND_SCALE;
+    group.vault = 100;
+
+    kani::cover!(
+        group.vault > group.c_tot
+            && group.source_credit[0].positive_claim_bound_num == 0
+            && group.source_credit[0].fresh_reserved_backing_num == 0
+            && group.source_credit[1].positive_claim_bound_num == 0
+            && group.source_credit[1].fresh_reserved_backing_num == 0,
+        "v16 live unattributed positive PnL with unrelated global residual is reachable"
+    );
+    assert_eq!(
+        kani_validate_positive_pnl_source_attribution(account.pnl, 0),
+        Err(V16Error::InvalidLeg)
+    );
+    assert_eq!(group.kani_account_haircut_equity(&account).unwrap(), 0);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_unsigned_positive_kf_cannot_create_unattributed_pnl() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut flat = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    group.vault = 100;
+
+    kani::cover!(
+        group.vault > group.c_tot,
+        "v16 unattributed positive K/F has unrelated global residual available"
+    );
+    assert_eq!(
+        group.kani_apply_signed_kf_delta_to_pnl(&mut flat, 10, None),
+        Err(V16Error::InvalidLeg)
+    );
+
+    let mut loss = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    loss.pnl = -5;
+    group.negative_pnl_account_count = 1;
+    group
+        .kani_apply_signed_kf_delta_to_pnl(&mut loss, 10, None)
+        .unwrap();
+    assert!(loss.pnl <= 0);
 }
 
 #[kani::proof]

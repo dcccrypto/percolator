@@ -232,6 +232,21 @@ impl V16Core {
     }
 
     #[inline]
+    fn validate_positive_pnl_source_attribution(
+        pnl: i128,
+        source_claim_sum_num: u128,
+    ) -> V16Result<()> {
+        if pnl <= 0 {
+            return Ok(());
+        }
+        let required = Self::bound_num_from_amount(pnl as u128)?;
+        if source_claim_sum_num < required {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(())
+    }
+
+    #[inline]
     fn accrual_activity_for_asset_segment(
         old: AssetStateV16,
         segment_dt: u64,
@@ -817,6 +832,14 @@ impl V16Core {
             .and_then(|v| v.try_into_u128())
             .ok_or(V16Error::ArithmeticOverflow)
     }
+}
+
+#[cfg(kani)]
+pub fn kani_validate_positive_pnl_source_attribution(
+    pnl: i128,
+    source_claim_sum_num: u128,
+) -> V16Result<()> {
+    V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1799,10 +1822,7 @@ impl<'a> PortfolioV16View<'a> {
         self.validate_source_credit_shape_with_market(market)?;
         let source_claim_sum_num = self.source_claim_bound_sum_num()?;
         if source_claim_sum_num != 0 {
-            let required = V16Core::bound_num_from_amount(pnl.max(0) as u128)?;
-            if source_claim_sum_num < required {
-                return Err(V16Error::InvalidLeg);
-            }
+            V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)?;
         }
         Self::validate_resolved_payout_receipt_static(
             self.header.resolved_payout_receipt.try_to_runtime()?,
@@ -6193,11 +6213,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let positive_support = if Self::account_has_source_claims(account)? {
             self.account_source_realizable_support(account, account.header.pnl.get() as u128)?
         } else {
-            self.haircut_effective_support(
-                account.header.pnl.get() as u128,
-                self.residual(),
-                self.junior_claim_bound(),
-            )?
+            0
         };
         let positive_support_i128 =
             i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -6261,6 +6277,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if new_pos >= old_pos {
             let increase = new_pos - old_pos;
             let increase_num = V16Core::bound_num_from_amount(increase)?;
+            let increase_domain = if increase_num != 0 {
+                if source_domain.is_none()
+                    && decode_market_mode(self.header.mode)? == MarketModeV16::Live
+                {
+                    return Err(V16Error::InvalidLeg);
+                }
+                source_domain
+            } else {
+                None
+            };
             self.header.pnl_pos_tot = V16PodU128::new(
                 self.header
                     .pnl_pos_tot
@@ -6275,29 +6301,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .checked_add(increase_num)
                     .ok_or(V16Error::ArithmeticOverflow)?,
             );
-            if increase_num != 0 {
-                if let Some(domain) = source_domain {
-                    self.ensure_account_source_claim_market_id(account, domain)?;
-                    let source = &mut account.source_domains[domain];
-                    source.source_claim_bound_num = V16PodU128::new(
-                        source
-                            .source_claim_bound_num
-                            .get()
-                            .checked_add(increase_num)
-                            .ok_or(V16Error::ArithmeticOverflow)?,
-                    );
-                    let mut source_credit = self.source_credit_for_domain(domain)?;
-                    source_credit.positive_claim_bound_num = source_credit
-                        .positive_claim_bound_num
+            if let Some(domain) = increase_domain {
+                self.ensure_account_source_claim_market_id(account, domain)?;
+                let source = &mut account.source_domains[domain];
+                source.source_claim_bound_num = V16PodU128::new(
+                    source
+                        .source_claim_bound_num
+                        .get()
                         .checked_add(increase_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    source_credit.exact_positive_claim_num = source_credit
-                        .exact_positive_claim_num
-                        .checked_add(increase_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    self.set_source_credit_for_domain(domain, source_credit)?;
-                    self.recompute_source_credit_domain_after_mutation(domain)?;
-                }
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                let mut source_credit = self.source_credit_for_domain(domain)?;
+                source_credit.positive_claim_bound_num = source_credit
+                    .positive_claim_bound_num
+                    .checked_add(increase_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                source_credit.exact_positive_claim_num = source_credit
+                    .exact_positive_claim_num
+                    .checked_add(increase_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_source_credit_for_domain(domain, source_credit)?;
+                self.recompute_source_credit_domain_after_mutation(domain)?;
             }
         } else {
             let decrease = old_pos - new_pos;
@@ -6407,30 +6431,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
-        let residual = self.residual();
-        let junior_bound = self.junior_claim_bound();
-        let global_effective_available =
-            self.haircut_effective_support(old_positive_face, residual, junior_bound)?;
-        let mut source_support_selected = false;
         let effective_available = if has_source_claims {
-            let source_effective_available = self.account_unliened_source_realizable_support(
-                &account.as_view(),
-                old_positive_face,
-            )?;
-            if source_effective_available > global_effective_available {
-                source_support_selected = true;
-                source_effective_available
-            } else {
-                global_effective_available
-            }
+            self.account_unliened_source_realizable_support(&account.as_view(), old_positive_face)?
+        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+            0
         } else {
-            global_effective_available
+            self.haircut_effective_support(
+                old_positive_face,
+                self.residual(),
+                self.junior_claim_bound(),
+            )?
         };
         let support_consumed = effective_available.min(loss_abs);
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let mut junior_face_burned = if source_support_selected {
+        let mut junior_face_burned = if has_source_claims {
             self.create_and_consume_account_source_credit_for_effective_not_atomic(
                 account,
                 support_consumed,
@@ -6440,6 +6456,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else if support_consumed == 0 {
             0
         } else {
+            let residual = self.residual();
+            let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
         if remaining_loss != 0 {
@@ -6489,6 +6507,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs());
         }
         if account.header.pnl.get() >= 0 {
+            if source_domain.is_none()
+                && decode_market_mode(self.header.mode)? == MarketModeV16::Live
+            {
+                return Err(V16Error::InvalidLeg);
+            }
             let new_pnl = account
                 .header
                 .pnl
@@ -6508,23 +6531,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let old_loss = account.header.pnl.get().unsigned_abs();
         let new_face_support = delta as u128;
-        let residual = self.residual();
-        let junior_bound = self
-            .junior_claim_bound()
-            .checked_add(new_face_support)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let global_effective_available =
-            self.haircut_effective_support(new_face_support, residual, junior_bound)?;
         let (effective_available, source_support_domain) = if let Some(domain) = source_domain {
-            let source_effective_available =
-                self.source_domain_realizable_support_for_face(domain, new_face_support)?;
-            if source_effective_available > global_effective_available {
-                (source_effective_available, Some(domain))
-            } else {
-                (global_effective_available, None)
-            }
+            (
+                self.source_domain_realizable_support_for_face(domain, new_face_support)?,
+                Some(domain),
+            )
+        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+            (0, None)
         } else {
-            (global_effective_available, None)
+            let residual = self.residual();
+            let junior_bound = self
+                .junior_claim_bound()
+                .checked_add(new_face_support)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            (
+                self.haircut_effective_support(new_face_support, residual, junior_bound)?,
+                None,
+            )
         };
         let support_consumed = effective_available.min(old_loss);
         let remaining_loss = old_loss
@@ -6537,9 +6560,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else if support_consumed == 0 {
             0
         } else {
+            let residual = self.residual();
+            let junior_bound = self
+                .junior_claim_bound()
+                .checked_add(new_face_support)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if remaining_loss != 0 {
+        if (source_support_domain.is_none()
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
+            || remaining_loss != 0
+        {
             junior_face_burned = new_face_support;
         }
         if junior_face_burned > new_face_support {
@@ -6882,10 +6913,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .validate_source_credit_shape_with_market(&self.as_view())?;
         let source_claim_sum_num = account.as_view().source_claim_bound_sum_num()?;
         if source_claim_sum_num != 0 {
-            let required = V16Core::bound_num_from_amount(account.header.pnl.get().max(0) as u128)?;
-            if source_claim_sum_num < required {
-                return Err(V16Error::InvalidLeg);
-            }
+            V16Core::validate_positive_pnl_source_attribution(
+                account.header.pnl.get(),
+                source_claim_sum_num,
+            )?;
         }
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
@@ -10105,6 +10136,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let converted = if Self::account_has_source_claims(&account.as_view())? {
             self.account_source_realizable_support(&account.as_view(), released)?
+        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+            0
         } else {
             self.haircut_effective_support(released, self.residual(), self.junior_claim_bound())?
         };
@@ -11752,10 +11785,7 @@ impl MarketGroupV16 {
         self.validate_account_source_credit_shape(account)?;
         let source_claim_sum_num = Self::account_source_claim_bound_sum_num_static(account)?;
         if source_claim_sum_num != 0 {
-            let required = Self::bound_num_from_amount(account.pnl.max(0) as u128)?;
-            if source_claim_sum_num < required {
-                return Err(V16Error::InvalidLeg);
-            }
+            V16Core::validate_positive_pnl_source_attribution(account.pnl, source_claim_sum_num)?;
         }
         self.validate_close_progress_ledger(account.close_progress)?;
         self.validate_resolved_payout_receipt(account.resolved_payout_receipt)?;
@@ -12669,6 +12699,8 @@ impl MarketGroupV16 {
         }
         let converted = if Self::account_has_source_claims(account)? {
             self.account_source_realizable_support(account, released)?
+        } else if self.mode == MarketModeV16::Live {
+            0
         } else {
             self.haircut_effective_support(released, self.residual(), self.junior_claim_bound())?
         };
@@ -18278,11 +18310,7 @@ impl MarketGroupV16 {
         let positive_support = if Self::account_has_source_claims(account)? {
             self.account_source_realizable_support(account, account.pnl.max(0) as u128)?
         } else {
-            self.haircut_effective_support(
-                account.pnl.max(0) as u128,
-                self.residual(),
-                self.junior_claim_bound(),
-            )?
+            0
         };
         let positive_support_i128 =
             i128::try_from(positive_support).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -18344,28 +18372,22 @@ impl MarketGroupV16 {
         }
 
         let has_source_claims = Self::account_has_source_claims(account)?;
-        let residual = self.residual();
-        let junior_bound = self.junior_claim_bound();
-        let global_effective_available =
-            self.haircut_effective_support(old_positive_face, residual, junior_bound)?;
-        let mut source_support_selected = false;
         let effective_available = if has_source_claims {
-            let source_effective_available =
-                self.account_unliened_source_realizable_support(account, old_positive_face)?;
-            if source_effective_available > global_effective_available {
-                source_support_selected = true;
-                source_effective_available
-            } else {
-                global_effective_available
-            }
+            self.account_unliened_source_realizable_support(account, old_positive_face)?
+        } else if self.mode == MarketModeV16::Live {
+            0
         } else {
-            global_effective_available
+            self.haircut_effective_support(
+                old_positive_face,
+                self.residual(),
+                self.junior_claim_bound(),
+            )?
         };
         let support_consumed = effective_available.min(loss_abs);
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let mut junior_face_burned = if source_support_selected {
+        let mut junior_face_burned = if has_source_claims {
             self.create_and_consume_account_source_credit_for_effective_not_atomic(
                 account,
                 support_consumed,
@@ -18375,6 +18397,8 @@ impl MarketGroupV16 {
         } else if support_consumed == 0 {
             0
         } else {
+            let residual = self.residual();
+            let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
         if remaining_loss != 0 {
@@ -18430,6 +18454,9 @@ impl MarketGroupV16 {
             return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs());
         }
         if account.pnl >= 0 {
+            if source_domain.is_none() && self.mode == MarketModeV16::Live {
+                return Err(V16Error::InvalidLeg);
+            }
             let new_pnl = account
                 .pnl
                 .checked_add(delta)
@@ -18447,23 +18474,23 @@ impl MarketGroupV16 {
 
         let old_loss = account.pnl.unsigned_abs();
         let new_face_support = delta as u128;
-        let residual = self.residual();
-        let junior_bound = self
-            .junior_claim_bound()
-            .checked_add(new_face_support)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let global_effective_available =
-            self.haircut_effective_support(new_face_support, residual, junior_bound)?;
         let (effective_available, source_support_domain) = if let Some(domain) = source_domain {
-            let source_effective_available =
-                self.source_domain_realizable_support_for_face(domain, new_face_support)?;
-            if source_effective_available > global_effective_available {
-                (source_effective_available, Some(domain))
-            } else {
-                (global_effective_available, None)
-            }
+            (
+                self.source_domain_realizable_support_for_face(domain, new_face_support)?,
+                Some(domain),
+            )
+        } else if self.mode == MarketModeV16::Live {
+            (0, None)
         } else {
-            (global_effective_available, None)
+            let residual = self.residual();
+            let junior_bound = self
+                .junior_claim_bound()
+                .checked_add(new_face_support)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            (
+                self.haircut_effective_support(new_face_support, residual, junior_bound)?,
+                None,
+            )
         };
         let support_consumed = effective_available.min(old_loss);
         let remaining_loss = old_loss
@@ -18476,9 +18503,16 @@ impl MarketGroupV16 {
         } else if support_consumed == 0 {
             0
         } else {
+            let residual = self.residual();
+            let junior_bound = self
+                .junior_claim_bound()
+                .checked_add(new_face_support)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if remaining_loss != 0 {
+        if (source_support_domain.is_none() && self.mode == MarketModeV16::Live)
+            || remaining_loss != 0
+        {
             junior_face_burned = new_face_support;
         }
         if junior_face_burned > new_face_support {
@@ -19261,33 +19295,38 @@ impl MarketGroupV16 {
         let old_pos = account.pnl.max(0) as u128;
         let new_pos = new_pnl.max(0) as u128;
         if new_pos >= old_pos {
-            let increase_num = Self::bound_num_from_amount(new_pos - old_pos)?;
+            let increase = new_pos - old_pos;
+            let increase_num = Self::bound_num_from_amount(increase)?;
+            let increase_domain = if increase_num != 0 {
+                if source_domain.is_none() && self.mode == MarketModeV16::Live {
+                    return Err(V16Error::InvalidLeg);
+                }
+                source_domain
+            } else {
+                None
+            };
             self.pnl_pos_tot = self
                 .pnl_pos_tot
-                .checked_add(new_pos - old_pos)
+                .checked_add(increase)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.pnl_pos_bound_tot_num = self
                 .pnl_pos_bound_tot_num
                 .checked_add(increase_num)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            if increase_num != 0 {
-                if let Some(domain) = source_domain {
-                    self.ensure_account_source_claim_market_id(account, domain)?;
-                    account.source_claim_bound_num[domain] = account.source_claim_bound_num[domain]
-                        .checked_add(increase_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    self.source_credit[domain].positive_claim_bound_num = self.source_credit
-                        [domain]
-                        .positive_claim_bound_num
-                        .checked_add(increase_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    self.source_credit[domain].exact_positive_claim_num = self.source_credit
-                        [domain]
-                        .exact_positive_claim_num
-                        .checked_add(increase_num)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    self.recompute_source_credit_domain_after_mutation(domain)?;
-                }
+            if let Some(domain) = increase_domain {
+                self.ensure_account_source_claim_market_id(account, domain)?;
+                account.source_claim_bound_num[domain] = account.source_claim_bound_num[domain]
+                    .checked_add(increase_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.source_credit[domain].positive_claim_bound_num = self.source_credit[domain]
+                    .positive_claim_bound_num
+                    .checked_add(increase_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.source_credit[domain].exact_positive_claim_num = self.source_credit[domain]
+                    .exact_positive_claim_num
+                    .checked_add(increase_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.recompute_source_credit_domain_after_mutation(domain)?;
             }
         } else {
             let decrease = old_pos - new_pos;
