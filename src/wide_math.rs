@@ -7,8 +7,8 @@
 // risk engine.
 //
 // DUAL-MODE LAYOUT (mirrors src/i128.rs):
-//   - Kani builds: `#[repr(transparent)]` wrapper around `[u128; 2]` so the
-//     SAT solver works on native 128-bit words instead of 64-bit limb arrays.
+//   - Kani builds: `#[repr(C)]` wrapper around `[u128; 2]` so the SAT solver
+//     works on native 128-bit words instead of 64-bit limb arrays.
 //   - BPF / host builds: `#[repr(C)] [u64; 4]` for consistent 8-byte
 //     alignment across all Solana targets.
 //
@@ -20,7 +20,7 @@ use core::cmp::Ordering;
 // U256 -- Kani version
 // ============================================================================
 #[cfg(kani)]
-#[repr(transparent)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct U256([u128; 2]); // [lo, hi]
 
@@ -539,7 +539,7 @@ impl core::ops::SubAssign for U256 {
 // I256 -- Kani version
 // ============================================================================
 #[cfg(kani)]
-#[repr(transparent)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct I256([u128; 2]); // two's complement [lo, hi]; sign bit is bit 127 of hi
 
@@ -650,9 +650,7 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0)
-                .checked_add(U256::from_u128(1u128 << 127))
-                .unwrap_or(U256::MAX);
+            let min_mag = U256::new(0, 1u128 << 127);
             // For exactly 2^255, result is MIN
             if product == min_mag {
                 return Some(I256::MIN);
@@ -672,8 +670,8 @@ impl I256 {
 
     pub fn checked_add(self, rhs: I256) -> Option<I256> {
         let (lo, carry) = self.0[0].overflowing_add(rhs.0[0]);
-        let (hi, overflow1) = self.0[1].overflowing_add(rhs.0[1]);
-        let (hi, overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
+        let (hi, _overflow1) = self.0[1].overflowing_add(rhs.0[1]);
+        let (hi, _overflow2) = hi.overflowing_add(if carry { 1 } else { 0 });
         let result = I256([lo, hi]);
 
         // Signed overflow: if both operands have the same sign and the result
@@ -700,8 +698,8 @@ impl I256 {
                 // This is valid only if self is non-negative (result fits in I256).
                 // self - MIN: we'll do it directly.
                 let (lo, borrow) = self.0[0].overflowing_sub(rhs.0[0]);
-                let (hi, underflow1) = self.0[1].overflowing_sub(rhs.0[1]);
-                let (hi, underflow2) = hi.overflowing_sub(if borrow { 1 } else { 0 });
+                let (hi, _underflow1) = self.0[1].overflowing_sub(rhs.0[1]);
+                let (hi, _underflow2) = hi.overflowing_sub(if borrow { 1 } else { 0 });
                 let result = I256([lo, hi]);
                 // Check: subtracting a negative from anything should not make it
                 // more negative. self - MIN where MIN is negative. If self >= 0,
@@ -873,9 +871,7 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0)
-                .checked_add(U256::from_u128(1u128 << 127))
-                .unwrap_or(U256::MAX);
+            let min_mag = U256::new(0, 1u128 << 127);
             // For exactly 2^255, result is MIN
             if product == min_mag {
                 return Some(I256::MIN);
@@ -1150,6 +1146,7 @@ pub fn div_rem_u256(num: U256, den: U256) -> (U256, U256) {
 
 /// Private 512-bit unsigned integer for intermediate computations.
 /// Stored as [u128; 4] in little-endian order.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct U512([u128; 4]);
 
@@ -1322,6 +1319,11 @@ impl U512 {
         if self.cmp_u512(&den_512) == Ordering::Less {
             let r = self.try_into_u256().expect("remainder must fit U256");
             return Some((U256::ZERO, r));
+        }
+
+        if self.0[2] == 0 && self.0[3] == 0 {
+            let num = U256::new(self.0[0], self.0[1]);
+            return Some(div_rem_u256(num, den));
         }
 
         let num_lz = self.leading_zeros();
@@ -1591,7 +1593,7 @@ impl I256 {
 }
 
 // ============================================================================
-// §4.8 v11.31 Native 128-bit Arithmetic Helpers
+// Current spec §1.1 arithmetic helpers.
 // ============================================================================
 
 /// Native multiply-divide floor. Product a*b must not overflow u128. Panics on d==0.
@@ -1673,6 +1675,7 @@ pub fn wide_signed_mul_div_floor_from_k_pair(
 }
 
 /// ADL delta_K representability check error.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OverI128Magnitude;
 
@@ -1921,6 +1924,20 @@ mod tests {
         let v = I256::from_i128(-100);
         let a = v.abs_u256();
         assert_eq!(a, U256::from_u128(100));
+    }
+
+    #[test]
+    fn test_i256_mul_negative_above_i128_magnitude() {
+        let a = I256::from_u128(1u128 << 127);
+        let b = I256::from_i128(-2);
+
+        let product = a
+            .checked_mul_i256(b)
+            .expect("-2^128 fits in signed 256-bit range");
+
+        assert!(product.is_negative());
+        assert_eq!(product.try_into_i128(), None);
+        assert_eq!(product.abs_u256(), U256::new(0, 1));
     }
 
     // --- I256 comparison ---

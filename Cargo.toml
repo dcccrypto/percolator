@@ -6,25 +6,21 @@ license = "Apache-2.0"
 
 [lib]
 name = "percolator"
-path = "src/percolator.rs"
+path = "src/lib.rs"
 
 [dependencies]
-# No runtime dependencies - pure no_std compatible library
+bytemuck = { version = "1.23", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.4"
 
 [features]
 default = []
-test = []  # MAX_ACCOUNTS=64 for tests
-stress = []  # Expose test_visible methods but keep MAX_ACCOUNTS=4096
+test = ["runtime-vec-api"]  # Enable test-only harness configuration
+stress = []  # Reserved for stress/audit harnesses
 fuzz = ["test"]  # Enable fuzzing tests (includes test feature for test_visible helpers)
-small = []  # MAX_ACCOUNTS=256 for low-traffic markets
-medium = []  # MAX_ACCOUNTS=1024 for mid-range markets
 audit-scan = []  # Enable full account-table invariant scans on public exits
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+runtime-vec-api = []  # Legacy runtime Vec adapters for tests/proofs only; production uses zero-copy views.
 
 [profile.release]
 lto = "fat"
@@ -36,6 +32,12 @@ overflow-checks = true
 inherits = "release"
 panic = "abort"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(kani)',
+    'cfg(target_os, values("solana"))',
+] }
+
 [workspace.metadata.kani]
 flags = { tests = true }
 unstable = { stubbing = true }
@@ -43,3 +45,13 @@ unstable = { stubbing = true }
 [[workspace.metadata.kani.proof]]
 harness = ".*"
 unwind = 70
+
+[[test]]
+name = "v16_spec_tests"
+path = "tests/v16_spec_tests.rs"
+required-features = ["test"]
+
+[[test]]
+name = "v16_fuzzing"
+path = "tests/v16_fuzzing.rs"
+required-features = ["fuzz"]
