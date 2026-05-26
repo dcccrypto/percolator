@@ -3890,8 +3890,8 @@ impl EngineAssetSlotV16Account {
         let backing = BackingBucketV16::empty_for_market(market_id);
         Self {
             asset: AssetStateV16Account::default(),
-            insurance_domain_budget_long: V16PodU128::new(MAX_VAULT_TVL),
-            insurance_domain_budget_short: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_budget_long: V16PodU128::default(),
+            insurance_domain_budget_short: V16PodU128::default(),
             insurance_domain_spent_long: V16PodU128::default(),
             insurance_domain_spent_short: V16PodU128::default(),
             pending_domain_loss_barrier_long: V16PodU64::default(),
@@ -4340,7 +4340,7 @@ impl MarketGroupV16HeaderAccount {
             pnl_pos_bound_tot_num: self.pnl_pos_bound_tot_num.get(),
             pnl_pos_bound_tot: self.pnl_pos_bound_tot.get(),
             pnl_matured_pos_tot: self.pnl_matured_pos_tot.get(),
-            insurance_domain_budget: vec![MAX_VAULT_TVL; domain_count],
+            insurance_domain_budget: vec![0; domain_count],
             insurance_domain_spent: vec![0; domain_count],
             pending_domain_loss_barriers: vec![0; domain_count],
             source_credit: vec![SourceCreditStateV16::EMPTY; domain_count],
@@ -4580,8 +4580,8 @@ impl MarketGroupV16HeaderAccount {
         asset.slot_last = now_slot;
         *slot = EngineAssetSlotV16Account {
             asset: AssetStateV16Account::from_runtime(&asset),
-            insurance_domain_budget_long: V16PodU128::new(MAX_VAULT_TVL),
-            insurance_domain_budget_short: V16PodU128::new(MAX_VAULT_TVL),
+            insurance_domain_budget_long: V16PodU128::default(),
+            insurance_domain_budget_short: V16PodU128::default(),
             insurance_domain_spent_long: V16PodU128::default(),
             insurance_domain_spent_short: V16PodU128::default(),
             pending_domain_loss_barrier_long: V16PodU64::default(),
@@ -4704,6 +4704,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
         let configured_assets = self.header.config.max_market_slots.get() as usize;
         let mut live_source_credit_insurance_atoms = 0u128;
+        let mut live_domain_budget_remaining_atoms = 0u128;
         let mut i = 0usize;
         while i < self.markets.len() {
             let slot = self.markets[i].engine_slot();
@@ -4743,6 +4744,14 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 self.header.current_slot.get(),
                 &mut live_source_credit_insurance_atoms,
             )?;
+            live_domain_budget_remaining_atoms = live_domain_budget_remaining_atoms
+                .checked_add(
+                    slot.insurance_domain_budget_long
+                        .get()
+                        .checked_sub(slot.insurance_domain_spent_long.get())
+                        .ok_or(V16Error::InvalidConfig)?,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
             Self::validate_domain_shape_for_view(
                 asset.market_id,
                 slot.source_credit_short.try_to_runtime()?,
@@ -4754,9 +4763,19 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 self.header.current_slot.get(),
                 &mut live_source_credit_insurance_atoms,
             )?;
+            live_domain_budget_remaining_atoms = live_domain_budget_remaining_atoms
+                .checked_add(
+                    slot.insurance_domain_budget_short
+                        .get()
+                        .checked_sub(slot.insurance_domain_spent_short.get())
+                        .ok_or(V16Error::InvalidConfig)?,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
             i += 1;
         }
-        if live_source_credit_insurance_atoms > self.header.insurance.get() {
+        if live_source_credit_insurance_atoms > self.header.insurance.get()
+            || live_domain_budget_remaining_atoms > self.header.insurance.get()
+        {
             return Err(V16Error::InvalidConfig);
         }
         Ok(())
@@ -11881,7 +11900,7 @@ impl MarketGroupV16 {
             pnl_pos_bound_tot_num: 0,
             pnl_pos_bound_tot: 0,
             pnl_matured_pos_tot: 0,
-            insurance_domain_budget: vec![MAX_VAULT_TVL; domain_count],
+            insurance_domain_budget: vec![0; domain_count],
             insurance_domain_spent: vec![0; domain_count],
             pending_domain_loss_barriers: vec![0; domain_count],
             source_credit: vec![SourceCreditStateV16::EMPTY; domain_count],
@@ -16541,6 +16560,7 @@ impl MarketGroupV16 {
             return Err(V16Error::InvalidConfig);
         }
         let mut live_source_credit_insurance_atoms = 0u128;
+        let mut live_domain_budget_remaining_atoms = 0u128;
         if self.asset_activation_count == 0 {
             if self.last_asset_activation_slot != 0 {
                 return Err(V16Error::InvalidConfig);
@@ -16575,6 +16595,13 @@ impl MarketGroupV16 {
             }
             if d < configured_domains {
                 self.validate_source_domain_ledger(d)?;
+                live_domain_budget_remaining_atoms = live_domain_budget_remaining_atoms
+                    .checked_add(
+                        self.insurance_domain_budget[d]
+                            .checked_sub(self.insurance_domain_spent[d])
+                            .ok_or(V16Error::InvalidConfig)?,
+                    )
+                    .ok_or(V16Error::ArithmeticOverflow)?;
                 let reserved_atoms = Self::amount_from_bound_num(
                     self.source_credit[d].insurance_credit_reserved_num,
                 )?;
@@ -16591,7 +16618,9 @@ impl MarketGroupV16 {
             }
             d += 1;
         }
-        if live_source_credit_insurance_atoms > self.insurance {
+        if live_source_credit_insurance_atoms > self.insurance
+            || live_domain_budget_remaining_atoms > self.insurance
+        {
             return Err(V16Error::InvalidConfig);
         }
         let configured_assets = self.config.max_market_slots as usize;

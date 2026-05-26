@@ -397,6 +397,7 @@ fn seed_insurance_source_lien_state(
     group.vault = group.vault.checked_add(10).unwrap();
     group.insurance = 10 * BOUND_SCALE;
     group.vault = group.vault.checked_add(group.insurance).unwrap();
+    group.insurance_domain_budget[0] = group.insurance;
     group
         .add_account_source_positive_pnl_not_atomic(account, 0, 10)
         .unwrap();
@@ -9185,6 +9186,7 @@ fn proof_v16_bankrupt_liquidation_consumes_insurance_before_social_loss() {
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
     group.vault = 4;
     group.insurance = 4;
+    group.insurance_domain_budget[1] = 4;
     account.pnl = -9;
     group.negative_pnl_account_count = 1;
     group.assets[0].loss_weight_sum_short = 1;
@@ -9293,6 +9295,7 @@ fn proof_v16_domain_insurance_spend_excludes_source_credit_reservations() {
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
     group.vault = 4;
     group.insurance = 4;
+    group.insurance_domain_budget[1] = 4;
     group.insurance_credit_reservations[1] = InsuranceCreditReservationV16 {
         insurance_credit_reserved_num: 4 * BOUND_SCALE,
         source_credit_epoch: group.source_credit[1].credit_epoch,
@@ -9318,6 +9321,33 @@ fn proof_v16_domain_insurance_spend_excludes_source_credit_reservations() {
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_unbudgeted_domain_cannot_spend_global_insurance() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    group.vault = 4;
+    group.insurance = 4;
+    bankrupt.pnl = -4;
+    group.negative_pnl_account_count = 1;
+
+    let used = group
+        .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut bankrupt)
+        .unwrap();
+
+    kani::cover!(
+        group.insurance != 0 && group.insurance_domain_budget[1] == 0,
+        "v16 global insurance exists while bankrupt domain budget is empty"
+    );
+    assert_eq!(used, 0);
+    assert_eq!(group.insurance, 4);
+    assert_eq!(group.insurance_domain_spent[1], 0);
+    assert_eq!(bankrupt.pnl, -4);
+}
+
+#[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_zero_copy_domain_insurance_spend_excludes_source_credit_reservations() {
@@ -9327,6 +9357,7 @@ fn proof_v16_zero_copy_domain_insurance_spend_excludes_source_credit_reservation
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
     group.vault = 4;
     group.insurance = 4;
+    group.insurance_domain_budget[1] = 4;
     group.insurance_credit_reservations[1] = InsuranceCreditReservationV16 {
         insurance_credit_reserved_num: 4 * BOUND_SCALE,
         source_credit_epoch: group.source_credit[1].credit_epoch,
@@ -9360,6 +9391,55 @@ fn proof_v16_zero_copy_domain_insurance_spend_excludes_source_credit_reservation
             .get()
             != 0,
         "v16 zero-copy source-credit insurance reservation occupies bankrupt domain budget"
+    );
+    assert_eq!(used, 0);
+    assert_eq!(market_view.header.insurance.get(), 4);
+    assert_eq!(
+        market_view.markets[0]
+            .engine
+            .insurance_domain_spent_short
+            .get(),
+        0
+    );
+    assert_eq!(account_view.header.pnl.get(), -4);
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_zero_copy_unbudgeted_domain_cannot_spend_global_insurance() {
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut bankrupt =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    group.vault = 4;
+    group.insurance = 4;
+    bankrupt.pnl = -4;
+    group.negative_pnl_account_count = 1;
+
+    let mut header = group_header_for_one_asset(&group);
+    let mut markets = [Market {
+        wrapper: (),
+        engine: group_slots_for_one_asset(&group)[0],
+    }];
+    let mut account_header = PortfolioAccountV16Account::from_runtime(&bankrupt);
+    let mut source_domains = source_domains_for_one_asset(&bankrupt);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    let used = market_view
+        .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account_view)
+        .unwrap();
+
+    kani::cover!(
+        market_view.header.insurance.get() != 0
+            && market_view.markets[0]
+                .engine
+                .insurance_domain_budget_short
+                .get()
+                == 0,
+        "v16 zero-copy global insurance exists while bankrupt domain budget is empty"
     );
     assert_eq!(used, 0);
     assert_eq!(market_view.header.insurance.get(), 4);
@@ -9481,6 +9561,62 @@ fn proof_v16_bad_asset_cannot_spend_unrelated_domain_insurance_budget() {
     assert_eq!(group.insurance, 1);
     assert_eq!(group.insurance_domain_spent[0], 0);
     assert_eq!(group.insurance_domain_spent[1], 0);
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_invariants_reject_overallocated_domain_insurance_budgets() {
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    group.vault = 4;
+    group.insurance = 4;
+    group.insurance_domain_budget = vec![0; group.insurance_domain_budget.len()];
+    group.insurance_domain_budget[0] = 4;
+    group.insurance_domain_budget[1] = 1;
+
+    kani::cover!(
+        group.insurance_domain_budget[0] + group.insurance_domain_budget[1] > group.insurance,
+        "v16 total unspent domain budgets exceed aggregate insurance"
+    );
+    assert_eq!(
+        group.assert_public_invariants(),
+        Err(V16Error::InvalidConfig)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_zero_copy_invariants_reject_overallocated_domain_insurance_budgets() {
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    group.vault = 4;
+    group.insurance = 4;
+    group.insurance_domain_budget = vec![0; group.insurance_domain_budget.len()];
+    group.insurance_domain_budget[0] = 4;
+    group.insurance_domain_budget[1] = 1;
+
+    let mut header = group_header_for_one_asset(&group);
+    let mut markets = [Market {
+        wrapper: (),
+        engine: group_slots_for_one_asset(&group)[0],
+    }];
+    let market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    kani::cover!(
+        market_view.markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get()
+            + market_view.markets[0]
+                .engine
+                .insurance_domain_budget_short
+                .get()
+            > market_view.header.insurance.get(),
+        "v16 zero-copy total unspent domain budgets exceed aggregate insurance"
+    );
+    assert_eq!(market_view.validate_shape(), Err(V16Error::InvalidConfig));
 }
 
 fn assert_bankrupt_liquidation_cannot_free_exposure_before_residual_durable(residual: i128) {
