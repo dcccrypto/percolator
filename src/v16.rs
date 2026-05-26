@@ -215,6 +215,67 @@ pub fn active_bitmap_with_cleared(
 }
 
 #[inline]
+fn liquidation_remaining_active_bitmap_after_close(
+    active_bitmap: V16ActiveBitmap,
+    leg_slot_index: usize,
+    close_q: u128,
+    leg_abs_q: u128,
+) -> V16Result<V16ActiveBitmap> {
+    if close_q == leg_abs_q {
+        active_bitmap_with_cleared(active_bitmap, leg_slot_index)
+    } else {
+        Ok(active_bitmap)
+    }
+}
+
+#[inline]
+fn liquidation_uncovered_loss_after_principal(pnl: i128, capital: u128) -> u128 {
+    if pnl < 0 {
+        pnl.unsigned_abs().saturating_sub(capital)
+    } else {
+        0
+    }
+}
+
+#[inline]
+fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
+    pnl: i128,
+    capital: u128,
+    active_bitmap: V16ActiveBitmap,
+    leg_slot_index: usize,
+    close_q: u128,
+    leg_abs_q: u128,
+) -> V16Result<bool> {
+    let uncovered_loss_after_principal = liquidation_uncovered_loss_after_principal(pnl, capital);
+    let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
+        active_bitmap,
+        leg_slot_index,
+        close_q,
+        leg_abs_q,
+    )?;
+    Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+    pnl: i128,
+    capital: u128,
+    active_bitmap: V16ActiveBitmap,
+    leg_slot_index: usize,
+    close_q: u128,
+    leg_abs_q: u128,
+) -> V16Result<bool> {
+    liquidation_close_would_leave_uncovered_loss_with_open_risk(
+        pnl,
+        capital,
+        active_bitmap,
+        leg_slot_index,
+        close_q,
+        leg_abs_q,
+    )
+}
+
+#[inline]
 pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
     let mut total = 0u32;
     let mut i = 0;
@@ -9592,22 +9653,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             return Err(V16Error::LockActive);
         }
-        let uncovered_loss_after_principal = if account.header.pnl.get() < 0 {
-            account
-                .header
-                .pnl
-                .get()
-                .unsigned_abs()
-                .saturating_sub(account.header.capital.get())
-        } else {
-            0
-        };
-        let remaining_active_bitmap = if close_q == leg.basis_pos_q.unsigned_abs() {
-            active_bitmap_with_cleared(account.header.active_bitmap.map(V16PodU64::get), leg_slot)?
-        } else {
-            account.header.active_bitmap.map(V16PodU64::get)
-        };
-        if uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap) {
+        if liquidation_close_would_leave_uncovered_loss_with_open_risk(
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            account.header.active_bitmap.map(V16PodU64::get),
+            leg_slot,
+            close_q,
+            leg.basis_pos_q.unsigned_abs(),
+        )? {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -14768,6 +14821,25 @@ impl MarketGroupV16 {
         funding_rate_e9: i128,
         protective_progress_committed: bool,
     ) -> V16Result<AccrueAssetOutcomeV16> {
+        let out = self.accrue_asset_to_core_not_atomic(
+            asset_index,
+            now_slot,
+            effective_price,
+            funding_rate_e9,
+            protective_progress_committed,
+        )?;
+        self.assert_public_invariants()?;
+        Ok(out)
+    }
+
+    fn accrue_asset_to_core_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
         if self.mode != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -14882,8 +14954,13 @@ impl MarketGroupV16 {
         // through `accrue_asset_to_not_atomic` either directly (crank) or
         // via `settle_account_for_position_action_and_refresh_not_atomic`
         // (deposit / withdraw / trade).
+        //
+        // Upstream b757c76 split `accrue_asset_to_not_atomic` into an
+        // outer wrapper that calls this core then `assert_public_invariants`,
+        // so the assert previously here is now reached via the outer
+        // wrapper after our stress-envelope writer runs. Net check order:
+        // mutate asset → apply_stress_envelope_progress → outer assert.
         self.apply_stress_envelope_progress(consumption_bps_e9, now_slot)?;
-        self.assert_public_invariants()?;
         Ok(AccrueAssetOutcomeV16 {
             dt: segment_dt,
             price_move_active,
@@ -14891,6 +14968,24 @@ impl MarketGroupV16 {
             equity_active,
             loss_stale_after: self.loss_stale_active,
         })
+    }
+
+    #[cfg(kani)]
+    pub fn kani_accrue_asset_to_core_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
+        self.accrue_asset_to_core_not_atomic(
+            asset_index,
+            now_slot,
+            effective_price,
+            funding_rate_e9,
+            protective_progress_committed,
+        )
     }
 
     fn accrual_activity_for_asset_segment(
@@ -15220,17 +15315,14 @@ impl MarketGroupV16 {
         )? {
             return Err(V16Error::LockActive);
         }
-        let uncovered_loss_after_principal = if account.pnl < 0 {
-            account.pnl.unsigned_abs().saturating_sub(account.capital)
-        } else {
-            0
-        };
-        let remaining_active_bitmap = if close_q == leg.basis_pos_q.unsigned_abs() {
-            active_bitmap_with_cleared(account.active_bitmap, leg_slot)?
-        } else {
-            account.active_bitmap
-        };
-        if uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap) {
+        if liquidation_close_would_leave_uncovered_loss_with_open_risk(
+            account.pnl,
+            account.capital,
+            account.active_bitmap,
+            leg_slot,
+            close_q,
+            leg.basis_pos_q.unsigned_abs(),
+        )? {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -16312,6 +16404,15 @@ impl MarketGroupV16 {
     pub fn begin_full_drain_reset(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
         self.begin_full_drain_reset_inner(asset_index, side)?;
         self.assert_public_invariants()
+    }
+
+    #[cfg(kani)]
+    pub fn kani_begin_full_drain_reset_inner(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        self.begin_full_drain_reset_inner(asset_index, side)
     }
 
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
@@ -19694,6 +19795,16 @@ impl MarketGroupV16 {
         delta_q: i128,
     ) -> V16Result<()> {
         self.apply_position_delta(account, asset_index, delta_q)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_reduce_matching_open_interest_for_unilateral_close(
+        &mut self,
+        asset_index: usize,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<()> {
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, closed_side, close_q)
     }
 
     fn reduce_position(
