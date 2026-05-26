@@ -28,6 +28,20 @@ fn group() -> MarketGroupV16 {
     MarketGroupV16::new(market, V16Config::public_user_fund(4, 0, 10)).unwrap()
 }
 
+fn group_with_market_slots(max_market_slots: u32) -> MarketGroupV16 {
+    let (market, _, _) = ids();
+    MarketGroupV16::new(
+        market,
+        V16Config::public_user_fund_with_market_slots(
+            max_market_slots as u16,
+            max_market_slots,
+            0,
+            10,
+        ),
+    )
+    .unwrap()
+}
+
 fn bitmap(indices: &[usize]) -> percolator::V16ActiveBitmap {
     let mut out = percolator::active_bitmap_empty();
     for &idx in indices {
@@ -6106,6 +6120,105 @@ fn v16_equity_active_accrual_commits_one_bounded_loss_stale_segment() {
 }
 
 #[test]
+fn v16_106_loss_stale_active_remains_set_when_other_asset_stale_runtime() {
+    let mut g = group_with_market_slots(2);
+    g.config.max_accrual_dt_slots = 10;
+    g.config.min_funding_lifetime_slots = 10;
+    let mut asset0_long = account_with_id(10);
+    let mut asset1_long = account_with_id(11);
+    g.attach_leg(&mut asset0_long, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut asset1_long, 1, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let _asset0_short = attach_opposite(&mut g, 0, SideV16::Long, POS_SCALE, 12);
+    let _asset1_short = attach_opposite(&mut g, 1, SideV16::Long, POS_SCALE, 13);
+
+    g.accrue_asset_to_not_atomic(1, 20, 2, 0, true).unwrap();
+    assert_eq!(g.assets[1].slot_last, 10);
+    assert!(g.loss_stale_active);
+
+    g.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+    g.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+
+    assert_eq!(g.assets[0].slot_last, 20);
+    assert_eq!(g.assets[1].slot_last, 10);
+    assert_eq!(g.slot_last, 10);
+    assert!(
+        g.loss_stale_active,
+        "catching up one asset must not clear a stale loss segment on another accruable asset"
+    );
+}
+
+#[test]
+fn v16_106_loss_stale_active_clears_only_when_all_accruable_assets_fresh_runtime() {
+    let mut g = group_with_market_slots(2);
+    g.config.max_accrual_dt_slots = 10;
+    g.config.min_funding_lifetime_slots = 10;
+    let mut asset0_long = account_with_id(14);
+    let mut asset1_long = account_with_id(15);
+    g.attach_leg(&mut asset0_long, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut asset1_long, 1, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let _asset0_short = attach_opposite(&mut g, 0, SideV16::Long, POS_SCALE, 16);
+    let _asset1_short = attach_opposite(&mut g, 1, SideV16::Long, POS_SCALE, 17);
+
+    g.accrue_asset_to_not_atomic(1, 20, 2, 0, true).unwrap();
+    g.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+    g.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+    assert!(g.loss_stale_active);
+    assert_eq!(g.slot_last, 10);
+
+    g.accrue_asset_to_not_atomic(1, 20, 2, 0, true).unwrap();
+
+    assert_eq!(g.assets[0].slot_last, 20);
+    assert_eq!(g.assets[1].slot_last, 20);
+    assert_eq!(g.slot_last, 20);
+    assert!(!g.loss_stale_active);
+}
+
+#[test]
+fn v16_106_loss_stale_active_remains_set_when_other_asset_stale_zero_copy() {
+    let mut g = group_with_market_slots(2);
+    g.config.max_accrual_dt_slots = 10;
+    g.config.min_funding_lifetime_slots = 10;
+    let mut asset0_long = account_with_id(18);
+    let mut asset1_long = account_with_id(19);
+    g.attach_leg(&mut asset0_long, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    g.attach_leg(&mut asset1_long, 1, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let _asset0_short = attach_opposite(&mut g, 0, SideV16::Long, POS_SCALE, 20);
+    let _asset1_short = attach_opposite(&mut g, 1, SideV16::Long, POS_SCALE, 21);
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    view.accrue_asset_to_not_atomic(1, 20, 2, 0, true).unwrap();
+    view.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+    view.accrue_asset_to_not_atomic(0, 20, 2, 0, true).unwrap();
+
+    assert_eq!(
+        view.markets[0].engine.asset.slot_last.get(),
+        20,
+        "asset 0 should be locally current"
+    );
+    assert_eq!(
+        view.markets[1].engine.asset.slot_last.get(),
+        10,
+        "asset 1 remains loss-stale"
+    );
+    assert_eq!(view.header.slot_last.get(), 10);
+    assert_eq!(view.header.loss_stale_active, 1);
+}
+
+#[test]
 fn v16_pending_domain_loss_barrier_does_not_freeze_asset_accrual() {
     let mut g = group();
     let mut a = account();
@@ -6326,6 +6439,96 @@ fn v16_trade_fee_conserves_vault_and_keeps_oi_symmetric() {
     assert_eq!(g.c_tot, c_tot_before - 2);
     assert_eq!(g.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(g.assets[0].oi_eff_short_q, POS_SCALE);
+}
+
+#[test]
+fn v16_trade_outcome_reports_actual_charged_fees_runtime() {
+    let mut g = group();
+    g.config.max_trading_fee_bps = 1_000;
+    let mut long = account_with_id(22);
+    let mut short = account_with_id(23);
+    g.deposit_not_atomic(&mut long, 3).unwrap();
+    g.deposit_not_atomic(&mut short, 7).unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+
+    let out = g
+        .execute_trade_with_fee_in_place_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: POS_SCALE,
+                exec_price: 100,
+                fee_bps: 1_000,
+            },
+            &[100; V16_MAX_PORTFOLIO_ASSETS_N],
+        )
+        .unwrap();
+
+    assert_eq!(out.notional, 100);
+    assert_eq!(out.fee_a, 3);
+    assert_eq!(out.fee_b, 7);
+    assert_eq!(g.insurance, 10);
+    assert_eq!(g.c_tot, 0);
+    assert_eq!(long.capital, 0);
+    assert_eq!(short.capital, 0);
+}
+
+#[test]
+fn v16_trade_outcome_reports_actual_charged_fees_zero_copy() {
+    let mut g = group();
+    g.config.max_trading_fee_bps = 1_000;
+    let mut long = account_with_id(24);
+    let mut short = account_with_id(25);
+    g.deposit_not_atomic(&mut long, 3).unwrap();
+    g.deposit_not_atomic(&mut short, 7).unwrap();
+    g.attach_leg(&mut long, 0, SideV16::Short, -(POS_SCALE as i128))
+        .unwrap();
+    g.attach_leg(&mut short, 0, SideV16::Long, POS_SCALE as i128)
+        .unwrap();
+    let mut header =
+        MarketGroupV16HeaderAccount::from_runtime_with_capacity(&g, g.assets.len()).unwrap();
+    let mut markets = (0..g.assets.len())
+        .map(|i| Market {
+            wrapper: [i as u8; 32],
+            engine: EngineAssetSlotV16Account::from_runtime_group_slot(&g, i).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let mut long_header = PortfolioAccountV16Account::from_runtime(&long);
+    let mut short_header = PortfolioAccountV16Account::from_runtime(&short);
+    let domain_count =
+        percolator::v16::v16_domain_count_for_market_slots(g.config.max_market_slots).unwrap();
+    let mut long_sources = vec![PortfolioSourceDomainV16Account::default(); domain_count];
+    let mut short_sources = vec![PortfolioSourceDomainV16Account::default(); domain_count];
+    let mut long_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut long_header, &mut long_sources);
+    let mut short_view =
+        percolator::v16::PortfolioV16ViewMut::new(&mut short_header, &mut short_sources);
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let out = market_view
+        .execute_trade_with_fee_in_place_not_atomic(
+            &mut long_view,
+            &mut short_view,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: POS_SCALE,
+                exec_price: 100,
+                fee_bps: 1_000,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(out.notional, 100);
+    assert_eq!(out.fee_a, 3);
+    assert_eq!(out.fee_b, 7);
+    assert_eq!(market_view.header.insurance.get(), 10);
+    assert_eq!(market_view.header.c_tot.get(), 0);
+    assert_eq!(long_view.header.capital.get(), 0);
+    assert_eq!(short_view.header.capital.get(), 0);
 }
 
 #[test]

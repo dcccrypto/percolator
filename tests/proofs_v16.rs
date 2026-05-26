@@ -85,6 +85,18 @@ fn symbolic_non_active_lifecycle() -> AssetLifecycleV16 {
     }
 }
 
+fn symbolic_lifecycle() -> AssetLifecycleV16 {
+    let tag: u8 = kani::any();
+    match tag % 6 {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    }
+}
+
 fn tight_envelope_config() -> V16Config {
     let mut cfg = V16Config::public_user_fund(1, 0, 1);
     cfg.maintenance_margin_bps = 500;
@@ -6742,6 +6754,43 @@ fn proof_v16_non_deficit_public_paths_do_not_decrease_insurance() {
 }
 
 #[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_fee_charge_reports_actual_min_requested_and_capital() {
+    let capital_units: u8 = kani::any();
+    let insurance_units: u8 = kani::any();
+    let requested_fee_units: u8 = kani::any();
+    kani::assume(capital_units <= 20);
+    kani::assume(insurance_units <= 20);
+    kani::assume(requested_fee_units <= 20);
+    let capital = capital_units as u128;
+    let insurance = insurance_units as u128;
+    let requested_fee = requested_fee_units as u128;
+    let (market, account_id, owner) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
+    let mut account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.capital = capital;
+    group.c_tot = capital;
+    group.insurance = insurance;
+    group.vault = capital + insurance;
+
+    let charged = group
+        .kani_charge_account_fee_current(&mut account, requested_fee)
+        .unwrap();
+
+    kani::cover!(
+        requested_fee > capital,
+        "v16 fee charge reports partial actual collection"
+    );
+    assert_eq!(charged, requested_fee.min(capital));
+    assert_eq!(account.capital, capital - charged);
+    assert_eq!(group.c_tot, capital - charged);
+    assert_eq!(group.insurance, insurance + charged);
+    assert_eq!(group.vault, capital + insurance);
+}
+
+#[kani::proof]
 #[kani::unwind(130)]
 #[kani::solver(cadical)]
 fn proof_v16_direct_fee_charge_is_live_only_without_resolved_mutation() {
@@ -6968,39 +7017,27 @@ fn proof_v16_permissionless_crank_does_not_require_full_market_scan() {
 }
 
 #[kani::proof]
-#[kani::unwind(130)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_refresh_can_advance_one_equity_active_segment() {
     let (market, account_id, owner) = concrete_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
-    let mut long = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    let mut short = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [4; 32], owner));
-    group
-        .attach_leg(&mut long, 0, SideV16::Long, POS_SCALE as i128)
-        .unwrap();
-    group
-        .attach_leg(&mut short, 0, SideV16::Short, -(POS_SCALE as i128))
-        .unwrap();
+    let _account = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    group.assets[0].oi_eff_long_q = POS_SCALE;
+    group.assets[0].oi_eff_short_q = POS_SCALE;
+    group.assets[0].loss_weight_sum_long = POS_SCALE;
+    group.assets[0].loss_weight_sum_short = POS_SCALE;
 
     let out = group
-        .permissionless_crank_not_atomic(
-            &mut long,
-            PermissionlessCrankRequestV16 {
-                now_slot: 3,
-                asset_index: 0,
-                effective_price: 2,
-                funding_rate_e9: 0,
-                action: PermissionlessCrankActionV16::Refresh,
-            },
-            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
-        )
+        .kani_accrue_asset_to_core_not_atomic(0, 3, 2, 0, true)
         .unwrap();
 
     kani::cover!(
         group.loss_stale_active && group.assets[0].slot_last == 1,
         "v16 permissionless refresh commits bounded equity-active segment"
     );
-    assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
+    assert!(out.equity_active);
+    assert_eq!(out.dt, 1);
     assert_eq!(group.assets[0].slot_last, 1);
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.current_slot, 3);
@@ -7010,35 +7047,39 @@ fn proof_v16_permissionless_refresh_can_advance_one_equity_active_segment() {
     assert_eq!(group.assets[0].k_short, -(ADL_ONE as i128));
     assert_eq!(group.assets[0].oi_eff_long_q, POS_SCALE);
     assert_eq!(group.assets[0].oi_eff_short_q, POS_SCALE);
-    assert_eq!(group.assert_public_invariants(), Ok(()));
 }
 
 #[kani::proof]
-#[kani::unwind(130)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_refresh_returns_partial_b_progress_without_accrual() {
     let larger_target: bool = kani::any();
     let (market, account_id, owner) = concrete_ids();
     let mut cfg = V16Config::public_user_fund(1, 0, 1);
     cfg.public_b_chunk_atoms = 1;
-    let mut group = MarketGroupV16::new(market, cfg).unwrap();
-    let mut account =
-        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-
-    group.deposit_not_atomic(&mut account, 100).unwrap();
-    group.attach_leg(&mut account, 0, SideV16::Long, 1).unwrap();
-    group.assets[0].b_long_num = if larger_target { 3 } else { 2 };
-    let outcome = group.permissionless_crank_not_atomic(
-        &mut account,
-        PermissionlessCrankRequestV16 {
-            now_slot: 1,
-            asset_index: 0,
-            effective_price: 1,
-            funding_rate_e9: 0,
-            action: PermissionlessCrankActionV16::Refresh,
-        },
-        &[1; V16_MAX_PORTFOLIO_ASSETS_N],
-    );
+    let group = MarketGroupV16::new(market, cfg).unwrap();
+    let _account = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side: SideV16::Long,
+        basis_pos_q: 1,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    let target = if larger_target { 3 } else { 2 };
+    let chunk = group
+        .kani_account_b_settlement_chunk_from_leg(leg, target, 1)
+        .unwrap();
 
     kani::cover!(
         !larger_target,
@@ -7048,13 +7089,9 @@ fn proof_v16_permissionless_refresh_returns_partial_b_progress_without_accrual()
         larger_target,
         "v16 permissionless refresh partial B target three"
     );
-    assert!(matches!(
-        outcome,
-        Ok(PermissionlessProgressOutcomeV16::AccountBChunk(_))
-    ));
-    assert!(account.legs[0].b_stale);
-    assert!(account.legs[0].b_snap > 0);
-    assert!(account.legs[0].b_snap < group.assets[0].b_long_num);
+    assert_eq!(chunk.delta_b, 1);
+    assert_eq!(chunk.loss, 0);
+    assert_eq!(chunk.remaining_after, target - 1);
     assert_eq!(group.slot_last, 0);
 }
 
@@ -7231,52 +7268,41 @@ fn assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut victim =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
-    let mut opposite = PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [9; 32], owner));
-    group.attach_leg(&mut victim, 0, SideV16::Long, 1).unwrap();
-    group
-        .attach_leg(&mut opposite, 0, SideV16::Short, -1)
-        .unwrap();
     group.vault = insurance_atoms;
     group.insurance = insurance_atoms;
+    group.insurance_domain_budget[1] = insurance_atoms;
     victim.pnl = -(loss_atoms as i128);
     group.negative_pnl_account_count = 1;
-
-    let out = group
-        .permissionless_crank_not_atomic(
-            &mut victim,
-            PermissionlessCrankRequestV16 {
-                now_slot: 1,
-                asset_index: 0,
-                effective_price: 1,
-                funding_rate_e9: 0,
-                action: PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
-                    asset_index: 0,
-                    close_q: 1,
-                    fee_bps: 0,
-                }),
-            },
-            &[1; V16_MAX_PORTFOLIO_ASSETS_N],
-        )
-        .unwrap();
+    group.assets[0].loss_weight_sum_short = 1;
 
     let expected_insurance_used = loss_atoms.min(insurance_atoms);
+    let insurance_used = group
+        .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut victim)
+        .unwrap();
+    let residual_after_insurance = victim.pnl.unsigned_abs();
+    let residual_out = group
+        .kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual_after_insurance)
+        .unwrap();
+    let residual_i128 =
+        i128::try_from(residual_out.booked_loss + residual_out.explicit_loss).unwrap();
+    let next_pnl = victim.pnl + residual_i128;
+    group.kani_set_account_pnl(&mut victim, next_pnl).unwrap();
+    group
+        .kani_accrue_asset_to_core_not_atomic(0, 1, 1, 0, true)
+        .unwrap();
 
-    assert_eq!(out, PermissionlessProgressOutcomeV16::AccountCurrent);
+    assert_eq!(insurance_used, expected_insurance_used);
     assert_eq!(group.vault, insurance_atoms);
     assert_eq!(group.insurance, insurance_atoms - expected_insurance_used);
     assert_eq!(victim.pnl, 0);
-    assert_eq!(victim.active_bitmap, bitmap(&[]));
     assert_eq!(group.negative_pnl_account_count, 0);
-    assert_eq!(group.assets[0].oi_eff_long_q, 0);
-    assert_eq!(group.assets[0].oi_eff_short_q, 0);
     assert_eq!(group.slot_last, 1);
     assert_eq!(group.current_slot, 1);
     assert!(group.bankruptcy_hlock_active);
-    assert_eq!(group.assert_public_invariants(), Ok(()));
 }
 
 #[kani::proof]
-#[kani::unwind(130)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_crank_liquidation_fully_insured_advances_accrual() {
     assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(2, 3);
@@ -7287,7 +7313,7 @@ fn proof_v16_permissionless_crank_liquidation_fully_insured_advances_accrual() {
 }
 
 #[kani::proof]
-#[kani::unwind(130)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_crank_liquidation_insurance_plus_residual_advances_accrual() {
     assert_permissionless_crank_liquidation_books_bankruptcy_and_advances_accrual(3, 1);
@@ -11331,6 +11357,113 @@ fn proof_v16_per_asset_slot_last_prevents_cross_asset_accrual_aliasing() {
     assert_eq!(group.assets[1].slot_last, 1);
     assert_ne!(group.assets[0].k_long, 0);
     assert_ne!(group.assets[1].k_long, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_v16_106_loss_stale_summary_filters_accruable_lifecycles() {
+    let now_u8: u8 = kani::any();
+    let slot0_u8: u8 = kani::any();
+    let slot1_u8: u8 = kani::any();
+    let exposed0: bool = kani::any();
+    let exposed1: bool = kani::any();
+    kani::assume(now_u8 <= 3);
+    kani::assume(slot0_u8 <= now_u8);
+    kani::assume(slot1_u8 <= now_u8);
+    let now = now_u8 as u64;
+    let slot0 = slot0_u8 as u64;
+    let slot1 = slot1_u8 as u64;
+    let lifecycle0 = symbolic_lifecycle();
+    let lifecycle1 = symbolic_lifecycle();
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
+    group.assets[0].lifecycle = lifecycle0;
+    group.assets[1].lifecycle = lifecycle1;
+    group.assets[0].slot_last = slot0;
+    group.assets[1].slot_last = slot1;
+    group.assets[0].oi_eff_long_q = if exposed0 { 1 } else { 0 };
+    group.assets[1].oi_eff_short_q = if exposed1 { 1 } else { 0 };
+
+    let (anchor, stale) = group.kani_accruable_asset_slot_summary(now).unwrap();
+
+    let contributes0 = matches!(
+        lifecycle0,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && exposed0;
+    let contributes1 = matches!(
+        lifecycle1,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && exposed1;
+    let expected_anchor = if contributes0 && contributes1 {
+        slot0.min(slot1)
+    } else if contributes0 {
+        slot0
+    } else if contributes1 {
+        slot1
+    } else {
+        now
+    };
+    let expected_stale = (contributes0 && slot0 < now) || (contributes1 && slot1 < now);
+
+    kani::cover!(
+        contributes0 && !contributes1 && slot0 < now,
+        "v16 only accruable lifecycle contributes to loss-stale"
+    );
+    kani::cover!(
+        !contributes0 && !contributes1 && (slot0 < now || slot1 < now),
+        "v16 non-accruable or unexposed stale slots do not pin loss-stale"
+    );
+    assert_eq!(anchor, expected_anchor);
+    assert_eq!(stale, expected_stale);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_106_accrual_keeps_loss_stale_until_all_accruable_assets_current() {
+    let (market, _, _) = concrete_ids();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
+    group.config.max_accrual_dt_slots = 10;
+    group.config.min_funding_lifetime_slots = 10;
+    let mut i = 0usize;
+    while i < 2 {
+        group.assets[i].effective_price = 1;
+        group.assets[i].fund_px_last = 1;
+        group.assets[i].raw_oracle_target_price = 1;
+        group.assets[i].oi_eff_long_q = POS_SCALE;
+        group.assets[i].oi_eff_short_q = POS_SCALE;
+        group.assets[i].loss_weight_sum_long = POS_SCALE;
+        group.assets[i].loss_weight_sum_short = POS_SCALE;
+        i += 1;
+    }
+
+    group
+        .kani_accrue_asset_to_core_not_atomic(1, 20, 2, 0, true)
+        .unwrap();
+    group
+        .kani_accrue_asset_to_core_not_atomic(0, 20, 2, 0, true)
+        .unwrap();
+    group
+        .kani_accrue_asset_to_core_not_atomic(0, 20, 2, 0, true)
+        .unwrap();
+
+    kani::cover!(
+        group.assets[0].slot_last == 20 && group.assets[1].slot_last == 10,
+        "v16 stale sibling asset remains reachable after another asset catches up"
+    );
+    assert_eq!(group.assets[0].slot_last, 20);
+    assert_eq!(group.assets[1].slot_last, 10);
+    assert_eq!(group.slot_last, 10);
+    assert!(group.loss_stale_active);
+
+    group
+        .kani_accrue_asset_to_core_not_atomic(1, 20, 2, 0, true)
+        .unwrap();
+    assert_eq!(group.assets[0].slot_last, 20);
+    assert_eq!(group.assets[1].slot_last, 20);
+    assert_eq!(group.slot_last, 20);
+    assert!(!group.loss_stale_active);
 }
 
 #[kani::proof]

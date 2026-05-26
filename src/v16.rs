@@ -3753,6 +3753,22 @@ pub struct EngineAssetSlotV16Account {
     pub insurance_reservation_short: InsuranceCreditReservationV16Account,
 }
 
+fn asset_contributes_to_loss_stale_summary(asset: AssetStateV16) -> bool {
+    matches!(
+        asset.lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+    ) && (asset.oi_eff_long_q != 0
+        || asset.oi_eff_short_q != 0
+        || asset.stored_pos_count_long != 0
+        || asset.stored_pos_count_short != 0
+        || asset.stale_account_count_long != 0
+        || asset.stale_account_count_short != 0
+        || asset.pending_obligation_count_long != 0
+        || asset.pending_obligation_count_short != 0
+        || asset.loss_weight_sum_long != 0
+        || asset.loss_weight_sum_short != 0)
+}
+
 pub trait MarketSlotV16View {
     fn engine_slot(&self) -> &EngineAssetSlotV16Account;
 }
@@ -7483,6 +7499,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    fn accruable_asset_slot_summary(
+        &self,
+        config: &V16Config,
+        now_slot: u64,
+    ) -> V16Result<(u64, bool)> {
+        let configured = (config.max_market_slots as usize).min(self.markets.len());
+        let mut anchor = now_slot;
+        let mut saw_accruable = false;
+        let mut i = 0usize;
+        while i < configured {
+            let asset = self.markets[i].engine.asset.try_to_runtime()?;
+            if asset_contributes_to_loss_stale_summary(asset) {
+                if asset.slot_last > now_slot {
+                    return Err(V16Error::InvalidConfig);
+                }
+                saw_accruable = true;
+                anchor = anchor.min(asset.slot_last);
+            }
+            i += 1;
+        }
+        Ok((anchor, saw_accruable && anchor < now_slot))
+    }
+
     pub fn accrue_asset_to_not_atomic(
         &mut self,
         asset_index: usize,
@@ -7568,8 +7607,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
-        self.header.slot_last = V16PodU64::new(asset.slot_last);
-        self.header.loss_stale_active = encode_bool(asset.slot_last < now_slot);
+        let (group_slot_last, group_loss_stale) =
+            self.accruable_asset_slot_summary(&config, now_slot)?;
+        self.header.slot_last = V16PodU64::new(group_slot_last);
+        self.header.loss_stale_active = encode_bool(group_loss_stale);
         if activity.price_move_active {
             self.header.oracle_epoch = V16PodU64::new(
                 self.header
@@ -9753,8 +9794,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         let price = self.asset_state(request.asset_index)?.effective_price;
-        self.charge_account_fee_current_not_atomic(long_account, fee)?;
-        self.charge_account_fee_current_not_atomic(short_account, fee)?;
+        let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
+        let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta_with_lookup(
             long_account,
             request.asset_index,
@@ -9804,8 +9845,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_audit_scan(&long_account.as_view())?;
         self.validate_account_audit_scan(&short_account.as_view())?;
         Ok(TradeOutcomeV16 {
-            fee_a: fee,
-            fee_b: fee,
+            fee_a,
+            fee_b,
             notional,
         })
     }
@@ -14536,9 +14577,11 @@ impl MarketGroupV16 {
             .slot_last
             .checked_add(segment_dt)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        let asset_slot_last = asset.slot_last;
         self.current_slot = now_slot;
-        self.slot_last = asset.slot_last;
-        self.loss_stale_active = asset.slot_last < now_slot;
+        let (group_slot_last, group_loss_stale) = self.accruable_asset_slot_summary(now_slot)?;
+        self.slot_last = group_slot_last;
+        self.loss_stale_active = group_loss_stale;
         if price_move_active {
             self.oracle_epoch = self
                 .oracle_epoch
@@ -14556,7 +14599,7 @@ impl MarketGroupV16 {
             price_move_active,
             funding_active,
             equity_active,
-            loss_stale_after: self.loss_stale_active,
+            loss_stale_after: asset_slot_last < now_slot,
         })
     }
 
@@ -14682,8 +14725,8 @@ impl MarketGroupV16 {
         let short_old_abs =
             signed_position(self.active_leg_for_asset(short_account, request.asset_index)?)
                 .unsigned_abs();
-        self.charge_account_fee_current_not_atomic(long_account, fee)?;
-        self.charge_account_fee_current_not_atomic(short_account, fee)?;
+        let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
+        let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_position_delta(long_account, request.asset_index, long_delta)?;
         self.apply_position_delta(short_account, request.asset_index, short_delta)?;
         self.recertify_account_after_trade_delta(
@@ -14712,8 +14755,8 @@ impl MarketGroupV16 {
         }
         self.assert_public_invariants()?;
         Ok(TradeOutcomeV16 {
-            fee_a: fee,
-            fee_b: fee,
+            fee_a,
+            fee_b,
             notional,
         })
     }
@@ -15190,6 +15233,22 @@ impl MarketGroupV16 {
         request: PermissionlessCrankRequestV16,
         effective_prices: &[u64],
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        let out = self.permissionless_crank_core_not_atomic(account, request, effective_prices)?;
+        let partial_settle_b =
+            matches!(request.action, PermissionlessCrankActionV16::SettleB { .. })
+                && matches!(out, PermissionlessProgressOutcomeV16::AccountBChunk(_));
+        if !partial_settle_b {
+            self.assert_public_invariants()?;
+        }
+        Ok(out)
+    }
+
+    fn permissionless_crank_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        request: PermissionlessCrankRequestV16,
+        effective_prices: &[u64],
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         if self.mode != MarketModeV16::Live
             && !matches!(request.action, PermissionlessCrankActionV16::Recover(_))
         {
@@ -15208,7 +15267,6 @@ impl MarketGroupV16 {
                         self.config.public_b_chunk_atoms,
                     )?
                 {
-                    self.assert_public_invariants()?;
                     return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
                 }
                 self.certify_account_after_local_settlement(account, effective_prices)?;
@@ -15224,14 +15282,14 @@ impl MarketGroupV16 {
             }
             PermissionlessCrankActionV16::Liquidate(liq) => {
                 let liquidated_asset_index = liq.asset_index;
-                self.liquidate_account_not_atomic(account, liq, effective_prices)?;
+                self.liquidate_account_core_not_atomic(account, liq, effective_prices)?;
                 liquidated_asset_index == request.asset_index
             }
             PermissionlessCrankActionV16::Recover(reason) => {
                 return self.declare_permissionless_recovery(reason);
             }
         };
-        self.accrue_asset_to_not_atomic(
+        self.accrue_asset_to_core_not_atomic(
             request.asset_index,
             request.now_slot,
             request.effective_price,
@@ -15239,6 +15297,16 @@ impl MarketGroupV16 {
             protective_progress,
         )?;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_permissionless_crank_core(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        request: PermissionlessCrankRequestV16,
+        effective_prices: &[u64],
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_core_not_atomic(account, request, effective_prices)
     }
 
     pub fn resolve_market_not_atomic(&mut self, resolved_slot: u64) -> V16Result<()> {
@@ -17965,6 +18033,32 @@ impl MarketGroupV16 {
         }
     }
 
+    fn accruable_asset_slot_summary(&self, now_slot: u64) -> V16Result<(u64, bool)> {
+        let mut anchor = now_slot;
+        let mut saw_accruable = false;
+        let mut i = 0usize;
+        while i < self.config.max_market_slots as usize {
+            if i >= self.assets.len() {
+                return Err(V16Error::InvalidConfig);
+            }
+            let asset = self.assets[i];
+            if asset_contributes_to_loss_stale_summary(asset) {
+                if asset.slot_last > now_slot {
+                    return Err(V16Error::InvalidConfig);
+                }
+                saw_accruable = true;
+                anchor = anchor.min(asset.slot_last);
+            }
+            i += 1;
+        }
+        Ok((anchor, saw_accruable && anchor < now_slot))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_accruable_asset_slot_summary(&self, now_slot: u64) -> V16Result<(u64, bool)> {
+        self.accruable_asset_slot_summary(now_slot)
+    }
+
     fn require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         match self.assets[asset_index].lifecycle {
@@ -19459,6 +19553,15 @@ impl MarketGroupV16 {
         new_pnl: i128,
     ) -> V16Result<()> {
         self.set_account_pnl_inner(account, new_pnl, None)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_set_account_pnl(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        new_pnl: i128,
+    ) -> V16Result<()> {
+        self.set_account_pnl(account, new_pnl)
     }
 
     fn set_account_pnl_with_source(
