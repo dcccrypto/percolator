@@ -1,10 +1,10 @@
-# Risk Engine Spec (Source of Truth) — v16.8.0 Realizable Full Shared Cross-Margin
+# Risk Engine Spec (Source of Truth) — v16.8.1 Realizable Full Shared Cross-Margin
 
 **Design:** protected principal + full instance-local cross-margin + source-domain realizable PnL credit + source-credit liens + insurance-credit reservations + exact counterparty/insurance lien lifecycle + single-category residual-cure accounting + quote-value flow proof + reservation encumbrance proof + stock reconciliation + explicit rounding-residue sink + bounded recovery fallback envelope + expiry-reconciled backing buckets + non-double-counted insurance capacity + single-sided margin penalties + strict close priority + local market-side bankruptcy domains + mutable asset lifecycle + preemptible bankrupt close + durable close-progress ledger + pending-loss obligations + instance isolation.  
 **Scope:** one Percolator market-group instance for one quote-token vault, with up to `N` configured asset slots per `PortfolioAccount` and unbounded global account count. A UI MAY aggregate multiple instances, but each instance is an independent vault, solvency, credit, insurance, B, PnL, payout, and recovery domain.  
 **Status:** normative source of truth. Terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
-This revision supersedes v16.7.0 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
+This revision supersedes v16.8.0 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
 
 ```text
 Inside one trusted instance:
