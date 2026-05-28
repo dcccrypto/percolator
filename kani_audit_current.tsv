@@ -1,0 +1,15 @@
+harness	seconds	status	cover
+proof_v16_floor_div_signed_conservative_matches_small_reference	5	PASS	** 2 of 2 cover properties satisfied
+proof_v16_mul_div_floor_u256_matches_small_reference	17	PASS	** 1 of 1 cover properties satisfied
+proof_v16_mul_div_ceil_u256_is_floor_plus_remainder_indicator	68	PASS	** 2 of 2 cover properties satisfied
+proof_v16_ceil_div_positive_checked_matches_small_reference	4	PASS	** 2 of 2 cover properties satisfied
+proof_v16_wide_signed_mul_div_floor_matches_small_reference	77	PASS	** 2 of 2 cover properties satisfied
+proof_v16_k_pair_mul_div_floor_matches_small_reference	202	PASS	** 2 of 2 cover properties satisfied
+proof_v16_k_pair_zero_cases_return_zero	2	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_deposit_preserves_c_tot_vault_capital_sum	188	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_overwithdraw_rejects_without_mutation	254	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_fee_sync_settles_negative_pnl_before_fee	203	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend	28	PASS	** 2 of 2 cover properties satisfied
+proof_v16_view_positive_funding_charges_long_side	40	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_negative_funding_pays_long_side	35	PASS	** 1 of 1 cover properties satisfied
+proof_v16_view_initial_margin_source_lien_creation_is_backed	3	PASS	** 1 of 1 cover properties satisfied

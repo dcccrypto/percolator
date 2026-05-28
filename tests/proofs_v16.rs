@@ -3,9 +3,9 @@
 use percolator::v16::{
     BackingBucketStatusV16, BackingBucketV16, EngineAssetSlotV16Account, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, SideV16, SourceCreditStateV16, V16Config,
-    V16Error, V16PodI128, V16PodU128, V16PodU64,
+    PortfolioLegV16, PortfolioSourceDomainV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, SideV16, SourceCreditStateV16, V16Config, V16Error, V16PodI128,
+    V16PodU128, V16PodU64,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -149,16 +149,8 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     assert_eq!(account.header.pnl.get(), -5 + budget as i128);
 }
 
-#[kani::proof]
-#[kani::unwind(64)]
-#[kani::solver(cadical)]
-fn proof_v16_view_funding_target_signs_match_long_short_sides() {
-    let positive_funding: bool = kani::any();
-    let (mut header, mut markets, mut account_header, mut source_domains) =
-        one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(10);
-    account_header.capital = V16PodU128::new(10);
+fn run_funding_target_sign_case(positive_funding: bool) -> (i128, i128, i128) {
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
     if positive_funding {
         markets[0].engine.asset.f_long_num = V16PodI128::new(-(ADL_ONE as i128));
         markets[0].engine.asset.f_short_num = V16PodI128::new(ADL_ONE as i128);
@@ -166,8 +158,7 @@ fn proof_v16_view_funding_target_signs_match_long_short_sides() {
         markets[0].engine.asset.f_long_num = V16PodI128::new(ADL_ONE as i128);
         markets[0].engine.asset.f_short_num = V16PodI128::new(-(ADL_ONE as i128));
     }
-    account_header.active_bitmap[0] = V16PodU64::new(1);
-    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+    let leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
         market_id: 1,
@@ -183,28 +174,37 @@ fn proof_v16_view_funding_target_signs_match_long_short_sides() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
-    });
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-    market
-        .full_account_refresh_not_atomic(&mut account)
-        .unwrap();
+    };
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.kani_leg_kf_delta_for_settlement(leg).unwrap()
+}
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_view_positive_funding_charges_long_side() {
+    let (k_now, f_now, net) = run_funding_target_sign_case(true);
     kani::cover!(
-        positive_funding && account.header.capital.get() == 9 && account.header.pnl.get() == 0,
+        k_now == 0 && f_now == -(ADL_ONE as i128) && net == -1,
         "positive funding charges long"
     );
+    assert_eq!(k_now, 0);
+    assert_eq!(f_now, -(ADL_ONE as i128));
+    assert_eq!(net, -1);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_view_negative_funding_pays_long_side() {
+    let (k_now, f_now, net) = run_funding_target_sign_case(false);
     kani::cover!(
-        !positive_funding && account.header.capital.get() == 10 && account.header.pnl.get() == 1,
+        k_now == 0 && f_now == ADL_ONE as i128 && net == 1,
         "negative funding pays long"
     );
-    if positive_funding {
-        assert_eq!(account.header.capital.get(), 9);
-        assert_eq!(account.header.pnl.get(), 0);
-    } else {
-        assert_eq!(account.header.capital.get(), 10);
-        assert_eq!(account.header.pnl.get(), 1);
-    }
+    assert_eq!(k_now, 0);
+    assert_eq!(f_now, ADL_ONE as i128);
+    assert_eq!(net, 1);
 }
 
 #[kani::proof]

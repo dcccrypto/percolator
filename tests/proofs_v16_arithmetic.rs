@@ -55,6 +55,7 @@ fn proof_v16_mul_div_floor_u256_matches_small_reference() {
     let d = d_raw as u128;
     let got = mul_div_floor_u256(U256::from_u128(a), U256::from_u128(b), U256::from_u128(d));
 
+    kani::cover!(a != 0 && b != 0 && d > 1, "nontrivial mul-div floor branch");
     assert_eq!(got.try_into_u128(), Some((a * b) / d));
 }
 
@@ -101,6 +102,8 @@ fn proof_v16_ceil_div_positive_checked_matches_small_reference() {
     let got = ceil_div_positive_checked(U256::from_u128(n), U256::from_u128(d));
     let expected = n / d + u128::from(n % d != 0);
 
+    kani::cover!(n % d == 0, "ceil-div positive exact branch");
+    kani::cover!(n % d != 0, "ceil-div positive remainder branch");
     assert_eq!(got.try_into_u128(), Some(expected));
 }
 
@@ -163,6 +166,7 @@ fn proof_v16_k_pair_zero_cases_return_zero() {
     kani::assume((1..=40).contains(&den_raw));
     let den = den_raw as u128;
 
+    kani::cover!(den > 1, "K-pair zero-delta and zero-basis branches");
     assert_eq!(wide_signed_mul_div_floor_from_k_pair(0, -7, 11, den), 0);
     assert_eq!(wide_signed_mul_div_floor_from_k_pair(9, 3, 3, den), 0);
 }

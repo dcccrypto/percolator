@@ -6918,18 +6918,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    fn settle_leg_kf_effects_at_slot(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        leg_slot: usize,
-    ) -> V16Result<()> {
-        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
-            return Err(V16Error::InvalidLeg);
-        }
-        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active {
-            return Ok(());
-        }
+    fn leg_kf_delta_for_settlement(&self, leg: PortfolioLegV16) -> V16Result<(i128, i128, i128)> {
         let asset_index = leg.asset_index as usize;
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
         let den = leg
@@ -6968,6 +6957,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_add(f_delta)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_non_min_i128(net)?;
+        Ok((k_now, f_now, net))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_leg_kf_delta_for_settlement(
+        &self,
+        leg: PortfolioLegV16,
+    ) -> V16Result<(i128, i128, i128)> {
+        self.leg_kf_delta_for_settlement(leg)
+    }
+
+    fn settle_leg_kf_effects_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
+        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
+        if !leg.active {
+            return Ok(());
+        }
+        let asset_index = leg.asset_index as usize;
+        let (k_now, f_now, net) = self.leg_kf_delta_for_settlement(leg)?;
         if net != 0 {
             if net > 0 {
                 let source_domain =
