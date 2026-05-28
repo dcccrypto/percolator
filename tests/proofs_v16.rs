@@ -558,3 +558,50 @@ fn proof_v16_counterparty_source_credit_support_does_not_debit_vault_or_insuranc
     );
     assert_eq!(proof.validate(), Ok(()));
 }
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let c_tot_before: u128 = kani::any();
+    kani::assume(amount <= c_tot_before && c_tot_before <= 1_000_000);
+    let vault = c_tot_before;
+
+    let reserve_proof =
+        TokenValueFlowProofV16::account_capital_to_realized_loss(amount, vault, vault).unwrap();
+    let c_tot_after_reserve = c_tot_before - amount;
+
+    let support_proof =
+        TokenValueFlowProofV16::support_to_account_capital(amount, amount, 0, 0, vault, vault)
+            .unwrap();
+    let c_tot_after_support = c_tot_after_reserve + amount;
+
+    kani::cover!(
+        amount > 1 && c_tot_before > amount,
+        "counterparty support is backed by a prior nontrivial capital reservation"
+    );
+    assert_eq!(
+        reserve_proof.debits[TokenValueClassV16::AccountCapital as usize],
+        amount
+    );
+    assert_eq!(
+        reserve_proof.credits[TokenValueClassV16::ExplicitBackedLoss as usize],
+        amount
+    );
+    assert_eq!(
+        support_proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+        amount
+    );
+    assert_eq!(
+        support_proof.debits[TokenValueClassV16::AccountCapital as usize],
+        amount
+    );
+    assert_eq!(reserve_proof.validate(), Ok(()));
+    assert_eq!(support_proof.validate(), Ok(()));
+    assert_eq!(c_tot_after_support, c_tot_before);
+    assert_eq!(reserve_proof.vault_after, vault);
+    assert_eq!(support_proof.vault_after, vault);
+}

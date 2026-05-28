@@ -1,10 +1,10 @@
-# Risk Engine Spec (Source of Truth) — v16.8.4 Realizable Full Shared Cross-Margin
+# Risk Engine Spec (Source of Truth) — v16.8.5 Realizable Full Shared Cross-Margin
 
 **Design:** protected principal + full instance-local cross-margin + source-domain realizable PnL credit + source-credit liens + insurance-credit reservations + exact counterparty/insurance lien lifecycle + single-category residual-cure accounting + quote-value flow proof + reservation encumbrance proof + stock reconciliation + explicit rounding-residue sink + bounded recovery fallback envelope + expiry-reconciled backing buckets + non-double-counted insurance capacity + single-sided margin penalties + strict close priority + local market-side bankruptcy domains + mutable asset lifecycle + preemptible bankrupt close + durable close-progress ledger + pending-loss obligations + instance isolation.  
 **Scope:** one Percolator market-group instance for one quote-token vault, with up to `N` configured asset slots per `PortfolioAccount` and unbounded global account count. A UI MAY aggregate multiple instances, but each instance is an independent vault, solvency, credit, insurance, B, PnL, payout, and recovery domain.  
 **Status:** normative source of truth. Terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
-This revision supersedes v16.8.3 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
+This revision supersedes v16.8.4 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
 
 ```text
 Inside one trusted instance:
@@ -368,7 +368,7 @@ create_lien_from_counterparty_backing(bucket, amount):
 
 consume_lien_backing(bucket, amount):
     require bucket.valid_liened_backing_num >= amount
-    require amount % BOUND_SCALE == 0 when consumed for quote-atom residual cure
+    require amount % BOUND_SCALE == 0 when consumed for any quote-atom close/support ledger
     cure_atoms = amount / BOUND_SCALE
     bucket.valid_liened_backing_num     -= amount
     bucket.consumed_liened_backing_num  += amount
@@ -652,7 +652,15 @@ if backing_source == CounterpartyBucket and purpose in {Withdrawal, Conversion, 
     consumed scaled backing amount is converted to support_atoms = amount / BOUND_SCALE
     support_atoms is recorded as counterparty source-credit support for the exact
     account-capital, fee, or payout credit being created.
-    It MUST NOT debit V, I, insurance_spent, or any insurance ledger.
+    This support MUST be matched by a prior or same-instruction account-capital
+    to realized-loss/backing reservation for the same source domain. Consuming
+    the lien removes already-reserved backing, increments the source-domain
+    provider receivable, and proves the supported credit as
+    CloseCounterpartyCreditConsumed -> AccountCapital or an exactly equivalent
+    value-flow class. It MUST NOT debit V, I, insurance_spent, or any insurance
+    ledger. Any later external token payout MUST use the ordinary account-capital
+    or payout-ledger debit and vault debit path; counterparty backing consumption
+    alone never sends quote tokens out of the vault.
 
 if backing_source == InsuranceReservation and purpose == ResidualCure:
     consumed value is recorded as insurance_spent
