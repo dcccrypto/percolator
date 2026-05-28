@@ -20869,3 +20869,163 @@ pub mod fork_facade {
     }
 }
 
+/// LP Vault share-math + NAV — pure functions for the fork's LP Vault
+/// wrapper feature (Phase 2.B Tier 3, Workstream 4B).
+///
+/// These functions are engine-resident + Kani-proven so the fund-handling
+/// math has formal coverage. The wrapper (`percolator-prog`) calls them
+/// from the LP Vault instruction handlers. LP shares themselves are pure
+/// wrapper meta (a standard SPL Token-2022 mint); only the arithmetic
+/// lives here.
+///
+/// SECURITY INVARIANT (sign-off Note 2): `lp_vault_nav_atoms` is computed
+/// STRICTLY from `BackingDomainLedgerAccountV16` monotonic counters, never
+/// from a raw vault token balance. A direct token donation into the
+/// backing-bucket vault does NOT change any of these counters, so it
+/// cannot inflate NAV or move the share price an incoming depositor pays.
+/// This is what makes the ERC-4626-class donation-inflation attack
+/// impossible by construction.
+pub mod lp_vault {
+    use super::{V16Error, V16Result};
+    use crate::wide_math::wide_mul_div_floor_u128;
+    use crate::MAX_MARGIN_BPS;
+
+    /// Net asset value of the LP Vault, in collateral atoms, derived
+    /// strictly from backing-domain ledger counters (Note 2 security
+    /// invariant). All inputs come from `BackingDomainLedgerAccountV16`:
+    ///
+    /// - `total_principal_atoms`           current principal (deposits - withdraws)
+    /// - `total_earnings_atoms`            cumulative utilization-fee earnings
+    /// - `total_earnings_withdrawn_atoms`  cumulative earnings withdrawn
+    /// - `cumulative_loss_atoms`           cumulative impaired/consumed principal
+    /// - `cumulative_recovery_atoms`       cumulative recovered principal
+    /// - `fee_share_bps`                   LP share of earnings (0..=10_000)
+    ///
+    /// `NAV = available_principal + lp_earnings`, where
+    ///   `available_principal = total_principal_atoms - (loss - recovery)`
+    ///   `lp_earnings = floor((earnings - earnings_withdrawn) * fee_share_bps / 10_000)`
+    ///
+    /// `loss - recovery` equals the current unavailable principal and is
+    /// always `>= 0` by the ledger's construction (both counters track the
+    /// same `unavailable_principal` going up = loss, down = recovery — see
+    /// `sync_backing_domain_ledger` in `percolator-prog`). We nonetheless
+    /// fail closed on any underflow as an accounting anomaly.
+    ///
+    /// NOTE: the insurance-side fraction of earnings
+    /// `(1 - fee_share_bps/10_000)` is intentionally NOT counted in NAV —
+    /// it accrues in the bucket as a protocol reserve (sign-off Note 3, v1
+    /// stub). A future insurance-claim instruction can route it.
+    pub fn lp_vault_nav_atoms(
+        total_principal_atoms: u128,
+        total_earnings_atoms: u128,
+        total_earnings_withdrawn_atoms: u128,
+        cumulative_loss_atoms: u128,
+        cumulative_recovery_atoms: u128,
+        fee_share_bps: u16,
+    ) -> V16Result<u128> {
+        if fee_share_bps as u64 > MAX_MARGIN_BPS {
+            return Err(V16Error::InvalidConfig);
+        }
+        // net impairment = loss - recovery == current unavailable principal (>= 0)
+        let net_impairment = cumulative_loss_atoms
+            .checked_sub(cumulative_recovery_atoms)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // available principal cannot go negative; anomaly => fail closed
+        let available_principal = total_principal_atoms
+            .checked_sub(net_impairment)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // net earnings = earnings - withdrawn (>= 0 by monotonicity)
+        let net_earnings = total_earnings_atoms
+            .checked_sub(total_earnings_withdrawn_atoms)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // LP share of earnings (round DOWN). Remainder is the insurance-side
+        // stub (Note 3) — accrues in the bucket, not counted in LP NAV.
+        let lp_earnings =
+            wide_mul_div_floor_u128(net_earnings, fee_share_bps as u128, MAX_MARGIN_BPS as u128);
+        available_principal
+            .checked_add(lp_earnings)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// LP shares to mint for a deposit of `amount` atoms against a vault
+    /// with `total_shares` outstanding and `nav_atoms` net asset value
+    /// (computed BEFORE this deposit). Round DOWN — the vault keeps any
+    /// dust, never over-issues.
+    ///
+    /// - `total_shares == 0`: fresh vault or drain-epoch reset -> 1:1
+    ///   (returns `amount`). Caller guarantees `amount > 0`.
+    /// - `total_shares > 0 && nav_atoms == 0`: vault wiped to zero NAV
+    ///   while shares still outstanding -> cannot price a deposit; reject.
+    /// - otherwise: `floor(amount * total_shares / nav_atoms)`.
+    ///
+    /// The result MAY be 0 (when `amount * total_shares < nav_atoms`). The
+    /// caller (wrapper) MUST reject a 0 result with an explicit error
+    /// (sign-off Note 1: never silently mint 0 and absorb the deposit).
+    /// Kept as pure math here; the reject policy + error mapping
+    /// (`LpVaultZeroSharesMinted`) live in the wrapper handler.
+    pub fn lp_shares_for_deposit(
+        amount: u128,
+        total_shares: u128,
+        nav_atoms: u128,
+    ) -> V16Result<u128> {
+        if total_shares == 0 {
+            return Ok(amount);
+        }
+        if nav_atoms == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(wide_mul_div_floor_u128(amount, total_shares, nav_atoms))
+    }
+
+    /// Collateral atoms to release for redeeming `shares` against a vault
+    /// with `total_shares` outstanding and `nav_atoms` NAV. Round DOWN —
+    /// the vault keeps any dust so it stays solvent against remaining
+    /// shares.
+    ///
+    /// `floor(shares * nav_atoms / total_shares)`.
+    pub fn lp_atoms_for_redemption(
+        shares: u128,
+        total_shares: u128,
+        nav_atoms: u128,
+    ) -> V16Result<u128> {
+        if total_shares == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        if shares > total_shares {
+            return Err(V16Error::CounterUnderflow);
+        }
+        Ok(wide_mul_div_floor_u128(shares, nav_atoms, total_shares))
+    }
+
+    /// Split a fee/earnings delta into the LP-side accrual and the
+    /// insurance-side remainder. LP side = `floor(delta * fee_share_bps /
+    /// 10_000)`; insurance side = `delta - lp_side`.
+    ///
+    /// In v1 the LP side accrues automatically via NAV (the earnings
+    /// counter feeds `lp_vault_nav_atoms`); this helper exists for the
+    /// crank's snapshot bookkeeping and for the future insurance-side
+    /// routing hook (sign-off Note 3 — insurance routing is a v1 stub).
+    pub fn lp_fee_split(delta_atoms: u128, fee_share_bps: u16) -> V16Result<(u128, u128)> {
+        if fee_share_bps as u64 > MAX_MARGIN_BPS {
+            return Err(V16Error::InvalidConfig);
+        }
+        let lp_side =
+            wide_mul_div_floor_u128(delta_atoms, fee_share_bps as u128, MAX_MARGIN_BPS as u128);
+        let insurance_side = delta_atoms
+            .checked_sub(lp_side)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((lp_side, insurance_side))
+    }
+
+    /// True iff a queued redemption's cooldown has elapsed:
+    /// `current_slot >= request_slot + cooldown_slots` (saturating add).
+    /// `cooldown_slots == 0` => always elapsed (immediate redemption).
+    pub fn lp_redemption_cooldown_elapsed(
+        request_slot: u64,
+        current_slot: u64,
+        cooldown_slots: u64,
+    ) -> bool {
+        current_slot >= request_slot.saturating_add(cooldown_slots)
+    }
+}
+

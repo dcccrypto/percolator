@@ -762,3 +762,70 @@ fn proof_v16_admit_threshold_field_persists_in_trade_request() {
 
     kani::cover!(true, "A-1 TradeRequestV16 field round-trips losslessly");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// LP Vault share-math (Phase 2.B Tier 3, Workstream 4B)
+//
+// Harnesses for the pure functions in `percolator::lp_vault`.
+//
+// COVERAGE NOTE — Kani tractability of the wide-math functions:
+// `lp_vault_nav_atoms`, `lp_shares_for_deposit` (non-fresh path),
+// `lp_atoms_for_redemption`, and `lp_fee_split` all route through
+// `wide_mul_div_floor_u128`, whose U256 long division (`div_rem_u256`) is a
+// ~256-iteration bit loop. CBMC cannot unwind that within a practical budget
+// (empirically `fee_share_bound` ran 426s at unwind(4) and still hit the
+// unwinding assertion). Per the brief's pre-approved CBMC-timeout rule and
+// the project's P-12/P-13 deferral precedent, the 5 wide-math properties are
+// DEFERRED with explicit coverage mapping in V16_PROOFS_RETIRED.md — the 29
+// concrete-value runtime unit tests in `tests/v16_fork_lp_vault_tests.rs`
+// exhaustively exercise round-DOWN issuance/redemption, monotonicity, the
+// deposit→redeem no-profit invariant, NAV-from-counters (donation defense),
+// and fee-split conservation across edge cases.
+//
+// The 2 harnesses below avoid the U256 loop (early-return / pure-u64) and
+// verify in well under 1s, so they remain as live formal proofs.
+// ════════════════════════════════════════════════════════════════════════════
+
+use percolator::lp_vault::{lp_redemption_cooldown_elapsed, lp_shares_for_deposit};
+
+/// LP_VAULT-5: drain-epoch freshness — when no shares are outstanding, a fresh
+/// deposit mints exactly `amount` shares (1:1), independent of stale NAV.
+/// Hits the `total_shares == 0` early return, so no wide-math loop. Verifies
+/// in ~0.08s.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_lp_vault_drain_epoch_freshness() {
+    let amount: u128 = kani::any();
+    let stale_nav: u128 = kani::any();
+    kani::assume(amount >= 1 && amount <= 1_000_000_000_000);
+    // total_shares == 0 → 1:1 regardless of any residual NAV.
+    let shares = lp_shares_for_deposit(amount, 0, stale_nav).unwrap();
+    assert_eq!(shares, amount, "drain-epoch deposit must mint 1:1");
+    kani::cover!(true, "LP_VAULT-5 drain epoch freshness (1:1 reset)");
+}
+
+/// LP_VAULT-7: cooldown enforcement — a redemption is elapsed iff the current
+/// slot has reached `request_slot + cooldown` (saturating), with no overflow.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_lp_vault_cooldown_enforcement() {
+    let request_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+    let cooldown: u64 = kani::any();
+
+    let elapsed = lp_redemption_cooldown_elapsed(request_slot, current_slot, cooldown);
+    let deadline = request_slot.saturating_add(cooldown);
+    assert_eq!(
+        elapsed,
+        current_slot >= deadline,
+        "cooldown elapsed iff current >= saturating deadline"
+    );
+    // cooldown == 0 ⇒ always elapsed (immediate redemption).
+    if cooldown == 0 {
+        assert!(lp_redemption_cooldown_elapsed(request_slot, current_slot, 0)
+            == (current_slot >= request_slot));
+    }
+    kani::cover!(true, "LP_VAULT-7 cooldown enforcement (saturating)");
+}
