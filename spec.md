@@ -1141,29 +1141,43 @@ If a lien's source rate drops, backing expires, or source domain enters recovery
 7. Portfolio health and staleness
 -------------------------------------------------------------------------------
 
-A full portfolio refresh computes:
+A full portfolio refresh computes a health certificate from the current v16
+public-profile requirement formula:
 
 ```text
 portfolio_maintenance_req =
     gross_mm
-    - hedge_credit
-    + stale_penalty
-    + concentration_penalty
-    + thin_market_penalty
-    + unsettled_loss_penalty
     + target_effective_lag_penalty
-    + domain_lock_penalty
-    + sum(maintenance_pending_loss_penalty)
-    + pending_obligation_exposure
-    + impaired_lien_penalty
 
 portfolio_initial_req =
-    gross_im - initial_hedge_credit + requirement_side_stricter_penalties
+    gross_im + target_effective_lag_penalty
 ```
 
-The terms shown here are requirement-side terms and MUST be excluded from equity-side penalties used in the same initial/maintenance/trade test. Pending obligation and impaired lien exposure MUST be counted exactly once.
+The current v16 public profile does not enable numeric hedge credit,
+concentration penalties, thin-market penalties, stale penalties, domain-lock
+penalties, maintenance-pending-loss penalties, pending-obligation exposure
+adders, or impaired-lien adders. Those terms are zero unless a future profile
+adds explicit config, exact formulas, and proofs. In the current profile their
+safety effect is represented by one of these mechanisms instead:
 
-Hedge credit is optional and deterministic:
+- negative and unsettled account PnL is included on the equity side by refresh,
+  settlement, and conservative haircut equity;
+- stale, B-stale, loss-stale, hmax/stress, recovery, target/effective-lagged
+  without the approved lane, active close barrier, pending-domain-loss barrier,
+  pending obligation, and impaired-lien states are hard locks or
+  progress-only/reduction-only states for favorable actions;
+- unsupported hedge/concentration/thin-market profiles are not production-legal
+  merely by naming the term in this section.
+
+For every check, equity-side penalties and requirement-side terms remain
+disjoint. If a future profile moves any hard-lock/zero term into the numeric
+requirement formula, it MUST define the exact formula and prove equivalent or
+more conservative single counting. Pending obligation and impaired lien exposure
+MUST be counted exactly once: in current v16 they are counted by lock/progress
+rules, not by positive numeric maintenance adders.
+
+Hedge credit is optional, disabled in the current v16 public profile, and
+deterministic when enabled by a future profile:
 
 ```text
 hedge_credit <= min(offset_leg_risks) * cfg_max_offset_bps / 10_000
@@ -1179,7 +1193,11 @@ worst_combined_price_funding_loss
   + stale_or_oracle_uncertainty
   <= gross_mm - hedge_credit
 ```
-For initial-margin approval, the analogous initial envelope MUST hold using `gross_im - initial_hedge_credit`. No hedge-credit configuration is production-legal unless this reduced-requirement envelope holds for all allowed portfolios.
+For initial-margin approval, the analogous initial envelope MUST hold using
+`gross_im - initial_hedge_credit`. No hedge-credit configuration is
+production-legal unless this reduced-requirement envelope holds for all allowed
+portfolios. Until that configuration and proof exist, `hedge_credit` and
+`initial_hedge_credit` are exactly zero.
 
 A certificate is fresh only if instance id, market group, config hash, asset-set epoch, epochs, active bitmap, asset slots, source-credit epochs, lien states, and effective prices remain valid.
 
@@ -1543,9 +1561,9 @@ Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close c
 89. `global_accumulator_not_account_health_proof`.
 90. `canonical_single_leg_per_asset`.
 91. `N_too_large_rejects_public_initialization_or_activation`.
-92. `pending_obligation_exposure_counted_exactly_once_in_health_test`.
+92. `pending_obligation_exposure_counted_exactly_once_by_lock_or_health_test`.
 93. `equity_side_penalties_disjoint_from_requirement_side_penalties`.
-94. `hedge_credit_reduced_requirement_covers_combined_loss_envelope`.
+94. `hedge_credit_zero_unless_reduced_requirement_envelope_is_proven`.
 95. `cross_close_priority_is_strict_total_order`.
 96. `equal_priority_livelock_impossible`.
 97. `B_booking_triggers_source_claim_bound_and_credit_rate_recompute_or_conservative_lowering`.
