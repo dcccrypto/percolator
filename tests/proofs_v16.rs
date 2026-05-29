@@ -1762,6 +1762,60 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
 }
 
 #[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() {
+    let atoms = 3u128;
+    let amount = atoms * BOUND_SCALE;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(atoms);
+    header.insurance = V16PodU128::new(atoms);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: amount,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            insurance_credit_reserved_num: amount,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .create_source_credit_lien_from_insurance_not_atomic(0, amount)
+        .unwrap();
+    let reservation = market.markets[0]
+        .engine
+        .insurance_reservation_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        reservation.valid_liened_insurance_num == amount,
+        "public insurance lien create covers nontrivial lien"
+    );
+    assert_eq!(reservation.insurance_credit_reserved_num, amount);
+    assert_eq!(reservation.valid_liened_insurance_num, amount);
+    assert_eq!(source.insurance_credit_reserved_num, amount);
+    assert_eq!(source.valid_liened_insurance_num, amount);
+    assert_eq!(market.header.insurance.get(), atoms);
+    assert_eq!(market.header.vault.get(), atoms);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
