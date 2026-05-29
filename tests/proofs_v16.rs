@@ -1822,6 +1822,41 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
+    let price_raw: u16 = kani::any();
+    kani::assume((201..=205).contains(&price_raw));
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let market_before = markets[0];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.accrue_asset_to_not_atomic(0, 2, price_raw as u64, 0, true);
+
+    kani::cover!(
+        price_raw > 201,
+        "price-move cap proof covers nontrivial out-of-envelope price"
+    );
+    assert_eq!(result, Err(V16Error::RecoveryRequired));
+    assert_eq!(market.header.current_slot, header_before.current_slot);
+    assert_eq!(market.header.slot_last, header_before.slot_last);
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.markets[0].engine.asset, market_before.engine.asset);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_only() {
     let residual_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&residual_raw));
