@@ -1,8 +1,10 @@
 use percolator::v16::{
     v16_domain_count_for_market_slots, AssetStateV16Account, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account, LiquidationRequestV16,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
     V16PodU64,
@@ -339,6 +341,81 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     assert_eq!(market.header.loss_stale_active, 1);
     assert_eq!(market.header.slot_last.get(), 9);
     assert_eq!(account.header.active_bitmap[0].get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let (mut account_header, mut source_domains) = account_fixture(1, 12);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+        market.deposit_not_atomic(&mut account, 7).unwrap();
+    }
+    header.insurance = V16PodU128::new(3);
+    header.vault = V16PodU128::new(10);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let capital_before = account_header.capital;
+    let pnl_before = account_header.pnl;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let first = market
+        .permissionless_crank_not_atomic(
+            &mut account,
+            PermissionlessCrankRequestV16 {
+                now_slot: 1,
+                asset_index: 0,
+                effective_price: 100,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Recover(
+                    PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+                ),
+            },
+        )
+        .unwrap();
+    let second = market
+        .permissionless_crank_not_atomic(
+            &mut account,
+            PermissionlessCrankRequestV16 {
+                now_slot: 1,
+                asset_index: 0,
+                effective_price: 100,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Recover(
+                    PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+                ),
+            },
+        )
+        .unwrap();
+    let refresh_after_recovery = market.permissionless_crank_not_atomic(
+        &mut account,
+        PermissionlessCrankRequestV16 {
+            now_slot: 1,
+            asset_index: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        },
+    );
+
+    assert_eq!(
+        first,
+        PermissionlessProgressOutcomeV16::RecoveryDeclared(
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+        )
+    );
+    assert_eq!(second, first);
+    assert_eq!(refresh_after_recovery, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(account.header.pnl, pnl_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
