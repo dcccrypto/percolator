@@ -7,12 +7,12 @@ use percolator::v16::{
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
     AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
@@ -1402,6 +1402,88 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
+    let gross_raw: u8 = kani::any();
+    let drift_raw: u8 = kani::any();
+    let support_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let b_loss_raw: u8 = kani::any();
+    let explicit_raw: u8 = kani::any();
+    kani::assume(gross_raw <= 6);
+    kani::assume(drift_raw <= 3);
+    kani::assume(support_raw <= 4);
+    kani::assume(insurance_raw <= 4);
+    kani::assume(b_loss_raw <= 4);
+    kani::assume(explicit_raw <= 4);
+
+    let gross = gross_raw as u128;
+    let drift = drift_raw as u128;
+    let support = support_raw as u128;
+    let insurance = insurance_raw as u128;
+    let b_loss = b_loss_raw as u128;
+    let explicit = explicit_raw as u128;
+    let total_loss = gross + drift;
+    let progress = support + insurance + b_loss + explicit;
+    kani::assume(total_loss > 0);
+    kani::assume(progress <= total_loss);
+    let residual = total_loss - progress;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    let base = CloseProgressLedgerV16 {
+        active: true,
+        finalized: residual == 0,
+        canceled: false,
+        close_id: 1,
+        asset_index: 0,
+        market_id: 1,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross,
+        drift_reference_slot: 0,
+        max_close_slot: 10,
+        support_consumed: support,
+        junior_face_burned: support,
+        insurance_spent: insurance,
+        b_loss_booked: b_loss,
+        explicit_loss_assigned: explicit,
+        drift_consumed: drift,
+        residual_remaining: residual,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&base);
+    let account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    let ok = account.validate_with_market(&market.as_view());
+
+    let mut bad_header = account_header;
+    let mut bad_domains = source_domains;
+    let bad = CloseProgressLedgerV16 {
+        residual_remaining: residual + 1,
+        ..base
+    };
+    bad_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&bad);
+    let bad_account = PortfolioV16ViewMut::new(&mut bad_header, &mut bad_domains);
+    let rejected = bad_account.validate_with_market(&market.as_view());
+
+    kani::cover!(
+        residual == 0,
+        "close progress proof covers finalized residual"
+    );
+    kani::cover!(
+        residual != 0,
+        "close progress proof covers pending residual"
+    );
+    kani::cover!(
+        progress != 0,
+        "close progress proof covers nonzero close cure progress"
+    );
+    assert_eq!(ok, Ok(()));
+    assert_eq!(rejected, Err(V16Error::InvalidLeg));
 }
 
 #[kani::proof]
