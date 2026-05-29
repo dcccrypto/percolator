@@ -10440,7 +10440,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::BStale);
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         self.validate_shape_audit_scan()?;
         Ok(charged)
@@ -10981,7 +10981,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(U256::from_u64(dt))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);
         account.validate_with_market(&self.as_view())?;
@@ -11007,7 +11007,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.close_progress.try_to_runtime()? != CloseProgressLedgerV16::EMPTY {
             return Err(V16Error::LockActive);
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         if account.header.pnl.get() < 0 || amount > account.header.capital.get() {
             return Err(V16Error::LockActive);
         }
