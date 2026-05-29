@@ -3291,3 +3291,35 @@ fn proof_v16_symbolic_conservative_fee_profile_satisfies_mm_envelope_on_small_no
     );
     assert_eq!(cfg.kani_solvency_envelope_holds_for_notional(x), Ok(true));
 }
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals() {
+    let funding_e9_raw: u16 = kani::any();
+    let x_raw: u16 = kani::any();
+
+    kani::assume(funding_e9_raw <= 50);
+    kani::assume((1..=1024).contains(&x_raw));
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
+    cfg.maintenance_margin_bps = 10_000;
+    cfg.initial_margin_bps = 10_000;
+    cfg.max_price_move_bps_per_slot = 100;
+    cfg.max_accrual_dt_slots = 1;
+    cfg.min_funding_lifetime_slots = 1;
+    cfg.max_abs_funding_e9_per_slot = funding_e9_raw as u64;
+    cfg.liquidation_fee_bps = 100;
+    cfg.min_liquidation_abs = 1;
+    cfg.liquidation_fee_cap = 1;
+    cfg.min_nonzero_mm_req = 2;
+    cfg.min_nonzero_im_req = 3;
+
+    let x = x_raw as u128;
+
+    kani::cover!(
+        funding_e9_raw > 0 && x > 64,
+        "symbolic funding profile covers nonzero funding and interior notional"
+    );
+    assert_eq!(cfg.kani_solvency_envelope_holds_for_notional(x), Ok(true));
+}
