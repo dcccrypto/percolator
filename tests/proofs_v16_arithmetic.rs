@@ -1,5 +1,6 @@
 #![cfg(kani)]
 
+use percolator::v16::kani_checked_fee_bps;
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
@@ -169,4 +170,37 @@ fn proof_v16_k_pair_zero_cases_return_zero() {
     kani::cover!(den > 1, "K-pair zero-delta and zero-basis branches");
     assert_eq!(wide_signed_mul_div_floor_from_k_pair(0, -7, 11, den), 0);
     assert_eq!(wide_signed_mul_div_floor_from_k_pair(9, 3, 3, den), 0);
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_checked_trade_fee_is_ceil_bps_and_never_exceeds_notional() {
+    let notional_raw: u8 = kani::any();
+    let fee_bps_raw: u8 = kani::any();
+    let max_fee_case: bool = kani::any();
+    kani::assume(notional_raw <= 200);
+    kani::assume(fee_bps_raw <= 250);
+
+    let notional = notional_raw as u128;
+    let fee_bps = if max_fee_case {
+        10_000
+    } else {
+        fee_bps_raw as u64
+    };
+    let fee = kani_checked_fee_bps(notional, fee_bps).unwrap();
+    let product = notional * fee_bps as u128;
+    let expected = product / 10_000 + u128::from(product % 10_000 != 0);
+
+    kani::cover!(
+        product != 0 && product % 10_000 != 0,
+        "checked fee proof covers rounded-up fee branch"
+    );
+    kani::cover!(
+        fee_bps == 10_000 && notional > 0,
+        "checked fee proof covers max-fee equality branch"
+    );
+    assert_eq!(fee, expected);
+    assert!(fee <= notional);
+    assert_eq!(fee == 0, notional == 0 || fee_bps == 0);
 }
