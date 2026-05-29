@@ -272,6 +272,41 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
+    let loss_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=3).contains(&loss_raw));
+    kani::assume((1..=3).contains(&amount_raw));
+    kani::assume(amount_raw <= 10 - loss_raw);
+    let loss = loss_raw as u128;
+    let amount = amount_raw as u128;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.vault = V16PodU128::new(10);
+    header.c_tot = V16PodU128::new(10);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.capital = V16PodU128::new(10);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    market.withdraw_not_atomic(&mut account, amount).unwrap();
+
+    kani::cover!(
+        amount > 1 && loss > 1,
+        "withdraw loss-seniority proof covers loss settlement plus external exit"
+    );
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    assert_eq!(account.header.capital.get(), 10 - loss - amount);
+    assert_eq!(market.header.c_tot.get(), 10 - loss - amount);
+    assert_eq!(market.header.vault.get(), 10 - amount);
+    assert_eq!(market.header.insurance.get(), 0);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_withdraw() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
