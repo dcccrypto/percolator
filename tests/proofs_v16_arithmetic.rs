@@ -1,6 +1,6 @@
 #![cfg(kani)]
 
-use percolator::v16::{kani_checked_fee_bps, kani_scaled_adl_delta_fast};
+use percolator::v16::{kani_adjust_u128, kani_checked_fee_bps, kani_scaled_adl_delta_fast};
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
@@ -245,4 +245,34 @@ fn proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed() 
         "scaled ADL fast path covers fail-closed non-fast-path input"
     );
     assert_eq!(got, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_adjust_u128_applies_exact_delta_or_fails_closed() {
+    let current_raw: u8 = kani::any();
+    let old_raw: u8 = kani::any();
+    let new_raw: u8 = kani::any();
+    kani::assume(current_raw <= 100);
+    kani::assume(old_raw <= 100);
+    kani::assume(new_raw <= 100);
+
+    let current = current_raw as u128;
+    let old = old_raw as u128;
+    let new = new_raw as u128;
+    let result = kani_adjust_u128(current, old, new);
+
+    kani::cover!(new > old, "adjust_u128 proof covers positive delta");
+    kani::cover!(
+        new < old && old - new > current,
+        "adjust_u128 proof covers fail-closed underflow"
+    );
+    if new >= old {
+        assert_eq!(result, Ok(current + (new - old)));
+    } else if old - new <= current {
+        assert_eq!(result, Ok(current - (old - new)));
+    } else {
+        assert!(result.is_err());
+    }
 }
