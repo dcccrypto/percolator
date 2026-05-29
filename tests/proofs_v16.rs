@@ -154,6 +154,41 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
+    let resolved_slot_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&resolved_slot_raw));
+    let resolved_slot = resolved_slot_raw as u64;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(7);
+    header.c_tot = V16PodU128::new(3);
+    header.insurance = V16PodU128::new(4);
+    header.loss_stale_active = 1;
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+
+    kani::cover!(
+        resolved_slot > 1,
+        "resolved market transition covers future authenticated slot"
+    );
+    assert_eq!(market.header.mode, 1);
+    assert_eq!(market.header.resolved_slot.get(), resolved_slot);
+    assert_eq!(market.header.current_slot.get(), resolved_slot);
+    assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_open_source_claim_exposure_blocks_convert() {
