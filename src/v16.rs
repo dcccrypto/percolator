@@ -9333,6 +9333,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    #[cfg(kani)]
+    pub fn kani_book_bankruptcy_residual_chunk_internal(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        residual_remaining: u128,
+    ) -> V16Result<BResidualBookingOutcomeV16> {
+        self.book_bankruptcy_residual_chunk_internal(asset_index, bankrupt_side, residual_remaining)
+    }
+
     fn book_bankruptcy_residual_chunk_for_account_core(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

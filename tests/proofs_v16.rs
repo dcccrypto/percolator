@@ -1713,6 +1713,34 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_only() {
+    let residual_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&residual_raw));
+    let residual = residual_raw as u128;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.mode = 1;
+    let asset_before = markets[0].engine.asset;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let outcome = market
+        .kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual)
+        .unwrap();
+
+    kani::cover!(
+        residual > 1,
+        "resolved residual booking proof covers nontrivial explicit residual"
+    );
+    assert_eq!(outcome.booked_loss, 0);
+    assert_eq!(outcome.explicit_loss, residual);
+    assert_eq!(outcome.delta_b, 0);
+    assert_eq!(outcome.remaining_after, 0);
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(market.markets[0].engine.asset, asset_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
