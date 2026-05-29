@@ -1329,6 +1329,81 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_insurance_reserve_rejects_unfunded_domain_without_mutation() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&amount_raw));
+    let amount = amount_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let vault_before = header.vault;
+    let insurance_before = header.insurance;
+    let source_before = markets[0].engine.source_credit_long;
+    let reservation_before = markets[0].engine.insurance_reservation_long;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let result = market.reserve_insurance_credit_not_atomic(0, amount);
+
+    kani::cover!(
+        result == Err(V16Error::LockActive),
+        "unfunded domain insurance reservation reaches isolation guard"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.markets[0].engine.source_credit_long, source_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_reservation_long,
+        reservation_before
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
+    let atoms = 3u128;
+    let amount = atoms * BOUND_SCALE;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(atoms);
+    header.insurance = V16PodU128::new(atoms);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .reserve_insurance_credit_not_atomic(0, amount)
+        .unwrap();
+    let reservation = market.markets[0]
+        .engine
+        .insurance_reservation_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        atoms > 1,
+        "funded domain insurance reservation is nontrivial"
+    );
+    assert_eq!(reservation.insurance_credit_reserved_num, amount);
+    assert_eq!(reservation.valid_liened_insurance_num, 0);
+    assert_eq!(source.insurance_credit_reserved_num, amount);
+    assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
