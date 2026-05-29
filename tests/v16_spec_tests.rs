@@ -196,6 +196,47 @@ fn v16_view_dynamic_market_slots_can_be_activated_without_runtime_vec_engine() {
 }
 
 #[test]
+fn v16_reused_market_slot_rejects_old_market_id_leg() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let (mut account_header, mut source_domains) = account_fixture(1, 16);
+    let old_market_id = markets[0].engine.asset.market_id.get();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.retire_empty_asset_not_atomic(0, 1).unwrap();
+        market.activate_empty_market_not_atomic(0, 200, 2).unwrap();
+    }
+    assert_ne!(markets[0].engine.asset.market_id.get(), old_market_id);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: old_market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    assert_eq!(
+        market.full_account_refresh_not_atomic(&mut account),
+        Err(V16Error::HiddenLeg),
+        "stale legs from a retired market slot must not bind to the reactivated market"
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_view_rejects_overwithdraw() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let (mut account_header, mut source_domains) = account_fixture(1, 6);
