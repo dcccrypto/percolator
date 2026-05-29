@@ -1715,6 +1715,64 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
+    let now_slot_raw: u8 = kani::any();
+    let price_delta_raw: u8 = kani::any();
+    kani::assume((2..=4).contains(&now_slot_raw));
+    kani::assume((1..=5).contains(&price_delta_raw));
+    let now_slot = now_slot_raw as u64;
+    let price = 100 + price_delta_raw as u64;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let expected_asset_slot = asset.slot_last + 1;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let oracle_epoch_before = header.oracle_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let outcome = market
+        .accrue_asset_to_not_atomic(0, now_slot, price, 0, true)
+        .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        now_slot > expected_asset_slot,
+        "equity-active accrual proof covers stale multi-slot catchup"
+    );
+    kani::cover!(
+        price_delta_raw > 1,
+        "equity-active accrual proof covers nontrivial price movement"
+    );
+    assert_eq!(outcome.dt, 1);
+    assert!(outcome.price_move_active);
+    assert!(!outcome.funding_active);
+    assert!(outcome.equity_active);
+    assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
+    assert_eq!(asset_after.slot_last, expected_asset_slot);
+    assert_eq!(asset_after.effective_price, price);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.header.slot_last.get(), expected_asset_slot);
+    assert_eq!(
+        market.header.loss_stale_active,
+        if expected_asset_slot < now_slot { 1 } else { 0 }
+    );
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_only() {
     let residual_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&residual_raw));
