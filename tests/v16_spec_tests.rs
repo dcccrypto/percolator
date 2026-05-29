@@ -260,6 +260,90 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
 }
 
 #[test]
+fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let (mut account_header, mut source_domains) = account_fixture(2, 11);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(9);
+    header.loss_stale_active = 1;
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = 2 * POS_SCALE;
+    asset0.oi_eff_short_q = 2 * POS_SCALE;
+    asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.stored_pos_count_long = 2;
+    asset0.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 9;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let outcome = market
+        .permissionless_crank_not_atomic(
+            &mut account,
+            percolator::v16::PermissionlessCrankRequestV16 {
+                now_slot: 10,
+                asset_index: 0,
+                effective_price: 100,
+                funding_rate_e9: 0,
+                action: percolator::v16::PermissionlessCrankActionV16::Liquidate(
+                    LiquidationRequestV16 {
+                        asset_index: 0,
+                        close_q: POS_SCALE,
+                        fee_bps: 0,
+                    },
+                ),
+            },
+        )
+        .expect(
+            "locally current liquidation must progress despite unrelated global loss-staleness",
+        );
+
+    assert_eq!(
+        outcome,
+        percolator::v16::PermissionlessProgressOutcomeV16::AccountCurrent
+    );
+    assert_eq!(market.header.loss_stale_active, 1);
+    assert_eq!(market.header.slot_last.get(), 9);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let (mut long_header, mut long_domains) = account_fixture(1, 8);
