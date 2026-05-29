@@ -87,6 +87,56 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral() {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    header.vault = V16PodU128::new(11);
+    header.c_tot = V16PodU128::new(7);
+    header.insurance = V16PodU128::new(4);
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    let slot = &market.markets[0].engine;
+    let asset = slot.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        asset.lifecycle == AssetLifecycleV16::Active && asset.market_id == 1,
+        "public market activation reaches active market branch"
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(slot.insurance_domain_budget_long.get(), 0);
+    assert_eq!(slot.insurance_domain_budget_short.get(), 0);
+    assert_eq!(slot.insurance_domain_spent_long.get(), 0);
+    assert_eq!(slot.insurance_domain_spent_short.get(), 0);
+    assert_eq!(
+        slot.source_credit_long.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        slot.source_credit_short.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        slot.insurance_reservation_long.try_to_runtime().unwrap(),
+        InsuranceCreditReservationV16::EMPTY
+    );
+    assert_eq!(
+        slot.insurance_reservation_short.try_to_runtime().unwrap(),
+        InsuranceCreditReservationV16::EMPTY
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
