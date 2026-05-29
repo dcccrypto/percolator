@@ -1684,6 +1684,35 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation() {
+    let price_delta_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&price_delta_raw));
+    let price_delta = price_delta_raw as u64;
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let market_before = markets[0];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.accrue_asset_to_not_atomic(0, 2, 100 + price_delta, 0, false);
+
+    kani::cover!(
+        price_delta > 1,
+        "equity-active accrual proof covers nontrivial price movement"
+    );
+    assert_eq!(result, Err(V16Error::NonProgress));
+    assert_eq!(market.header.current_slot, header_before.current_slot);
+    assert_eq!(market.header.slot_last, header_before.slot_last);
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.markets[0].engine.asset, market_before.engine.asset);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
