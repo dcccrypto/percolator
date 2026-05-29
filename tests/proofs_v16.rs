@@ -435,6 +435,38 @@ fn proof_v16_trade_fee_helper_does_not_charge_negative_pnl_account() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_explicit_fee_charge_moves_current_capital_to_insurance_only() {
+    let fee_raw: u8 = kani::any();
+    kani::assume((1..=7).contains(&fee_raw));
+    let requested_fee = fee_raw as u128;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.vault = V16PodU128::new(7);
+    header.c_tot = V16PodU128::new(7);
+    account_header.capital = V16PodU128::new(7);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    let charged = market
+        .charge_account_fee_not_atomic(&mut account, requested_fee)
+        .unwrap();
+
+    kani::cover!(
+        requested_fee > 1,
+        "public explicit fee charge covers nontrivial amount"
+    );
+    assert_eq!(charged, requested_fee);
+    assert_eq!(account.header.capital.get(), 7 - requested_fee);
+    assert_eq!(market.header.c_tot.get(), 7 - requested_fee);
+    assert_eq!(market.header.insurance.get(), requested_fee);
+    assert_eq!(market.header.vault.get(), 7);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_negative_pnl_settlement_consumes_principal_before_residual() {
