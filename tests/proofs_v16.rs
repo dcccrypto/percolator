@@ -137,6 +137,43 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
+    let growth_raw: u8 = kani::any();
+    kani::assume(growth_raw <= 3);
+    let new_capacity = 1 + growth_raw as u32;
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    header.vault = V16PodU128::new(11);
+    header.c_tot = V16PodU128::new(7);
+    header.insurance = V16PodU128::new(4);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let asset_set_epoch_before = header.asset_set_epoch.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    header
+        .grow_asset_slot_capacity_not_atomic(new_capacity, new_capacity)
+        .unwrap();
+    let config = header.config.try_to_runtime_shape().unwrap();
+
+    kani::cover!(
+        new_capacity > 1,
+        "public market capacity growth covers actual growth"
+    );
+    assert_eq!(header.asset_slot_capacity.get(), new_capacity);
+    assert_eq!(config.max_market_slots, new_capacity);
+    assert_eq!(header.vault, vault_before);
+    assert_eq!(header.c_tot, c_tot_before);
+    assert_eq!(header.insurance, insurance_before);
+    assert_eq!(header.asset_set_epoch.get(), asset_set_epoch_before + 1);
+    assert_eq!(header.risk_epoch.get(), risk_epoch_before + 1);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
