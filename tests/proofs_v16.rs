@@ -13,9 +13,11 @@ use percolator::v16::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutReceiptV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, TokenValueClassV16, TokenValueFlowProofV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
+    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TokenValueClassV16,
+    TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU64,
+    V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, POS_SCALE};
 
@@ -915,6 +917,73 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
     assert_eq!(ok_payment.paid_effective, terminal);
     assert!(ok_payment.finalized);
     assert_eq!(overpay, Err(V16Error::InvalidLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
+    let claimable_raw: u8 = kani::any();
+    let vault_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&claimable_raw));
+    kani::assume(vault_raw <= 5);
+    let claimable = claimable_raw as u128;
+    let vault = vault_raw as u128;
+    let paid_before = 2u128;
+    let terminal = paid_before + claimable;
+    let payout = claimable.min(vault);
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.mode = 1;
+    header.vault = V16PodU128::new(vault);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: terminal,
+            terminal_claim_exact_receipts_num: terminal * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 1,
+            current_payout_rate_den: 1,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: terminal * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: terminal,
+            paid_effective: paid_before,
+            finalized: false,
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    let paid = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(payout > 0, "resolved payout topup pays a nonzero amount");
+    kani::cover!(
+        payout < claimable,
+        "resolved payout topup is capped by vault"
+    );
+    kani::cover!(
+        payout == claimable,
+        "resolved payout topup can fully pay claimable amount"
+    );
+    assert_eq!(paid, payout);
+    assert_eq!(market.header.vault.get(), vault - payout);
+    assert_eq!(receipt.paid_effective, paid_before + payout);
+    assert_eq!(receipt.finalized, payout == claimable);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
