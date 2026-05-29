@@ -432,6 +432,11 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
             .get(),
         90 * BOUND_SCALE
     );
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut long),
+        Err(V16Error::LockActive),
+        "source-backed positive PnL must not be realized while the source-claim exposure remains open"
+    );
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
