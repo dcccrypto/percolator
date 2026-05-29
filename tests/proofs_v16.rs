@@ -2127,6 +2127,48 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
+    let residual_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    let residual = residual_raw as u128;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(residual);
+    header.vault = V16PodU128::new(0);
+    header.insurance = V16PodU128::new(0);
+    account_header.pnl = V16PodI128::new(-(residual as i128));
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let market_before = markets[0];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let result =
+        market.kani_preflight_liquidation_residual_durability(0, SideV16::Long, &account.as_view());
+
+    kani::cover!(
+        residual > 1,
+        "liquidation residual preflight proof covers nontrivial residual"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.header.mode, header_before.mode);
+    assert_eq!(market.header.recovery_reason, header_before.recovery_reason);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.markets[0], market_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();

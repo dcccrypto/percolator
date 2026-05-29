@@ -6040,6 +6040,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(kani)]
+    pub fn kani_preflight_liquidation_residual_durability(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        self.preflight_liquidation_residual_durability(asset_index, bankrupt_side, account)
+    }
+
     fn create_and_consume_source_credit_from_counterparty_core_not_atomic(
         &mut self,
         domain: usize,
