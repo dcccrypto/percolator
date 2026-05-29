@@ -9221,6 +9221,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .min(self.header.config.public_b_chunk_atoms.get()))
     }
 
+    #[cfg(kani)]
+    pub fn kani_bankruptcy_residual_single_step_capacity(
+        &self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        residual_remaining: u128,
+    ) -> V16Result<u128> {
+        self.bankruptcy_residual_single_step_capacity(
+            asset_index,
+            bankrupt_side,
+            residual_remaining,
+        )
+    }
+
     fn book_bankruptcy_residual_chunk_internal(
         &mut self,
         asset_index: usize,

@@ -1800,6 +1800,51 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    let rem_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&residual_raw));
+    kani::assume((1..=10).contains(&chunk_raw));
+    kani::assume(rem_raw <= 8);
+    let residual = residual_raw as u128;
+    let chunk = chunk_raw as u128;
+    let expected = residual.min(chunk);
+
+    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(chunk);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.social_loss_remainder_short_num = rem_raw as u128;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let capacity = market
+        .kani_bankruptcy_residual_single_step_capacity(0, SideV16::Long, residual)
+        .unwrap();
+
+    kani::cover!(
+        residual > chunk,
+        "bankruptcy residual capacity proof covers public chunk cap"
+    );
+    kani::cover!(
+        residual <= chunk,
+        "bankruptcy residual capacity proof covers full residual fit"
+    );
+    assert_eq!(capacity, expected);
+    assert!(capacity > 0);
+    assert!(capacity <= residual);
+    assert!(capacity <= chunk);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
