@@ -9238,17 +9238,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let opp = opposite_side(bankrupt_side);
         let asset = self.asset_state(asset_index)?;
-        let (b_now, weight_sum, rem) = match opp {
-            SideV16::Long => (
-                asset.b_long_num,
-                asset.loss_weight_sum_long,
-                asset.social_loss_remainder_long_num,
-            ),
-            SideV16::Short => (
-                asset.b_short_num,
-                asset.loss_weight_sum_short,
-                asset.social_loss_remainder_short_num,
-            ),
+        let weight_sum = match opp {
+            SideV16::Long => asset.loss_weight_sum_long,
+            SideV16::Short => asset.loss_weight_sum_short,
         };
         if weight_sum == 0 {
             if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
@@ -9285,6 +9277,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
             return Err(V16Error::RecoveryRequired);
         }
+        let mut asset = asset;
+        if let Some(outcome) = Self::apply_bankruptcy_residual_chunk_to_loss_side(
+            &mut asset,
+            opp,
+            engine_chunk,
+            residual_remaining,
+        )? {
+            self.set_asset_state(asset_index, asset)?;
+            self.header.bankruptcy_hlock_active = 1;
+            return Ok(outcome);
+        }
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            self.header.bankruptcy_hlock_active = 1;
+            return Ok(BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: residual_remaining,
+                delta_b: 0,
+                remaining_after: 0,
+            });
+        }
+        self.declare_permissionless_recovery(
+            PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+        )?;
+        Err(V16Error::RecoveryRequired)
+    }
+
+    fn apply_bankruptcy_residual_chunk_to_loss_side(
+        asset: &mut AssetStateV16,
+        opp: SideV16,
+        engine_chunk: u128,
+        residual_remaining: u128,
+    ) -> V16Result<Option<BResidualBookingOutcomeV16>> {
+        if engine_chunk == 0 || engine_chunk > residual_remaining {
+            return Ok(None);
+        }
+        let (b_now, weight_sum, rem) = match opp {
+            SideV16::Long => (
+                asset.b_long_num,
+                asset.loss_weight_sum_long,
+                asset.social_loss_remainder_long_num,
+            ),
+            SideV16::Short => (
+                asset.b_short_num,
+                asset.loss_weight_sum_short,
+                asset.social_loss_remainder_short_num,
+            ),
+        };
+        if weight_sum == 0 {
+            return Ok(None);
+        }
         let numerator = engine_chunk
             .checked_mul(SOCIAL_LOSS_DEN)
             .and_then(|v| v.checked_add(rem))
@@ -9292,21 +9334,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let delta_b = numerator / weight_sum;
         let new_rem = numerator % weight_sum;
         if delta_b == 0 || b_now.checked_add(delta_b).is_none() {
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                self.header.bankruptcy_hlock_active = 1;
-                return Ok(BResidualBookingOutcomeV16 {
-                    booked_loss: 0,
-                    explicit_loss: residual_remaining,
-                    delta_b: 0,
-                    remaining_after: 0,
-                });
-            }
-            self.declare_permissionless_recovery(
-                PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
-            )?;
-            return Err(V16Error::RecoveryRequired);
+            return Ok(None);
         }
-        let mut asset = asset;
         match opp {
             SideV16::Long => {
                 asset.b_long_num = asset
@@ -9323,14 +9352,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 asset.social_loss_remainder_short_num = new_rem;
             }
         }
-        self.set_asset_state(asset_index, asset)?;
-        self.header.bankruptcy_hlock_active = 1;
-        Ok(BResidualBookingOutcomeV16 {
+        Ok(Some(BResidualBookingOutcomeV16 {
             booked_loss: engine_chunk,
             explicit_loss: 0,
             delta_b,
             remaining_after: residual_remaining - engine_chunk,
-        })
+        }))
     }
 
     #[cfg(kani)]
@@ -9341,6 +9368,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         residual_remaining: u128,
     ) -> V16Result<BResidualBookingOutcomeV16> {
         self.book_bankruptcy_residual_chunk_internal(asset_index, bankrupt_side, residual_remaining)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_apply_bankruptcy_residual_chunk_to_loss_side(
+        asset: &mut AssetStateV16,
+        opp: SideV16,
+        engine_chunk: u128,
+        residual_remaining: u128,
+    ) -> V16Result<Option<BResidualBookingOutcomeV16>> {
+        Self::apply_bankruptcy_residual_chunk_to_loss_side(
+            asset,
+            opp,
+            engine_chunk,
+            residual_remaining,
+        )
     }
 
     fn book_bankruptcy_residual_chunk_for_account_core(
