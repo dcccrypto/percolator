@@ -1,12 +1,13 @@
 use percolator::v16::{
-    v16_domain_count_for_market_slots, BackingBucketStatusV16, BackingBucketV16,
-    BackingBucketV16Account, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioSourceDomainV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, SourceCreditStateV16,
+    v16_domain_count_for_market_slots, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account, LiquidationRequestV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
     V16PodU64,
 };
-use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
+use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
@@ -191,6 +192,71 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
         before_reservation
     );
     assert_eq!(market.markets[0].engine.source_credit_long, before_source);
+}
+
+#[test]
+fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let (mut account_header, mut source_domains) = account_fixture(1, 10);
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let insurance_before = market.header.insurance.get();
+    let vault_before = market.header.vault.get();
+
+    let out = market
+        .liquidate_account_not_atomic(
+            &mut account,
+            LiquidationRequestV16 {
+                asset_index: 0,
+                close_q: POS_SCALE,
+                fee_bps: 0,
+            },
+        )
+        .expect("liquidation should progress by booking residual, not draining other domains");
+
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    assert!(out.residual_booked > 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]
