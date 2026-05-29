@@ -223,6 +223,55 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.vault = V16PodU128::new(10);
+    header.c_tot = V16PodU128::new(10);
+    account_header.capital = V16PodU128::new(10);
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let capital_before = account_header.capital;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let result = market.withdraw_not_atomic(&mut account, amount);
+
+    kani::cover!(
+        amount > 1,
+        "nonflat withdraw proof covers nontrivial rejected amount"
+    );
+    assert_eq!(result, Err(V16Error::Stale));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(account.header.capital, capital_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_withdraw() {
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
