@@ -13,11 +13,11 @@ use percolator::v16::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TokenValueClassV16,
-    TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU64,
-    V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
+    TokenValueClassV16, TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, POS_SCALE};
 
@@ -1136,6 +1136,41 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     assert_eq!(market.header.vault.get(), vault - payout);
     assert_eq!(receipt.paid_effective, paid_before + payout);
     assert_eq!(receipt.finalized, payout == claimable);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&capital_raw));
+    let capital = capital_raw as u128;
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    header.mode = 1;
+    header.current_slot = V16PodU64::new(2);
+    header.resolved_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.last_fee_slot = V16PodU64::new(2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(capital > 1, "resolved flat close pays nontrivial capital");
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: capital });
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
