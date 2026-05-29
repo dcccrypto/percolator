@@ -5,9 +5,10 @@ use percolator::v16::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, SideV16, SourceCreditStateV16,
-    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
-    V16PodU64,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
+    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config,
+    V16Error, V16PodI128, V16PodU128, V16PodU64,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -416,6 +417,73 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(account.header.capital, capital_before);
     assert_eq!(account.header.pnl, pnl_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_payout_topup_finishes_receipt_without_overpaying() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let (mut account_header, mut source_domains) = account_fixture(1, 13);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+    let terminal_claim = 10u128;
+    header.vault = V16PodU128::new(4);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: terminal_claim,
+            terminal_claim_exact_receipts_num: terminal_claim * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 1,
+            current_payout_rate_den: 1,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: terminal_claim * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: terminal_claim,
+            paid_effective: 2,
+            finalized: false,
+        });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let first = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+    let after_first = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    market.header.vault = V16PodU128::new(4);
+    let second = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+    let after_second = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    let third = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+
+    assert_eq!(first, 4);
+    assert_eq!(after_first.paid_effective, 6);
+    assert!(!after_first.finalized);
+    assert_eq!(second, 4);
+    assert_eq!(after_second.paid_effective, terminal_claim);
+    assert!(after_second.finalized);
+    assert_eq!(third, 0);
+    assert_eq!(market.header.vault.get(), 0);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
