@@ -174,6 +174,66 @@ fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
+    let supplied_raw: u8 = kani::any();
+    let capacity_raw: u8 = kani::any();
+    let configured_raw: u8 = kani::any();
+    kani::assume(supplied_raw <= 8);
+    kani::assume(capacity_raw <= 8);
+    kani::assume(configured_raw <= 8);
+
+    let supplied = supplied_raw as usize;
+    let capacity = capacity_raw as usize;
+    let configured = configured_raw as usize;
+    let result = MarketGroupV16HeaderAccount::kani_validate_dynamic_market_slots_len(
+        supplied, capacity, configured,
+    );
+    let expected_ok = supplied == capacity && capacity >= configured;
+
+    kani::cover!(
+        expected_ok && capacity > configured,
+        "dynamic market slot length proof covers realloc capacity above configured markets"
+    );
+    kani::cover!(
+        supplied < capacity,
+        "dynamic market slot length proof covers undersupplied wrapper slice"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
+    let extension_index_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&extension_index_raw));
+    let extension_index = extension_index_raw as usize;
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let zero_fill = EngineAssetSlotV16Account::default();
+    let mut dirty_extension = EngineAssetSlotV16Account::default();
+    dirty_extension.insurance_domain_spent_long = V16PodU128::new(1);
+
+    let zero_extension =
+        header.kani_validate_dynamic_market_slot_shape_at(extension_index, &zero_fill);
+    let dirty_extension_result =
+        header.kani_validate_dynamic_market_slot_shape_at(extension_index, &dirty_extension);
+    let configured_dirty_result =
+        header.kani_validate_dynamic_market_slot_shape_at(0, &dirty_extension);
+
+    kani::cover!(
+        extension_index > 1,
+        "dynamic extension slot proof covers later realloc slot"
+    );
+    assert_eq!(zero_extension, Ok(()));
+    assert_eq!(dirty_extension_result, Err(V16Error::InvalidConfig));
+    assert_eq!(configured_dirty_result, Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
