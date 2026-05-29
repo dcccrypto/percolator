@@ -126,7 +126,7 @@ fn apply_fuzz_action(
     );
     let target_a = (selector & 0x8) == 0;
     let amount = (amount_seed as u128) % 128;
-    let result = match selector % 10 {
+    let result = match selector % 12 {
         0 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
@@ -286,7 +286,7 @@ fn apply_fuzz_action(
                     .map(|_| ())
             }
         }
-        _ => {
+        9 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
                 let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
@@ -319,6 +319,26 @@ fn apply_fuzz_action(
                             ),
                         },
                     )
+                    .map(|_| ())
+            }
+        }
+        10 => {
+            let mut market = MarketGroupV16ViewMut::new(header, markets);
+            market
+                .resolve_market_not_atomic(market.header.current_slot.get())
+                .map(|_| ())
+        }
+        _ => {
+            let mut market = MarketGroupV16ViewMut::new(header, markets);
+            if target_a {
+                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                market
+                    .close_resolved_account_not_atomic(&mut account, 0)
+                    .map(|_| ())
+            } else {
+                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                market
+                    .close_resolved_account_not_atomic(&mut account, 0)
                     .map(|_| ())
             }
         }
