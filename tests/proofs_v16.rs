@@ -1537,6 +1537,64 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
+// Global junior-bound aggregation invariant: the group-level junior claim bound
+// (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
+// (`haircut_effective_support`) and the resolved-payout snapshot, so it must
+// never UNDERSTATE the aggregate per-domain source claims it haircuts against —
+// otherwise the denominator is too small and support is over-computed. The
+// mutation paths (credit/burn) keep `global >= sum(per-domain)` in lockstep, but
+// `validate_shape` never checks it: a state with a fully-backed domain claim but
+// a zero global bound is internally inconsistent yet currently accepted. This
+// proof pins that invariant — it FAILS until validate_shape enforces the sum.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&claim_raw));
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+
+    // Inline market (no account fixture -> no 16-leg loop), so unwind(8) suffices.
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+
+    // A pristine, fully-backed long domain holding `claim` of source claims:
+    // available backing == claim_num so credit_rate is full (CREDIT_RATE_SCALE).
+    let source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_credit);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    // Group-level junior bound left at 0 -> global UNDERSTATES the domain's claims.
+    // Every other facet of the state is valid; the only inconsistency is the
+    // missing aggregation relation.
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    kani::cover!(claim > 0, "global-vs-domain aggregation covers nontrivial claim");
+    // The group bound (0) understates the per-domain source claims (claim_num > 0).
+    // A sound validator must reject this; today it does not.
+    assert_eq!(market.validate_shape(), Err(V16Error::InvalidConfig));
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
