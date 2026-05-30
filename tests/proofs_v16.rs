@@ -1420,6 +1420,123 @@ fn proof_v16_unliened_source_support_is_capped_by_realizable_backing() {
     }
 }
 
+// Cross-account solvency: two independent winners holding positive-PnL claims
+// attributed to the SAME source-credit domain cannot jointly realize more value
+// than the single shared backing pool they both draw from. The existing
+// single-account `unliened_source_support_is_capped_by_realizable_backing` proves
+// support <= backing for ONE account; nothing proves the apportionment is
+// conservative ACROSS accounts. This is the static heart of the issue-#104
+// (asymmetric K-snap) class: an undercapitalized loser leaves backing < total
+// claim, and the credit-rate haircut must dilute BOTH winners so their summed
+// realizable support never exceeds the actual backing.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&a_raw));
+    kani::assume((1..=5).contains(&b_raw));
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let total = a + b;
+    // Undercapitalized (haircut) OR exactly-backed regime: backing <= total claim.
+    kani::assume(backing_raw as u128 <= total);
+    let backing = backing_raw as u128;
+
+    let a_num = a * BOUND_SCALE;
+    let b_num = b * BOUND_SCALE;
+    let total_num = total * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+
+    // Shared domain: total claim bound = a + b, single backing pool = `backing`.
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total_num,
+        exact_positive_claim_num: total_num,
+        fresh_reserved_backing_num: backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
+
+    // Build the market WITHOUT the account fixtures (`try_empty`/`empty_account_fixture`),
+    // which zero-fill a 16-element `legs` array of large structs. That loop forces
+    // unwind >= 17 and, replicated across two accounts, explodes the SAT formula.
+    // The realizable-support query never reads legs, so zeroed accounts are sound and
+    // keep the only reachable loop at the 2-domain source scan (unwind(8) suffices).
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let mut acct_a_header = PortfolioAccountV16Account::default();
+    let mut acct_a_domains = [PortfolioSourceDomainV16Account::default(); 2];
+    let mut acct_b_header = PortfolioAccountV16Account::default();
+    let mut acct_b_domains = [PortfolioSourceDomainV16Account::default(); 2];
+
+    header.pnl_pos_tot = V16PodU128::new(total);
+    header.pnl_matured_pos_tot = V16PodU128::new(total);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(total);
+
+    // Account A holds claim `a` in domain 0; account B holds claim `b` in domain 0.
+    // Their per-account shares sum to the domain's total bound (the aggregation
+    // invariant that real settlement maintains), constructed here, not assumed.
+    acct_a_header.pnl = V16PodI128::new(a as i128);
+    acct_a_header.reserved_pnl = V16PodU128::new(a);
+    acct_a_domains[0].source_claim_market_id = V16PodU64::new(1);
+    acct_a_domains[0].source_claim_bound_num = V16PodU128::new(a_num);
+
+    acct_b_header.pnl = V16PodI128::new(b as i128);
+    acct_b_header.reserved_pnl = V16PodU128::new(b);
+    acct_b_domains[0].source_claim_market_id = V16PodU64::new(1);
+    acct_b_domains[0].source_claim_bound_num = V16PodU128::new(b_num);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_credit);
+    markets[0].engine.backing_long = if backing_num == 0 {
+        BackingBucketV16Account::from_runtime(&BackingBucketV16::empty_for_market(1))
+    } else {
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        })
+    };
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account_a = PortfolioV16ViewMut::new(&mut acct_a_header, &mut acct_a_domains);
+    let account_b = PortfolioV16ViewMut::new(&mut acct_b_header, &mut acct_b_domains);
+
+    let support_a = market
+        .kani_account_unliened_source_realizable_support(&account_a.as_view(), a)
+        .unwrap();
+    let support_b = market
+        .kani_account_unliened_source_realizable_support(&account_b.as_view(), b)
+        .unwrap();
+
+    kani::cover!(
+        backing < total,
+        "cross-account support covers undercapitalized haircut regime"
+    );
+    kani::cover!(
+        backing == total,
+        "cross-account support covers fully backed regime"
+    );
+
+    // Global conservation: the two winners' independently-computed realizable
+    // support cannot jointly exceed the shared backing pool.
+    assert!(support_a + support_b <= backing);
+    assert!(support_a <= a);
+    assert!(support_b <= b);
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -1474,7 +1591,7 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
 }
 
 #[kani::proof]
-#[kani::unwind(80)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     let claimable_raw: u8 = kani::any();
@@ -1631,7 +1748,7 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
 }
 
 #[kani::proof]
-#[kani::unwind(96)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
     let capital_raw: u8 = kani::any();
@@ -2852,12 +2969,25 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
 }
 
 #[kani::proof]
-#[kani::unwind(96)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() {
-    let atoms = 3u128;
+    // `atoms` is now symbolic (was a hard-coded 3 — the proof asserted facts about a
+    // single concrete lien size). The market is built inline rather than via
+    // `one_market_view_fixture`, whose discarded account ran a 16-element legs
+    // zero-fill loop; that loop plus unwind(96) blew the formula past the 600s budget.
+    let atoms_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&atoms_raw));
+    let atoms = atoms_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets, _, _) = one_market_view_fixture();
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
