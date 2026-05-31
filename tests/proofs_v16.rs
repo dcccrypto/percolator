@@ -1595,6 +1595,73 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
     assert_eq!(market.validate_shape(), Err(V16Error::InvalidConfig));
 }
 
+// Loser-side backing reservation is value-neutral: when a counterparty's realized
+// loss is backed, exactly `backing` atoms move out of the loser's capital AND out
+// of c_tot (in lockstep) and are absorbed into the loser's pnl, while the group
+// vault is unchanged and `backing` never exceeds the loser's free capital. This is
+// the collateralization step behind every source-credited winner claim, and it had
+// NO proof coverage. `backing = min(new_loss, capital - negative_before)` exercises
+// both the loss-capped and capital-capped branches.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped() {
+    let capital_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&capital_raw));
+    kani::assume((1..=8).contains(&loss_raw));
+    let capital = capital_raw as u128;
+    let loss = loss_raw as u128;
+
+    // Inline market (no account fixture -> no 16-leg loop), valid activated domain 0.
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    // Single undercapitalized loser holding `loss` of realized loss as negative pnl.
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut acct_header = PortfolioAccountV16Account::default();
+    let mut acct_domains = [PortfolioSourceDomainV16Account::default(); 2];
+    acct_header.capital = V16PodU128::new(capital);
+    acct_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut acct_header, &mut acct_domains);
+
+    // negative_before = 0 (nothing pre-encumbered); new loss = `loss`.
+    market
+        .kani_reserve_new_capital_backed_loss_for_source_domain_not_atomic(&mut account, 0, 0, loss)
+        .unwrap();
+
+    let expected_backing = loss.min(capital);
+
+    kani::cover!(loss < capital, "capital-backed loss covers loss-capped branch");
+    kani::cover!(loss > capital, "capital-backed loss covers capital-capped branch");
+
+    // Backing never exceeds the loser's free capital nor the new loss.
+    assert!(expected_backing <= capital);
+    assert!(expected_backing <= loss);
+    // Capital and c_tot each fall by exactly `backing` (lockstep), pnl rises by it,
+    // and the vault does not move (value is reshaped, not created or destroyed).
+    assert_eq!(account.header.capital.get(), capital - expected_backing);
+    assert_eq!(market.header.c_tot.get(), c_tot_before - expected_backing);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + expected_backing as i128
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]

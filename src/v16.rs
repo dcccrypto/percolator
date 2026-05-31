@@ -7070,6 +7070,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(kani)]
+    pub fn kani_reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        negative_before: u128,
+        negative_after: u128,
+    ) -> V16Result<()> {
+        self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+            account,
+            domain,
+            negative_before,
+            negative_after,
+        )
+    }
+
     fn kf_target_for_leg(
         &self,
         asset_index: usize,
