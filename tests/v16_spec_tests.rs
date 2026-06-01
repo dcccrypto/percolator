@@ -1,18 +1,18 @@
 use percolator::v16::{
     account_equity, risk_notional_ceil, v16_domain_count_for_market_slots, AssetLifecycleV16,
-    AssetStateV16Account, BackingBucketStatusV16, CloseProgressLedgerV16,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
-    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    CloseProgressLedgerV16, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16Account,
+    LiquidationRequestV16, Market, MarketGroupV16, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16,
     PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account,
-    PortfolioSourceDomainV16Account, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    RebalanceRequestV16, ReservationEncumbranceProofV16, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16,
-    SourceCreditLienAggregateProofV16, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    PortfolioSourceDomainV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, RebalanceRequestV16, ReservationEncumbranceProofV16,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutReceiptV16, SideModeV16, SideV16,
+    SourceCreditLienAggregateProofV16, SourceCreditStateV16, SourceCreditStateV16Account,
+    StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, TradeRequestV16,
+    V16Config, V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128,
+    V16PodU16, V16PodU32, V16PodU64, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE,
@@ -40,6 +40,54 @@ fn group_with_market_slots(max_market_slots: u32) -> MarketGroupV16 {
         ),
     )
     .unwrap()
+}
+
+// RESYNC(f3aef4b): ported verbatim from toly's test suite — zero-copy
+// (account-form) fixtures used by the new source-credit IM-lien spec test.
+// Our fork previously built these views inline; these named helpers are the
+// shape toly's new tests expect.
+fn market_fixture(
+    market_slots: u32,
+    init_price: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let cfg =
+        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
+    let mut markets = (0..market_slots)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        for i in 0..market_slots as usize {
+            view.activate_empty_market_not_atomic(i as u32, init_price, (i + 1) as u64)
+                .unwrap();
+        }
+        view.validate_shape().unwrap();
+    }
+    (header, markets)
+}
+
+fn account_fixture(
+    market_slots: u32,
+    account_seed: u8,
+) -> (
+    PortfolioAccountV16Account,
+    Vec<PortfolioSourceDomainV16Account>,
+) {
+    let (market_id, _, owner) = ids();
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        market_id,
+        [account_seed; 32],
+        owner,
+    ));
+    let account = PortfolioAccountV16Account::try_empty(header).unwrap();
+    let domains = vec![
+        PortfolioSourceDomainV16Account::default();
+        v16_domain_count_for_market_slots(market_slots).unwrap()
+    ];
+    (account, domains)
 }
 
 fn bitmap(indices: &[usize]) -> percolator::V16ActiveBitmap {
@@ -10655,4 +10703,99 @@ fn v16_rebalance_rejects_missing_or_zero_progress() {
         ),
         Err(V16Error::InvalidConfig)
     );
+}
+
+#[test]
+fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let (mut long_header, mut long_domains) = account_fixture(1, 8);
+    let (mut short_header, mut short_domains) = account_fixture(1, 9);
+    let claim = 100u128;
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+    market
+        .execute_trade_with_fee_in_place_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: 10 * POS_SCALE,
+                exec_price: 1,
+                fee_bps: 0,
+                admit_h_max_consumption_threshold_bps_opt: None,
+            },
+        )
+        .expect("risk-increasing trade should atomically lien backed source credit for IM");
+
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(
+        long.source_domains[0].source_claim_liened_num.get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        long.source_domains[0].source_lien_effective_reserved.get(),
+        10
+    );
+    assert_eq!(
+        long.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .valid_liened_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .fresh_unliened_backing_num
+            .get(),
+        90 * BOUND_SCALE
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
 }

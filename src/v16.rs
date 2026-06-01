@@ -1014,12 +1014,12 @@ pub enum BackingBucketStatusV16 {
     Impaired,
 }
 
-#[cfg(any(kani, feature = "runtime-vec-api"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SourceCreditBackingSourceV16 {
-    Counterparty,
-    Insurance,
-}
+// NOTE (v16 re-sync, f3aef4b): the pre-existing cfg(any(kani, runtime-vec-api))-
+// gated definition of SourceCreditBackingSourceV16 was removed here — toly's
+// f3aef4b adds an ungated definition (below, in the account/view path block)
+// that supersedes it in all build configs. Keeping both triggers E0428 under
+// --features runtime-vec-api / kani. Variant set is identical (Counterparty,
+// Insurance), so this is a pure de-duplication, not a behavioral change.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessRecoveryReasonV16 {
@@ -3241,6 +3241,12 @@ struct SourceCreditConsumptionV16 {
     face_burn: u128,
     counterparty_credit_consumed: u128,
     insurance_credit_consumed: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceCreditBackingSourceV16 {
+    Counterparty,
+    Insurance,
 }
 
 #[repr(C)]
@@ -5560,6 +5566,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.create_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn create_source_credit_lien_from_counterparty_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -5584,7 +5599,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
-        self.validate_shape()
+        Ok(())
     }
 
     pub fn release_source_credit_lien_from_counterparty_not_atomic(
@@ -5769,6 +5784,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.create_source_credit_lien_from_insurance_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn create_source_credit_lien_from_insurance_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -5792,7 +5816,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_insurance_reservation_for_domain(domain, reservation)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
-        self.validate_shape()
+        Ok(())
     }
 
     pub fn release_source_credit_lien_from_insurance_not_atomic(
@@ -6262,6 +6286,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    fn valid_source_lien_effective_reserved_sum(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+        let mut sum = 0u128;
+        let mut d = 0usize;
+        while d < account.source_domains.len() {
+            sum = sum
+                .checked_add(
+                    account.source_domains[d]
+                        .source_lien_effective_reserved
+                        .get(),
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(sum)
+    }
+
+    fn incremental_initial_margin_source_credit_needed(
+        account: &PortfolioV16View<'_>,
+        no_positive_equity: i128,
+    ) -> V16Result<u128> {
+        let cert = account.header.health_cert.try_to_runtime()?;
+        if !cert.valid {
+            return Err(V16Error::Stale);
+        }
+        let existing_lien = Self::valid_source_lien_effective_reserved_sum(account)?;
+        if no_positive_equity >= 0 {
+            let covered = (no_positive_equity as u128)
+                .checked_add(existing_lien)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return Ok(cert.certified_initial_req.saturating_sub(covered));
+        }
+        let need_before_lien = cert
+            .certified_initial_req
+            .checked_add(no_positive_equity.unsigned_abs())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(need_before_lien.saturating_sub(existing_lien))
+    }
+
     fn set_insurance_reservation_for_domain(
         &mut self,
         domain: usize,
@@ -6661,6 +6723,254 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
+    }
+
+    fn create_source_credit_lien_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        backing_num: u128,
+    ) -> V16Result<SourceCreditBackingSourceV16> {
+        self.domain_asset_side(domain)?;
+        if backing_num == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot > self.header.current_slot.get()
+            && bucket.fresh_unliened_backing_num >= backing_num
+        {
+            self.create_source_credit_lien_from_counterparty_core_not_atomic(domain, backing_num)?;
+            return Ok(SourceCreditBackingSourceV16::Counterparty);
+        }
+        let reservation = self.insurance_reservation_for_domain(domain)?;
+        let encumbered = reservation
+            .valid_liened_insurance_num
+            .checked_add(reservation.impaired_liened_insurance_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if reservation
+            .insurance_credit_reserved_num
+            .checked_sub(encumbered)
+            .ok_or(V16Error::CounterUnderflow)?
+            >= backing_num
+        {
+            self.create_source_credit_lien_from_insurance_core_not_atomic(domain, backing_num)?;
+            return Ok(SourceCreditBackingSourceV16::Insurance);
+        }
+        Err(V16Error::LockActive)
+    }
+
+    fn apply_account_source_credit_lien_delta(
+        source: &mut PortfolioSourceDomainV16Account,
+        backing_source: SourceCreditBackingSourceV16,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<()> {
+        let prior_counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_add(required_face_num)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_add(effective_credit)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        match backing_source {
+            SourceCreditBackingSourceV16::Counterparty => {
+                source.source_claim_counterparty_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_counterparty_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_counterparty_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_counterparty_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                if prior_counterparty_backing == 0 {
+                    source.source_lien_fee_last_slot = V16PodU64::new(current_slot);
+                }
+            }
+            SourceCreditBackingSourceV16::Insurance => {
+                source.source_claim_insurance_liened_num = V16PodU128::new(
+                    source
+                        .source_claim_insurance_liened_num
+                        .get()
+                        .checked_add(required_face_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+                source.source_lien_insurance_backing_num = V16PodU128::new(
+                    source
+                        .source_lien_insurance_backing_num
+                        .get()
+                        .checked_add(required_backing_num)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_apply_counterparty_source_credit_lien_delta(
+        source: &mut PortfolioSourceDomainV16Account,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<()> {
+        Self::apply_account_source_credit_lien_delta(
+            source,
+            SourceCreditBackingSourceV16::Counterparty,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            current_slot,
+        )
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_create_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        current_slot: u64,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_lien_create_delta(bucket, source, current_slot, amount)
+    }
+
+    fn create_account_source_credit_lien_for_effective_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        effective_credit: u128,
+    ) -> V16Result<()> {
+        account.validate_with_market(&self.as_view())?;
+        self.domain_asset_side(domain)?;
+        if domain >= account.source_domains.len() {
+            return Err(V16Error::InvalidLeg);
+        }
+        if effective_credit == 0 {
+            return Ok(());
+        }
+        self.validate_source_domain_ledger_current(domain)?;
+        let rate = self.source_credit_for_domain(domain)?.credit_rate_num;
+        if rate == 0 {
+            return Err(V16Error::LockActive);
+        }
+        let required_face_num = checked_mul_div_ceil_u256(
+            U256::from_u128(
+                effective_credit
+                    .checked_mul(BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            ),
+            U256::from_u128(CREDIT_RATE_SCALE),
+            U256::from_u128(rate),
+        )
+        .and_then(|v| v.try_into_u128())
+        .ok_or(V16Error::ArithmeticOverflow)?;
+        let required_backing_num = effective_credit
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if Self::source_claim_unliened_num(&account.as_view(), domain)? < required_face_num {
+            return Err(V16Error::LockActive);
+        }
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
+        let backing_source =
+            self.create_source_credit_lien_backing_not_atomic(domain, required_backing_num)?;
+        Self::apply_account_source_credit_lien_delta(
+            &mut account.source_domains[domain],
+            backing_source,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            self.header.current_slot.get(),
+        )?;
+        account.header.health_cert.valid = 0;
+        account.validate_with_market(&self.as_view())
+    }
+
+    fn create_account_source_credit_lien_for_effective_any_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        effective_credit: u128,
+    ) -> V16Result<()> {
+        account.validate_with_market(&self.as_view())?;
+        let mut remaining = effective_credit;
+        let domain_count = self.configured_domain_count()?;
+        let mut d = 0usize;
+        while d < domain_count && remaining != 0 {
+            let rate = self.source_credit_for_domain(d)?.credit_rate_num;
+            let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
+            if rate != 0 && unliened != 0 {
+                self.validate_source_domain_ledger_current(d)?;
+                let soft_num = U256::from_u128(unliened)
+                    .checked_mul(U256::from_u128(rate))
+                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+                    .and_then(|v| v.try_into_u128())
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let by_claim = soft_num / BOUND_SCALE;
+                let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
+                let take = remaining.min(by_claim).min(by_backing);
+                if take != 0 {
+                    self.create_account_source_credit_lien_for_effective_not_atomic(
+                        account, d, take,
+                    )?;
+                    remaining -= take;
+                }
+            }
+            d += 1;
+        }
+        if remaining != 0 {
+            return Err(V16Error::LockActive);
+        }
+        Ok(())
+    }
+
+    fn create_initial_margin_source_lien_if_needed(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        let mut attempts = 0u8;
+        while attempts < 2 {
+            if !decode_bool(account.header.health_cert.valid)? {
+                return Err(V16Error::Stale);
+            }
+            let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
+            let required_credit = Self::incremental_initial_margin_source_credit_needed(
+                &account.as_view(),
+                no_positive,
+            )?;
+            if required_credit == 0 {
+                return Ok(());
+            }
+            self.create_account_source_credit_lien_for_effective_any_not_atomic(
+                account,
+                required_credit,
+            )?;
+            self.recertify_account_after_source_lien_change(account)?;
+            attempts += 1;
+        }
+        Err(V16Error::LockActive)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_create_initial_margin_source_lien_if_needed(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        self.create_initial_margin_source_lien_if_needed(account)
     }
 
     fn haircut_effective_support(
@@ -10091,6 +10401,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn recertify_account_after_source_lien_change(
+        &self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<HealthCertV16> {
+        let existing = account.header.health_cert.try_to_runtime()?;
+        if existing.active_bitmap_at_cert != account.header.active_bitmap.map(V16PodU64::get) {
+            return Err(V16Error::Stale);
+        }
+        let equity = self.account_haircut_equity(&account.as_view())?;
+        let certified_liq_deficit = if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            existing
+                .certified_maintenance_req
+                .saturating_sub(equity as u128)
+        };
+        let cert = HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: existing.certified_initial_req,
+            certified_maintenance_req: existing.certified_maintenance_req,
+            certified_liq_deficit,
+            certified_worst_case_loss: existing.certified_worst_case_loss,
+            cert_oracle_epoch: self.header.oracle_epoch.get(),
+            cert_funding_epoch: self.header.funding_epoch.get(),
+            cert_risk_epoch: self.header.risk_epoch.get(),
+            cert_asset_set_epoch: self.header.asset_set_epoch.get(),
+            active_bitmap_at_cert: account.header.active_bitmap.map(V16PodU64::get),
+            valid: true,
+        };
+        account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        Ok(cert)
+    }
+
     fn recertify_account_after_trade_delta(
         &self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -10251,15 +10594,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
 
         if risk_increasing && !locked {
-            if trade_preflight.long_has_source_claims
-                && Self::ensure_no_positive_credit_initial_margin(&long_account.as_view()).is_err()
-            {
-                return Err(V16Error::LockActive);
+            if trade_preflight.long_has_source_claims {
+                self.create_initial_margin_source_lien_if_needed(long_account)?;
             }
-            if trade_preflight.short_has_source_claims
-                && Self::ensure_no_positive_credit_initial_margin(&short_account.as_view()).is_err()
-            {
-                return Err(V16Error::LockActive);
+            if trade_preflight.short_has_source_claims {
+                self.create_initial_margin_source_lien_if_needed(short_account)?;
             }
         }
         Self::ensure_initial_margin(&long_account.as_view())?;
@@ -12098,6 +12437,20 @@ impl Default for PortfolioAccountV16Account {
 impl PortfolioAccountV16Account {
     pub fn try_empty(header: ProvenanceHeaderV16Account) -> V16Result<Self> {
         let owner = header.try_to_runtime()?.owner;
+        // RESYNC(f3aef4b): legs MUST be seeded from PortfolioLegV16::EMPTY, not
+        // ::default(). is_empty() requires a_basis == ADL_ONE (a nonzero
+        // sentinel), so a zeroed default leg fails the leg-shape check in
+        // validate_with_market and yields HiddenLeg. This realigns our fork's
+        // try_empty with toly's (which the new IM-lien spec test exercises) and
+        // fixes a latent shape-validation bug for any try_empty-constructed
+        // account.
+        let mut legs = [PortfolioLegV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let empty_leg = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+        let mut i = 0usize;
+        while i < V16_MAX_PORTFOLIO_ASSETS_N {
+            legs[i] = empty_leg;
+            i += 1;
+        }
         Ok(Self {
             provenance_header: header,
             owner,
@@ -12108,7 +12461,7 @@ impl PortfolioAccountV16Account {
             cancel_deposit_escrow: V16PodU128::new(0),
             last_fee_slot: V16PodU64::new(0),
             active_bitmap: [V16PodU64::new(0); V16_ACTIVE_BITMAP_WORDS],
-            legs: [PortfolioLegV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N],
+            legs,
             health_cert: HealthCertV16Account::default(),
             stale_state: encode_bool(false),
             b_stale_state: encode_bool(false),
