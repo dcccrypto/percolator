@@ -807,7 +807,7 @@ impl V16Core {
         state: SourceCreditStateV16,
         face_claim: u128,
     ) -> V16Result<u128> {
-        if face_claim == 0 {
+        if face_claim == 0 || state.positive_claim_bound_num == 0 {
             return Ok(0);
         }
         let credited_num = U256::from_u128(Self::bound_num_from_amount(face_claim)?)
@@ -817,6 +817,58 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)?;
         Ok((credited_num / BOUND_SCALE)
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+    }
+
+    fn target_effective_lag_loss_penalty(
+        abs_pos_q: u128,
+        side: SideV16,
+        effective_price: u64,
+        raw_target_price: u64,
+    ) -> V16Result<u128> {
+        let adverse_delta =
+            Self::target_effective_lag_adverse_delta(side, effective_price, raw_target_price);
+        risk_notional_ceil(abs_pos_q, adverse_delta)
+    }
+
+    fn target_effective_lag_adverse_delta(
+        side: SideV16,
+        effective_price: u64,
+        raw_target_price: u64,
+    ) -> u64 {
+        match side {
+            SideV16::Long if raw_target_price < effective_price => {
+                effective_price - raw_target_price
+            }
+            SideV16::Short if raw_target_price > effective_price => {
+                raw_target_price - effective_price
+            }
+            _ => 0,
+        }
+    }
+
+    fn health_requirements_from_notional_and_target_lag(
+        config: V16Config,
+        risk_notional: u128,
+        target_lag_penalty: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let initial_req = margin_requirement(
+            risk_notional,
+            config.initial_margin_bps,
+            config.min_nonzero_im_req,
+        )?
+        .checked_add(target_lag_penalty)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+        let maintenance_req = margin_requirement(
+            risk_notional,
+            config.maintenance_margin_bps,
+            config.min_nonzero_mm_req,
+        )?
+        .checked_add(target_lag_penalty)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+        let worst_case_loss = risk_notional
+            .checked_add(target_lag_penalty)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((initial_req, maintenance_req, worst_case_loss))
     }
 
     #[cfg(any(kani, feature = "runtime-vec-api"))]
@@ -1945,6 +1997,7 @@ impl<'a> PortfolioV16View<'a> {
                         | AssetLifecycleV16::DrainOnly
                         | AssetLifecycleV16::Recovery
                 )
+                || !leg_snapshots_bound_to_asset_side(asset, leg)
             {
                 return Err(V16Error::HiddenLeg);
             }
@@ -1975,6 +2028,9 @@ impl<'a> PortfolioV16View<'a> {
     ) -> V16Result<()> {
         let configured_domains =
             v16_domain_count_for_market_slots(market.header.config.max_market_slots.get())?;
+        if self.source_domains.len() < configured_domains {
+            return Err(V16Error::HiddenLeg);
+        }
         let mut d = 0usize;
         while d < self.source_domains.len() {
             let source = self.source_domains[d];
@@ -2002,6 +2058,15 @@ impl<'a> PortfolioV16View<'a> {
             let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
             if source.source_claim_market_id.get() != asset.market_id {
                 return Err(V16Error::HiddenLeg);
+            }
+            let slot = market.markets[asset_index].engine_slot();
+            let domain_credit = if d % 2 == 0 {
+                slot.source_credit_long.try_to_runtime()?
+            } else {
+                slot.source_credit_short.try_to_runtime()?
+            };
+            if source.source_claim_bound_num.get() > domain_credit.positive_claim_bound_num {
+                return Err(V16Error::InvalidLeg);
             }
             let proof = SourceCreditLienAggregateProofV16 {
                 domain: u16::try_from(d).map_err(|_| V16Error::ArithmeticOverflow)?,
@@ -2082,20 +2147,7 @@ impl<'a> PortfolioV16View<'a> {
     }
 
     fn validate_resolved_payout_receipt_static(receipt: ResolvedPayoutReceiptV16) -> V16Result<()> {
-        if !receipt.present {
-            if !receipt.is_empty() {
-                return Err(V16Error::InvalidLeg);
-            }
-            return Ok(());
-        }
-        let exact_num = V16Core::bound_num_from_amount(receipt.terminal_positive_claim_face)?;
-        if exact_num > receipt.prior_bound_contribution_num
-            || receipt.paid_effective > receipt.terminal_positive_claim_face
-            || receipt.finalized != (receipt.paid_effective == receipt.terminal_positive_claim_face)
-        {
-            return Err(V16Error::InvalidLeg);
-        }
-        Ok(())
+        validate_resolved_payout_receipt_value(receipt)
     }
 
     fn validate_close_progress_ledger_with_market<T>(
@@ -2426,6 +2478,61 @@ impl Default for ResolvedPayoutReceiptV16 {
     }
 }
 
+fn validate_resolved_payout_receipt_value(receipt: ResolvedPayoutReceiptV16) -> V16Result<()> {
+    if !receipt.present {
+        if !receipt.is_empty() {
+            return Err(V16Error::InvalidLeg);
+        }
+        return Ok(());
+    }
+    let exact_num = receipt
+        .terminal_positive_claim_face
+        .checked_mul(BOUND_SCALE)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if exact_num > receipt.prior_bound_contribution_num
+        || receipt.paid_effective > receipt.terminal_positive_claim_face
+        || receipt.finalized != (receipt.paid_effective == receipt.terminal_positive_claim_face)
+    {
+        return Err(V16Error::InvalidLeg);
+    }
+    Ok(())
+}
+
+fn apply_resolved_payout_receipt_payment(
+    mut receipt: ResolvedPayoutReceiptV16,
+    actual_resolved_paid: u128,
+) -> V16Result<ResolvedPayoutReceiptV16> {
+    validate_resolved_payout_receipt_value(receipt)?;
+    if actual_resolved_paid == 0 {
+        return Ok(receipt);
+    }
+    if !receipt.present {
+        return Err(V16Error::InvalidLeg);
+    }
+    let remaining = receipt
+        .terminal_positive_claim_face
+        .checked_sub(receipt.paid_effective)
+        .ok_or(V16Error::InvalidLeg)?;
+    if actual_resolved_paid > remaining {
+        return Err(V16Error::InvalidLeg);
+    }
+    receipt.paid_effective = receipt
+        .paid_effective
+        .checked_add(actual_resolved_paid)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    receipt.finalized = receipt.paid_effective == receipt.terminal_positive_claim_face;
+    validate_resolved_payout_receipt_value(receipt)?;
+    Ok(receipt)
+}
+
+#[cfg(kani)]
+pub fn kani_apply_resolved_payout_receipt_payment(
+    receipt: ResolvedPayoutReceiptV16,
+    actual_resolved_paid: u128,
+) -> V16Result<ResolvedPayoutReceiptV16> {
+    apply_resolved_payout_receipt_payment(receipt, actual_resolved_paid)
+}
+
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg(any(kani, feature = "runtime-vec-api"))]
@@ -2539,6 +2646,24 @@ impl PortfolioAccountV16 {
             .min(self.source_lien_fee_last_slot.len())
             .min(self.source_claim_impaired_num.len())
             .min(self.source_lien_impaired_effective_reserved.len())
+    }
+
+    fn checked_source_domain_capacity(&self) -> V16Result<usize> {
+        let capacity = self.source_claim_market_id.len();
+        if self.source_claim_bound_num.len() != capacity
+            || self.source_claim_liened_num.len() != capacity
+            || self.source_claim_counterparty_liened_num.len() != capacity
+            || self.source_claim_insurance_liened_num.len() != capacity
+            || self.source_lien_effective_reserved.len() != capacity
+            || self.source_lien_counterparty_backing_num.len() != capacity
+            || self.source_lien_insurance_backing_num.len() != capacity
+            || self.source_lien_fee_last_slot.len() != capacity
+            || self.source_claim_impaired_num.len() != capacity
+            || self.source_lien_impaired_effective_reserved.len() != capacity
+        {
+            return Err(V16Error::HiddenLeg);
+        }
+        Ok(capacity)
     }
 }
 
@@ -2811,11 +2936,7 @@ impl TokenValueFlowProofV16 {
         vault_before: u128,
         vault_after: u128,
     ) -> V16Result<()> {
-        if vault_before != vault_after {
-            return Err(V16Error::InvalidConfig);
-        }
-        let _ = amount;
-        Ok(())
+        Self::insurance_to_close_insurance_spent(amount, vault_before, vault_after)?.validate()
     }
 
     pub fn support_to_account_capital(
@@ -5957,6 +6078,59 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 Self::clear_account_source_claim_market_id_if_empty(account, d);
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
+            if burn_num != 0 {
+                let impaired_burn = account.source_domains[d]
+                    .source_claim_impaired_num
+                    .get()
+                    .min(burn_num);
+                if impaired_burn != 0 {
+                    let old_impaired = account.source_domains[d].source_claim_impaired_num.get();
+                    let next_impaired = old_impaired
+                        .checked_sub(impaired_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    account.source_domains[d].source_claim_bound_num = V16PodU128::new(
+                        account.source_domains[d]
+                            .source_claim_bound_num
+                            .get()
+                            .checked_sub(impaired_burn)
+                            .ok_or(V16Error::CounterUnderflow)?,
+                    );
+                    account.source_domains[d].source_claim_impaired_num =
+                        V16PodU128::new(next_impaired);
+                    let impaired_effective_burn = if next_impaired == 0 {
+                        account.source_domains[d]
+                            .source_lien_impaired_effective_reserved
+                            .get()
+                    } else {
+                        V16Core::amount_from_bound_num(impaired_burn)?.min(
+                            account.source_domains[d]
+                                .source_lien_impaired_effective_reserved
+                                .get(),
+                        )
+                    };
+                    account.source_domains[d].source_lien_impaired_effective_reserved =
+                        V16PodU128::new(
+                            account.source_domains[d]
+                                .source_lien_impaired_effective_reserved
+                                .get()
+                                .checked_sub(impaired_effective_burn)
+                                .ok_or(V16Error::CounterUnderflow)?,
+                        );
+                    let mut source_credit = self.source_credit_for_domain(d)?;
+                    source_credit.positive_claim_bound_num = source_credit
+                        .positive_claim_bound_num
+                        .checked_sub(impaired_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    source_credit.exact_positive_claim_num = source_credit
+                        .exact_positive_claim_num
+                        .checked_sub(impaired_burn.min(source_credit.exact_positive_claim_num))
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    burn_num -= impaired_burn;
+                    self.set_source_credit_for_domain(d, source_credit)?;
+                    Self::clear_account_source_claim_market_id_if_empty(account, d);
+                    self.recompute_source_credit_domain_after_mutation(d)?;
+                }
+            }
             d += 1;
         }
         if burn_num != 0 {
@@ -7158,22 +7332,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.markets[asset_index].engine.asset.effective_price.get()
             };
             let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
-            initial_req = initial_req
-                .checked_add(margin_requirement(
+            let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
+                leg.basis_pos_q.unsigned_abs(),
+                leg.side,
+                price,
+                self.markets[asset_index]
+                    .engine
+                    .asset
+                    .raw_oracle_target_price
+                    .get(),
+            )?;
+            let (leg_initial, leg_maintenance, leg_worst_case_loss) =
+                V16Core::health_requirements_from_notional_and_target_lag(
+                    config,
                     risk_notional,
-                    config.initial_margin_bps,
-                    config.min_nonzero_im_req,
-                )?)
+                    target_lag_penalty,
+                )?;
+            initial_req = initial_req
+                .checked_add(leg_initial)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             maintenance_req = maintenance_req
-                .checked_add(margin_requirement(
-                    risk_notional,
-                    config.maintenance_margin_bps,
-                    config.min_nonzero_mm_req,
-                )?)
+                .checked_add(leg_maintenance)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             worst_case_loss = worst_case_loss
-                .checked_add(risk_notional)
+                .checked_add(leg_worst_case_loss)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
         }
@@ -7271,6 +7453,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         | AssetLifecycleV16::DrainOnly
                         | AssetLifecycleV16::Recovery
                 )
+                || !leg_snapshots_bound_to_asset_side(asset, leg)
             {
                 return Err(V16Error::HiddenLeg);
             }
@@ -7322,22 +7505,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.markets[asset_index].engine.asset.effective_price.get()
             };
             let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
-            initial_req = initial_req
-                .checked_add(margin_requirement(
+            let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
+                refreshed.basis_pos_q.unsigned_abs(),
+                refreshed.side,
+                price,
+                asset.raw_oracle_target_price,
+            )?;
+            let (leg_initial, leg_maintenance, leg_worst_case_loss) =
+                V16Core::health_requirements_from_notional_and_target_lag(
+                    config,
                     risk_notional,
-                    config.initial_margin_bps,
-                    config.min_nonzero_im_req,
-                )?)
+                    target_lag_penalty,
+                )?;
+            initial_req = initial_req
+                .checked_add(leg_initial)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             maintenance_req = maintenance_req
-                .checked_add(margin_requirement(
-                    risk_notional,
-                    config.maintenance_margin_bps,
-                    config.min_nonzero_mm_req,
-                )?)
+                .checked_add(leg_maintenance)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             worst_case_loss = worst_case_loss
-                .checked_add(risk_notional)
+                .checked_add(leg_worst_case_loss)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
         }
@@ -8957,12 +9144,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ledger: CloseProgressLedgerV16,
     ) -> V16Result<()> {
         if ledger.active && self.header.current_slot.get() > ledger.max_close_slot {
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+                return Ok(());
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
             return Err(V16Error::RecoveryRequired);
         }
         Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_ensure_close_progress_not_expired(
+        &mut self,
+        ledger: CloseProgressLedgerV16,
+    ) -> V16Result<()> {
+        self.ensure_close_progress_not_expired(ledger)
     }
 
     fn ensure_open_close_snapshot_current_or_recovery(
@@ -8978,6 +9176,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && Self::active_leg_slot_for_asset(account, asset_index)?.is_some()
             && self.header.current_slot.get() > ledger.drift_reference_slot
         {
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+                return Ok(());
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -9904,6 +10105,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
+        let asset = self.asset_state(asset_index)?;
+        if asset.raw_oracle_target_price != asset.effective_price {
+            let cert = self.compute_account_health_cert_with_price_override(
+                &account.as_view(),
+                false,
+                None,
+            )?;
+            account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+            return Ok(cert);
+        }
         let existing = account.header.health_cert.try_to_runtime()?;
         let old_notional = risk_notional_ceil(old_abs_q, price)?;
         let new_notional = risk_notional_ceil(new_abs_q, price)?;
@@ -10125,10 +10336,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() >= 0 {
             return Ok(());
         }
-        self.header.bankruptcy_hlock_active = 1;
-        self.set_account_pnl(account, 0)?;
-        account.header.health_cert.valid = 0;
-        Ok(())
+        Err(V16Error::RecoveryRequired)
+    }
+
+    fn resolved_unattributed_insolvent_negative_pnl_requires_recovery(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        Ok(
+            decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+                && account.header.pnl.get() < 0
+                && account.header.pnl.get().unsigned_abs() > account.header.capital.get()
+                && self.resolved_bankruptcy_attribution(account)?.is_none(),
+        )
     }
 
     fn settle_resolved_bankruptcy_negative_pnl(
@@ -10957,13 +11177,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let payout = claimable.min(self.header.vault.get());
-        receipt.paid_effective = receipt
-            .paid_effective
-            .checked_add(payout)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if receipt.paid_effective == receipt.terminal_positive_claim_face {
-            receipt.finalized = true;
-        }
+        receipt = apply_resolved_payout_receipt_payment(receipt, payout)?;
         let vault_before = self.header.vault.get();
         self.header.vault = V16PodU128::new(
             self.header
@@ -11034,15 +11248,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_shape()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        if self
+            .resolved_unattributed_insolvent_negative_pnl_requires_recovery(&account.as_view())?
+        {
+            return Err(V16Error::RecoveryRequired);
+        }
         self.sync_account_fee_to_slot_not_atomic(
             account,
             self.header.resolved_slot.get(),
             fee_rate_per_slot,
         )?;
+        if self
+            .resolved_unattributed_insolvent_negative_pnl_requires_recovery(&account.as_view())?
+        {
+            return Err(V16Error::RecoveryRequired);
+        }
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
+        self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
@@ -11053,21 +11278,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?
         {
             self.create_resolved_payout_receipt_if_needed(account)?;
-            let mut receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+            let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
             let claimable = self.resolved_receipt_claimable_now(receipt)?;
-            receipt.paid_effective = receipt
-                .paid_effective
-                .checked_add(claimable)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if receipt.paid_effective == receipt.terminal_positive_claim_face {
-                receipt.finalized = true;
-            }
-            account.header.resolved_payout_receipt =
-                ResolvedPayoutReceiptV16Account::from_runtime(&receipt);
+            payout_receipt = Some(receipt);
             claimable
         } else {
             0
@@ -11081,6 +11299,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let resolved_paid = payout
             .checked_sub(capital_paid)
             .ok_or(V16Error::CounterUnderflow)?;
+        if let Some(mut receipt) = payout_receipt {
+            receipt = apply_resolved_payout_receipt_payment(receipt, resolved_paid)?;
+            account.header.resolved_payout_receipt =
+                ResolvedPayoutReceiptV16Account::from_runtime(&receipt);
+        }
         let vault_before = self.header.vault.get();
         self.header.vault = V16PodU128::new(
             self.header
@@ -11111,6 +11334,59 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
+    }
+
+    fn detach_solvent_active_legs_for_resolved_close(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        if account.header.pnl.get() < 0
+            || decode_bool(account.header.b_stale_state)?
+            || decode_bool(account.header.stale_state)?
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            return Ok(());
+        }
+
+        let configured_max = self.header.config.max_market_slots.get() as usize;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                if leg.b_stale || leg.stale {
+                    return Ok(());
+                }
+                let asset_index = leg.asset_index as usize;
+                if asset_index >= configured_max {
+                    return Err(V16Error::InvalidLeg);
+                }
+                if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+                    return Ok(());
+                }
+                let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+                if k_target != leg.k_snap || f_target != leg.f_snap {
+                    return Ok(());
+                }
+                if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+                    return Ok(());
+                }
+            }
+            slot += 1;
+        }
+
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                self.clear_leg(account, leg.asset_index as usize)?;
+            }
+            slot += 1;
+        }
+        Ok(())
     }
 
     pub fn deposit_not_atomic(
@@ -12080,7 +12356,7 @@ impl MarketGroupV16 {
         &self,
         account: &PortfolioAccountV16,
     ) -> V16Result<()> {
-        if account.source_domain_capacity() < self.configured_domain_count()? {
+        if account.checked_source_domain_capacity()? < self.configured_domain_count()? {
             return Err(V16Error::InvalidLeg);
         }
         Ok(())
@@ -12196,6 +12472,7 @@ impl MarketGroupV16 {
                             | AssetLifecycleV16::DrainOnly
                             | AssetLifecycleV16::Recovery
                     )
+                    || !leg_snapshots_bound_to_asset_side(self.assets[asset_index], leg)
                 {
                     return Err(V16Error::HiddenLeg);
                 }
@@ -12283,23 +12560,7 @@ impl MarketGroupV16 {
     }
 
     fn validate_resolved_payout_receipt(&self, receipt: ResolvedPayoutReceiptV16) -> V16Result<()> {
-        if !receipt.present {
-            if !receipt.is_empty() {
-                return Err(V16Error::InvalidLeg);
-            }
-            return Ok(());
-        }
-        let exact_num = Self::bound_num_from_amount(receipt.terminal_positive_claim_face)?;
-        if exact_num > receipt.prior_bound_contribution_num {
-            return Err(V16Error::InvalidLeg);
-        }
-        if receipt.paid_effective > receipt.terminal_positive_claim_face {
-            return Err(V16Error::InvalidLeg);
-        }
-        if receipt.finalized != (receipt.paid_effective == receipt.terminal_positive_claim_face) {
-            return Err(V16Error::InvalidLeg);
-        }
-        Ok(())
+        validate_resolved_payout_receipt_value(receipt)
     }
 
     pub fn create_portfolio_account(&mut self, account: &PortfolioAccountV16) -> V16Result<()> {
@@ -12313,7 +12574,10 @@ impl MarketGroupV16 {
 
     fn validate_account_source_credit_shape(&self, account: &PortfolioAccountV16) -> V16Result<()> {
         let configured_domains = self.configured_domain_count()?;
-        let account_domain_capacity = account.source_domain_capacity();
+        let account_domain_capacity = account.checked_source_domain_capacity()?;
+        if account_domain_capacity < configured_domains {
+            return Err(V16Error::HiddenLeg);
+        }
         let mut d = 0;
         while d < account_domain_capacity {
             let numeric_zero_source_domain = account.source_claim_bound_num[d] == 0
@@ -12339,6 +12603,9 @@ impl MarketGroupV16 {
             let asset_index = d / 2;
             if account.source_claim_market_id[d] != self.assets[asset_index].market_id {
                 return Err(V16Error::HiddenLeg);
+            }
+            if account.source_claim_bound_num[d] > self.source_credit[d].positive_claim_bound_num {
+                return Err(V16Error::InvalidLeg);
             }
             self.source_credit_lien_proof_for_account_domain(account, d)?
                 .validate()?;
@@ -12432,8 +12699,10 @@ impl MarketGroupV16 {
         })
     }
 
-    pub fn close_portfolio_account(&mut self, account: &PortfolioAccountV16) -> V16Result<()> {
-        self.validate_account_shape(account)?;
+    fn validate_portfolio_close_clean_state(
+        account: &PortfolioAccountV16,
+        source_claim_bound_sum_num: u128,
+    ) -> V16Result<()> {
         if !active_bitmap_is_empty(account.active_bitmap)
             || account.capital != 0
             || account.pnl != 0
@@ -12443,12 +12712,27 @@ impl MarketGroupV16 {
             || account.stale_state
             || account.b_stale_state
             || account.close_progress.active
-            || Self::account_source_claim_bound_sum_num_static(account)? != 0
+            || source_claim_bound_sum_num != 0
             || (account.resolved_payout_receipt.present
                 && !account.resolved_payout_receipt.finalized)
         {
             return Err(V16Error::LockActive);
         }
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_validate_portfolio_close_clean_state(
+        account: &PortfolioAccountV16,
+        source_claim_bound_sum_num: u128,
+    ) -> V16Result<()> {
+        Self::validate_portfolio_close_clean_state(account, source_claim_bound_sum_num)
+    }
+
+    pub fn close_portfolio_account(&mut self, account: &PortfolioAccountV16) -> V16Result<()> {
+        self.validate_account_shape(account)?;
+        let source_claim_bound_sum_num = Self::account_source_claim_bound_sum_num_static(account)?;
+        Self::validate_portfolio_close_clean_state(account, source_claim_bound_sum_num)?;
         self.materialized_portfolio_count = self
             .materialized_portfolio_count
             .checked_sub(1)
@@ -12461,6 +12745,7 @@ impl MarketGroupV16 {
         account: &mut PortfolioAccountV16,
         amount: u128,
     ) -> V16Result<()> {
+        self.ensure_account_source_domain_capacity(account)?;
         self.validate_account_shape(account)?;
         self.deposit_core_not_atomic(account, amount)?;
         self.assert_public_invariants()
@@ -12723,10 +13008,25 @@ impl MarketGroupV16 {
         if account.pnl >= 0 {
             return Ok(());
         }
-        self.bankruptcy_hlock_active = true;
-        self.set_account_pnl(account, 0)?;
-        account.health_cert.valid = false;
-        Ok(())
+        Err(V16Error::RecoveryRequired)
+    }
+
+    fn resolved_unattributed_insolvent_negative_pnl_requires_recovery(
+        &self,
+        account: &PortfolioAccountV16,
+    ) -> V16Result<bool> {
+        Ok(self.mode == MarketModeV16::Resolved
+            && account.pnl < 0
+            && account.pnl.unsigned_abs() > account.capital
+            && self.resolved_bankruptcy_attribution(account)?.is_none())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_resolved_unattributed_insolvent_negative_pnl_requires_recovery(
+        &self,
+        account: &PortfolioAccountV16,
+    ) -> V16Result<bool> {
+        self.resolved_unattributed_insolvent_negative_pnl_requires_recovery(account)
     }
 
     fn settle_resolved_bankruptcy_negative_pnl(
@@ -12921,13 +13221,18 @@ impl MarketGroupV16 {
         account: &mut PortfolioAccountV16,
         asset_index: usize,
         old_abs_q: u128,
-        price: u64,
+        effective_prices: &[u64],
     ) -> V16Result<HealthCertV16> {
-        if asset_index >= self.config.max_market_slots as usize
-            || price == 0
-            || price > MAX_ORACLE_PRICE
-        {
+        if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidConfig);
+        }
+        let price = effective_price_at(effective_prices, asset_index)?;
+        if self.assets[asset_index].raw_oracle_target_price
+            != self.assets[asset_index].effective_price
+        {
+            let cert = self.compute_account_health_cert(account, effective_prices, false)?;
+            account.health_cert = cert;
+            return Ok(cert);
         }
         let existing = account.health_cert;
         let new_abs_q =
@@ -13760,6 +14065,7 @@ impl MarketGroupV16 {
         side: SideV16,
         basis_pos_q: i128,
     ) -> V16Result<()> {
+        self.ensure_account_source_domain_capacity(account)?;
         self.validate_portfolio_account_provenance(account)?;
         if asset_index >= self.config.max_market_slots as usize {
             return Err(V16Error::InvalidLeg);
@@ -14175,17 +14481,17 @@ impl MarketGroupV16 {
         }
         let price = effective_price_at(effective_prices, asset_index)?;
         let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
-        let leg_initial = margin_requirement(
-            risk_notional,
-            self.config.initial_margin_bps,
-            self.config.min_nonzero_im_req,
+        let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
+            leg.basis_pos_q.unsigned_abs(),
+            leg.side,
+            price,
+            self.assets[asset_index].raw_oracle_target_price,
         )?;
-        let leg_maintenance = margin_requirement(
+        V16Core::health_requirements_from_notional_and_target_lag(
+            self.config,
             risk_notional,
-            self.config.maintenance_margin_bps,
-            self.config.min_nonzero_mm_req,
-        )?;
-        Ok((leg_initial, leg_maintenance, risk_notional))
+            target_lag_penalty,
+        )
     }
 
     fn build_account_health_cert_from_requirements(
@@ -14260,6 +14566,29 @@ impl MarketGroupV16 {
         require_b_current: bool,
     ) -> V16Result<(u128, u128, u128)> {
         self.account_health_leg_requirements(leg, effective_prices, require_b_current)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_target_effective_lag_adverse_delta(
+        &self,
+        side: SideV16,
+        effective_price: u64,
+        raw_target_price: u64,
+    ) -> u64 {
+        V16Core::target_effective_lag_adverse_delta(side, effective_price, raw_target_price)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_health_requirements_from_notional_and_target_lag(
+        &self,
+        risk_notional: u128,
+        target_lag_penalty: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        V16Core::health_requirements_from_notional_and_target_lag(
+            self.config,
+            risk_notional,
+            target_lag_penalty,
+        )
     }
 
     #[cfg(kani)]
@@ -14369,6 +14698,15 @@ impl MarketGroupV16 {
         let cert = self.compute_account_health_cert(account, effective_prices, true)?;
         account.health_cert = cert;
         Ok(cert)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_certify_account_after_local_settlement(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+        effective_prices: &[u64],
+    ) -> V16Result<HealthCertV16> {
+        self.certify_account_after_local_settlement(account, effective_prices)
     }
 
     fn collect_account_backing_utilization_fees_not_atomic(
@@ -14625,6 +14963,7 @@ impl MarketGroupV16 {
                         | AssetLifecycleV16::DrainOnly
                         | AssetLifecycleV16::Recovery
                 )
+                || !leg_snapshots_bound_to_asset_side(self.assets[asset_index], leg)
             {
                 return Err(V16Error::HiddenLeg);
             }
@@ -14794,16 +15133,18 @@ impl MarketGroupV16 {
             }
             let price = effective_price_at(effective_prices, i)?;
             let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
-            let leg_initial = margin_requirement(
-                risk_notional,
-                self.config.initial_margin_bps,
-                self.config.min_nonzero_im_req,
+            let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
+                refreshed.basis_pos_q.unsigned_abs(),
+                refreshed.side,
+                price,
+                self.assets[i].raw_oracle_target_price,
             )?;
-            let leg_maintenance = margin_requirement(
-                risk_notional,
-                self.config.maintenance_margin_bps,
-                self.config.min_nonzero_mm_req,
-            )?;
+            let (leg_initial, leg_maintenance, leg_worst_case_loss) =
+                V16Core::health_requirements_from_notional_and_target_lag(
+                    self.config,
+                    risk_notional,
+                    target_lag_penalty,
+                )?;
             initial_req = initial_req
                 .checked_add(leg_initial)
                 .ok_or(V16Error::ArithmeticOverflow)?;
@@ -14811,7 +15152,7 @@ impl MarketGroupV16 {
                 .checked_add(leg_maintenance)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             worst_case_loss = worst_case_loss
-                .checked_add(risk_notional)
+                .checked_add(leg_worst_case_loss)
                 .ok_or(V16Error::ArithmeticOverflow)?;
         }
         if account.b_stale_state || has_b_stale_leg(account) {
@@ -15154,13 +15495,13 @@ impl MarketGroupV16 {
             long_account,
             request.asset_index,
             long_old_abs,
-            effective_price_at(effective_prices, request.asset_index)?,
+            effective_prices,
         )?;
         self.recertify_account_after_trade_delta(
             short_account,
             request.asset_index,
             short_old_abs,
-            effective_price_at(effective_prices, request.asset_index)?,
+            effective_prices,
         )?;
         if risk_increasing && !locked {
             self.create_initial_margin_source_lien_if_needed(long_account)?;
@@ -15753,6 +16094,7 @@ impl MarketGroupV16 {
         account: &mut PortfolioAccountV16,
         fee_rate_per_slot: u128,
     ) -> V16Result<ResolvedCloseOutcomeV16> {
+        self.ensure_account_source_domain_capacity(account)?;
         if self.mode != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
@@ -15762,11 +16104,18 @@ impl MarketGroupV16 {
             self.assert_public_invariants()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        if self.resolved_unattributed_insolvent_negative_pnl_requires_recovery(account)? {
+            return Err(V16Error::RecoveryRequired);
+        }
         self.sync_account_fee_to_slot_not_atomic(account, self.resolved_slot, fee_rate_per_slot)?;
+        if self.resolved_unattributed_insolvent_negative_pnl_requires_recovery(account)? {
+            return Err(V16Error::RecoveryRequired);
+        }
         self.settle_negative_pnl_from_principal(account)?;
         if account.pnl < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
+        self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.active_bitmap)
             || account.pnl < 0
             || account.b_stale_state
@@ -15777,19 +16126,11 @@ impl MarketGroupV16 {
         if account.pnl > 0 && !self.resolved_positive_payout_ready() {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        let mut payout_receipt = None;
         let pnl_payout = if account.pnl > 0 || account.resolved_payout_receipt.present {
             self.create_resolved_payout_receipt_if_needed(account)?;
             let claimable = self.resolved_receipt_claimable_now(account.resolved_payout_receipt)?;
-            account.resolved_payout_receipt.paid_effective = account
-                .resolved_payout_receipt
-                .paid_effective
-                .checked_add(claimable)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if account.resolved_payout_receipt.paid_effective
-                == account.resolved_payout_receipt.terminal_positive_claim_face
-            {
-                account.resolved_payout_receipt.finalized = true;
-            }
+            payout_receipt = Some(account.resolved_payout_receipt);
             claimable
         } else {
             0
@@ -15803,6 +16144,10 @@ impl MarketGroupV16 {
         let resolved_paid = payout
             .checked_sub(capital_paid)
             .ok_or(V16Error::CounterUnderflow)?;
+        if let Some(mut receipt) = payout_receipt {
+            receipt = apply_resolved_payout_receipt_payment(receipt, resolved_paid)?;
+            account.resolved_payout_receipt = receipt;
+        }
         let vault_before = self.vault;
         self.vault = self
             .vault
@@ -15826,6 +16171,51 @@ impl MarketGroupV16 {
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
     }
 
+    fn detach_solvent_active_legs_for_resolved_close(
+        &mut self,
+        account: &mut PortfolioAccountV16,
+    ) -> V16Result<()> {
+        if account.pnl < 0
+            || account.b_stale_state
+            || account.stale_state
+            || account.close_progress.has_pending_residual()
+        {
+            return Ok(());
+        }
+
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.legs[slot];
+            if !leg.active {
+                continue;
+            }
+            if leg.b_stale || leg.stale {
+                return Ok(());
+            }
+            let asset_index = leg.asset_index as usize;
+            if asset_index >= self.config.max_market_slots as usize {
+                return Err(V16Error::InvalidLeg);
+            }
+            if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+                return Ok(());
+            }
+            let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+            if k_target != leg.k_snap || f_target != leg.f_snap {
+                return Ok(());
+            }
+            if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+                return Ok(());
+            }
+        }
+
+        for slot in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+            if account.legs[slot].active {
+                let asset_index = account.legs[slot].asset_index as usize;
+                self.clear_leg(account, asset_index)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn claim_resolved_payout_topup_not_atomic(
         &mut self,
         account: &mut PortfolioAccountV16,
@@ -15839,16 +16229,8 @@ impl MarketGroupV16 {
             return Ok(0);
         }
         let payout = claimable.min(self.vault);
-        account.resolved_payout_receipt.paid_effective = account
-            .resolved_payout_receipt
-            .paid_effective
-            .checked_add(payout)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if account.resolved_payout_receipt.paid_effective
-            == account.resolved_payout_receipt.terminal_positive_claim_face
-        {
-            account.resolved_payout_receipt.finalized = true;
-        }
+        account.resolved_payout_receipt =
+            apply_resolved_payout_receipt_payment(account.resolved_payout_receipt, payout)?;
         let vault_before = self.vault;
         self.vault = self
             .vault
@@ -16070,6 +16452,7 @@ impl MarketGroupV16 {
         bankrupt_side: SideV16,
         residual_remaining: u128,
     ) -> V16Result<BResidualBookingOutcomeV16> {
+        self.ensure_account_source_domain_capacity(account)?;
         self.validate_account_shape(account)?;
         self.book_bankruptcy_residual_chunk_for_account_core(
             account,
@@ -16357,12 +16740,23 @@ impl MarketGroupV16 {
         ledger: CloseProgressLedgerV16,
     ) -> V16Result<()> {
         if ledger.active && self.current_slot > ledger.max_close_slot {
+            if self.mode == MarketModeV16::Resolved {
+                return Ok(());
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
             return Err(V16Error::RecoveryRequired);
         }
         Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_ensure_close_progress_not_expired(
+        &mut self,
+        ledger: CloseProgressLedgerV16,
+    ) -> V16Result<()> {
+        self.ensure_close_progress_not_expired(ledger)
     }
 
     fn ensure_open_close_snapshot_current_or_recovery(
@@ -16380,12 +16774,24 @@ impl MarketGroupV16 {
                 .is_some()
             && self.current_slot > ledger.drift_reference_slot
         {
+            if self.mode == MarketModeV16::Resolved {
+                return Ok(());
+            }
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
             return Err(V16Error::RecoveryRequired);
         }
         Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_ensure_open_close_snapshot_current_or_recovery(
+        &mut self,
+        account: &PortfolioAccountV16,
+        ledger: CloseProgressLedgerV16,
+    ) -> V16Result<()> {
+        self.ensure_open_close_snapshot_current_or_recovery(account, ledger)
     }
 
     fn apply_quantity_adl_after_residual_internal(
@@ -16939,6 +17345,7 @@ impl MarketGroupV16 {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.ensure_account_source_domain_capacity(account)?;
         self.validate_account_shape(account)?;
         self.validate_source_domain_index(domain)?;
         if amount == 0 {
@@ -20124,6 +20531,41 @@ impl MarketGroupV16 {
                 Self::clear_account_source_claim_market_id_if_empty(account, d);
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
+            if burn_num != 0 {
+                let impaired_burn = account.source_claim_impaired_num[d].min(burn_num);
+                if impaired_burn != 0 {
+                    let next_impaired = account.source_claim_impaired_num[d]
+                        .checked_sub(impaired_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    account.source_claim_bound_num[d] = account.source_claim_bound_num[d]
+                        .checked_sub(impaired_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    account.source_claim_impaired_num[d] = next_impaired;
+                    let impaired_effective_burn = if next_impaired == 0 {
+                        account.source_lien_impaired_effective_reserved[d]
+                    } else {
+                        Self::amount_from_bound_num(impaired_burn)?
+                            .min(account.source_lien_impaired_effective_reserved[d])
+                    };
+                    account.source_lien_impaired_effective_reserved[d] = account
+                        .source_lien_impaired_effective_reserved[d]
+                        .checked_sub(impaired_effective_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    self.source_credit[d].positive_claim_bound_num = self.source_credit[d]
+                        .positive_claim_bound_num
+                        .checked_sub(impaired_burn)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    self.source_credit[d].exact_positive_claim_num = self.source_credit[d]
+                        .exact_positive_claim_num
+                        .checked_sub(
+                            impaired_burn.min(self.source_credit[d].exact_positive_claim_num),
+                        )
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    burn_num -= impaired_burn;
+                    Self::clear_account_source_claim_market_id_if_empty(account, d);
+                    self.recompute_source_credit_domain_after_mutation(d)?;
+                }
+            }
             d += 1;
         }
         if burn_num != 0 {
@@ -20590,6 +21032,20 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         return Err(V16Error::InvalidLeg);
     }
     Ok(())
+}
+
+fn snapshot_epoch_bound_to_side(epoch_snap: u64, side_epoch: u64, mode: SideModeV16) -> bool {
+    epoch_snap == side_epoch
+        || (mode == SideModeV16::ResetPending && epoch_snap.checked_add(1) == Some(side_epoch))
+}
+
+fn leg_snapshots_bound_to_asset_side(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+    let (side_epoch, mode) = match leg.side {
+        SideV16::Long => (asset.epoch_long, asset.mode_long),
+        SideV16::Short => (asset.epoch_short, asset.mode_short),
+    };
+    snapshot_epoch_bound_to_side(leg.epoch_snap, side_epoch, mode)
+        && snapshot_epoch_bound_to_side(leg.b_epoch_snap, side_epoch, mode)
 }
 
 fn same_side_risk_reduction_or_flat_obligation(current: i128, next: i128) -> bool {
