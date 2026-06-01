@@ -11460,6 +11460,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(U256::from_u64(dt))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
+            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
+                .settle_account_side_effects_not_atomic(
+                    account,
+                    self.header.config.public_b_chunk_atoms.get(),
+                )?
+            {
+                return Err(V16Error::BStale);
+            }
+        }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);

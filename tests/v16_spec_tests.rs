@@ -398,6 +398,63 @@ fn v16_zero_copy_principal_settlement_starts_hlock_on_unpaid_flat_loss() {
         .unwrap();
 }
 
+// RESYNC(4008f89): two new toly tests for the nonflat-loss-before-fee-sync path.
+#[test]
+fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let (mut long_header, mut long_domains) = account_fixture(1, 14);
+    let (mut short_header, mut short_domains) = account_fixture(1, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+        market.deposit_not_atomic(&mut long, 100).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_in_place_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: POS_SCALE,
+                    exec_price: 100,
+                    fee_bps: 0,
+                    admit_h_max_consumption_threshold_bps_opt: None,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 50, 0, true)
+            .unwrap();
+    }
+    assert_eq!(long_header.pnl.get(), 0);
+    assert_eq!(long_header.capital.get(), 100);
+    assert_eq!(header.insurance.get(), 0);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
+    let charged = market
+        .sync_account_fee_to_slot_not_atomic(&mut long, 2, 100)
+        .unwrap();
+
+    assert_eq!(
+        charged, 50,
+        "lazy K loss must consume principal before recurring fee collection"
+    );
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(market.header.insurance.get(), 50);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_view_dynamic_market_slots_can_be_activated_without_runtime_vec_engine() {
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    view.validate_shape().unwrap();
+}
+
 #[test]
 fn v16_zero_copy_flat_withdraw_mutates_pod_without_runtime_vecs() {
     let mut g = group();
