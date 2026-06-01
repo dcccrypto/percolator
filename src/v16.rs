@@ -10919,7 +10919,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::BStale);
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         self.validate_shape_audit_scan()?;
         Ok(charged)
@@ -11460,7 +11460,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(U256::from_u64(dt))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);
         account.validate_with_market(&self.as_view())?;
@@ -11486,7 +11486,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.close_progress.try_to_runtime()? != CloseProgressLedgerV16::EMPTY {
             return Err(V16Error::LockActive);
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         if account.header.pnl.get() < 0 || amount > account.header.capital.get() {
             return Err(V16Error::LockActive);
         }
@@ -13522,7 +13522,10 @@ impl MarketGroupV16 {
         if account.b_stale_state || has_b_stale_leg(account) {
             return Err(V16Error::BStale);
         }
-        self.settle_negative_pnl_from_principal(account)?;
+        // RESYNC(64d78c4, runtime mirror): use the _core loss-settlement variant
+        // in this hot path, matching toly's view-path flip in
+        // charge_account_fee_after_loss_settlement.
+        self.settle_negative_pnl_from_principal_core(account)?;
         if requested_fee == 0 || account.pnl < 0 {
             return Ok(0);
         }
@@ -13863,7 +13866,9 @@ impl MarketGroupV16 {
         self.certify_account_after_local_settlement(account, effective_prices)?;
         // A-1: pass-through None (non-trade caller).
         let locked = self.h_lock_lane(Some(account), false, None)? == HLockLaneV16::HMax;
-        self.settle_negative_pnl_from_principal(account)?;
+        // RESYNC(64d78c4, runtime mirror): _core loss-settlement variant in the
+        // withdraw hot path, matching toly's view-path withdraw_not_atomic flip.
+        self.settle_negative_pnl_from_principal_core(account)?;
         if account.pnl < 0 || amount > account.capital {
             return Err(V16Error::LockActive);
         }
