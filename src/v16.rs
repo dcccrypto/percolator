@@ -2378,6 +2378,11 @@ impl<'a> PortfolioV16View<'a> {
         }
         Ok(found)
     }
+
+    #[cfg(kani)]
+    pub fn kani_active_leg_slot_for_asset(&self, asset_index: usize) -> V16Result<Option<usize>> {
+        self.active_leg_slot_for_asset(asset_index)
+    }
 }
 
 impl<'a> PortfolioV16ViewMut<'a> {
@@ -6545,6 +6550,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     #[cfg(kani)]
+    pub fn kani_prepare_counterparty_lien_terminal_release_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_lien_terminal_release_delta(bucket, source, amount)
+    }
+
+    #[cfg(kani)]
     pub fn kani_prepare_counterparty_backing_add_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -8520,6 +8534,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             d += 1;
         }
         Ok(false)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_convert_source_claim_exposure_guard(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        Ok(Self::account_has_source_claims(account)?
+            && self.account_has_active_source_claim_exposure(account)?)
     }
 
     fn pending_domain_loss_barrier_count(

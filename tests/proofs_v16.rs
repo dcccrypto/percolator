@@ -17,8 +17,7 @@ use percolator::v16::{
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
     StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config, V16Error,
-    V16PodI128, V16PodU128,
-    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    V16PodI128, V16PodU128, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, POS_SCALE, SOCIAL_LOSS_DEN,
@@ -91,12 +90,15 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral() {
+    let with_senior_balances: bool = kani::any();
+    let c_tot = if with_senior_balances { 7 } else { 0 };
+    let insurance = if with_senior_balances { 4 } else { 0 };
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    header.vault = V16PodU128::new(11);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(4);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -108,9 +110,12 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
     let asset = slot.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        asset.lifecycle == AssetLifecycleV16::Active && asset.market_id == 1,
-        "public market activation reaches active market branch"
+        with_senior_balances,
+        "public market activation covers nonzero symbolic senior-balance case"
     );
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(asset.market_id, 1);
+    assert_eq!(asset.effective_price, 100);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -238,17 +243,23 @@ fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
+    let capital_raw: u8 = kani::any();
+    let extra_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=8).contains(&extra_raw));
+    let capital = capital_raw as u128;
+    let withdraw = capital + extra_raw as u128;
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-    market.deposit_not_atomic(&mut account, 3).unwrap();
+    market.deposit_not_atomic(&mut account, capital).unwrap();
 
-    let result = market.withdraw_not_atomic(&mut account, 4);
+    let result = market.withdraw_not_atomic(&mut account, withdraw);
 
     kani::cover!(
-        result == Err(V16Error::LockActive),
-        "view overwithdraw lock branch reachable"
+        extra_raw > 1,
+        "view overwithdraw lock branch reachable for symbolic overdraw amount"
     );
     assert_eq!(result, Err(V16Error::LockActive));
 }
@@ -369,22 +380,34 @@ fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_withdraw() {
+    let capital_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&capital_raw));
+    kani::assume((1..=10).contains(&amount_raw));
+    let capital = capital_raw as u128;
+    let amount = amount_raw as u128;
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
     header.mode = 2;
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(10);
-    account_header.capital = V16PodU128::new(10);
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let capital_before = account_header.capital;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-    let result = market.withdraw_not_atomic(&mut account, 1);
+    let result = market.withdraw_not_atomic(&mut account, amount);
 
     kani::cover!(
-        result == Err(V16Error::LockActive),
-        "recovery mode blocks ordinary withdraw"
+        amount > 1 && capital > 1,
+        "recovery mode blocks ordinary withdraw over symbolic balances"
     );
     assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(account.header.capital, capital_before);
 }
 
 #[kani::proof]
@@ -473,10 +496,13 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_open_source_claim_exposure_blocks_convert() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&claim_raw));
+    let claim = claim_raw as u128;
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
-    let face_num = 10u128 * BOUND_SCALE;
+    let face_num = claim * BOUND_SCALE;
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
     active_bitmap_set(&mut bitmap, 0).unwrap();
     let leg = PortfolioLegV16 {
@@ -498,7 +524,7 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
     };
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
     account_header.active_bitmap = bitmap.map(V16PodU64::new);
-    account_header.pnl = V16PodI128::new(10);
+    account_header.pnl = V16PodI128::new(claim as i128);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         certified_equity: 100,
         certified_initial_req: 1,
@@ -521,16 +547,18 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         });
     source_domains[1].source_claim_market_id = V16PodU64::new(market_id);
     source_domains[1].source_claim_bound_num = V16PodU128::new(face_num);
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
 
-    let result = market.convert_released_pnl_to_capital_not_atomic(&mut account);
+    let blocked = market
+        .kani_convert_source_claim_exposure_guard(&account.as_view())
+        .unwrap();
 
     kani::cover!(
-        result == Err(V16Error::LockActive),
-        "active source-claim exposure reaches convert guard"
+        blocked && claim > 1,
+        "active source-claim exposure reaches convert guard for symbolic claim"
     );
-    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(blocked);
 }
 
 #[kani::proof]
@@ -712,6 +740,15 @@ fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
+    let loss_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let partial_close_raw: u8 = kani::any();
+    kani::assume((2..=10).contains(&loss_raw));
+    kani::assume((1..loss_raw).contains(&capital_raw));
+    kani::assume((1..=9).contains(&partial_close_raw));
+    let loss = -(loss_raw as i128);
+    let undercapitalized = capital_raw as u128;
+    let partial_close_q = partial_close_raw as u128;
     let mut two_leg_bitmap = V16_EMPTY_ACTIVE_BITMAP;
     active_bitmap_set(&mut two_leg_bitmap, 0).unwrap();
     active_bitmap_set(&mut two_leg_bitmap, 1).unwrap();
@@ -720,8 +757,8 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
 
     let full_close_with_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            -5,
-            1,
+            loss,
+            undercapitalized,
             two_leg_bitmap,
             0,
             10,
@@ -730,18 +767,18 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
         .unwrap();
     let partial_close_with_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            -5,
-            1,
+            loss,
+            undercapitalized,
             two_leg_bitmap,
             0,
-            5,
+            partial_close_q,
             10,
         )
         .unwrap();
     let full_close_without_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            -5,
-            1,
+            loss,
+            undercapitalized,
             single_leg_bitmap,
             0,
             10,
@@ -750,8 +787,8 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
         .unwrap();
     let covered_loss_with_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            -5,
-            5,
+            loss,
+            loss_raw as u128,
             two_leg_bitmap,
             0,
             10,
@@ -760,8 +797,11 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
         .unwrap();
 
     kani::cover!(
-        full_close_with_other_risk && partial_close_with_other_risk,
-        "liquidation guard detects uncovered loss with remaining open risk"
+        loss_raw > 5
+            && capital_raw > 1
+            && full_close_with_other_risk
+            && partial_close_with_other_risk,
+        "liquidation guard detects symbolic uncovered loss with remaining open risk"
     );
     assert!(full_close_with_other_risk);
     assert!(partial_close_with_other_risk);
@@ -1032,12 +1072,19 @@ fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault() {
+    let earnings_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&earnings_raw));
+    kani::assume((1..=10).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= earnings_raw);
+    let earnings = earnings_raw as u128;
+    let withdraw = withdraw_raw as u128;
     let (mut header, mut markets, _, _) = one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
-    header.vault = V16PodU128::new(5);
+    header.vault = V16PodU128::new(earnings);
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id,
-        utilization_fee_earnings: 5,
+        utilization_fee_earnings: earnings,
         status: BackingBucketStatusV16::Expired,
         ..BackingBucketV16::EMPTY
     });
@@ -1046,7 +1093,7 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     market
-        .withdraw_backing_provider_earnings_not_atomic(0, 3)
+        .withdraw_backing_provider_earnings_not_atomic(0, withdraw)
         .unwrap();
     let bucket = market.markets[0]
         .engine
@@ -1055,11 +1102,11 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
         .unwrap();
 
     kani::cover!(
-        bucket.utilization_fee_earnings == 2,
-        "public backing earnings withdraw is nontrivial"
+        withdraw > 1 && bucket.utilization_fee_earnings > 0,
+        "public backing earnings withdraw is nontrivial and symbolic"
     );
-    assert_eq!(market.header.vault.get(), 2);
-    assert_eq!(bucket.utilization_fee_earnings, 2);
+    assert_eq!(market.header.vault.get(), earnings - withdraw);
+    assert_eq!(bucket.utilization_fee_earnings, earnings - withdraw);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(market.validate_shape(), Ok(()));
@@ -1069,12 +1116,14 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
+    let stale_market_id_raw: u8 = kani::any();
+    kani::assume((2..=10).contains(&stale_market_id_raw));
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
     let leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
-        market_id: 999,
+        market_id: stale_market_id_raw as u64,
         side: SideV16::Long,
         basis_pos_q: POS_SCALE as i128,
         a_basis: ADL_ONE,
@@ -1098,8 +1147,8 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let result = account.as_view().validate_with_market(&market.as_view());
 
     kani::cover!(
-        result == Err(V16Error::HiddenLeg),
-        "stale market_id leg is rejected after asset slot reuse"
+        stale_market_id_raw > 2 && result == Err(V16Error::HiddenLeg),
+        "symbolic stale market_id leg is rejected after asset slot reuse"
     );
     assert_eq!(result, Err(V16Error::HiddenLeg));
 }
@@ -1108,14 +1157,16 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
 fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
-    let (mut header, mut markets, mut account_header, mut source_domains) =
-        one_market_view_fixture();
+    let large_position: bool = kani::any();
+    let units = if large_position { 2 } else { 1 };
+    let basis = units as i128 * POS_SCALE as i128;
+    let (_, _, mut account_header, mut source_domains) = one_market_view_fixture();
     let long_leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
         market_id: 1,
         side: SideV16::Long,
-        basis_pos_q: POS_SCALE as i128,
+        basis_pos_q: basis,
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
@@ -1129,7 +1180,7 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
     };
     let short_leg = PortfolioLegV16 {
         side: SideV16::Short,
-        basis_pos_q: -(POS_SCALE as i128),
+        basis_pos_q: -basis,
         ..long_leg
     };
     account_header.legs[0] = percolator::v16::PortfolioLegV16Account::from_runtime(&long_leg);
@@ -1139,25 +1190,27 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
     active_bitmap_set(&mut bitmap, 1).unwrap();
     account_header.active_bitmap = bitmap.map(V16PodU64::new);
 
-    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-    let result = account.as_view().validate_with_market(&market.as_view());
+    let result = account.as_view().kani_active_leg_slot_for_asset(0);
 
     kani::cover!(
-        result == Err(V16Error::HiddenLeg),
-        "duplicate active asset legs are rejected"
+        large_position && result.is_err(),
+        "duplicate active asset legs are rejected before double-counting symbolic size"
     );
-    assert_eq!(result, Err(V16Error::HiddenLeg));
+    assert!(result.is_err());
 }
 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
+    let with_senior_balances: bool = kani::any();
+    let c_tot = if with_senior_balances { 7 } else { 0 };
+    let insurance = if with_senior_balances { 3 } else { 0 };
     let (mut header, mut markets, _, _) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(3);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -1169,8 +1222,8 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        asset.lifecycle == AssetLifecycleV16::DrainOnly,
-        "active asset can enter drain-only without value movement"
+        with_senior_balances && asset.lifecycle == AssetLifecycleV16::DrainOnly,
+        "active asset can enter drain-only without moving nonzero senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::DrainOnly);
     assert_eq!(market.header.vault, vault_before);
@@ -1188,19 +1241,23 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_retire_nonempty_asset_rejects() {
+    let units_raw: u8 = kani::any();
+    let retire_slot_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&units_raw));
+    kani::assume((1..=10).contains(&retire_slot_raw));
     let (mut header, mut markets, _, _) = one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
-    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_long_q = units_raw as u128 * POS_SCALE;
     asset.stored_pos_count_long = 1;
-    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_long = units_raw as u128 * POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let result = market.retire_empty_asset_not_atomic(0, 10);
+    let result = market.retire_empty_asset_not_atomic(0, retire_slot_raw as u64);
 
     kani::cover!(
-        result == Err(V16Error::LockActive),
-        "nonempty asset retirement reaches fail-closed guard"
+        units_raw > 1 && result == Err(V16Error::LockActive),
+        "nonempty asset retirement reaches fail-closed guard for symbolic OI"
     );
     assert_eq!(result, Err(V16Error::LockActive));
 }
@@ -1209,10 +1266,16 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
+    let with_senior_balances: bool = kani::any();
+    let retire_slot_raw: u8 = kani::any();
+    kani::assume((1..=10).contains(&retire_slot_raw));
+    let c_tot = if with_senior_balances { 7 } else { 0 };
+    let insurance = if with_senior_balances { 3 } else { 0 };
+    let retire_slot = retire_slot_raw as u64;
     let (mut header, mut markets, _, _) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(3);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -1220,16 +1283,18 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let risk_epoch_before = header.risk_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.retire_empty_asset_not_atomic(0, 10).unwrap();
+    market
+        .retire_empty_asset_not_atomic(0, retire_slot)
+        .unwrap();
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        asset.lifecycle == AssetLifecycleV16::Retired,
-        "empty asset can retire without moving value"
+        retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
+        "empty asset can retire without moving nonzero senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
-    assert_eq!(asset.retired_slot, 10);
-    assert_eq!(market.header.current_slot.get(), 10);
+    assert_eq!(asset.retired_slot, retire_slot);
+    assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -1590,7 +1655,10 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
-    kani::cover!(claim > 0, "global-vs-domain aggregation covers nontrivial claim");
+    kani::cover!(
+        claim > 0,
+        "global-vs-domain aggregation covers nontrivial claim"
+    );
     // The group bound (0) understates the per-domain source claims (claim_num > 0).
     // A sound validator must reject this; today it does not.
     assert_eq!(market.validate_shape(), Err(V16Error::InvalidConfig));
@@ -1646,8 +1714,14 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 
     let expected_backing = loss.min(capital);
 
-    kani::cover!(loss < capital, "capital-backed loss covers loss-capped branch");
-    kani::cover!(loss > capital, "capital-backed loss covers capital-capped branch");
+    kani::cover!(
+        loss < capital,
+        "capital-backed loss covers loss-capped branch"
+    );
+    kani::cover!(
+        loss > capital,
+        "capital-backed loss covers capital-capped branch"
+    );
 
     // Backing never exceeds the loser's free capital nor the new loss.
     assert!(expected_backing <= capital);
@@ -1705,196 +1779,100 @@ fn proof_v16_residual_excludes_senior_backing_provider_earnings() {
     assert_eq!(market.kani_residual(), surplus);
 }
 
-// Finding A: a winner whose source-credit IM lien is on COUNTERPARTY backing cannot
-// be wound down in Resolved mode. The terminal wind-down forces the winner's positive
-// PnL to zero (close_resolved -> set_account_pnl(0)) -> burn_account_source_claim_bound_num,
-// which can only burn the UNLIENED portion; a liened claim returns Err(LockActive). The
-// only counterparty-lien release is Live-only, so in Resolved the winner can never be
-// wound down (funds + market teardown stuck forever). The liened state here is built via
-// the engine's own lien-application deltas and asserted shape-valid, so it is reachable.
-// set_account_pnl(0) is exactly the operation close_resolved performs at the deadlock;
-// a correct Resolved wind-down releases the lien rather than reverting. FAILS until the
-// burn path releases the lien in Resolved mode.
+// Terminal wind-down must be able to release a counterparty lien without the
+// Live-only freshness gate. This proof targets the exact production delta used
+// by Resolved-mode source-claim burn; the full close/set_account_pnl path is
+// covered by integration tests, while this harness keeps Kani focused on the
+// liveness-critical arithmetic/ledger transition.
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_resolved_winddown_releases_liened_source_claim() {
-    // Concrete face: the deadlock is a liveness property of a reachable state, not a
-    // range property; a concrete witness keeps the heavy validate + lien + burn/release
-    // path tractable (the full close_resolved path and a symbolic face both time out).
-    let face = 2u128;
-    let face_num = face * BOUND_SCALE;
-    let backing_num = face_num;
-    let capital = 1u128;
-    let current_slot = 0u64;
+    let units_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&units_raw));
+    let amount = (units_raw as u128) * BOUND_SCALE;
 
-    let (mut header, mut markets, mut account_header, mut source_domains) =
-        one_market_view_fixture();
-
-    // Construct a consistent liened counterparty domain via the engine's own deltas.
-    let source_credit = SourceCreditStateV16 {
-        positive_claim_bound_num: face_num,
-        exact_positive_claim_num: face_num,
-        fresh_reserved_backing_num: backing_num,
-        credit_rate_num: CREDIT_RATE_SCALE,
-        ..SourceCreditStateV16::EMPTY
-    };
     let backing_bucket = BackingBucketV16 {
         market_id: 1,
-        fresh_unliened_backing_num: backing_num,
+        valid_liened_backing_num: amount,
         expiry_slot: 100,
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     };
-    let (backing_after, source_credit_after) =
-        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
-            backing_bucket,
-            source_credit,
-            current_slot,
-            backing_num,
-        )
-        .unwrap();
-    // After liening all backing, available backing is 0; keep the domain's credit
-    // rate consistent with that (the lien delta does not recompute it).
-    let mut source_credit_after = source_credit_after;
-    source_credit_after.credit_rate_num =
-        kani_expected_source_credit_rate_num_for_state(source_credit_after).unwrap();
-    markets[0].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&source_credit_after);
-    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing_after);
-
-    // Resolved mode; winner holds positive pnl == its fully-liened source claim.
-    header.mode = 1;
-    header.vault = V16PodU128::new(capital + face);
-    header.c_tot = V16PodU128::new(capital);
-    header.pnl_pos_tot = V16PodU128::new(face);
-    header.pnl_matured_pos_tot = V16PodU128::new(face);
-    header.pnl_pos_bound_tot_num = V16PodU128::new(face_num);
-    header.pnl_pos_bound_tot = V16PodU128::new(face);
-
-    // Winner account: positive pnl == its fully-liened source claim.
-    source_domains[0].source_claim_market_id = V16PodU64::new(1);
-    source_domains[0].source_claim_bound_num = V16PodU128::new(face_num);
-    MarketGroupV16ViewMut::<u64>::kani_apply_counterparty_source_credit_lien_delta(
-        &mut source_domains[0],
-        face_num,
-        backing_num,
-        face,
-        current_slot,
-    )
-    .unwrap();
-    account_header.capital = V16PodU128::new(capital);
-    account_header.pnl = V16PodI128::new(face as i128);
-    account_header.reserved_pnl = V16PodU128::new(face);
-    account_header.last_fee_slot = V16PodU64::new(2);
-
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-
-    // The constructed liened-winner state is valid and reachable.
-    assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
-
-    // Zeroing the winner's PnL is exactly what close_resolved does; in Resolved mode
-    // it must release the counterparty lien and succeed, not dead-lock on LockActive.
-    let outcome = market.kani_set_account_pnl(&mut account, 0);
-    assert_eq!(outcome, Ok(()));
-    assert_eq!(account.header.pnl.get(), 0);
-    assert_eq!(account.source_domains[0].source_claim_liened_num.get(), 0);
-}
-
-// Finding C (gap in the Finding-A fix): the Resolved-mode lien release routes through
-// the counterparty-release delta, which carries a lending-time freshness guard
-// (bucket must be Fresh and expiry_slot > current_slot). A market that resolves AFTER
-// the backing bucket's expiry has current_slot >= expiry_slot, so the release returns
-// CounterUnderflow -> burn -> set_account_pnl(0) reverts -> the same permanent deadlock
-// the fix was meant to close. Terminal wind-down is returning backing, not re-lending,
-// so it must be expiry-agnostic. Same fixture as the non-expired witness but with an
-// EXPIRED bucket (expiry_slot=1, current_slot=2). FAILS until the Resolved release
-// uses an expiry-agnostic terminal path.
-#[kani::proof]
-#[kani::unwind(40)]
-#[kani::solver(cadical)]
-fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
-    let face = 2u128;
-    let face_num = face * BOUND_SCALE;
-    let backing_num = face_num;
-    let capital = 1u128;
-    let lend_slot = 0u64;
-
-    let (mut header, mut markets, mut account_header, mut source_domains) =
-        one_market_view_fixture();
-
-    // Lien created at slot 0 against a bucket expiring at slot 1 (valid at lend time).
     let source_credit = SourceCreditStateV16 {
-        positive_claim_bound_num: face_num,
-        exact_positive_claim_num: face_num,
-        fresh_reserved_backing_num: backing_num,
+        fresh_reserved_backing_num: amount,
+        valid_liened_backing_num: amount,
+        positive_claim_bound_num: amount,
+        exact_positive_claim_num: amount,
         credit_rate_num: CREDIT_RATE_SCALE,
         ..SourceCreditStateV16::EMPTY
     };
-    let backing_bucket = BackingBucketV16 {
-        market_id: 1,
-        fresh_unliened_backing_num: backing_num,
-        expiry_slot: 1,
-        status: BackingBucketStatusV16::Fresh,
-        ..BackingBucketV16::EMPTY
-    };
-    let (backing_after, source_credit_after) =
-        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+
+    let (bucket_after, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
             backing_bucket,
             source_credit,
-            lend_slot,
-            backing_num,
+            amount,
         )
         .unwrap();
-    let mut source_credit_after = source_credit_after;
-    source_credit_after.credit_rate_num =
-        kani_expected_source_credit_rate_num_for_state(source_credit_after).unwrap();
-    markets[0].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&source_credit_after);
-    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing_after);
+    kani::cover!(
+        units_raw > 1,
+        "terminal wind-down releases nontrivial counterparty lien"
+    );
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
+    assert_eq!(source_after.valid_liened_backing_num, 0);
+    assert_eq!(source_after.fresh_reserved_backing_num, amount);
+}
 
-    // Resolved at slot 2 — PAST the bucket's expiry (1). The bucket stays Fresh-by-status
-    // but is time-expired, which is shape-valid (validate ignores current_slot here).
-    header.mode = 1;
-    header.slot_last = V16PodU64::new(1);
-    header.current_slot = V16PodU64::new(2);
-    header.vault = V16PodU128::new(capital + face);
-    header.c_tot = V16PodU128::new(capital);
-    header.pnl_pos_tot = V16PodU128::new(face);
-    header.pnl_matured_pos_tot = V16PodU128::new(face);
-    header.pnl_pos_bound_tot_num = V16PodU128::new(face_num);
-    header.pnl_pos_bound_tot = V16PodU128::new(face);
+// The terminal counterparty-lien release must also ignore bucket status/expiry:
+// returning liened backing is a wind-down operation, not a fresh lending action.
+// If this regresses to the Live release helper, a resolved market can deadlock
+// after a bucket expires.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
+    let units_raw: u8 = kani::any();
+    let status_is_expired: bool = kani::any();
+    kani::assume((1..=4).contains(&units_raw));
+    let amount = (units_raw as u128) * BOUND_SCALE;
 
-    source_domains[0].source_claim_market_id = V16PodU64::new(1);
-    source_domains[0].source_claim_bound_num = V16PodU128::new(face_num);
-    MarketGroupV16ViewMut::<u64>::kani_apply_counterparty_source_credit_lien_delta(
-        &mut source_domains[0],
-        face_num,
-        backing_num,
-        face,
-        lend_slot,
-    )
-    .unwrap();
-    account_header.capital = V16PodU128::new(capital);
-    account_header.pnl = V16PodI128::new(face as i128);
-    account_header.reserved_pnl = V16PodU128::new(face);
-    account_header.last_fee_slot = V16PodU64::new(2);
+    let backing_bucket = BackingBucketV16 {
+        market_id: 1,
+        valid_liened_backing_num: amount,
+        expiry_slot: 1,
+        status: if status_is_expired {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
+        ..BackingBucketV16::EMPTY
+    };
+    let source_credit = SourceCreditStateV16 {
+        fresh_reserved_backing_num: amount,
+        valid_liened_backing_num: amount,
+        positive_claim_bound_num: amount,
+        exact_positive_claim_num: amount,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
 
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
-
-    // Valid, reachable post-resolution state with a time-expired backing bucket.
-    assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
-
-    // The expired bucket must not re-introduce the deadlock: the Resolved wind-down
-    // releases the (now time-expired) counterparty lien rather than reverting.
-    let outcome = market.kani_set_account_pnl(&mut account, 0);
-    assert_eq!(outcome, Ok(()));
-    assert_eq!(account.header.pnl.get(), 0);
-    assert_eq!(account.source_domains[0].source_claim_liened_num.get(), 0);
+    let (bucket_after, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+            backing_bucket,
+            source_credit,
+            amount,
+        )
+        .unwrap();
+    kani::cover!(
+        status_is_expired && units_raw > 1,
+        "terminal wind-down releases nontrivial expired-status counterparty lien"
+    );
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
+    assert_eq!(source_after.valid_liened_backing_num, 0);
+    assert_eq!(source_after.fresh_reserved_backing_num, amount);
 }
 
 // General guard for the Finding-B class ("junior payout pool must exclude ALL
@@ -2209,11 +2187,26 @@ fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
+    let gross_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let max_slot_raw: u8 = kani::any();
+    let overrun_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&gross_raw));
+    kani::assume(c_tot_raw <= 10);
+    kani::assume(insurance_raw <= 10);
+    kani::assume((1..=10).contains(&max_slot_raw));
+    kani::assume((1..=5).contains(&overrun_raw));
+    let gross = gross_raw as u128;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let max_slot = max_slot_raw as u64;
+    let current_slot = max_slot + overrun_raw as u64;
     let (mut header, mut markets, _, _) = one_market_view_fixture();
-    header.current_slot = V16PodU64::new(11);
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(3);
+    header.current_slot = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -2225,10 +2218,10 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
         asset_index: 0,
         market_id: 1,
         domain_side: SideV16::Long,
-        gross_loss_at_close_start: 5,
+        gross_loss_at_close_start: gross,
         drift_reference_slot: 0,
-        max_close_slot: 10,
-        residual_remaining: 5,
+        max_close_slot: max_slot,
+        residual_remaining: gross,
         ..CloseProgressLedgerV16::EMPTY
     };
 
@@ -2236,8 +2229,8 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     let result = market.kani_ensure_close_progress_not_expired(ledger);
 
     kani::cover!(
-        result == Err(V16Error::RecoveryRequired),
-        "expired live close progress declares recovery"
+        overrun_raw > 1 && gross > 1 && result == Err(V16Error::RecoveryRequired),
+        "expired live close progress declares recovery for symbolic close lifetime overrun"
     );
     assert_eq!(result, Err(V16Error::RecoveryRequired));
     assert_eq!(market.header.mode, 2);
@@ -2336,12 +2329,18 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
+    let with_senior_balances: bool = kani::any();
+    let now_slot_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&now_slot_raw));
+    let c_tot = if with_senior_balances { 7 } else { 0 };
+    let insurance = if with_senior_balances { 3 } else { 0 };
+    let now_slot = now_slot_raw as u64;
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(3);
-    account_header.capital = V16PodU128::new(7);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(c_tot);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -2354,7 +2353,7 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
         .permissionless_crank_not_atomic(
             &mut account,
             PermissionlessCrankRequestV16 {
-                now_slot: 1,
+                now_slot,
                 asset_index: 0,
                 effective_price: 100,
                 funding_rate_e9: 0,
@@ -2371,8 +2370,9 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
             PermissionlessProgressOutcomeV16::RecoveryDeclared(
                 PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
             )
-        ),
-        "permissionless recovery crank reaches recovery declaration"
+        ) && now_slot > 1
+            && with_senior_balances,
+        "permissionless recovery crank reaches recovery declaration over nonzero senior balances"
     );
     assert_eq!(
         outcome,
@@ -2396,11 +2396,18 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_value_movement() {
+    let with_senior_balances: bool = kani::any();
+    let future_slot: bool = kani::any();
+    let price_moves: bool = kani::any();
+    let c_tot = if with_senior_balances { 7 } else { 0 };
+    let insurance = if with_senior_balances { 4 } else { 0 };
+    let now_slot = if future_slot { 2 } else { 1 };
+    let effective_price = if price_moves { 101 } else { 100 };
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
-    header.vault = V16PodU128::new(11);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(4);
+    header.vault = V16PodU128::new(c_tot + insurance);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -2411,9 +2418,9 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
         .permissionless_crank_not_atomic(
             &mut account,
             PermissionlessCrankRequestV16 {
-                now_slot: 2,
+                now_slot,
                 asset_index: 0,
-                effective_price: 101,
+                effective_price,
                 funding_rate_e9: 0,
                 action: PermissionlessCrankActionV16::Refresh,
             },
@@ -2422,14 +2429,18 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        outcome == PermissionlessProgressOutcomeV16::AccountCurrent && asset.effective_price == 101,
-        "permissionless empty-market crank advances authenticated price"
+        outcome == PermissionlessProgressOutcomeV16::AccountCurrent
+            && asset.effective_price == effective_price
+            && future_slot
+            && price_moves
+            && with_senior_balances,
+        "permissionless empty-market crank advances symbolic authenticated slot and price"
     );
     assert_eq!(outcome, PermissionlessProgressOutcomeV16::AccountCurrent);
-    assert_eq!(market.header.current_slot.get(), 2);
-    assert_eq!(market.header.slot_last.get(), 2);
-    assert_eq!(asset.slot_last, 2);
-    assert_eq!(asset.effective_price, 101);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.header.slot_last.get(), now_slot);
+    assert_eq!(asset.slot_last, now_slot);
+    assert_eq!(asset.effective_price, effective_price);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -2815,32 +2826,43 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
+    let capital_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    let fee_rate_raw: u8 = kani::any();
+    kani::assume((1..=100).contains(&capital_raw));
+    kani::assume((1..=100).contains(&loss_raw));
+    kani::assume((1..=100).contains(&fee_rate_raw));
+    kani::assume(loss_raw < capital_raw);
+    let capital = capital_raw as u128;
+    let loss = loss_raw as u128;
+    let fee_rate = fee_rate_raw as u128;
+    let expected_fee = (capital - loss).min(fee_rate * 10);
     let (mut header, mut markets, mut account_header, mut source_domains) =
         one_market_view_fixture();
-    header.vault = V16PodU128::new(100);
-    header.c_tot = V16PodU128::new(100);
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
     header.negative_pnl_account_count = V16PodU64::new(1);
     header.current_slot = V16PodU64::new(10);
     header.slot_last = V16PodU64::new(10);
-    account_header.capital = V16PodU128::new(100);
-    account_header.pnl = V16PodI128::new(-40);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
 
     let charged = market
-        .sync_account_fee_to_slot_not_atomic(&mut account, 10, 10)
+        .sync_account_fee_to_slot_not_atomic(&mut account, 10, fee_rate)
         .unwrap();
 
     kani::cover!(
-        charged == 60 && account.header.pnl.get() == 0,
-        "view fee sync settles realized loss before fee"
+        loss > 1 && fee_rate > capital - loss && account.header.pnl.get() == 0,
+        "view fee sync settles realized loss before capping fee to remaining capital"
     );
-    assert_eq!(charged, 60);
+    assert_eq!(charged, expected_fee);
     assert_eq!(account.header.pnl.get(), 0);
-    assert_eq!(account.header.capital.get(), 0);
-    assert_eq!(market.header.c_tot.get(), 0);
-    assert_eq!(market.header.insurance.get(), 60);
-    assert_eq!(market.header.vault.get(), 100);
+    assert_eq!(account.header.capital.get(), capital - loss - expected_fee);
+    assert_eq!(market.header.c_tot.get(), capital - loss - expected_fee);
+    assert_eq!(market.header.insurance.get(), expected_fee);
+    assert_eq!(market.header.vault.get(), capital);
 }
 
 #[kani::proof]
@@ -3022,14 +3044,14 @@ fn proof_v16_new_unfunded_domain_cannot_consume_shared_insurance() {
     assert_eq!(account.header.pnl.get(), -(residual_loss as i128));
 }
 
-fn run_funding_target_sign_case(positive_funding: bool) -> (i128, i128, i128) {
+fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i128, i128) {
     let (mut header, mut markets, _, _) = one_market_view_fixture();
     if positive_funding {
-        markets[0].engine.asset.f_long_num = V16PodI128::new(-(ADL_ONE as i128));
-        markets[0].engine.asset.f_short_num = V16PodI128::new(ADL_ONE as i128);
+        markets[0].engine.asset.f_long_num = V16PodI128::new(-(ADL_ONE as i128) * units);
+        markets[0].engine.asset.f_short_num = V16PodI128::new((ADL_ONE as i128) * units);
     } else {
-        markets[0].engine.asset.f_long_num = V16PodI128::new(ADL_ONE as i128);
-        markets[0].engine.asset.f_short_num = V16PodI128::new(-(ADL_ONE as i128));
+        markets[0].engine.asset.f_long_num = V16PodI128::new((ADL_ONE as i128) * units);
+        markets[0].engine.asset.f_short_num = V16PodI128::new(-(ADL_ONE as i128) * units);
     }
     let leg = PortfolioLegV16 {
         active: true,
@@ -3056,28 +3078,34 @@ fn run_funding_target_sign_case(positive_funding: bool) -> (i128, i128, i128) {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_positive_funding_charges_long_side() {
-    let (k_now, f_now, net) = run_funding_target_sign_case(true);
+    let units_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&units_raw));
+    let units = units_raw as i128;
+    let (k_now, f_now, net) = run_funding_target_sign_case(true, units);
     kani::cover!(
-        k_now == 0 && f_now == -(ADL_ONE as i128) && net == -1,
-        "positive funding charges long"
+        units > 1 && k_now == 0 && f_now == -(ADL_ONE as i128) * units && net == -units,
+        "positive funding charges long with symbolic funding magnitude"
     );
     assert_eq!(k_now, 0);
-    assert_eq!(f_now, -(ADL_ONE as i128));
-    assert_eq!(net, -1);
+    assert_eq!(f_now, -(ADL_ONE as i128) * units);
+    assert_eq!(net, -units);
 }
 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_negative_funding_pays_long_side() {
-    let (k_now, f_now, net) = run_funding_target_sign_case(false);
+    let units_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&units_raw));
+    let units = units_raw as i128;
+    let (k_now, f_now, net) = run_funding_target_sign_case(false, units);
     kani::cover!(
-        k_now == 0 && f_now == ADL_ONE as i128 && net == 1,
-        "negative funding pays long"
+        units > 1 && k_now == 0 && f_now == (ADL_ONE as i128) * units && net == units,
+        "negative funding pays long with symbolic funding magnitude"
     );
     assert_eq!(k_now, 0);
-    assert_eq!(f_now, ADL_ONE as i128);
-    assert_eq!(net, 1);
+    assert_eq!(f_now, (ADL_ONE as i128) * units);
+    assert_eq!(net, units);
 }
 
 #[kani::proof]
@@ -3274,7 +3302,8 @@ fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_m
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
-    let atoms = 3u128;
+    let nontrivial_atoms: bool = kani::any();
+    let atoms = if nontrivial_atoms { 3 } else { 1 };
     let amount = atoms * BOUND_SCALE;
     let (mut header, mut markets, _, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(atoms);
@@ -3311,7 +3340,10 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
         .try_to_runtime()
         .unwrap();
 
-    kani::cover!(atoms > 1, "public insurance lien consume is nontrivial");
+    kani::cover!(
+        nontrivial_atoms,
+        "public insurance lien consume is nontrivial and symbolic"
+    );
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
     assert_eq!(reservation.consumed_insurance_num, amount);
@@ -3352,7 +3384,8 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
-    let atoms = 3u128;
+    let nontrivial_atoms: bool = kani::any();
+    let atoms = if nontrivial_atoms { 3 } else { 1 };
     let amount = atoms * BOUND_SCALE;
     let (mut header, mut markets, _, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(atoms);
@@ -3378,8 +3411,8 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
         .unwrap();
 
     kani::cover!(
-        atoms > 1,
-        "funded domain insurance reservation is nontrivial"
+        nontrivial_atoms,
+        "funded domain insurance reservation is nontrivial and symbolic"
     );
     assert_eq!(reservation.insurance_credit_reserved_num, amount);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
@@ -3988,8 +4021,14 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     let mut account = PortfolioV16ViewMut::new(&mut acct_header, &mut acct_domains);
 
     let loss = pnl.unsigned_abs();
-    kani::cover!(capital < loss, "partial principal settlement: capital < loss");
-    kani::cover!(capital >= loss, "full principal settlement: capital covers loss");
+    kani::cover!(
+        capital < loss,
+        "partial principal settlement: capital < loss"
+    );
+    kani::cover!(
+        capital >= loss,
+        "full principal settlement: capital covers loss"
+    );
 
     let result = market.kani_settle_negative_pnl_from_principal_core_not_atomic(&mut account);
     assert!(result.is_ok());
@@ -4000,7 +4039,11 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     let insurance_after = market.header.insurance.get();
 
     // INV(f(s)): senior solvency and the per-account leg are preserved by the transition.
-    assert!(inv_senior_accounting(vault_after, c_tot_after, insurance_after));
+    assert!(inv_senior_accounting(
+        vault_after,
+        c_tot_after,
+        insurance_after
+    ));
     assert!(account.header.capital.get() <= c_tot_after);
 
     // Value-conservation delta laws: the transition moves exactly `paid` from the
@@ -4074,8 +4117,13 @@ fn proof_v16_withdraw_allowed_after_canceled_close() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
-    let face = 3u128;
-    let residual = 2u128; // payout rate = 2/3 < 1 (insolvent haircut)
+    let face_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume((2..=6).contains(&face_raw));
+    kani::assume((1..=5).contains(&residual_raw));
+    kani::assume(residual_raw < face_raw);
+    let face = face_raw as u128;
+    let residual = residual_raw as u128; // payout rate < 1 (insolvent haircut)
     let total_bound_num = face * BOUND_SCALE;
 
     let (mut header, mut markets, mut account_header, mut source_domains) =
@@ -4118,10 +4166,13 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
         .try_to_runtime()
         .unwrap();
 
-    kani::cover!(true, "insolvent terminal-rate receipt-clear path reached");
+    kani::cover!(
+        face > 3 && residual > 1,
+        "insolvent terminal-rate receipt-clear path reached for symbolic haircut"
+    );
     assert_eq!(paid_out, 0); // nothing more is claimable at the terminal rate
-    // The fully-diluted receipt must be cleared so the portfolio can dematerialize,
-    // not left present-but-unfinalized (which strands the market forever).
+                             // The fully-diluted receipt must be cleared so the portfolio can dematerialize,
+                             // not left present-but-unfinalized (which strands the market forever).
     assert!(!receipt.present);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));

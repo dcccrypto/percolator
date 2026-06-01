@@ -312,7 +312,10 @@ fn proof_v16_risk_notional_ceil_unaligned_ceil_is_correct() {
         product % POS_SCALE != 0,
         "unaligned: ceil rounding-correction branch fires"
     );
-    kani::cover!(product > POS_SCALE, "product exceeds one full unit (q >= 1 regime)");
+    kani::cover!(
+        product > POS_SCALE,
+        "product exceeds one full unit (q >= 1 regime)"
+    );
 
     assert_eq!(got, want);
 }
