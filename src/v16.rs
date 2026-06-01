@@ -11323,7 +11323,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
             return Err(V16Error::Stale);
         }
-        if account.header.close_progress.try_to_runtime()? != CloseProgressLedgerV16::EMPTY {
+        // A `canceled` close ledger (left behind by cure_and_cancel_close) is inert:
+        // validate_close_progress_ledger_with_market guarantees it carries no
+        // irreversible progress and residual_remaining == gross_loss_at_close_start,
+        // so it represents no obligation. Blocking withdraw on it permanently freezes a
+        // flat, solvent user who cured a forced close. Only an active/in-progress close
+        // ledger must block withdrawal.
+        let close_progress = account.header.close_progress.try_to_runtime()?;
+        if close_progress != CloseProgressLedgerV16::EMPTY && !close_progress.canceled {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;

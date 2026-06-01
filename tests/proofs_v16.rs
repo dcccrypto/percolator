@@ -4012,3 +4012,49 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     assert_eq!(c_tot_after, c_tot - paid);
     assert_eq!(account.header.capital.get(), capital - paid);
 }
+
+// Finding E: cure_and_cancel_close_not_atomic leaves close_progress in the `canceled`
+// (inert) state, never EMPTY; withdraw_not_atomic rejected any non-EMPTY close_progress,
+// so a flat, solvent user who cured a forced close could never withdraw their capital
+// again (Deposit doesn't gate, so deposits also became frozen -> capital sink). A canceled
+// ledger is validated to carry no irreversible progress (residual == gross_loss), i.e. no
+// obligation, so it must not block withdrawal. RED until withdraw treats a canceled ledger
+// like EMPTY.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_allowed_after_canceled_close() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&amount_raw));
+    let amount = amount_raw as u128;
+
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    market.deposit_not_atomic(&mut account, 5).unwrap(); // flat, solvent, capital 5
+
+    // Post-cure inert canceled close ledger (valid per
+    // validate_close_progress_ledger_with_market: canceled & !active & !finalized,
+    // close_id != 0, no irreversible progress, residual == gross_loss == 0).
+    account.header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            canceled: true,
+            close_id: 1,
+            asset_index: 0,
+            market_id: 1,
+            domain_side: SideV16::Long,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    // The cured state is valid and reachable.
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let capital_before = account.header.capital.get();
+    // A flat, solvent, cured user must be able to withdraw their own capital.
+    let result = market.withdraw_not_atomic(&mut account, amount);
+
+    kani::cover!(amount > 1, "withdraw-after-cure covers nontrivial amount");
+    assert_eq!(result, Ok(()));
+    assert_eq!(account.header.capital.get(), capital_before - amount);
+}
