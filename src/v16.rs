@@ -696,6 +696,32 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down.
+    // Identical to prepare_counterparty_lien_release_delta but WITHOUT the lending-time
+    // freshness guard (Fresh status / expiry_slot > current_slot): unwinding returns
+    // liened backing to the provider's unliened pool, it is not re-lending, so a
+    // time-expired bucket must not block it. Without this, a market that resolves past a
+    // backing bucket's expiry re-introduces the Finding-A close deadlock.
+    fn prepare_counterparty_lien_terminal_release_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.valid_liened_backing_num < amount || source.valid_liened_backing_num < amount {
+            return Err(V16Error::CounterUnderflow);
+        }
+        bucket.valid_liened_backing_num -= amount;
+        bucket.fresh_unliened_backing_num = bucket
+            .fresh_unliened_backing_num
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        source.valid_liened_backing_num -= amount;
+        Ok((bucket, source))
+    }
+
     fn prepare_counterparty_lien_consume_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -5223,6 +5249,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down; see
+    // prepare_counterparty_lien_terminal_release_delta. Mirrors
+    // release_source_credit_lien_from_counterparty_not_atomic but does not gate on
+    // bucket freshness/expiry, so a market that resolves past a bucket's expiry can
+    // still release the lien and wind the winner down.
+    fn release_source_credit_lien_from_counterparty_terminal_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = V16Core::prepare_counterparty_lien_terminal_release_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
+            source,
+            self.header.risk_epoch.get(),
+        )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
     fn consume_source_credit_lien_from_counterparty_core_not_atomic(
         &mut self,
         domain: usize,
@@ -5666,7 +5728,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .source_lien_insurance_backing_num
             .get();
         if counterparty_backing != 0 {
-            self.release_source_credit_lien_from_counterparty_not_atomic(d, counterparty_backing)?;
+            // Expiry-agnostic: terminal wind-down returns backing, so a time-expired
+            // bucket must not block the release (Finding C).
+            self.release_source_credit_lien_from_counterparty_terminal_not_atomic(
+                d,
+                counterparty_backing,
+            )?;
         }
         if insurance_backing != 0 {
             self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;

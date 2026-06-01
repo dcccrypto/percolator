@@ -1803,6 +1803,100 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
     assert_eq!(account.source_domains[0].source_claim_liened_num.get(), 0);
 }
 
+// Finding C (gap in the Finding-A fix): the Resolved-mode lien release routes through
+// the counterparty-release delta, which carries a lending-time freshness guard
+// (bucket must be Fresh and expiry_slot > current_slot). A market that resolves AFTER
+// the backing bucket's expiry has current_slot >= expiry_slot, so the release returns
+// CounterUnderflow -> burn -> set_account_pnl(0) reverts -> the same permanent deadlock
+// the fix was meant to close. Terminal wind-down is returning backing, not re-lending,
+// so it must be expiry-agnostic. Same fixture as the non-expired witness but with an
+// EXPIRED bucket (expiry_slot=1, current_slot=2). FAILS until the Resolved release
+// uses an expiry-agnostic terminal path.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
+    let face = 2u128;
+    let face_num = face * BOUND_SCALE;
+    let backing_num = face_num;
+    let capital = 1u128;
+    let lend_slot = 0u64;
+
+    let (mut header, mut markets, mut account_header, mut source_domains) =
+        one_market_view_fixture();
+
+    // Lien created at slot 0 against a bucket expiring at slot 1 (valid at lend time).
+    let source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: face_num,
+        exact_positive_claim_num: face_num,
+        fresh_reserved_backing_num: backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing_bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let (backing_after, source_credit_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            backing_bucket,
+            source_credit,
+            lend_slot,
+            backing_num,
+        )
+        .unwrap();
+    let mut source_credit_after = source_credit_after;
+    source_credit_after.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit_after).unwrap();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_credit_after);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing_after);
+
+    // Resolved at slot 2 — PAST the bucket's expiry (1). The bucket stays Fresh-by-status
+    // but is time-expired, which is shape-valid (validate ignores current_slot here).
+    header.mode = 1;
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(capital + face);
+    header.c_tot = V16PodU128::new(capital);
+    header.pnl_pos_tot = V16PodU128::new(face);
+    header.pnl_matured_pos_tot = V16PodU128::new(face);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(face_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(face);
+
+    source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    source_domains[0].source_claim_bound_num = V16PodU128::new(face_num);
+    MarketGroupV16ViewMut::<u64>::kani_apply_counterparty_source_credit_lien_delta(
+        &mut source_domains[0],
+        face_num,
+        backing_num,
+        face,
+        lend_slot,
+    )
+    .unwrap();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(face as i128);
+    account_header.reserved_pnl = V16PodU128::new(face);
+    account_header.last_fee_slot = V16PodU64::new(2);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    // Valid, reachable post-resolution state with a time-expired backing bucket.
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    // The expired bucket must not re-introduce the deadlock: the Resolved wind-down
+    // releases the (now time-expired) counterparty lien rather than reverting.
+    let outcome = market.kani_set_account_pnl(&mut account, 0);
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.source_domains[0].source_claim_liened_num.get(), 0);
+}
+
 // General guard for the Finding-B class ("junior payout pool must exclude ALL
 // senior funds"): residual() must be exactly the junior surplus that makes the
 // full stock reconciliation balance — vault = senior_capital + insurance +
