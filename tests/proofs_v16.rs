@@ -164,25 +164,57 @@ fn proof_v16_sparse_source_domain_validation_rejects_duplicate_occupied_domain()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_sparse_source_domain_validation_rejects_noncompact_tail() {
-    let claim_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&claim_raw));
-    let claim_num = claim_raw as u128 * BOUND_SCALE;
+fn proof_v16_sparse_source_domain_validation_rejects_unoccupied_tagged_slot() {
+    let domain_raw: u8 = kani::any();
+    kani::assume((1..=63).contains(&domain_raw));
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    account_header.pnl = V16PodI128::new(claim_raw as i128);
-    account_header.source_domains[1].domain = V16PodU32::new(0);
+    account_header.source_domains[1].domain = V16PodU32::new(domain_raw as u32);
     account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
-    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
     let rejected = account.kani_validate_source_credit_shape_with_market(&market.as_view());
 
     kani::cover!(
-        claim_raw > 1,
-        "noncompact sparse source-domain validation rejects hidden occupied tail"
+        domain_raw > 1,
+        "sparse source-domain validation rejects nontrivial unoccupied tagged slot"
     );
     assert_eq!(rejected, Err(V16Error::HiddenLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_sparse_source_domain_validation_accepts_domain_indexed_claim() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[1].domain = V16PodU32::new(1);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+
+    kani::cover!(
+        claim_raw > 1,
+        "source-domain validation accepts nontrivial domain-indexed persisted claim"
+    );
+    assert_eq!(account.kani_source_domain_slot(1), Ok(Some(1)));
+    assert_eq!(
+        account.kani_validate_source_credit_shape_with_market(&market.as_view()),
+        Ok(())
+    );
 }
 
 #[kani::proof]

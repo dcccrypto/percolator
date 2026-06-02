@@ -720,20 +720,18 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
 }
 
 #[test]
-fn v16_sparse_source_domains_reject_noncompact_hidden_tail() {
+fn v16_sparse_source_domains_reject_unoccupied_tagged_slot() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 19);
-    account_header.pnl = V16PodI128::new(1);
-    account_header.source_domains[1].domain = V16PodU32::new(0);
+    account_header.source_domains[1].domain = V16PodU32::new(1);
     account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
-    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
     assert_eq!(
         account.validate_with_market(&market.as_view()),
         Err(V16Error::HiddenLeg),
-        "a default source-domain hole must not hide later occupied entries from short-circuit scans"
+        "unoccupied tagged source-domain slots must not survive validation"
     );
 }
 
@@ -769,6 +767,9 @@ fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposi
     });
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    PortfolioV16View::new(&account_header)
+        .validate_with_market(&market.as_view())
+        .expect("read-only validation must accept coherent domain-indexed parked PnL");
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     market
         .deposit_not_atomic(&mut account, 3)
