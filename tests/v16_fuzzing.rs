@@ -1,11 +1,11 @@
 #![cfg(feature = "fuzz")]
 
 use percolator::v16::{
-    v16_domain_count_for_market_slots, EngineAssetSlotV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16Error,
+    EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
+    V16Config, V16Error,
 };
 use proptest::prelude::*;
 
@@ -26,41 +26,28 @@ fn fuzz_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     (header, markets)
 }
 
-fn fuzz_account(
-    account_id: [u8; 32],
-) -> (
-    PortfolioAccountV16Account,
-    Vec<PortfolioSourceDomainV16Account>,
-) {
+fn fuzz_account(account_id: [u8; 32]) -> PortfolioAccountV16Account {
     let (market_id, _, _, owner) = ids();
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
         market_id, account_id, owner,
     ));
-    (
-        PortfolioAccountV16Account::try_empty(header).unwrap(),
-        vec![
-            PortfolioSourceDomainV16Account::default();
-            v16_domain_count_for_market_slots(1).unwrap()
-        ],
-    )
+    PortfolioAccountV16Account::try_empty(header).unwrap()
 }
 
 fn assert_fuzz_invariants(
     header: &mut MarketGroupV16HeaderAccount,
     markets: &mut [Market<u64>],
     account_a: &PortfolioAccountV16Account,
-    domains_a: &[PortfolioSourceDomainV16Account],
     account_b: &PortfolioAccountV16Account,
-    domains_b: &[PortfolioSourceDomainV16Account],
 ) {
     let market = MarketGroupV16ViewMut::new(header, markets);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(
-        PortfolioV16View::new(account_a, domains_a).validate_with_market(&market.as_view()),
+        PortfolioV16View::new(account_a).validate_with_market(&market.as_view()),
         Ok(())
     );
     assert_eq!(
-        PortfolioV16View::new(account_b, domains_b).validate_with_market(&market.as_view()),
+        PortfolioV16View::new(account_b).validate_with_market(&market.as_view()),
         Ok(())
     );
     assert_eq!(
@@ -81,28 +68,22 @@ fn run_with_svm_rollback(
     header: &mut MarketGroupV16HeaderAccount,
     markets: &mut Vec<Market<u64>>,
     account_a: &mut PortfolioAccountV16Account,
-    domains_a: &mut Vec<PortfolioSourceDomainV16Account>,
     account_b: &mut PortfolioAccountV16Account,
-    domains_b: &mut Vec<PortfolioSourceDomainV16Account>,
     result: Result<(), V16Error>,
     before: (
         MarketGroupV16HeaderAccount,
         Vec<Market<u64>>,
         PortfolioAccountV16Account,
-        Vec<PortfolioSourceDomainV16Account>,
         PortfolioAccountV16Account,
-        Vec<PortfolioSourceDomainV16Account>,
     ),
 ) {
     if result.is_err() {
         *header = before.0;
         *markets = before.1;
         *account_a = before.2;
-        *domains_a = before.3;
-        *account_b = before.4;
-        *domains_b = before.5;
+        *account_b = before.3;
     }
-    assert_fuzz_invariants(header, markets, account_a, domains_a, account_b, domains_b);
+    assert_fuzz_invariants(header, markets, account_a, account_b);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -110,52 +91,43 @@ fn apply_fuzz_action(
     header: &mut MarketGroupV16HeaderAccount,
     markets: &mut Vec<Market<u64>>,
     account_a: &mut PortfolioAccountV16Account,
-    domains_a: &mut Vec<PortfolioSourceDomainV16Account>,
     account_b: &mut PortfolioAccountV16Account,
-    domains_b: &mut Vec<PortfolioSourceDomainV16Account>,
     selector: u8,
     amount_seed: u16,
 ) {
-    let before = (
-        *header,
-        markets.clone(),
-        *account_a,
-        domains_a.clone(),
-        *account_b,
-        domains_b.clone(),
-    );
+    let before = (*header, markets.clone(), *account_a, *account_b);
     let target_a = (selector & 0x8) == 0;
     let amount = (amount_seed as u128) % 128;
     let result = match selector % 12 {
         0 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market.deposit_not_atomic(&mut account, amount)
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market.deposit_not_atomic(&mut account, amount)
             }
         }
         1 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market.withdraw_not_atomic(&mut account, amount)
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market.withdraw_not_atomic(&mut account, amount)
             }
         }
         2 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .charge_account_fee_not_atomic(&mut account, amount)
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .charge_account_fee_not_atomic(&mut account, amount)
                     .map(|_| ())
@@ -164,12 +136,12 @@ fn apply_fuzz_action(
         3 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .full_account_refresh_not_atomic(&mut account)
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .full_account_refresh_not_atomic(&mut account)
                     .map(|_| ())
@@ -177,8 +149,8 @@ fn apply_fuzz_action(
         }
         4 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
-            let mut long_account = PortfolioV16ViewMut::new(account_a, domains_a);
-            let mut short_account = PortfolioV16ViewMut::new(account_b, domains_b);
+            let mut long_account = PortfolioV16ViewMut::new(account_a);
+            let mut short_account = PortfolioV16ViewMut::new(account_b);
             market
                 .execute_trade_with_fee_in_place_not_atomic(
                     &mut long_account,
@@ -195,7 +167,7 @@ fn apply_fuzz_action(
         5 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .permissionless_crank_not_atomic(
                         &mut account,
@@ -209,7 +181,7 @@ fn apply_fuzz_action(
                     )
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .permissionless_crank_not_atomic(
                         &mut account,
@@ -227,7 +199,7 @@ fn apply_fuzz_action(
         6 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .sync_account_fee_to_slot_not_atomic(
                         &mut account,
@@ -236,7 +208,7 @@ fn apply_fuzz_action(
                     )
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .sync_account_fee_to_slot_not_atomic(
                         &mut account,
@@ -249,10 +221,10 @@ fn apply_fuzz_action(
         7 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market.convert_released_pnl_to_capital_not_atomic(&mut account)
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market.convert_released_pnl_to_capital_not_atomic(&mut account)
             }
             .map(|_| ())
@@ -261,7 +233,7 @@ fn apply_fuzz_action(
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             let close_q = 1 + (amount % 4);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
@@ -273,7 +245,7 @@ fn apply_fuzz_action(
                     )
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
@@ -289,7 +261,7 @@ fn apply_fuzz_action(
         9 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .permissionless_crank_not_atomic(
                         &mut account,
@@ -305,7 +277,7 @@ fn apply_fuzz_action(
                     )
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .permissionless_crank_not_atomic(
                         &mut account,
@@ -331,12 +303,12 @@ fn apply_fuzz_action(
         _ => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
-                let mut account = PortfolioV16ViewMut::new(account_a, domains_a);
+                let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .close_resolved_account_not_atomic(&mut account, 0)
                     .map(|_| ())
             } else {
-                let mut account = PortfolioV16ViewMut::new(account_b, domains_b);
+                let mut account = PortfolioV16ViewMut::new(account_b);
                 market
                     .close_resolved_account_not_atomic(&mut account, 0)
                     .map(|_| ())
@@ -344,9 +316,7 @@ fn apply_fuzz_action(
         }
     };
 
-    run_with_svm_rollback(
-        header, markets, account_a, domains_a, account_b, domains_b, result, before,
-    );
+    run_with_svm_rollback(header, markets, account_a, account_b, result, before);
 }
 
 proptest! {
@@ -358,12 +328,12 @@ proptest! {
     ) {
         let (mut header, mut markets) = fuzz_group();
         let (_, a_id, b_id, _) = ids();
-        let (mut account_a, mut domains_a) = fuzz_account(a_id);
-        let (mut account_b, mut domains_b) = fuzz_account(b_id);
+        let mut account_a = fuzz_account(a_id);
+        let mut account_b = fuzz_account(b_id);
         {
             let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-            let mut a = PortfolioV16ViewMut::new(&mut account_a, &mut domains_a);
-            let mut b = PortfolioV16ViewMut::new(&mut account_b, &mut domains_b);
+            let mut a = PortfolioV16ViewMut::new(&mut account_a);
+            let mut b = PortfolioV16ViewMut::new(&mut account_b);
             market.deposit_not_atomic(&mut a, 1_000).unwrap();
             market.deposit_not_atomic(&mut b, 1_000).unwrap();
         }
@@ -371,9 +341,7 @@ proptest! {
             &mut header,
             &mut markets,
             &account_a,
-            &domains_a,
             &account_b,
-            &domains_b,
         );
 
         for (selector, amount_seed) in actions {
@@ -381,9 +349,7 @@ proptest! {
                 &mut header,
                 &mut markets,
                 &mut account_a,
-                &mut domains_a,
                 &mut account_b,
-                &mut domains_b,
                 selector,
                 amount_seed,
             );

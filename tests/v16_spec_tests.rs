@@ -4,11 +4,10 @@ use percolator::v16::{
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config,
-    V16Error, V16PodI128, V16PodU128, V16PodU64,
+    PortfolioLegV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
+    TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -39,25 +38,15 @@ fn market_fixture(
     (header, markets)
 }
 
-fn account_fixture(
-    market_slots: u32,
-    account_seed: u8,
-) -> (
-    PortfolioAccountV16Account,
-    Vec<PortfolioSourceDomainV16Account>,
-) {
+fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Account {
     let (market_id, _, owner) = ids();
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
         market_id,
         [account_seed; 32],
         owner,
     ));
-    let account = PortfolioAccountV16Account::try_empty(header).unwrap();
-    let domains = vec![
-        PortfolioSourceDomainV16Account::default();
-        v16_domain_count_for_market_slots(market_slots).unwrap()
-    ];
-    (account, domains)
+    let _ = v16_domain_count_for_market_slots(market_slots).unwrap();
+    PortfolioAccountV16Account::try_empty(header).unwrap()
 }
 
 #[test]
@@ -81,9 +70,9 @@ fn v16_public_fund_validator_accepts_nontrivial_exact_solvency_profile() {
 #[test]
 fn v16_view_deposit_and_withdraw_are_the_tested_paths() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 2);
+    let mut account_header = account_fixture(1, 2);
     let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account_view = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
 
     market_view
         .deposit_not_atomic(&mut account_view, 11)
@@ -104,7 +93,7 @@ fn v16_view_deposit_and_withdraw_are_the_tested_paths() {
 #[test]
 fn v16_view_fee_sync_settles_flat_loss_before_fee() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 4);
+    let mut account_header = account_fixture(1, 4);
     header.vault = V16PodU128::new(100);
     header.c_tot = V16PodU128::new(100);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -114,7 +103,7 @@ fn v16_view_fee_sync_settles_flat_loss_before_fee() {
     account_header.pnl = V16PodI128::new(-40);
 
     let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account_view = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
     let charged = market_view
         .sync_account_fee_to_slot_not_atomic(&mut account_view, 10, 10)
         .unwrap();
@@ -131,12 +120,12 @@ fn v16_view_fee_sync_settles_flat_loss_before_fee() {
 #[test]
 fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut long_header, mut long_domains) = account_fixture(1, 14);
-    let (mut short_header, mut short_domains) = account_fixture(1, 15);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
-        let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
         market.deposit_not_atomic(&mut long, 100).unwrap();
         market.deposit_not_atomic(&mut short, 1_000).unwrap();
         market
@@ -160,7 +149,7 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(header.insurance.get(), 0);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let charged = market
         .sync_account_fee_to_slot_not_atomic(&mut long, 2, 100)
         .unwrap();
@@ -198,7 +187,7 @@ fn v16_view_dynamic_market_slots_can_be_activated_without_runtime_vec_engine() {
 #[test]
 fn v16_reused_market_slot_rejects_old_market_id_leg() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 16);
+    let mut account_header = account_fixture(1, 16);
     let old_market_id = markets[0].engine.asset.market_id.get();
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -227,7 +216,7 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     assert_eq!(
         market.full_account_refresh_not_atomic(&mut account),
         Err(V16Error::HiddenLeg),
@@ -239,9 +228,9 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
 #[test]
 fn v16_view_rejects_overwithdraw() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 6);
+    let mut account_header = account_fixture(1, 6);
     let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account_view = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
     market_view
         .deposit_not_atomic(&mut account_view, 3)
         .unwrap();
@@ -289,7 +278,7 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
 #[test]
 fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 10);
+    let mut account_header = account_fixture(1, 10);
     header.vault = V16PodU128::new(50);
     header.insurance = V16PodU128::new(50);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -324,7 +313,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let insurance_before = market.header.insurance.get();
     let vault_before = market.header.vault.get();
 
@@ -354,7 +343,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
 #[test]
 fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale() {
     let (mut header, mut markets) = market_fixture(2, 100);
-    let (mut account_header, mut source_domains) = account_fixture(2, 11);
+    let mut account_header = account_fixture(2, 11);
     header.current_slot = V16PodU64::new(10);
     header.slot_last = V16PodU64::new(9);
     header.loss_stale_active = 1;
@@ -402,7 +391,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let outcome = market
         .permissionless_crank_not_atomic(
             &mut account,
@@ -438,10 +427,10 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
 #[test]
 fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 12);
+    let mut account_header = account_fixture(1, 12);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
         market.deposit_not_atomic(&mut account, 7).unwrap();
     }
     header.insurance = V16PodU128::new(3);
@@ -453,7 +442,7 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     let pnl_before = account_header.pnl;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let first = market
         .permissionless_crank_not_atomic(
             &mut account,
@@ -513,7 +502,7 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
 #[test]
 fn v16_resolved_payout_topup_finishes_receipt_without_overpaying() {
     let (mut header, mut markets) = market_fixture(1, 100);
-    let (mut account_header, mut source_domains) = account_fixture(1, 13);
+    let mut account_header = account_fixture(1, 13);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.resolve_market_not_atomic(1).unwrap();
@@ -543,7 +532,7 @@ fn v16_resolved_payout_topup_finishes_receipt_without_overpaying() {
         });
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let first = market
         .claim_resolved_payout_topup_not_atomic(&mut account)
         .unwrap();
@@ -580,13 +569,14 @@ fn v16_resolved_payout_topup_finishes_receipt_without_overpaying() {
 #[test]
 fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
     let (mut header, mut markets) = market_fixture(1, 1);
-    let (mut long_header, mut long_domains) = account_fixture(1, 8);
-    let (mut short_header, mut short_domains) = account_fixture(1, 9);
+    let mut long_header = account_fixture(1, 8);
+    let mut short_header = account_fixture(1, 9);
     let claim = 100u128;
     let claim_num = claim * BOUND_SCALE;
     long_header.pnl = V16PodI128::new(claim as i128);
-    long_domains[0].source_claim_market_id = V16PodU64::new(1);
-    long_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    long_header.source_domains[0].domain = V16PodU32::new(0);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
@@ -607,13 +597,13 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
     });
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
         market.deposit_not_atomic(&mut short, 1_000).unwrap();
     }
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut long = PortfolioV16ViewMut::new(&mut long_header, &mut long_domains);
-    let mut short = PortfolioV16ViewMut::new(&mut short_header, &mut short_domains);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
     market
         .execute_trade_with_fee_in_place_not_atomic(
             &mut long,
@@ -629,15 +619,17 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 
     assert_eq!(long.header.capital.get(), 0);
     assert_eq!(
-        long.source_domains[0].source_claim_liened_num.get(),
+        long.header.source_domains[0].source_claim_liened_num.get(),
         10 * BOUND_SCALE
     );
     assert_eq!(
-        long.source_domains[0].source_lien_effective_reserved.get(),
+        long.header.source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
         10
     );
     assert_eq!(
-        long.source_domains[0]
+        long.header.source_domains[0]
             .source_lien_counterparty_backing_num
             .get(),
         10 * BOUND_SCALE
