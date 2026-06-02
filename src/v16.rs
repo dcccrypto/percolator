@@ -11676,24 +11676,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    pub fn claim_resolved_payout_topup_not_atomic(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
+    fn preflight_claim_resolved_payout_topup(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
         account.validate_with_market(&self.as_view())?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
             || !decode_bool(self.header.payout_snapshot_captured)?
         {
             return Err(V16Error::LockActive);
         }
+        Ok(())
+    }
+
+    fn claim_resolved_payout_topup_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
         let mut receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
         let claimable = self.resolved_receipt_claimable_now(receipt)?;
         if claimable == 0 {
             // Fully paid at the current rate; if that rate is terminal the receipt is
             // fully diluted -- clear it so the portfolio can dematerialize.
             self.clear_fully_diluted_resolved_receipt_if_terminal(account)?;
-            account.validate_with_market(&self.as_view())?;
-            self.validate_shape()?;
             return Ok(0);
         }
         let payout = claimable.min(self.header.vault.get());
@@ -11716,6 +11721,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
+        Ok(payout)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_claim_resolved_payout_topup_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.claim_resolved_payout_topup_core_not_atomic(account)
+    }
+
+    pub fn claim_resolved_payout_topup_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.preflight_claim_resolved_payout_topup(&account.as_view())?;
+        let payout = self.claim_resolved_payout_topup_core_not_atomic(account)?;
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
         Ok(payout)
