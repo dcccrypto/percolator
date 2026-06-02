@@ -2105,7 +2105,9 @@ impl<'a> PortfolioV16View<'a> {
 
 impl<'a> PortfolioV16ViewMut<'a> {
     pub fn new(header: &'a mut PortfolioAccountV16Account) -> Self {
-        Self { header }
+        let mut view = Self { header };
+        view.compact_source_domains();
+        view
     }
 
     pub fn as_view(&self) -> PortfolioV16View<'_> {
@@ -2164,11 +2166,6 @@ impl<'a> PortfolioV16ViewMut<'a> {
         false
     }
 
-    #[cfg(kani)]
-    pub fn kani_reset_source_domain_slot_if_empty(&mut self, slot: usize) -> bool {
-        self.reset_source_domain_slot_if_empty(slot)
-    }
-
     fn compact_source_domains(&mut self) {
         let mut write = 0usize;
         let mut read = 0usize;
@@ -2187,11 +2184,6 @@ impl<'a> PortfolioV16ViewMut<'a> {
             self.header.source_domains[write] = PortfolioSourceDomainV16Account::default();
             write += 1;
         }
-    }
-
-    #[cfg(kani)]
-    pub fn kani_compact_source_domains(&mut self) {
-        self.compact_source_domains();
     }
 }
 

@@ -4,7 +4,7 @@ use percolator::v16::{
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config,
@@ -729,10 +729,63 @@ fn v16_sparse_source_domains_reject_noncompact_hidden_tail() {
     account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let account = PortfolioV16View::new(&account_header);
     assert_eq!(
         account.validate_with_market(&market.as_view()),
         Err(V16Error::HiddenLeg),
         "a default source-domain hole must not hide later occupied entries from short-circuit scans"
     );
+}
+
+#[test]
+fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposit() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut account_header = account_fixture(1, 20);
+    let claim = 7u128;
+    let claim_num = claim * BOUND_SCALE;
+    header.vault = V16PodU128::new(claim);
+    header.c_tot = V16PodU128::new(0);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.source_domains[1].domain = V16PodU32::new(1);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .deposit_not_atomic(&mut account, 3)
+        .expect("later deposit must accept a persisted parked source claim");
+
+    assert_eq!(account.header.capital.get(), 3);
+    assert_eq!(account.header.source_domains[0].domain.get(), 1);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
+    assert_eq!(
+        account.header.source_domains[1],
+        PortfolioSourceDomainV16Account::default()
+    );
+    account.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
 }

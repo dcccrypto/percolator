@@ -13,8 +13,8 @@ use percolator::v16::{
     InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
     StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config, V16Error,
@@ -175,10 +175,8 @@ fn proof_v16_sparse_source_domain_validation_rejects_noncompact_tail() {
     account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let account = PortfolioV16ViewMut::new(&mut account_header);
-    let rejected = account
-        .as_view()
-        .kani_validate_source_credit_shape_with_market(&market.as_view());
+    let account = PortfolioV16View::new(&account_header);
+    let rejected = account.kani_validate_source_credit_shape_with_market(&market.as_view());
 
     kani::cover!(
         claim_raw > 1,
@@ -190,7 +188,7 @@ fn proof_v16_sparse_source_domain_validation_rejects_noncompact_tail() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_sparse_source_domain_reset_and_compaction_remove_hidden_tail() {
+fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
     let claim_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&claim_raw));
     let claim_num = claim_raw as u128 * BOUND_SCALE;
@@ -202,13 +200,11 @@ fn proof_v16_sparse_source_domain_reset_and_compaction_remove_hidden_tail() {
     account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
     account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
 
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
-    assert!(account.kani_reset_source_domain_slot_if_empty(0));
-    account.kani_compact_source_domains();
+    let account = PortfolioV16ViewMut::new(&mut account_header);
 
     kani::cover!(
         claim_raw > 1,
-        "reset and compaction repair a nontrivial hidden source-domain tail"
+        "mutable view construction compacts a nontrivial persisted source-domain tail"
     );
     assert_eq!(
         account.header.source_domains[0]
