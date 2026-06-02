@@ -5794,6 +5794,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterOverflow)?,
         );
         source.source_lien_insurance_backing_num = V16PodU128::new(0);
+        // Genesis counter: move the pro-rata live capital-at-risk fee revenue to the impaired counter,
+        // matched to the backing capital that actually crystallized. Compute BEFORE shrinking the live
+        // effective reserve (the denominator). Floor rounding keeps dust with the still-live counter
+        // (conservative for residual farming; never over-credits).
+        let live_effective_before = source.source_lien_effective_reserved.get();
+        let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
+        let fee_to_crystallize = if live_effective_before == 0 || live_fee == 0 {
+            0
+        } else {
+            U256::from_u128(live_fee)
+                .checked_mul(U256::from_u128(effective))
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .checked_div(U256::from_u128(live_effective_before))
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .try_into_u128()
+                .ok_or(V16Error::ArithmeticOverflow)?
+        };
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
+            live_fee
+                .checked_sub(fee_to_crystallize)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(
+            source
+                .source_lien_impaired_capital_at_risk_fee_revenue
+                .get()
+                .checked_add(fee_to_crystallize)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
         source.source_lien_effective_reserved = V16PodU128::new(
             source
                 .source_lien_effective_reserved
@@ -7940,6 +7969,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.c_tot = V16PodU128::new(next_c_tot);
         bucket.utilization_fee_earnings = next_earnings;
         self.set_backing_bucket_for_domain(domain, bucket)?;
+        // Genesis counter: this fee was charged while the domain's backing lien was live and at risk
+        // (lien_backing_num > 0 above), so it is capital-at-risk fee revenue for this source domain.
+        account.header.source_domains[slot].source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
+            account.header.source_domains[slot]
+                .source_lien_capital_at_risk_fee_revenue
+                .get()
+                .checked_add(charged)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
         account.header.health_cert.valid = 0;
         Ok(charged)
     }
@@ -12468,6 +12506,12 @@ pub struct PortfolioSourceDomainV16Account {
     pub source_lien_fee_last_slot: V16PodU64,
     pub source_claim_impaired_num: V16PodU128,
     pub source_lien_impaired_effective_reserved: V16PodU128,
+    // Genesis residual-farming counter (anti-wash). Collateral-atom non-rebatable fee revenue
+    // generated WHILE this domain's backing lien was live and at risk. On residual crystallization
+    // the pro-rata share moves from the live counter to the impaired counter; the genesis farm reads
+    // the impaired counter to cap residual reward weight. Event-local, never a cumulative total.
+    pub source_lien_capital_at_risk_fee_revenue: V16PodU128,
+    pub source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128,
 }
 
 impl PortfolioSourceDomainV16Account {
@@ -12483,6 +12527,8 @@ impl PortfolioSourceDomainV16Account {
             || self.source_lien_fee_last_slot.get() != 0
             || self.source_claim_impaired_num.get() != 0
             || self.source_lien_impaired_effective_reserved.get() != 0
+            || self.source_lien_capital_at_risk_fee_revenue.get() != 0
+            || self.source_lien_impaired_capital_at_risk_fee_revenue.get() != 0
     }
 
     #[inline]
