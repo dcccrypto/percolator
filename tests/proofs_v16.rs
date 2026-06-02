@@ -164,6 +164,72 @@ fn proof_v16_sparse_source_domain_validation_rejects_duplicate_occupied_domain()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_sparse_source_domain_validation_rejects_noncompact_tail() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[1].domain = V16PodU32::new(0);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let rejected = account
+        .as_view()
+        .kani_validate_source_credit_shape_with_market(&market.as_view());
+
+    kani::cover!(
+        claim_raw > 1,
+        "noncompact sparse source-domain validation rejects hidden occupied tail"
+    );
+    assert_eq!(rejected, Err(V16Error::HiddenLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_sparse_source_domain_reset_and_compaction_remove_hidden_tail() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (_, _, mut account_header) = one_market_view_fixture();
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].domain = V16PodU32::new(0);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert!(account.kani_reset_source_domain_slot_if_empty(0));
+    account.kani_compact_source_domains();
+
+    kani::cover!(
+        claim_raw > 1,
+        "reset and compaction repair a nontrivial hidden source-domain tail"
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
+    assert_eq!(
+        account.header.source_domains[1],
+        PortfolioSourceDomainV16Account::default()
+    );
+    let view = account.as_view();
+    assert_eq!(view.kani_source_domain_slot(0), Ok(Some(0)));
+    let source = view.kani_source_domain(0).unwrap();
+    assert_eq!(source.source_claim_market_id.get(), 1);
+    assert_eq!(source.source_claim_bound_num.get(), claim_num);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
     let amount_raw: u16 = kani::any();
     kani::assume(amount_raw <= 1_000);

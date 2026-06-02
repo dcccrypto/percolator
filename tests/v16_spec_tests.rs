@@ -4,10 +4,11 @@ use percolator::v16::{
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
-    TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
+    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config,
+    V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -666,4 +667,72 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut account_header = account_fixture(1, 18);
+    let claim = 20u128;
+    let claim_num = claim * BOUND_SCALE;
+    header.vault = V16PodU128::new(claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .full_account_refresh_not_atomic(&mut account)
+        .unwrap();
+    let converted = market
+        .convert_released_pnl_to_capital_not_atomic(&mut account)
+        .expect("flat source-backed PnL should be convertible when backing is available");
+
+    assert_eq!(converted, claim);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), claim);
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
+    account.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_sparse_source_domains_reject_noncompact_hidden_tail() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut account_header = account_fixture(1, 19);
+    account_header.pnl = V16PodI128::new(1);
+    account_header.source_domains[1].domain = V16PodU32::new(0);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(
+        account.validate_with_market(&market.as_view()),
+        Err(V16Error::HiddenLeg),
+        "a default source-domain hole must not hide later occupied entries from short-circuit scans"
+    );
 }

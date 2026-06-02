@@ -2070,8 +2070,15 @@ impl<'a> PortfolioV16View<'a> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.header.source_domains[slot];
-            if source.is_occupied() && source.domain.get() == domain {
-                return Ok(Some(slot));
+            if source.domain.get() == domain {
+                if source.is_occupied() {
+                    return Ok(Some(slot));
+                }
+                if source.is_sparse_tail_default() {
+                    return Ok(None);
+                }
+            } else if source.is_sparse_tail_default() {
+                return Ok(None);
             }
             slot += 1;
         }
@@ -2113,22 +2120,24 @@ impl<'a> PortfolioV16ViewMut<'a> {
 
     fn source_domain_slot_or_insert(&mut self, domain: usize) -> V16Result<usize> {
         let domain_u32 = u32::try_from(domain).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let mut first_free = None;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.header.source_domains[slot];
-            if source.is_occupied() {
-                if source.domain.get() == domain_u32 {
+            if source.domain.get() == domain_u32 {
+                if source.is_occupied() {
                     return Ok(slot);
                 }
-            } else if first_free.is_none() {
-                first_free = Some(slot);
+                if source.is_sparse_tail_default() {
+                    self.header.source_domains[slot].domain = V16PodU32::new(domain_u32);
+                    return Ok(slot);
+                }
+            } else if source.is_sparse_tail_default() {
+                self.header.source_domains[slot].domain = V16PodU32::new(domain_u32);
+                return Ok(slot);
             }
             slot += 1;
         }
-        let slot = first_free.ok_or(V16Error::LockActive)?;
-        self.header.source_domains[slot].domain = V16PodU32::new(domain_u32);
-        Ok(slot)
+        Err(V16Error::LockActive)
     }
 
     fn source_domain_mut_or_insert(
@@ -2142,6 +2151,47 @@ impl<'a> PortfolioV16ViewMut<'a> {
     #[cfg(kani)]
     pub fn kani_source_domain_slot_or_insert(&mut self, domain: usize) -> V16Result<usize> {
         self.source_domain_slot_or_insert(domain)
+    }
+
+    fn reset_source_domain_slot_if_empty(&mut self, slot: usize) -> bool {
+        if slot < PORTFOLIO_SOURCE_DOMAIN_CAP
+            && !self.header.source_domains[slot].is_occupied()
+            && !self.header.source_domains[slot].is_sparse_tail_default()
+        {
+            self.header.source_domains[slot] = PortfolioSourceDomainV16Account::default();
+            return true;
+        }
+        false
+    }
+
+    #[cfg(kani)]
+    pub fn kani_reset_source_domain_slot_if_empty(&mut self, slot: usize) -> bool {
+        self.reset_source_domain_slot_if_empty(slot)
+    }
+
+    fn compact_source_domains(&mut self) {
+        let mut write = 0usize;
+        let mut read = 0usize;
+        while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = self.header.source_domains[read];
+            if source.is_occupied() {
+                if write != read {
+                    self.header.source_domains[write] = source;
+                    self.header.source_domains[read] = PortfolioSourceDomainV16Account::default();
+                }
+                write += 1;
+            }
+            read += 1;
+        }
+        while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            self.header.source_domains[write] = PortfolioSourceDomainV16Account::default();
+            write += 1;
+        }
+    }
+
+    #[cfg(kani)]
+    pub fn kani_compact_source_domains(&mut self) {
+        self.compact_source_domains();
     }
 }
 
@@ -2243,15 +2293,17 @@ impl<'a> PortfolioV16View<'a> {
             v16_domain_count_for_market_slots(market.header.config.max_market_slots.get())?;
         let mut seen = [u32::MAX; PORTFOLIO_SOURCE_DOMAIN_CAP];
         let mut seen_count = 0usize;
+        let mut seen_tail = false;
         let mut slot_index = 0usize;
         while slot_index < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot_index];
-            if !source.is_occupied() {
-                if source.domain.get() != 0 || source.source_claim_market_id.get() != 0 {
-                    return Err(V16Error::HiddenLeg);
-                }
+            if source.is_sparse_tail_default() {
+                seen_tail = true;
                 slot_index += 1;
                 continue;
+            }
+            if seen_tail || !source.is_occupied() {
+                return Err(V16Error::HiddenLeg);
             }
             let d_u32 = source.domain.get();
             let d = d_u32 as usize;
@@ -2359,6 +2411,9 @@ impl<'a> PortfolioV16View<'a> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if self.source_domains()[d].is_sparse_tail_default() {
+                break;
+            }
             sum = sum
                 .checked_add(self.source_domains()[d].source_claim_bound_num.get())
                 .ok_or(V16Error::ArithmeticOverflow)?;
@@ -5695,6 +5750,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if account.source_domains()[d].is_sparse_tail_default() {
+                break;
+            }
             sum = sum
                 .checked_add(account.source_domains()[d].source_claim_bound_num.get())
                 .ok_or(V16Error::ArithmeticOverflow)?;
@@ -5719,17 +5777,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get()
             .checked_sub(locked)
             .ok_or(V16Error::CounterUnderflow)
-    }
-
-    fn clear_account_source_claim_market_id_if_empty(
-        account: &mut PortfolioV16ViewMut<'_>,
-        domain: usize,
-    ) {
-        if let Ok(Some(slot)) = account.source_domain_slot(domain) {
-            if !account.header.source_domains[slot].is_occupied() {
-                account.header.source_domains[slot] = PortfolioSourceDomainV16Account::default();
-            }
-        }
     }
 
     fn impair_account_source_credit_insurance_lien_fields(
@@ -5808,7 +5855,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source.source_lien_counterparty_backing_num = V16PodU128::new(0);
         source.source_lien_insurance_backing_num = V16PodU128::new(0);
         source.source_lien_fee_last_slot = V16PodU64::new(0);
-        Self::clear_account_source_claim_market_id_if_empty(account, d);
+        account.reset_source_domain_slot_if_empty(slot);
         Ok(())
     }
 
@@ -5830,6 +5877,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && burn_num != 0 {
             let source_snapshot = account.header.source_domains[slot];
+            if source_snapshot.is_sparse_tail_default() {
+                break;
+            }
             if !source_snapshot.is_occupied() {
                 slot += 1;
                 continue;
@@ -5873,7 +5923,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterUnderflow)?;
                 self.set_source_credit_for_domain(d, source_credit)?;
                 burn_num -= burn;
-                Self::clear_account_source_claim_market_id_if_empty(account, d);
+                account.reset_source_domain_slot_if_empty(slot);
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
             if burn_num != 0 {
@@ -5923,7 +5973,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         .ok_or(V16Error::CounterUnderflow)?;
                     burn_num -= impaired_burn;
                     self.set_source_credit_for_domain(d, source_credit)?;
-                    Self::clear_account_source_claim_market_id_if_empty(account, d);
+                    account.reset_source_domain_slot_if_empty(slot);
                     self.recompute_source_credit_domain_after_mutation(d)?;
                 }
             }
@@ -5932,6 +5982,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if burn_num != 0 {
             return Err(V16Error::LockActive);
         }
+        account.compact_source_domains();
         Ok(())
     }
 
@@ -5963,6 +6014,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if !source.is_occupied() {
                 slot += 1;
                 continue;
@@ -6028,6 +6082,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if !source.is_occupied() {
                 slot += 1;
                 continue;
@@ -6065,6 +6122,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if account.source_domains()[d].is_sparse_tail_default() {
+                break;
+            }
             sum = sum
                 .checked_add(
                     account.source_domains()[d]
@@ -6430,6 +6490,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining != 0 {
             let source = account.header.source_domains[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if !source.is_occupied() {
                 slot += 1;
                 continue;
@@ -6729,6 +6792,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining != 0 {
             let source = account.header.source_domains[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if !source.is_occupied() {
                 slot += 1;
                 continue;
@@ -7810,6 +7876,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = account.header.source_domains[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if !source.is_occupied() {
                 slot += 1;
                 continue;
@@ -7822,6 +7891,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
         }
+        account.compact_source_domains();
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(total_charged)
@@ -7842,6 +7912,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get();
         if lien_backing_num == 0 {
             account.header.source_domains[slot].source_lien_fee_last_slot = V16PodU64::new(0);
+            account.reset_source_domain_slot_if_empty(slot);
             return Ok(0);
         }
         let last_slot = account.header.source_domains[slot]
@@ -8603,6 +8674,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = account.source_domains()[slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
             if source.is_occupied() && source.source_claim_bound_num.get() != 0 {
                 let d = source.domain.get() as usize;
                 if self.domain_asset_side(d).is_ok()
@@ -11146,6 +11220,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source_snapshot = account.header.source_domains[slot];
+            if source_snapshot.is_sparse_tail_default() {
+                break;
+            }
             if !source_snapshot.is_occupied() {
                 slot += 1;
                 continue;
@@ -11176,10 +11253,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source.source_lien_counterparty_backing_num = V16PodU128::new(0);
                 source.source_lien_insurance_backing_num = V16PodU128::new(0);
                 source.source_lien_fee_last_slot = V16PodU64::new(0);
-                Self::clear_account_source_claim_market_id_if_empty(account, d);
+                account.reset_source_domain_slot_if_empty(slot);
             }
             slot += 1;
         }
+        account.compact_source_domains();
         account.header.health_cert.valid = 0;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
@@ -12413,6 +12491,11 @@ impl PortfolioSourceDomainV16Account {
             || self.source_lien_fee_last_slot.get() != 0
             || self.source_claim_impaired_num.get() != 0
             || self.source_lien_impaired_effective_reserved.get() != 0
+    }
+
+    #[inline]
+    pub fn is_sparse_tail_default(self) -> bool {
+        !self.is_occupied() && self.domain.get() == 0 && self.source_claim_market_id.get() == 0
     }
 }
 
