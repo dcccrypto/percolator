@@ -1076,6 +1076,14 @@ pub fn kani_expected_source_credit_rate_num_for_state(
     V16Core::expected_source_credit_rate_num_for_state(state)
 }
 
+#[cfg(kani)]
+pub fn kani_source_credit_state_realizable_support_for_face(
+    state: SourceCreditStateV16,
+    face_claim: u128,
+) -> V16Result<u128> {
+    V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HLockLaneV16 {
     HMin,
