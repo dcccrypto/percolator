@@ -790,3 +790,58 @@ fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposi
     account.validate_with_market(&market.as_view()).unwrap();
     market.validate_shape().unwrap();
 }
+
+#[test]
+fn v16_trade_created_parked_source_claim_survives_later_deposit() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 21);
+    let mut short_header = account_fixture(1, 22);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_in_place_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: POS_SCALE,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+
+    assert!(long_header.pnl.get() > 0);
+    assert!(
+        long_header
+            .source_domains
+            .iter()
+            .any(|source| source.domain.get() == 1
+                && source.source_claim_market_id.get() == 1
+                && source.source_claim_bound_num.get() != 0),
+        "winner refresh must persist the source-domain claim created by K/F settlement"
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    PortfolioV16View::new(&long_header)
+        .validate_with_market(&market.as_view())
+        .expect("read-only validation must accept the trade-created parked claim");
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    market
+        .deposit_not_atomic(&mut long, 3)
+        .expect("later deposit must accept the persisted trade-created parked claim");
+
+    assert_eq!(long.header.capital.get(), 1_003);
+    long.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}

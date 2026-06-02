@@ -2137,7 +2137,7 @@ impl<'a> PortfolioV16ViewMut<'a> {
             let source = self.header.source_domains[slot];
             let source_domain = source.domain.get();
             if source_domain == domain_u32 {
-                if source.is_occupied() {
+                if source.is_occupied() || !source.has_default_sparse_tag() {
                     return Ok(slot);
                 }
                 if source.has_default_sparse_tag() {
@@ -7423,6 +7423,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidLeg);
         }
         let asset = self.markets[asset_index].engine.asset.try_to_runtime()?;
+        Self::kf_target_for_leg_from_asset(asset, leg)
+    }
+
+    fn kf_target_for_leg_from_asset(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<(i128, i128)> {
         let (current_k, current_f, epoch_start_k, epoch_start_f, side_epoch, mode) = match leg.side
         {
             SideV16::Long => (
@@ -7460,6 +7467,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidLeg);
         }
         let asset = self.markets[asset_index].engine.asset.try_to_runtime()?;
+        Self::b_target_for_leg_from_asset(asset, leg)
+    }
+
+    fn b_target_for_leg_from_asset(asset: AssetStateV16, leg: PortfolioLegV16) -> V16Result<u128> {
         let (current_b, epoch_start_b, side_epoch, mode) = match leg.side {
             SideV16::Long => (
                 asset.b_long_num,
@@ -7486,9 +7497,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     #[inline(always)]
-    fn leg_kf_delta_for_settlement(&self, leg: PortfolioLegV16) -> V16Result<(i128, i128, i128)> {
-        let asset_index = leg.asset_index as usize;
-        let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
+    fn leg_kf_delta_for_settlement_from_asset(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<(i128, i128, i128)> {
+        let (k_now, f_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
@@ -7529,6 +7542,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     #[cfg(kani)]
+    #[inline(always)]
+    fn leg_kf_delta_for_settlement(&self, leg: PortfolioLegV16) -> V16Result<(i128, i128, i128)> {
+        let asset = self.asset_state(leg.asset_index as usize)?;
+        Self::leg_kf_delta_for_settlement_from_asset(asset, leg)
+    }
+
+    #[cfg(kani)]
     pub fn kani_leg_kf_delta_for_settlement(
         &self,
         leg: PortfolioLegV16,
@@ -7544,12 +7564,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(V16Error::InvalidLeg);
         }
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        if !leg.active {
+            return Ok(());
+        }
+        let asset_index = leg.asset_index as usize;
+        let asset = self.asset_state(asset_index)?;
+        self.settle_leg_kf_effects_at_slot_with_asset(account, leg_slot, asset)
+    }
+
+    fn settle_leg_kf_effects_at_slot_with_asset(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        leg_slot: usize,
+        asset: AssetStateV16,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active {
             return Ok(());
         }
         let asset_index = leg.asset_index as usize;
-        let (k_now, f_now, net) = self.leg_kf_delta_for_settlement(leg)?;
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || asset_index >= self.markets.len()
+            || asset.market_id == 0
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        let (k_now, f_now, net) = Self::leg_kf_delta_for_settlement_from_asset(asset, leg)?;
         if net != 0 {
             if net > 0 {
                 let source_domain =
@@ -7685,10 +7729,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         allow_b_chunk: bool,
     ) -> V16Result<AccountRefreshCertOutcomeV16> {
         self.validate_account_scalar_preflight(&account.as_view())?;
-        account
-            .as_view()
-            .validate_source_credit_shape_with_market(&self.as_view())?;
-        let source_claim_sum_num = account.as_view().source_claim_bound_sum_num()?;
+        let source_claim_sum_num = if account.header.source_domains[0].is_sparse_tail_default() {
+            0
+        } else {
+            account
+                .as_view()
+                .validate_source_credit_shape_with_market(&self.as_view())?;
+            Self::account_source_claim_bound_sum_num(&account.as_view())?
+        };
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(
                 account.header.pnl.get(),
@@ -7754,9 +7802,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             seen_assets[seen_asset_count] = leg.asset_index;
             seen_asset_count += 1;
-            self.settle_leg_kf_effects_at_slot(account, slot)?;
+            self.settle_leg_kf_effects_at_slot_with_asset(account, slot, asset)?;
             let mut refreshed = account.header.legs[slot].try_to_runtime()?;
-            let target = self.b_target_for_leg(asset_index, refreshed)?;
+            let target = Self::b_target_for_leg_from_asset(asset, refreshed)?;
             if target > refreshed.b_snap {
                 self.mark_leg_b_stale(account, asset_index)?;
                 if allow_b_chunk {
@@ -7818,8 +7866,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         self.collect_account_backing_utilization_fees_not_atomic(account)?;
-        if decode_bool(account.header.b_stale_state)? || Self::has_b_stale_leg(&account.as_view())?
-        {
+        if decode_bool(account.header.b_stale_state)? {
             return Err(V16Error::BStale);
         }
         if decode_bool(account.header.stale_state)? {
@@ -10419,10 +10466,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_scalar_preflight(&account.as_view())?;
         if !decode_bool(account.header.stale_state)?
             && !decode_bool(account.header.b_stale_state)?
-            && !Self::has_b_stale_leg(&account.as_view())?
             && self
                 .ensure_favorable_action_current_certificate(&account.as_view())
                 .is_ok()
+            && !Self::has_b_stale_leg(&account.as_view())?
         {
             return account.header.health_cert.try_to_runtime();
         }

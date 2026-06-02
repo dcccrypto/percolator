@@ -92,6 +92,42 @@ fn proof_v16_sparse_source_domain_insert_roundtrips_occupied_domain() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v16_source_domain_insert_reuses_same_domain_market_id_tag() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (_, _, mut account_header) = one_market_view_fixture();
+
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let first = account.kani_source_domain_slot_or_insert(1).unwrap();
+    account.header.source_domains[first].source_claim_market_id = V16PodU64::new(1);
+    let second = account.kani_source_domain_slot_or_insert(1).unwrap();
+    account.header.source_domains[second].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    kani::cover!(
+        claim_raw > 1,
+        "source-domain insert reuses a same-domain market-id tag before the claim becomes occupied"
+    );
+    assert_eq!(first, second);
+    assert_eq!(account.header.source_domains[first].domain.get(), 1);
+    assert_eq!(
+        account.header.source_domains[first]
+            .source_claim_market_id
+            .get(),
+        1
+    );
+    assert_eq!(
+        account.header.source_domains[first]
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
+    assert_eq!(account.as_view().kani_source_domain_slot(1), Ok(Some(first)));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
     let domain_offset: u8 = kani::any();
     kani::assume(domain_offset < 16);
@@ -115,7 +151,7 @@ fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_sparse_source_domain_validation_rejects_duplicate_occupied_domain() {
     let claim_raw: u8 = kani::any();
@@ -1576,6 +1612,12 @@ fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
         delta_num
     );
     assert_eq!(account.header.source_domains[0].domain.get(), 1);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_market_id
+            .get(),
+        1
+    );
     assert_eq!(
         market.markets[0]
             .engine
