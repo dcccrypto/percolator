@@ -23,7 +23,8 @@ use percolator::v16::{
     V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, POS_SCALE, SOCIAL_LOSS_DEN,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_TRADE_SIZE_Q, POS_SCALE,
+    SOCIAL_LOSS_DEN,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -887,6 +888,44 @@ fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {
     assert_eq!(asset.f_short_num, before.f_short_num);
     assert_eq!(asset.b_long_num, before.b_long_num);
     assert_eq!(asset.b_short_num, before.b_short_num);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_signed_trade_request_maps_to_opposite_account_deltas() {
+    let size_q: i128 = kani::any();
+    let abs_size_q = size_q.unsigned_abs();
+    let expected_ok =
+        size_q != 0 && abs_size_q <= MAX_TRADE_SIZE_Q && size_q.checked_neg().is_some();
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(size_q);
+
+    kani::cover!(
+        expected_ok && size_q > 0,
+        "signed trade request covers first-account-long leg"
+    );
+    kani::cover!(
+        expected_ok && size_q < 0,
+        "signed trade request covers first-account-short leg"
+    );
+    kani::cover!(
+        size_q == 0,
+        "signed trade request covers zero-size rejection"
+    );
+    kani::cover!(
+        abs_size_q > MAX_TRADE_SIZE_Q,
+        "signed trade request covers max-size rejection"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((abs_q, first_delta, second_delta)) = result {
+        assert_eq!(abs_q, abs_size_q);
+        assert_eq!(first_delta, size_q);
+        assert_eq!(second_delta, size_q.checked_neg().unwrap());
+        assert_eq!(first_delta.checked_add(second_delta), Some(0));
+        assert!(abs_q > 0);
+        assert!(abs_q <= MAX_TRADE_SIZE_Q);
+    }
 }
 
 #[kani::proof]

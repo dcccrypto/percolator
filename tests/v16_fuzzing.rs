@@ -157,7 +157,7 @@ fn apply_fuzz_action(
                     &mut short_account,
                     TradeRequestV16 {
                         asset_index: 0,
-                        size_q: 1 + (amount % 4),
+                        size_q: i128::try_from(1 + (amount % 4)).unwrap(),
                         exec_price: 1,
                         fee_bps: (amount_seed as u64) % 11,
                     },

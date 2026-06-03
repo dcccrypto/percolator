@@ -50,6 +50,10 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     PortfolioAccountV16Account::try_empty(header).unwrap()
 }
 
+fn signed_q(q: u128) -> i128 {
+    i128::try_from(q).unwrap()
+}
+
 #[test]
 fn v16_public_fund_validator_accepts_nontrivial_exact_solvency_profile() {
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
@@ -135,7 +139,7 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
                 &mut short,
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: POS_SCALE,
+                    size_q: signed_q(POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
@@ -174,13 +178,13 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     let requests = [
         TradeRequestV16 {
             asset_index: 0,
-            size_q: POS_SCALE,
+            size_q: signed_q(POS_SCALE),
             exec_price: 100,
             fee_bps: 0,
         },
         TradeRequestV16 {
             asset_index: 1,
-            size_q: 2 * POS_SCALE,
+            size_q: signed_q(2 * POS_SCALE),
             exec_price: 100,
             fee_bps: 0,
         },
@@ -224,6 +228,73 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
 }
 
 #[test]
+fn v16_batch_trade_supports_mixed_signed_spread_legs() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut taker_header = account_fixture(2, 221);
+    let mut lp_header = account_fixture(2, 222);
+    let size_q = signed_q(5 * POS_SCALE);
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: -size_q,
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    market.deposit_not_atomic(&mut taker, 1_000).unwrap();
+    market.deposit_not_atomic(&mut lp, 1_000).unwrap();
+
+    let outcome = market
+        .execute_batch_with_fee_in_place_not_atomic(&mut taker, &mut lp, &requests)
+        .unwrap();
+
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(outcome.notional, 1_000);
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_long_q.get(),
+        5 * POS_SCALE
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_short_q.get(),
+        5 * POS_SCALE
+    );
+    assert_eq!(
+        market.markets[1].engine.asset.oi_eff_long_q.get(),
+        5 * POS_SCALE
+    );
+    assert_eq!(
+        market.markets[1].engine.asset.oi_eff_short_q.get(),
+        5 * POS_SCALE
+    );
+
+    let taker_asset0 = taker.header.legs[0].try_to_runtime().unwrap();
+    let taker_asset1 = taker.header.legs[1].try_to_runtime().unwrap();
+    let lp_asset0 = lp.header.legs[0].try_to_runtime().unwrap();
+    let lp_asset1 = lp.header.legs[1].try_to_runtime().unwrap();
+    assert_eq!(taker_asset0.side, SideV16::Long);
+    assert_eq!(taker_asset1.side, SideV16::Short);
+    assert_eq!(lp_asset0.side, SideV16::Short);
+    assert_eq!(lp_asset1.side, SideV16::Long);
+    assert_eq!(taker_asset0.basis_pos_q, size_q);
+    assert_eq!(taker_asset1.basis_pos_q, -size_q);
+    assert_eq!(lp_asset0.basis_pos_q, -size_q);
+    assert_eq!(lp_asset1.basis_pos_q, size_q);
+    market.validate_shape().unwrap();
+    taker.validate_with_market(&market.as_view()).unwrap();
+    lp.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_single_trade_matches_batch_of_one_state() {
     let (mut single_header, mut single_markets) = market_fixture(1, 100);
     let mut single_long_header = account_fixture(1, 209);
@@ -234,7 +305,7 @@ fn v16_single_trade_matches_batch_of_one_state() {
     let mut batch_short_header = single_short_header;
     let request = TradeRequestV16 {
         asset_index: 0,
-        size_q: 2 * POS_SCALE,
+        size_q: signed_q(2 * POS_SCALE),
         exec_price: 100,
         fee_bps: 0,
     };
@@ -287,7 +358,7 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
                 &mut taker,
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: 10 * POS_SCALE,
+                    size_q: signed_q(10 * POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
@@ -305,13 +376,13 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
             &[
                 TradeRequestV16 {
                     asset_index: 1,
-                    size_q: 10 * POS_SCALE,
+                    size_q: signed_q(10 * POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: 10 * POS_SCALE,
+                    size_q: signed_q(10 * POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
@@ -370,7 +441,7 @@ fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
                 &mut short,
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: POS_SCALE,
+                    size_q: signed_q(POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
@@ -392,7 +463,7 @@ fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
             &mut short,
             &[TradeRequestV16 {
                 asset_index: 0,
-                size_q: POS_SCALE,
+                size_q: signed_q(POS_SCALE),
                 exec_price: 101,
                 fee_bps: 0,
             }],
@@ -424,7 +495,7 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
                 &mut short,
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: POS_SCALE,
+                    size_q: signed_q(POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },
@@ -444,7 +515,7 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
         &mut short,
         &[TradeRequestV16 {
             asset_index: 0,
-            size_q: POS_SCALE,
+            size_q: signed_q(POS_SCALE),
             exec_price: 101,
             fee_bps: 0,
         }],
@@ -461,13 +532,13 @@ fn v16_batch_trade_is_bounded_by_configured_portfolio_asset_cap() {
     let requests = [
         TradeRequestV16 {
             asset_index: 0,
-            size_q: POS_SCALE,
+            size_q: signed_q(POS_SCALE),
             exec_price: 100,
             fee_bps: 0,
         },
         TradeRequestV16 {
             asset_index: 0,
-            size_q: POS_SCALE,
+            size_q: signed_q(POS_SCALE),
             exec_price: 100,
             fee_bps: 0,
         },
@@ -1126,7 +1197,7 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
             &mut short,
             TradeRequestV16 {
                 asset_index: 0,
-                size_q: 10 * POS_SCALE,
+                size_q: signed_q(10 * POS_SCALE),
                 exec_price: 1,
                 fee_bps: 0,
             },
@@ -1326,7 +1397,7 @@ fn v16_trade_created_parked_source_claim_survives_later_deposit() {
                 &mut short,
                 TradeRequestV16 {
                     asset_index: 0,
-                    size_q: POS_SCALE,
+                    size_q: signed_q(POS_SCALE),
                     exec_price: 100,
                     fee_bps: 0,
                 },

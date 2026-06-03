@@ -2826,7 +2826,9 @@ pub struct AccrueAssetOutcomeV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TradeRequestV16 {
     pub asset_index: usize,
-    pub size_q: u128,
+    /// Signed base quantity. Positive makes the first account long; negative
+    /// makes the first account short.
+    pub size_q: i128,
     pub exec_price: u64,
     pub fee_bps: u64,
 }
@@ -9434,9 +9436,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn validate_trade_request(&self, request: TradeRequestV16) -> V16Result<()> {
         let config = self.header.config.try_to_runtime_shape()?;
+        let size_q = Self::trade_request_abs_size_q(request)?;
         if request.asset_index >= config.max_market_slots as usize
-            || request.size_q == 0
-            || request.size_q > MAX_TRADE_SIZE_Q
+            || size_q > MAX_TRADE_SIZE_Q
             || request.exec_price == 0
             || request.exec_price > MAX_ORACLE_PRICE
             || request.fee_bps > config.max_trading_fee_bps
@@ -9446,17 +9448,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn trade_request_abs_size_q(request: TradeRequestV16) -> V16Result<u128> {
+        let (size_q, _, _) = Self::trade_signed_size_deltas(request.size_q)?;
+        Ok(size_q)
+    }
+
+    fn trade_signed_size_deltas(size_q: i128) -> V16Result<(u128, i128, i128)> {
+        if size_q == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let abs_size_q = size_q.unsigned_abs();
+        if abs_size_q > MAX_TRADE_SIZE_Q {
+            return Err(V16Error::InvalidConfig);
+        }
+        let opposite_delta = size_q.checked_neg().ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((abs_size_q, size_q, opposite_delta))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_trade_signed_size_deltas(size_q: i128) -> V16Result<(u128, i128, i128)> {
+        Self::trade_signed_size_deltas(size_q)
+    }
+
     fn validate_trade_position_preflight(
         &self,
         long_account: &PortfolioV16View<'_>,
         short_account: &PortfolioV16View<'_>,
         request: TradeRequestV16,
     ) -> V16Result<TradePositionPreflightV16> {
-        let long_delta =
-            i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let short_delta = long_delta
-            .checked_neg()
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
         let long_lookup =
             Self::position_delta_lookup_for_asset(long_account, request.asset_index, long_delta)?;
         let short_lookup =
@@ -11148,11 +11168,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         request: TradeRequestV16,
         recertify_after_fill: bool,
     ) -> V16Result<TradeApplyOutcomeV16> {
-        let long_delta =
-            i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let short_delta = long_delta
-            .checked_neg()
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (abs_size_q, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
         let trade_preflight = self.validate_trade_position_preflight(
             &long_account.as_view(),
             &short_account.as_view(),
@@ -11162,7 +11178,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if risk_increasing {
             self.require_asset_active_for_risk_increase(request.asset_index)?;
         }
-        let notional = trade_notional_floor(request.size_q, request.exec_price)?;
+        let notional = trade_notional_floor(abs_size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
         let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
