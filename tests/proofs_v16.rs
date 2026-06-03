@@ -1139,6 +1139,13 @@ fn proof_v16_full_refresh_impairs_expired_counterparty_lien_before_equity_credit
     account.source_lien_effective_reserved[0] = 5;
     account.source_lien_counterparty_backing_num[0] = 5 * BOUND_SCALE;
     group.source_credit[0].impaired_liened_backing_num = 5 * BOUND_SCALE;
+    // RESYNC(toly source-credit shape gate @2334): account.source_claim_bound_num[0] must not
+    // exceed the group domain's positive_claim_bound_num (else InvalidLeg on the post-impairment
+    // shape re-validation). Back the account's 10*BOUND_SCALE claim — mirrors sibling
+    // proof_v16_impaired_source_claim_is_burnable_when_positive_pnl_decreases. Impairment asserts
+    // (impaired==5, backing/liened zeroed) are unchanged (impair math independent of this bound).
+    group.source_credit[0].positive_claim_bound_num = 10 * BOUND_SCALE;
+    group.source_credit[0].exact_positive_claim_num = 10 * BOUND_SCALE;
     group.source_backing_buckets[0].status = BackingBucketStatusV16::Impaired;
     group.source_backing_buckets[0].impaired_liened_backing_num = 5 * BOUND_SCALE;
     assert_eq!(account.source_lien_effective_reserved[0], 5);
@@ -4450,6 +4457,7 @@ fn proof_v16_positive_kf_delta_cures_prior_loss_at_haircut_value() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     account.legs[0] = PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -6371,6 +6379,7 @@ fn proof_v16_global_residual_is_not_account_health_proof() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     account.pnl = residual as i128;
     account.reserved_pnl = 0;
     group.pnl_pos_tot = residual;
@@ -6622,6 +6631,7 @@ fn proof_v16_cross_margin_equity_counts_collateral_once_and_score_uses_full_enve
 
     let mut cert_account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    cert_account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     cert_account.health_cert.valid = true;
     cert_account.health_cert.certified_worst_case_loss = certified_loss;
     let score = group.risk_score(&cert_account).unwrap();
@@ -6677,7 +6687,7 @@ fn proof_v16_global_cross_margin_positive_leg_supports_other_leg_maintenance_wit
 
 fn assert_full_refresh_settles_and_scores_two_active_assets(capital_units: u128) {
     let (market, _, _) = concrete_ids();
-    let group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
+    let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
     let leg0 = PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -6719,6 +6729,12 @@ fn assert_full_refresh_settles_and_scores_two_active_assets(capital_units: u128)
         out[1] = 11;
         out
     };
+    // RESYNC(toly scoring): account_health_leg_requirements now adds a target-effective-lag
+    // penalty from raw_oracle_target_price (default 1). Set target == oracle price so adverse_delta
+    // = 0 and the lag penalty is 0, isolating the loss == risk-notional property this proof asserts
+    // (scoring fns byte-identical to toly; lag is a real toly scoring term, not a fork divergence).
+    group.assets[0].raw_oracle_target_price = prices[0];
+    group.assets[1].raw_oracle_target_price = prices[1];
     let expected_loss0 = risk_notional_ceil(POS_SCALE, prices[0]).unwrap();
     let expected_loss1 = risk_notional_ceil(POS_SCALE, prices[1]).unwrap();
 
@@ -6855,6 +6871,7 @@ fn proof_v16_b_stale_blocks_full_account_refresh() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): reach the b_stale gate (7943), not HiddenLeg
 
     group.mark_account_b_stale(&mut account).unwrap();
     kani::cover!(
@@ -6956,6 +6973,10 @@ fn assert_v16_deposit_into_stale_account_does_not_unlock_favorable_actions(stale
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    // RESYNC(f3aef4b/0bee8ef): size source-domain vecs so validate_account_shape passes;
+    // ensure_favorable_action_allowed then reaches h_lock_lane which returns HMax for a
+    // (b_)stale account -> Err(LockActive), exactly as asserted. Setup-only.
+    account.ensure_source_domain_capacity(group.source_credit.len());
 
     if stale_case {
         account.stale_state = true;
@@ -7378,6 +7399,11 @@ fn proof_v16_dead_leg_forfeit_haircuts_positive_support_when_junior_impaired() {
     account.pnl = 100;
     group.pnl_pos_tot = 100;
     set_junior_bound(&mut group, 100);
+    // RESYNC(toly): dead-leg forfeit / bounded-close haircut is a Recovery-mode path; the
+    // re-synced apply_haircut_bounded_close_loss_to_pnl gates on mode (Live gives no support).
+    // Mirror the passing sibling assert_v16_dead_leg_forfeit_books_loss_to_opposing_domain_only.
+    // Recovery: residual(50)<junior_bound(100) -> haircut support=50, full face(100) burned.
+    group.mode = MarketModeV16::Recovery;
     group.vault = 50;
 
     let (support_consumed, junior_face_burned) = group
@@ -7524,15 +7550,26 @@ fn proof_v16_non_deficit_public_paths_do_not_decrease_insurance() {
     let mut convert_account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [6; 32], owner));
     let profit = 3u128;
-    convert_account.pnl = profit as i128;
     convert_group.insurance = insurance;
-    convert_group.pnl_pos_tot = profit;
-    set_junior_bound(&mut convert_group, profit);
-    convert_group.pnl_matured_pos_tot = profit;
-    convert_group.vault = convert_group.insurance + profit;
+    // RESYNC: Live-mode positive-PnL conversion now REQUIRES source attribution
+    // (toly security gate). Set up the SAME source claim + fresh counterparty
+    // backing the engine itself uses (mirrors
+    // proof_v16_source_backed_conversion_waits_only_for_contributing_source_exposure):
+    // pnl=profit credited to source domain 0 (source_claim_bound_num[0] =
+    // profit*BOUND_SCALE; pnl_pos_tot/pnl_pos_bound_tot set by the engine), then a
+    // fresh counterparty backing of profit*BOUND_SCALE so credit_rate_num is full
+    // and the conversion is fully counterparty-backed (never touches insurance).
+    convert_group.vault = convert_group.insurance + 100;
     convert_group
+        .add_account_source_positive_pnl_not_atomic(&mut convert_account, 0, profit)
+        .unwrap();
+    convert_group
+        .add_fresh_counterparty_backing_not_atomic(0, profit * BOUND_SCALE, 10)
+        .unwrap();
+    let converted = convert_group
         .kani_convert_released_pnl_to_capital_core(&mut convert_account)
         .unwrap();
+    assert_eq!(converted, profit);
     kani::cover!(true, "v16 released pnl conversion preserves insurance");
     assert_eq!(convert_group.insurance, insurance);
 }
@@ -7767,6 +7804,7 @@ fn proof_v16_permissionless_crank_does_not_require_full_market_scan() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     account.capital = 1;
     group.c_tot = 1;
     group.vault = 1;
@@ -9104,6 +9142,7 @@ fn proof_v16_ordinary_positive_conversion_disabled_outside_live_payout_lane() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    account.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     account.pnl = 10;
     group.pnl_pos_tot = 10;
     group.pnl_matured_pos_tot = 10;
@@ -9765,12 +9804,38 @@ fn proof_v16_resolved_bankrupt_negative_blocker_can_clear_without_recovery() {
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [44; 32], owner));
+    bankrupt.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): settle->begin_close_progress_ledger validates account shape
     group.vault = 5;
     group.mode = MarketModeV16::Resolved;
     group.current_slot = 1;
     group.resolved_slot = 1;
     bankrupt.pnl = -3;
     group.negative_pnl_account_count = 1;
+    // RESYNC(toly): the re-synced resolved-bankruptcy settle requires an attributable active leg
+    // (else it cannot book the residual -> Err). Add the same leg the passing sibling
+    // resolved_active_bankrupt uses; with NO insurance/budget it books explicit_loss=3 in Resolved
+    // and clears WITHOUT recovery — the proof's stated intent. (Fails-closed-on-truly-unattributed
+    // stays guarded by the separate passing proof.)
+    bankrupt.legs[0] = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: group.assets[0].market_id,
+        side: SideV16::Long,
+        basis_pos_q: 1,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: group.assets[0].epoch_long,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: group.assets[0].epoch_long,
+        b_stale: false,
+        stale: false,
+    };
+    bankrupt.active_bitmap[0] = 1;
+    group.assets[0].stored_pos_count_long = 1;
+    group.assets[0].oi_eff_long_q = 1;
 
     let cleared = group.kani_settle_resolved_bankruptcy_negative_pnl(&mut bankrupt);
 
@@ -9793,6 +9858,7 @@ fn proof_v16_resolved_active_bankrupt_can_consume_insurance_and_clear_blocker() 
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut bankrupt =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [46; 32], owner));
+    bankrupt.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): settle->begin_close_progress_ledger validates account shape
     group.vault = 5;
     group.insurance = 5;
     group.mode = MarketModeV16::Resolved;
@@ -9803,6 +9869,10 @@ fn proof_v16_resolved_active_bankrupt_can_consume_insurance_and_clear_blocker() 
     group.assets[0].stored_pos_count_long = 1;
     group.assets[0].oi_eff_long_q = 1;
     group.assets[0].loss_weight_sum_long = 1;
+    // RESYNC(toly-synced domain-insurance gate): fund domain 1 = insurance_domain_index(0,Short)
+    // (= full residual 5 = group.insurance) so consume_domain_insurance_for_negative_pnl actually
+    // clears the blocker (its stated intent) instead of falling through to explicit-loss booking.
+    group.insurance_domain_budget[1] = 5;
     bankrupt.legs[0] = PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -9879,13 +9949,23 @@ fn proof_v16_pending_domain_barrier_does_not_freeze_unrelated_positive_credit() 
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(2, 0, 1)).unwrap();
     let mut profitable =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    profitable.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     profitable.capital = 100;
-    profitable.pnl = 5;
     group.c_tot = 100;
-    group.pnl_pos_tot = 5;
+    group.vault = 105;
+    // RESYNC: Live-mode positive-credit conversion now REQUIRES source attribution.
+    // Attribute the +5 pnl to UNRELATED domain 0 (asset 0, side decode_side(0)) and
+    // back it 1:1 with a fresh counterparty bucket so account_source_realizable_support
+    // (v16.rs ~19710) credits the full face at credit_rate_num == CREDIT_RATE_SCALE.
+    // The barred domain below is pending_domain_loss_barriers[1] = asset 0 / opposite
+    // side, which carries no leg and therefore never gates this conversion.
+    group
+        .add_account_source_positive_pnl_not_atomic(&mut profitable, 0, 5)
+        .unwrap();
+    group
+        .add_fresh_counterparty_backing_not_atomic(0, 5 * BOUND_SCALE, 10)
+        .unwrap();
     group.pnl_matured_pos_tot = 5;
-    set_junior_bound(&mut group, 5);
-    group.vault = group.c_tot + 5;
     group.pending_domain_loss_barriers[1] = 1;
     certify_account_current_for_v16_conversion_proof(&group, &mut profitable);
     group
@@ -10579,6 +10659,10 @@ fn assert_bankrupt_liquidation_excludes_fee_from_residual_and_spends_insurance_o
     account.pnl = -5;
     group.negative_pnl_account_count = 1;
     group.assets[0].loss_weight_sum_short = 1;
+    // RESYNC(toly-synced domain-insurance gate): fund domain 1 = insurance_domain_index(0,Short)
+    // so the bankrupt-Long insurance spend this proof asserts is permitted (available_domain_insurance
+    // byte-identical to toly; sibling ..._consumes_insurance_before_social_loss sets [1]=4).
+    group.insurance_domain_budget[1] = insurance;
 
     let insurance_used = group
         .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account)
@@ -11205,6 +11289,11 @@ fn assert_v16_cure_and_cancel_releases_barrier_and_escrow(
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    // RESYNC(f3aef4b/0bee8ef source-credit shape hardening): empty() leaves the
+    // source-domain vecs unsized; the cure/cancel path validates account shape first
+    // (HiddenLeg) before the cancel/escrow logic this proof targets. Size them to the
+    // configured domain count — canonical fixture idiom, no asserted value changes.
+    account.ensure_source_domain_capacity(group.source_credit.len());
     account.cancel_deposit_escrow = prior_escrow;
     group.vault = prior_escrow;
     account.close_progress = CloseProgressLedgerV16 {
@@ -11267,6 +11356,10 @@ fn assert_v16_cure_and_cancel_rejects_irreversible_progress_before_deposit_mutat
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    // RESYNC(f3aef4b/0bee8ef): size source-domain vecs so validate_account_shape passes
+    // and execution reaches the has_irreversible_progress() -> LockActive gate this proof
+    // asserts (else short-circuits to HiddenLeg). Setup-only; asserted Err(LockActive) unchanged.
+    account.ensure_source_domain_capacity(group.source_credit.len());
     let mut ledger = CloseProgressLedgerV16 {
         active: true,
         close_id: 1,
@@ -11381,6 +11474,7 @@ fn proof_v16_close_lifetime_uses_configured_bound_and_is_not_refreshed() {
     group.current_slot = 11;
     let mut bankrupt =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    bankrupt.ensure_source_domain_capacity(group.source_credit.len()); // RESYNC(f3aef4b): source-credit shape-gate precondition
     group
         .kani_begin_close_progress_ledger(&mut bankrupt, 0, SideV16::Short, 2)
         .unwrap();
@@ -11427,6 +11521,11 @@ fn proof_v16_account_shape_rejects_malformed_quantity_adl_close_progress() {
     let group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    // RESYNC(f3aef4b/0bee8ef): size source-domain vecs so validate_account_shape reaches the
+    // close-progress quantity-ADL malformation check (Err InvalidLeg) instead of short-circuiting
+    // to HiddenLeg on the unsized empty() account. Asserted Err(InvalidLeg) unchanged — this
+    // restores the precondition so the ADL-ledger validation is actually exercised.
+    account.ensure_source_domain_capacity(group.source_credit.len());
 
     if premature_adl {
         account.close_progress = CloseProgressLedgerV16 {
@@ -12528,14 +12627,27 @@ fn assert_funding_refresh_side_matches_sign_and_floor(
     expected_pnl: i128,
 ) {
     let (mut group, mut long, mut short) = funding_sign_floor_fixture();
+    // Mirror the engine's own funding settlement (v16.rs settle_leg_kf_effects_at_slot,
+    // ~L20736-20739): a positive (gain) net K/F delta MUST carry the opposite-side
+    // insurance source domain = insurance_domain_index(asset_index=0, opposite_side(leg.side)).
+    // asset_index is 0, so domain = 0*2 + encode_side(opposite_side(leg.side)):
+    //   refresh_long  -> leg.side Long  -> opposite Short -> encode_side(Short)=1 -> domain 1
+    //   refresh_short -> leg.side Short -> opposite Long  -> encode_side(Long)=0  -> domain 0
+    // This re-establishes the source attribution the re-synced Live positive-PnL gate
+    // (v16.rs apply_signed_kf_delta_to_pnl ~L20217-20226) requires, so the proof genuinely
+    // exercises the source-attributed positive settlement path rather than masking it.
+    // A loss (expected_pnl <= 0) routes through apply_haircut_bounded_close_loss_to_pnl,
+    // which the Live gate intentionally permits with None, so the loss proofs keep None.
     let refreshed = if refresh_long {
+        let source_domain = if expected_pnl > 0 { Some(1) } else { None };
         group
-            .kani_apply_signed_kf_delta_to_pnl(&mut long, expected_pnl, None)
+            .kani_apply_signed_kf_delta_to_pnl(&mut long, expected_pnl, source_domain)
             .unwrap();
         long
     } else {
+        let source_domain = if expected_pnl > 0 { Some(0) } else { None };
         group
-            .kani_apply_signed_kf_delta_to_pnl(&mut short, expected_pnl, None)
+            .kani_apply_signed_kf_delta_to_pnl(&mut short, expected_pnl, source_domain)
             .unwrap();
         short
     };
