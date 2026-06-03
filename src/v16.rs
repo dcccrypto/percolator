@@ -11160,7 +11160,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
     ) -> V16Result<TradeApplyOutcomeV16> {
-        self.validate_trade_request(request)?;
         let long_delta =
             i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
         let short_delta = long_delta
@@ -11251,30 +11250,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
     ) -> V16Result<TradeOutcomeV16> {
-        self.validate_trade_request(request)?;
-        self.validate_unconfigured_market_tail()?;
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
-            return Err(V16Error::LockActive);
-        }
-        self.settle_account_for_position_action_and_refresh_not_atomic(long_account)?;
-        self.settle_account_for_position_action_and_refresh_not_atomic(short_account)?;
-
-        let locked = self.h_lock_lane(Some(&long_account.as_view()), false)? == HLockLaneV16::HMax
-            || self.h_lock_lane(Some(&short_account.as_view()), false)? == HLockLaneV16::HMax;
-        let applied =
-            self.apply_trade_after_refresh_not_atomic(long_account, short_account, request)?;
-        self.finish_trade_checks_not_atomic(
+        let outcome = self.execute_batch_with_fee_in_place_not_atomic(
             long_account,
             short_account,
-            locked,
-            applied.risk_increasing,
-            applied.long_has_source_claims,
-            applied.short_has_source_claims,
+            core::slice::from_ref(&request),
         )?;
         Ok(TradeOutcomeV16 {
-            fee_a: applied.fee_a,
-            fee_b: applied.fee_b,
-            notional: applied.notional,
+            fee_a: outcome.fee_a,
+            fee_b: outcome.fee_b,
+            notional: outcome.notional,
         })
     }
 
@@ -11294,6 +11278,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if requests.len() > config.max_portfolio_assets as usize {
             return Err(V16Error::InvalidConfig);
+        }
+        let mut i = 0usize;
+        while i < requests.len() {
+            self.validate_trade_request(requests[i])?;
+            i += 1;
         }
         self.settle_account_for_position_action_and_refresh_not_atomic(long_account)?;
         self.settle_account_for_position_action_and_refresh_not_atomic(short_account)?;

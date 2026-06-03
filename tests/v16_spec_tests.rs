@@ -224,6 +224,53 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
 }
 
 #[test]
+fn v16_single_trade_matches_batch_of_one_state() {
+    let (mut single_header, mut single_markets) = market_fixture(1, 100);
+    let mut single_long_header = account_fixture(1, 209);
+    let mut single_short_header = account_fixture(1, 210);
+    let mut batch_header = single_header;
+    let mut batch_markets = single_markets.clone();
+    let mut batch_long_header = single_long_header;
+    let mut batch_short_header = single_short_header;
+    let request = TradeRequestV16 {
+        asset_index: 0,
+        size_q: 2 * POS_SCALE,
+        exec_price: 100,
+        fee_bps: 0,
+    };
+
+    let single_outcome = {
+        let mut market = MarketGroupV16ViewMut::new(&mut single_header, &mut single_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut single_long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut single_short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_in_place_not_atomic(&mut long, &mut short, request)
+            .unwrap()
+    };
+    let batch_outcome = {
+        let mut market = MarketGroupV16ViewMut::new(&mut batch_header, &mut batch_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut batch_long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut batch_short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_batch_with_fee_in_place_not_atomic(&mut long, &mut short, &[request])
+            .unwrap()
+    };
+
+    assert_eq!(batch_outcome.fill_count, 1);
+    assert_eq!(single_outcome.fee_a, batch_outcome.fee_a);
+    assert_eq!(single_outcome.fee_b, batch_outcome.fee_b);
+    assert_eq!(single_outcome.notional, batch_outcome.notional);
+    assert_eq!(single_header, batch_header);
+    assert_eq!(single_markets, batch_markets);
+    assert_eq!(single_long_header, batch_long_header);
+    assert_eq!(single_short_header, batch_short_header);
+}
+
+#[test]
 fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 203);
