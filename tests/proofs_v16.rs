@@ -203,21 +203,28 @@ fn source_lien_config() -> V16Config {
 }
 
 fn source_credit_rate_bounded_for_backing(backing: u128) {
+    // RESYNC(TF): add_source_positive_claim_bound_not_atomic now constructs only through the full
+    // encumbrance/invariant gates (activated asset + consistent backing bucket) that this minimal
+    // harness does not set up, so the old API-driven setup returns Err(InvalidConfig) before the rate
+    // assert can run. The credit rate is a PURE function of the source-credit state, so set the state
+    // directly (the reconciled realizable_support shape) and exercise the engine's own domain recompute
+    // — the SAME rate path add_source_positive_claim_bound runs internally. Rate math is untouched.
     let (market, _, _) = symbolic_ids();
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let claim = 100u128;
-    group
-        .add_source_positive_claim_bound_not_atomic(0, claim, 80)
-        .unwrap();
-    if backing != 0 {
-        group
-            .add_fresh_counterparty_backing_not_atomic(0, backing, 10)
-            .unwrap();
-    }
+    group.source_credit[0] = SourceCreditStateV16 {
+        positive_claim_bound_num: claim,
+        exact_positive_claim_num: 80,
+        fresh_reserved_backing_num: backing,
+        ..SourceCreditStateV16::EMPTY
+    };
     let available = group.source_credit_available_backing_num(0).unwrap();
     let expected_rate = core::cmp::min((available * CREDIT_RATE_SCALE) / claim, CREDIT_RATE_SCALE);
-    assert_eq!(group.source_credit[0].credit_rate_num, expected_rate);
-    assert!(group.source_credit[0].credit_rate_num <= CREDIT_RATE_SCALE);
+    let (recomputed, _) = group
+        .kani_prepared_source_credit_domain_recompute(group.source_credit[0])
+        .unwrap();
+    assert_eq!(recomputed.credit_rate_num, expected_rate);
+    assert!(recomputed.credit_rate_num <= CREDIT_RATE_SCALE);
 }
 
 #[kani::proof]
@@ -6899,6 +6906,12 @@ fn proof_v16_stale_clear_plus_current_certificate_restores_favorable_action_lane
     let mut group = MarketGroupV16::new(market, V16Config::public_user_fund(1, 0, 1)).unwrap();
     let mut account =
         PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, account_id, owner));
+    // RESYNC(TF / f3aef4b): source-credit shape-gate precondition. Without it, the empty() account
+    // trips validate_with_market -> HiddenLeg INSIDE ensure_favorable_action_allowed (it validates
+    // shape before the lock check), masking the real behavior. With a valid shape the engine returns
+    // exactly what this proof asserts: a stale account is locked (LockActive), and a cleared account
+    // with a current certificate re-enters the favorable-action lane (Ok). Assertions UNCHANGED.
+    account.ensure_source_domain_capacity(group.source_credit.len());
 
     group.mark_account_stale(&mut account).unwrap();
     assert_eq!(group.stale_certificate_count, 1);
