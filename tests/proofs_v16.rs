@@ -13632,4 +13632,46 @@ fn proof_v16_genesis_capital_at_risk_fee_crystallizes_on_insurance_impair() {
             + account.source_lien_impaired_capital_at_risk_fee_revenue[0],
         live_fee
     );
+
+    // E6 DUST BRANCH (residual-farm value-leak guard): a PARTIAL insurance impair
+    // (effective < live_effective_before) must crystallize EXACTLY floor(live_fee * effective /
+    // before) live -> impaired, retain the rounding dust LIVE, and conserve the total. Symbolic
+    // `effective` over the whole partial range proves the floor DIRECTION (the value-leak guard):
+    // floor (not ceil) keeps the residual live, so an impair can never crystallize MORE than the
+    // pro-rata share (which would let a residual-farmer leak value out of the live counter).
+    let before: u128 = 10;
+    let dust_fee: u128 = 7;
+    let effective: u128 = kani::any();
+    kani::assume(effective >= 1 && effective <= before);
+    let mut dust_account =
+        PortfolioAccountV16::empty(ProvenanceHeaderV16::new(market, [16; 32], [1; 32]));
+    dust_account.ensure_source_domain_capacity(group.source_credit.len());
+    dust_account.source_claim_bound_num[0] = 10 * BOUND_SCALE;
+    dust_account.source_claim_liened_num[0] = 10 * BOUND_SCALE;
+    dust_account.source_claim_insurance_liened_num[0] = 10 * BOUND_SCALE;
+    dust_account.source_lien_effective_reserved[0] = before;
+    dust_account.source_lien_insurance_backing_num[0] = 10 * BOUND_SCALE;
+    dust_account.source_lien_capital_at_risk_fee_revenue[0] = dust_fee;
+
+    MarketGroupV16::kani_impair_account_source_credit_insurance_lien_fields(
+        &mut dust_account,
+        0,
+        10 * BOUND_SCALE,
+        effective,
+    )
+    .unwrap();
+
+    let crystallized = (dust_fee * effective) / before; // integer floor
+    let live_remainder = dust_account.source_lien_capital_at_risk_fee_revenue[0];
+    let impaired_fee = dust_account.source_lien_impaired_capital_at_risk_fee_revenue[0];
+    // exact floor crystallized live -> impaired:
+    assert_eq!(impaired_fee, crystallized);
+    assert_eq!(live_remainder, dust_fee - crystallized);
+    // conservation (no value created or destroyed):
+    assert_eq!(live_remainder + impaired_fee, dust_fee);
+    // dust retained LIVE (floor is conservative): live_remainder over-covers the unrounded remainder.
+    assert!(live_remainder * before >= dust_fee * (before - effective));
+    // effective shrink mirrors the impaired effective exactly:
+    assert_eq!(dust_account.source_lien_effective_reserved[0], before - effective);
+    assert_eq!(dust_account.source_lien_impaired_effective_reserved[0], effective);
 }
