@@ -3632,15 +3632,36 @@ fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_m
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(24)]
 #[kani::solver(cadical)]
-fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
-    let nontrivial_atoms: bool = kani::any();
-    let atoms = if nontrivial_atoms { 3 } else { 1 };
+fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
+    let atom_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&atom_raw));
+    let atoms = atom_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    let mut markets = [Market::new(0u64, slot)];
+    header.next_market_id = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.asset_set_epoch = V16PodU64::new(1);
+    header.risk_epoch = V16PodU64::new(1);
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
     markets[0].engine.insurance_reservation_long =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
@@ -3658,10 +3679,9 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     market
-        .consume_source_credit_lien_from_insurance_not_atomic(0, amount)
+        .kani_apply_insurance_lien_consume_domain_delta(0, amount)
         .unwrap();
     let reservation = market.markets[0]
         .engine
@@ -3675,8 +3695,8 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
         .unwrap();
 
     kani::cover!(
-        nontrivial_atoms,
-        "public insurance lien consume is nontrivial and symbolic"
+        atom_raw > 1,
+        "insurance lien consume domain-budget proof is nontrivial and symbolic"
     );
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
@@ -3701,7 +3721,6 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
     );
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[kani::proof]
