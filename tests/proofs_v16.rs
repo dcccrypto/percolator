@@ -1306,6 +1306,7 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     market
         .withdraw_backing_provider_earnings_not_atomic(0, withdraw)
@@ -1322,6 +1323,10 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
     );
     assert_eq!(market.header.vault.get(), earnings - withdraw);
     assert_eq!(bucket.utilization_fee_earnings, earnings - withdraw);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings - withdraw
+    );
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(market.validate_shape(), Ok(()));
@@ -1636,6 +1641,7 @@ fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
     );
     assert_eq!(market.header.pnl_pos_tot.get(), delta as u128);
     assert_eq!(market.header.pnl_pos_bound_tot_num.get(), delta_num);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), delta_num);
 }
 
 #[kani::proof]
@@ -1816,6 +1822,7 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     // Group-level junior bound left at 0 -> global UNDERSTATES the domain's claims.
     // Every other facet of the state is valid; the only inconsistency is the
     // missing aggregation relation.
@@ -1933,7 +1940,8 @@ fn proof_v16_residual_excludes_senior_backing_provider_earnings() {
         status: BackingBucketStatusV16::Expired,
         ..BackingBucketV16::EMPTY
     });
-    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     kani::cover!(
         earnings > 0 && surplus > 0,
@@ -2079,7 +2087,8 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
             ..BackingBucketV16::EMPTY
         });
     }
-    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     kani::cover!(
         c_tot > 0 && insurance > 0 && earnings > 0 && surplus > 0,
@@ -3098,6 +3107,7 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
     account_header.pnl = V16PodI128::new(-5);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let used = market
@@ -3135,9 +3145,16 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
             insurance_credit_reserved_num: reserved * BOUND_SCALE,
             ..InsuranceCreditReservationV16::EMPTY
         });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            insurance_credit_reserved_num: reserved * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
     account_header.pnl = V16PodI128::new(-10);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let used = market
         .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account)
@@ -3475,6 +3492,7 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     market
         .consume_source_credit_lien_from_insurance_not_atomic(0, amount)
@@ -3504,6 +3522,20 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
         atoms
     );
     assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        0
+    );
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        0
+    );
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.validate_shape(), Ok(()));
@@ -3531,6 +3563,40 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_domain_insurance_budget_setter_updates_o1_remaining_total() {
+    let budget_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&budget_raw));
+    let budget = budget_raw as u128;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(budget);
+    header.insurance = V16PodU128::new(budget);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .set_domain_insurance_budget_not_atomic(0, budget)
+        .unwrap();
+
+    kani::cover!(budget > 1, "domain budget setter covers nontrivial budget");
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        budget
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get(),
+        budget
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
@@ -3545,6 +3611,7 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     market
         .reserve_insurance_credit_not_atomic(0, amount)
@@ -3568,6 +3635,20 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
     assert_eq!(reservation.valid_liened_insurance_num, 0);
     assert_eq!(source.insurance_credit_reserved_num, amount);
     assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        atoms
+    );
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        atoms
+    );
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -3609,6 +3690,7 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
             ..SourceCreditStateV16::EMPTY
         });
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     market
         .create_source_credit_lien_from_insurance_not_atomic(0, amount)
@@ -3632,6 +3714,20 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
     assert_eq!(reservation.valid_liened_insurance_num, amount);
     assert_eq!(source.insurance_credit_reserved_num, amount);
     assert_eq!(source.valid_liened_insurance_num, amount);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        atoms
+    );
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        atoms
+    );
     assert_eq!(market.header.insurance.get(), atoms);
     assert_eq!(market.header.vault.get(), atoms);
     assert_eq!(

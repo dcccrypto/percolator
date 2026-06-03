@@ -246,9 +246,9 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
     let (mut header, mut markets) = market_fixture(1, 100);
     header.vault = V16PodU128::new(10);
     header.insurance = V16PodU128::new(10);
-    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(10);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.set_domain_insurance_budget_not_atomic(0, 10).unwrap();
     market
         .reserve_insurance_credit_not_atomic(0, BOUND_SCALE)
         .unwrap();
@@ -292,6 +292,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
 
     account_header.pnl = V16PodI128::new(-5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
@@ -370,6 +371,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
 
     account_header.pnl = V16PodI128::new(-5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
@@ -418,8 +420,10 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         outcome,
         percolator::v16::PermissionlessProgressOutcomeV16::AccountCurrent
     );
-    assert_eq!(market.header.loss_stale_active, 1);
-    assert_eq!(market.header.slot_last.get(), 9);
+    assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(market.header.slot_last.get(), 10);
+    let unrelated_asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(unrelated_asset.slot_last, 9);
     assert_eq!(account.header.active_bitmap[0].get(), 0);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
@@ -581,6 +585,7 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     markets[0].engine.source_credit_long =
         SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
             positive_claim_bound_num: claim_num,
@@ -679,6 +684,7 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
@@ -746,6 +752,7 @@ fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposi
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.source_domains[1].domain = V16PodU32::new(1);
     account_header.source_domains[1].source_claim_market_id = V16PodU64::new(1);
