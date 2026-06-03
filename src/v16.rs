@@ -181,7 +181,7 @@ pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) ->
 }
 
 #[inline]
-pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
+fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
     if leg_slot_index >= V16_MAX_PORTFOLIO_ASSETS_N {
         return Err(V16Error::InvalidConfig);
     }
@@ -192,7 +192,7 @@ pub fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) 
 }
 
 #[inline]
-pub fn active_bitmap_with_cleared(
+fn active_bitmap_with_cleared(
     mut bitmap: V16ActiveBitmap,
     leg_slot_index: usize,
 ) -> V16Result<V16ActiveBitmap> {
@@ -1649,7 +1649,7 @@ impl V16Config {
         )
     }
 
-    pub fn validate_public_user_fund_shape(&self) -> V16Result<()> {
+    fn validate_public_user_fund_shape(&self) -> V16Result<()> {
         if self.max_portfolio_assets == 0
             || self.max_portfolio_assets as usize > V16_MAX_PORTFOLIO_ASSETS_N
             || self.max_market_slots == 0
@@ -2650,7 +2650,7 @@ impl CloseProgressLedgerV16 {
         self.active && !self.finalized && !self.canceled && self.residual_remaining != 0
     }
 
-    pub fn has_irreversible_progress(self) -> bool {
+    fn has_irreversible_progress(self) -> bool {
         self.support_consumed != 0
             || self.junior_face_burned != 0
             || self.insurance_spent != 0
@@ -2969,6 +2969,41 @@ impl TokenValueFlowProofV16 {
         let mut proof = Self::empty(vault_before, vault_after);
         proof.debit(TokenValueClassV16::AccountCapital, amount)?;
         proof.credit(TokenValueClassV16::InsuranceCapital, amount)?;
+        Ok(proof)
+    }
+
+    fn external_in_to_insurance_capital(
+        amount: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<Self> {
+        let mut proof = Self::empty(vault_before, vault_after);
+        proof.external_quote_in = amount;
+        proof.credit(TokenValueClassV16::ExternalQuote, amount)?;
+        proof.debit(TokenValueClassV16::InsuranceCapital, amount)?;
+        Ok(proof)
+    }
+
+    fn insurance_capital_to_external_out(
+        amount: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<Self> {
+        let mut proof = Self::empty(vault_before, vault_after);
+        proof.external_quote_out = amount;
+        proof.debit(TokenValueClassV16::InsuranceCapital, amount)?;
+        proof.credit(TokenValueClassV16::ExternalQuote, amount)?;
+        Ok(proof)
+    }
+
+    fn insurance_capital_to_account_capital(
+        amount: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<Self> {
+        let mut proof = Self::empty(vault_before, vault_after);
+        proof.debit(TokenValueClassV16::InsuranceCapital, amount)?;
+        proof.credit(TokenValueClassV16::AccountCapital, amount)?;
         Ok(proof)
     }
 
@@ -4070,7 +4105,7 @@ impl EngineAssetSlotV16Account {
             ))
     }
 
-    pub fn validate_market_id_binding(&self) -> V16Result<()> {
+    fn validate_market_id_binding(&self) -> V16Result<()> {
         let asset = self.asset.try_to_runtime()?;
         let long_bucket = self.backing_long.try_to_runtime()?;
         let short_bucket = self.backing_short.try_to_runtime()?;
@@ -5083,24 +5118,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn update_domain_budget_remaining_total(
-        &mut self,
-        old_budget: u128,
-        old_spent: u128,
-        new_budget: u128,
-        new_spent: u128,
-    ) -> V16Result<()> {
-        let old_remaining = Self::domain_budget_remaining_parts(old_budget, old_spent)?;
-        let new_remaining = Self::domain_budget_remaining_parts(new_budget, new_spent)?;
-        self.header.insurance_domain_budget_remaining_total =
-            V16PodU128::new(Self::apply_total_delta(
-                self.header.insurance_domain_budget_remaining_total.get(),
-                old_remaining,
-                new_remaining,
-            )?);
-        Ok(())
-    }
-
     fn update_resolved_payout_blocker_total(
         &mut self,
         old: u64,
@@ -5869,7 +5886,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_insurance_reservation_for_domain(domain, reservation)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.insurance = V16PodU128::new(next_insurance);
-        self.set_domain_insurance_spent(domain, next_domain_spent)?;
+        self.set_domain_insurance_spent_core(domain, next_domain_spent)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.validate_shape()
     }
@@ -5931,6 +5948,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         bucket.utilization_fee_earnings = next_earnings;
         self.header.vault = V16PodU128::new(next_vault);
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    /// Credits already-collected backing utilization fees to the provider bucket.
+    ///
+    /// This does not debit an account or increase the vault; callers must have already
+    /// moved value into vault slack. The method rejects if the resulting senior
+    /// backing-provider claim would exceed vault coverage.
+    pub fn credit_backing_provider_earnings_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let next_earnings_total = self
+            .header
+            .backing_provider_earnings_total
+            .get()
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let senior = self
+            .header
+            .c_tot
+            .get()
+            .checked_add(self.header.insurance.get())
+            .and_then(|v| v.checked_add(next_earnings_total))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if senior > self.header.vault.get() {
+            return Err(V16Error::LockActive);
+        }
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Err(V16Error::LockActive);
+        }
+        bucket.utilization_fee_earnings = bucket
+            .utilization_fee_earnings
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.validate_source_domain_ledger(domain)?;
         self.validate_shape()
@@ -6411,27 +6473,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
-    fn set_domain_insurance_spent(&mut self, domain: usize, spent: u128) -> V16Result<()> {
+    fn set_domain_insurance_spent_core(&mut self, domain: usize, spent: u128) -> V16Result<()> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let (old_budget, old_spent) = self.domain_insurance_budget_spent(domain)?;
-        self.update_domain_budget_remaining_total(old_budget, old_spent, old_budget, spent)?;
-        let slot = self.markets[asset_index].engine_slot_mut();
-        match side {
-            SideV16::Long => slot.insurance_domain_spent_long = V16PodU128::new(spent),
-            SideV16::Short => slot.insurance_domain_spent_short = V16PodU128::new(spent),
-        }
-        Ok(())
-    }
-
-    pub fn set_domain_insurance_budget_not_atomic(
-        &mut self,
-        domain: usize,
-        budget: u128,
-    ) -> V16Result<()> {
-        let (asset_index, side) = self.domain_asset_side(domain)?;
-        let (old_budget, spent) = self.domain_insurance_budget_spent(domain)?;
-        let old_remaining = Self::domain_budget_remaining_parts(old_budget, spent)?;
-        let new_remaining = Self::domain_budget_remaining_parts(budget, spent)?;
+        let old_remaining = Self::domain_budget_remaining_parts(old_budget, old_spent)?;
+        let new_remaining = Self::domain_budget_remaining_parts(old_budget, spent)?;
         let next_total = Self::apply_total_delta(
             self.header.insurance_domain_budget_remaining_total.get(),
             old_remaining,
@@ -6443,10 +6489,191 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.insurance_domain_budget_remaining_total = V16PodU128::new(next_total);
         let slot = self.markets[asset_index].engine_slot_mut();
         match side {
+            SideV16::Long => slot.insurance_domain_spent_long = V16PodU128::new(spent),
+            SideV16::Short => slot.insurance_domain_spent_short = V16PodU128::new(spent),
+        }
+        Ok(())
+    }
+
+    /// Sets the spent amount for a domain insurance budget while preserving the
+    /// aggregate remaining-budget invariant.
+    pub fn set_domain_insurance_spent(&mut self, domain: usize, spent: u128) -> V16Result<()> {
+        self.set_domain_insurance_spent_core(domain, spent)?;
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    fn set_domain_insurance_budget_core(
+        &mut self,
+        domain: usize,
+        budget: u128,
+        insurance_limit: u128,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let (old_budget, spent) = self.domain_insurance_budget_spent(domain)?;
+        let old_remaining = Self::domain_budget_remaining_parts(old_budget, spent)?;
+        let new_remaining = Self::domain_budget_remaining_parts(budget, spent)?;
+        let next_total = Self::apply_total_delta(
+            self.header.insurance_domain_budget_remaining_total.get(),
+            old_remaining,
+            new_remaining,
+        )?;
+        if next_total > insurance_limit {
+            return Err(V16Error::LockActive);
+        }
+        self.header.insurance_domain_budget_remaining_total = V16PodU128::new(next_total);
+        let slot = self.markets[asset_index].engine_slot_mut();
+        match side {
             SideV16::Long => slot.insurance_domain_budget_long = V16PodU128::new(budget),
             SideV16::Short => slot.insurance_domain_budget_short = V16PodU128::new(budget),
         }
+        Ok(())
+    }
+
+    fn set_domain_insurance_budget_not_atomic(
+        &mut self,
+        domain: usize,
+        budget: u128,
+    ) -> V16Result<()> {
+        self.set_domain_insurance_budget_core(domain, budget, self.header.insurance.get())?;
         self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    /// Credits already-collected insurance to a domain budget without changing vault
+    /// or total insurance.
+    pub fn credit_domain_insurance_budget_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
+        let next_budget = budget
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.set_domain_insurance_budget_not_atomic(domain, next_budget)
+    }
+
+    /// Deposits external quote into insurance and credits the same domain budget.
+    pub fn deposit_domain_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        let vault_before = self.header.vault.get();
+        let next_vault = vault_before
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let next_insurance = self
+            .header
+            .insurance
+            .get()
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
+        let next_budget = budget
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+
+        self.set_domain_insurance_budget_core(domain, next_budget, next_insurance)?;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::external_in_to_insurance_capital(
+            amount,
+            vault_before,
+            next_vault,
+        )?
+        .validate()?;
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    /// Withdraws available insurance from a single domain budget.
+    pub fn withdraw_domain_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount > self.available_domain_insurance(domain)? || amount > self.header.vault.get() {
+            return Err(V16Error::LockActive);
+        }
+        let vault_before = self.header.vault.get();
+        let next_vault = vault_before
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let next_insurance = self
+            .header
+            .insurance
+            .get()
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
+        let next_budget = budget
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+
+        self.set_domain_insurance_budget_core(domain, next_budget, next_insurance)?;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::insurance_capital_to_external_out(
+            amount,
+            vault_before,
+            next_vault,
+        )?
+        .validate()?;
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    /// Pays an account from unbudgeted insurance surplus, e.g. a crank reward.
+    ///
+    /// Budgeted domain insurance remains isolated and cannot be consumed by this path.
+    pub fn credit_account_from_insurance_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        account.validate_with_market(&self.as_view())?;
+        let next_insurance = self
+            .header
+            .insurance
+            .get()
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if self
+            .header
+            .insurance_domain_budget_remaining_total
+            .get()
+            > next_insurance
+        {
+            return Err(V16Error::LockActive);
+        }
+        let next_c_tot = self
+            .header
+            .c_tot
+            .get()
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let next_capital = account
+            .header
+            .capital
+            .get()
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let vault = self.header.vault.get();
+
+        self.header.insurance = V16PodU128::new(next_insurance);
+        self.header.c_tot = V16PodU128::new(next_c_tot);
+        account.header.capital = V16PodU128::new(next_capital);
+        account.header.health_cert.valid = 0;
+        TokenValueFlowProofV16::insurance_capital_to_account_capital(amount, vault, vault)?
+            .validate()?;
+        account.validate_with_market(&self.as_view())?;
         self.validate_shape()
     }
 
@@ -6497,7 +6724,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterUnderflow)?,
         );
         let (_, spent_before) = self.domain_insurance_budget_spent(domain)?;
-        self.set_domain_insurance_spent(
+        self.set_domain_insurance_spent_core(
             domain,
             spent_before
                 .checked_add(used)
@@ -6656,7 +6883,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_insurance_reservation_for_domain(domain, reservation)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.insurance = V16PodU128::new(next_insurance);
-        self.set_domain_insurance_spent(domain, next_domain_spent)?;
+        self.set_domain_insurance_spent_core(domain, next_domain_spent)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }

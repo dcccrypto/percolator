@@ -3565,20 +3565,21 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
-fn proof_v16_domain_insurance_budget_setter_updates_o1_remaining_total() {
+fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
     let budget_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&budget_raw));
     let budget = budget_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.vault = V16PodU128::new(budget);
-    header.insurance = V16PodU128::new(budget);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     market
-        .set_domain_insurance_budget_not_atomic(0, budget)
+        .deposit_domain_insurance_not_atomic(0, budget)
         .unwrap();
 
-    kani::cover!(budget > 1, "domain budget setter covers nontrivial budget");
+    kani::cover!(
+        budget > 1,
+        "domain insurance deposit covers nontrivial budget"
+    );
     assert_eq!(
         market
             .header

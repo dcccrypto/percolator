@@ -248,7 +248,7 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
     header.insurance = V16PodU128::new(10);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.set_domain_insurance_budget_not_atomic(0, 10).unwrap();
+    market.deposit_domain_insurance_not_atomic(0, 10).unwrap();
     market
         .reserve_insurance_credit_not_atomic(0, BOUND_SCALE)
         .unwrap();
@@ -274,6 +274,224 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
         before_reservation
     );
     assert_eq!(market.markets[0].engine.source_credit_long, before_source);
+}
+
+#[test]
+fn v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market.deposit_domain_insurance_not_atomic(0, 10).unwrap();
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        10
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get(),
+        10
+    );
+
+    market.withdraw_domain_insurance_not_atomic(0, 4).unwrap();
+    assert_eq!(market.header.vault.get(), 6);
+    assert_eq!(market.header.insurance.get(), 6);
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        6
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get(),
+        6
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let mut account_header = account_fixture(1, 9);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market
+        .credit_account_from_insurance_not_atomic(&mut account, 3)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.insurance.get(), 7);
+    assert_eq!(market.header.c_tot.get(), 3);
+    assert_eq!(account.header.capital.get(), 3);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    market.credit_domain_insurance_budget_not_atomic(0, 7).unwrap();
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1);
+    assert_eq!(
+        err,
+        Err(V16Error::LockActive),
+        "budgeted domain insurance must not be paid as a cranker reward"
+    );
+}
+
+#[test]
+fn v16_public_domain_insurance_spent_setter_preserves_budget_total() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market.deposit_domain_insurance_not_atomic(0, 10).unwrap();
+    market.set_domain_insurance_spent(0, 4).unwrap();
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        6
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_domain_spent_long
+            .get(),
+        4
+    );
+    market.set_domain_insurance_spent(0, 0).unwrap();
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        10
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_public_domain_insurance_spent_setter_rejects_unbacked_clear() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(5);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(5);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(10);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(5);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    let err = market.set_domain_insurance_spent(0, 0);
+
+    assert_eq!(err, Err(V16Error::LockActive));
+    assert_eq!(
+        market
+            .header
+            .insurance_domain_budget_remaining_total
+            .get(),
+        5
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_domain_spent_long
+            .get(),
+        5
+    );
+}
+
+#[test]
+fn v16_backing_provider_earnings_credit_and_withdraw_are_engine_accounted() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: 1,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: 1,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .credit_backing_provider_earnings_not_atomic(0, 4)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.backing_provider_earnings_total.get(), 4);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .utilization_fee_earnings
+            .get(),
+        4
+    );
+    market
+        .withdraw_backing_provider_earnings_not_atomic(0, 3)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), 7);
+    assert_eq!(market.header.backing_provider_earnings_total.get(), 1);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .utilization_fee_earnings
+            .get(),
+        1
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_backing_provider_earnings_credit_rejects_without_vault_slack() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.c_tot = V16PodU128::new(10);
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: 1,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: 1,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    let err = market.credit_backing_provider_earnings_not_atomic(0, 1);
+
+    assert_eq!(err, Err(V16Error::LockActive));
+    assert_eq!(market.header.backing_provider_earnings_total.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .utilization_fee_earnings
+            .get(),
+        0
+    );
 }
 
 #[test]
