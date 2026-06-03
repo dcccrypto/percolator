@@ -8,13 +8,14 @@ use percolator::v16::{
     kani_source_credit_state_realizable_support_for_face,
     kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
     AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
     StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config, V16Error,
@@ -122,7 +123,10 @@ fn proof_v16_source_domain_insert_reuses_same_domain_market_id_tag() {
             .get(),
         claim_num
     );
-    assert_eq!(account.as_view().kani_source_domain_slot(1), Ok(Some(first)));
+    assert_eq!(
+        account.as_view().kani_source_domain_slot(1),
+        Ok(Some(first))
+    );
 }
 
 #[kani::proof]
@@ -883,6 +887,127 @@ fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {
     assert_eq!(asset.f_short_num, before.f_short_num);
     assert_eq!(asset.b_long_num, before.b_long_num);
     assert_eq!(asset.b_short_num, before.b_short_num);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_batch_outcome_accumulator_is_exact_and_overflow_checked() {
+    let fill_count: u32 = kani::any();
+    let fee_a: u128 = kani::any();
+    let fee_b: u128 = kani::any();
+    let notional: u128 = kani::any();
+    let add_fee_a: u128 = kani::any();
+    let add_fee_b: u128 = kani::any();
+    let add_notional: u128 = kani::any();
+    let risk_before: bool = kani::any();
+    let long_claim_before: bool = kani::any();
+    let short_claim_before: bool = kani::any();
+    let applied_risk: bool = kani::any();
+    let applied_long_claim: bool = kani::any();
+    let applied_short_claim: bool = kani::any();
+    let mut outcome = BatchTradeOutcomeV16 {
+        fill_count,
+        fee_a,
+        fee_b,
+        notional,
+    };
+    let mut risk = risk_before;
+    let mut long_claim = long_claim_before;
+    let mut short_claim = short_claim_before;
+
+    let expected_fill = fill_count.checked_add(1);
+    let expected_fee_a = fee_a.checked_add(add_fee_a);
+    let expected_fee_b = fee_b.checked_add(add_fee_b);
+    let expected_notional = notional.checked_add(add_notional);
+    let expected_ok = expected_fill.is_some()
+        && expected_fee_a.is_some()
+        && expected_fee_b.is_some()
+        && expected_notional.is_some();
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk,
+        &mut long_claim,
+        &mut short_claim,
+        add_fee_a,
+        add_fee_b,
+        add_notional,
+        applied_risk,
+        applied_long_claim,
+        applied_short_claim,
+    );
+
+    kani::cover!(
+        expected_ok
+            && add_fee_a != 0
+            && add_fee_b != 0
+            && add_notional != 0
+            && applied_risk
+            && applied_long_claim
+            && applied_short_claim,
+        "batch accumulator covers a nontrivial successful fill aggregation"
+    );
+    kani::cover!(!expected_ok, "batch accumulator covers overflow rejection");
+    assert_eq!(result.is_ok(), expected_ok);
+    if result.is_ok() {
+        assert_eq!(outcome.fill_count, expected_fill.unwrap());
+        assert_eq!(outcome.fee_a, expected_fee_a.unwrap());
+        assert_eq!(outcome.fee_b, expected_fee_b.unwrap());
+        assert_eq!(outcome.notional, expected_notional.unwrap());
+        assert_eq!(risk, risk_before || applied_risk);
+        assert_eq!(long_claim, long_claim_before || applied_long_claim);
+        assert_eq!(short_claim, short_claim_before || applied_short_claim);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_final_batch_margin_gate_accepts_only_final_certified_im() {
+    let equity_units_raw: i8 = kani::any();
+    let req_units_raw: u8 = kani::any();
+    let cert_valid: bool = kani::any();
+    kani::assume((-1..=4).contains(&equity_units_raw));
+    kani::assume(req_units_raw <= 4);
+    let equity = equity_units_raw as i128 * 100;
+    let req = req_units_raw as u128 * 100;
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: equity,
+        certified_initial_req: req,
+        certified_maintenance_req: req,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: req,
+        cert_oracle_epoch: 0,
+        cert_funding_epoch: 0,
+        cert_risk_epoch: 0,
+        cert_asset_set_epoch: 0,
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: cert_valid,
+    });
+
+    let account = PortfolioV16View::new(&account_header);
+    let result = MarketGroupV16ViewMut::<u64>::kani_ensure_initial_margin(&account);
+    let expected_ok = cert_valid && equity >= 0 && (equity as u128) >= req;
+
+    kani::cover!(
+        expected_ok && equity_units_raw > req_units_raw as i8,
+        "final batch margin gate covers accepting overcollateralized certificates"
+    );
+    kani::cover!(
+        cert_valid && equity < 0,
+        "final batch margin gate covers rejecting negative final equity"
+    );
+    kani::cover!(
+        cert_valid && equity >= 0 && (equity as u128) < req,
+        "final batch margin gate covers rejecting undercollateralized certificates"
+    );
+    kani::cover!(
+        !cert_valid,
+        "final batch margin gate covers rejecting stale final certificates"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
 }
 
 #[kani::proof]
@@ -3530,10 +3655,7 @@ fn proof_v16_public_insurance_lien_consume_spends_only_its_domain_budget() {
         0
     );
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         0
     );
     assert_eq!(market.header.vault, vault_before);
@@ -3581,17 +3703,11 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
         "domain insurance deposit covers nontrivial budget"
     );
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         budget
     );
     assert_eq!(
-        market.markets[0]
-            .engine
-            .insurance_domain_budget_long
-            .get(),
+        market.markets[0].engine.insurance_domain_budget_long.get(),
         budget
     );
     assert_eq!(market.validate_shape(), Ok(()));
@@ -3644,10 +3760,7 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
         atoms
     );
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         atoms
     );
     assert_eq!(market.header.vault, vault_before);
@@ -3723,10 +3836,7 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
         atoms
     );
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         atoms
     );
     assert_eq!(market.header.insurance.get(), atoms);

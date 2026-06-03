@@ -5005,11 +5005,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     #[cfg(any(test, kani))]
     pub fn refresh_header_aggregate_totals_for_test(&mut self) -> V16Result<()> {
-        let totals = self.as_view().compute_aggregate_totals_and_validate_slots()?;
+        let totals = self
+            .as_view()
+            .compute_aggregate_totals_and_validate_slots()?;
         self.header.backing_provider_earnings_total =
             V16PodU128::new(totals.backing_provider_earnings);
-        self.header.source_claim_bound_total_num =
-            V16PodU128::new(totals.source_claim_bound_num);
+        self.header.source_claim_bound_total_num = V16PodU128::new(totals.source_claim_bound_num);
         self.header.source_insurance_credit_reserved_total_atoms =
             V16PodU128::new(totals.source_insurance_credit_reserved_atoms);
         self.header.insurance_domain_budget_remaining_total =
@@ -5137,17 +5138,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn update_resolved_payout_blocker_total(
-        &mut self,
-        old: u64,
-        new: u64,
-    ) -> V16Result<()> {
-        self.header.resolved_payout_blocker_count =
-            V16PodU64::new(Self::apply_total_delta_u64(
-                self.header.resolved_payout_blocker_count.get(),
-                old,
-                new,
-            )?);
+    fn update_resolved_payout_blocker_total(&mut self, old: u64, new: u64) -> V16Result<()> {
+        self.header.resolved_payout_blocker_count = V16PodU64::new(Self::apply_total_delta_u64(
+            self.header.resolved_payout_blocker_count.get(),
+            old,
+            new,
+        )?);
         Ok(())
     }
 
@@ -6598,12 +6594,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_domain_insurance_budget_core(domain, next_budget, next_insurance)?;
         self.header.vault = V16PodU128::new(next_vault);
         self.header.insurance = V16PodU128::new(next_insurance);
-        TokenValueFlowProofV16::external_in_to_insurance_capital(
-            amount,
-            vault_before,
-            next_vault,
-        )?
-        .validate()?;
+        TokenValueFlowProofV16::external_in_to_insurance_capital(amount, vault_before, next_vault)?
+            .validate()?;
         self.validate_source_domain_ledger(domain)?;
         self.validate_shape()
     }
@@ -6664,12 +6656,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get()
             .checked_sub(amount)
             .ok_or(V16Error::CounterUnderflow)?;
-        if self
-            .header
-            .insurance_domain_budget_remaining_total
-            .get()
-            > next_insurance
-        {
+        if self.header.insurance_domain_budget_remaining_total.get() > next_insurance {
             return Err(V16Error::LockActive);
         }
         let next_c_tot = self
@@ -6702,15 +6689,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.insurance_reservation_for_domain(domain)?
                 .insurance_credit_reserved_num,
         )?;
-        let global_available = self
-            .header
-            .insurance
-            .get()
-            .saturating_sub(
-                self.header
-                    .source_insurance_credit_reserved_total_atoms
-                    .get(),
-            );
+        let global_available = self.header.insurance.get().saturating_sub(
+            self.header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+        );
         let budget_remaining = budget
             .saturating_sub(spent)
             .saturating_sub(domain_reserved_atoms);
@@ -8959,9 +8942,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidLeg);
         }
-        let old_blockers = slot_resolved_payout_blockers_v16(
-            self.markets[asset_index].engine_slot(),
-        )?;
+        let old_blockers =
+            slot_resolved_payout_blockers_v16(self.markets[asset_index].engine_slot())?;
         let new_blockers = {
             let slot = self.markets[asset_index].engine_slot_mut();
             let old_asset = slot.asset;
@@ -11013,6 +10995,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(kani)]
+    pub fn kani_ensure_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
+        Self::ensure_initial_margin(account)
+    }
+
     fn account_no_positive_credit_equity(account: &PortfolioV16View<'_>) -> V16Result<i128> {
         validate_non_min_i128(account.header.pnl.get())?;
         validate_fee_credits(account.header.fee_credits.get())?;
@@ -11218,6 +11205,64 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    fn accumulate_batch_trade_apply(
+        outcome: &mut BatchTradeOutcomeV16,
+        risk_increasing: &mut bool,
+        long_has_source_claims: &mut bool,
+        short_has_source_claims: &mut bool,
+        applied: TradeApplyOutcomeV16,
+    ) -> V16Result<()> {
+        outcome.fill_count = outcome
+            .fill_count
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        outcome.fee_a = outcome
+            .fee_a
+            .checked_add(applied.fee_a)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        outcome.fee_b = outcome
+            .fee_b
+            .checked_add(applied.fee_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        outcome.notional = outcome
+            .notional
+            .checked_add(applied.notional)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        *risk_increasing |= applied.risk_increasing;
+        *long_has_source_claims |= applied.long_has_source_claims;
+        *short_has_source_claims |= applied.short_has_source_claims;
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_accumulate_batch_trade_apply(
+        outcome: &mut BatchTradeOutcomeV16,
+        risk_increasing: &mut bool,
+        long_has_source_claims: &mut bool,
+        short_has_source_claims: &mut bool,
+        fee_a: u128,
+        fee_b: u128,
+        notional: u128,
+        applied_risk_increasing: bool,
+        applied_long_has_source_claims: bool,
+        applied_short_has_source_claims: bool,
+    ) -> V16Result<()> {
+        Self::accumulate_batch_trade_apply(
+            outcome,
+            risk_increasing,
+            long_has_source_claims,
+            short_has_source_claims,
+            TradeApplyOutcomeV16 {
+                fee_a,
+                fee_b,
+                notional,
+                risk_increasing: applied_risk_increasing,
+                long_has_source_claims: applied_long_has_source_claims,
+                short_has_source_claims: applied_short_has_source_claims,
+            },
+        )
+    }
+
     fn finish_trade_checks_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
@@ -11272,6 +11317,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         requests: &[TradeRequestV16],
     ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
+        self.execute_batch_with_fee_after_tail_validation_not_atomic(
+            long_account,
+            short_account,
+            requests,
+        )
+    }
+
+    fn execute_batch_with_fee_after_tail_validation_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> V16Result<BatchTradeOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -11310,25 +11368,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 requests[i],
                 recertify_after_fill,
             )?;
-            outcome.fill_count = outcome
-                .fill_count
-                .checked_add(1)
-                .ok_or(V16Error::CounterOverflow)?;
-            outcome.fee_a = outcome
-                .fee_a
-                .checked_add(applied.fee_a)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            outcome.fee_b = outcome
-                .fee_b
-                .checked_add(applied.fee_b)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            outcome.notional = outcome
-                .notional
-                .checked_add(applied.notional)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            risk_increasing |= applied.risk_increasing;
-            long_has_source_claims |= applied.long_has_source_claims;
-            short_has_source_claims |= applied.short_has_source_claims;
+            Self::accumulate_batch_trade_apply(
+                &mut outcome,
+                &mut risk_increasing,
+                &mut long_has_source_claims,
+                &mut short_has_source_claims,
+                applied,
+            )?;
             i += 1;
         }
         if !recertify_after_fill {
@@ -12135,8 +12181,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let nonflat = !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
-        let fee_anchor = if decode_market_mode(self.header.mode)? == MarketModeV16::Live
-            && nonflat
+        let fee_anchor = if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat
         {
             self.account_fee_anchor_for_loss_currentness(&account.as_view(), now_slot)?
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {

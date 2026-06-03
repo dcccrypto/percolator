@@ -332,11 +332,20 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
         "final portfolio keeps only the replacement asset-1 exposure"
     );
     assert_eq!(
-        taker.header.health_cert.try_to_runtime().unwrap().certified_initial_req,
+        taker
+            .header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_initial_req,
         1_000
     );
     assert_eq!(
-        lp.header.health_cert.try_to_runtime().unwrap().certified_initial_req,
+        lp.header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_initial_req,
         1_000
     );
     market.validate_shape().unwrap();
@@ -593,17 +602,11 @@ fn v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting() {
     assert_eq!(market.header.vault.get(), 10);
     assert_eq!(market.header.insurance.get(), 10);
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         10
     );
     assert_eq!(
-        market.markets[0]
-            .engine
-            .insurance_domain_budget_long
-            .get(),
+        market.markets[0].engine.insurance_domain_budget_long.get(),
         10
     );
 
@@ -611,17 +614,11 @@ fn v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting() {
     assert_eq!(market.header.vault.get(), 6);
     assert_eq!(market.header.insurance.get(), 6);
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         6
     );
     assert_eq!(
-        market.markets[0]
-            .engine
-            .insurance_domain_budget_long
-            .get(),
+        market.markets[0].engine.insurance_domain_budget_long.get(),
         6
     );
     assert_eq!(market.validate_shape(), Ok(()));
@@ -646,7 +643,9 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
-    market.credit_domain_insurance_budget_not_atomic(0, 7).unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(0, 7)
+        .unwrap();
     let err = market.credit_account_from_insurance_not_atomic(&mut account, 1);
     assert_eq!(
         err,
@@ -663,25 +662,16 @@ fn v16_public_domain_insurance_spent_setter_preserves_budget_total() {
     market.deposit_domain_insurance_not_atomic(0, 10).unwrap();
     market.set_domain_insurance_spent(0, 4).unwrap();
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         6
     );
     assert_eq!(
-        market.markets[0]
-            .engine
-            .insurance_domain_spent_long
-            .get(),
+        market.markets[0].engine.insurance_domain_spent_long.get(),
         4
     );
     market.set_domain_insurance_spent(0, 0).unwrap();
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         10
     );
     assert_eq!(market.validate_shape(), Ok(()));
@@ -702,17 +692,11 @@ fn v16_public_domain_insurance_spent_setter_rejects_unbacked_clear() {
 
     assert_eq!(err, Err(V16Error::LockActive));
     assert_eq!(
-        market
-            .header
-            .insurance_domain_budget_remaining_total
-            .get(),
+        market.header.insurance_domain_budget_remaining_total.get(),
         5
     );
     assert_eq!(
-        market.markets[0]
-            .engine
-            .insurance_domain_spent_long
-            .get(),
+        market.markets[0].engine.insurance_domain_spent_long.get(),
         5
     );
 }
