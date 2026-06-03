@@ -3089,6 +3089,7 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     let market_before = markets[0];
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
     let account = PortfolioV16ViewMut::new(&mut account_header);
     let result =
         market.kani_preflight_liquidation_residual_durability(0, SideV16::Long, &account.as_view());
@@ -3131,6 +3132,7 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
     let insurance_before = header.insurance;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
     let account = PortfolioV16ViewMut::new(&mut account_header);
     let result =
         market.kani_preflight_liquidation_residual_durability(0, SideV16::Long, &account.as_view());
