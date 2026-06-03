@@ -271,6 +271,80 @@ fn v16_single_trade_matches_batch_of_one_state() {
 }
 
 #[test]
+fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut taker_header = account_fixture(2, 211);
+    let mut lp_header = account_fixture(2, 212);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+        market.deposit_not_atomic(&mut taker, 1_000).unwrap();
+        market.deposit_not_atomic(&mut lp, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_in_place_not_atomic(
+                &mut lp,
+                &mut taker,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: 10 * POS_SCALE,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    let outcome = market
+        .execute_batch_with_fee_in_place_not_atomic(
+            &mut taker,
+            &mut lp,
+            &[
+                TradeRequestV16 {
+                    asset_index: 1,
+                    size_q: 10 * POS_SCALE,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: 10 * POS_SCALE,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            ],
+        )
+        .expect("batch must not reject a final-IM-valid basket due to interim IM");
+
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(outcome.notional, 2_000);
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_long_q.get(),
+        0,
+        "second fill closes the original asset-0 exposure"
+    );
+    assert_eq!(
+        market.markets[1].engine.asset.oi_eff_long_q.get(),
+        10 * POS_SCALE,
+        "final portfolio keeps only the replacement asset-1 exposure"
+    );
+    assert_eq!(
+        taker.header.health_cert.try_to_runtime().unwrap().certified_initial_req,
+        1_000
+    );
+    assert_eq!(
+        lp.header.health_cert.try_to_runtime().unwrap().certified_initial_req,
+        1_000
+    );
+    market.validate_shape().unwrap();
+    taker.validate_with_market(&market.as_view()).unwrap();
+    lp.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 203);

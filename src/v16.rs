@@ -11159,6 +11159,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
+        recertify_after_fill: bool,
     ) -> V16Result<TradeApplyOutcomeV16> {
         let long_delta =
             i128::try_from(request.size_q).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -11176,7 +11177,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let notional = trade_notional_floor(request.size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
-        let price = self.asset_state(request.asset_index)?.effective_price;
         let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
         let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
         self.apply_current_position_delta_with_lookup(
@@ -11191,20 +11191,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_delta,
             trade_preflight.short_lookup,
         )?;
-        self.recertify_account_after_trade_delta(
-            long_account,
-            request.asset_index,
-            trade_preflight.long_old_abs_q,
-            trade_preflight.long_new_abs_q,
-            price,
-        )?;
-        self.recertify_account_after_trade_delta(
-            short_account,
-            request.asset_index,
-            trade_preflight.short_old_abs_q,
-            trade_preflight.short_new_abs_q,
-            price,
-        )?;
+        if recertify_after_fill {
+            let price = self.asset_state(request.asset_index)?.effective_price;
+            self.recertify_account_after_trade_delta(
+                long_account,
+                request.asset_index,
+                trade_preflight.long_old_abs_q,
+                trade_preflight.long_new_abs_q,
+                price,
+            )?;
+            self.recertify_account_after_trade_delta(
+                short_account,
+                request.asset_index,
+                trade_preflight.short_old_abs_q,
+                trade_preflight.short_new_abs_q,
+                price,
+            )?;
+        }
         Ok(TradeApplyOutcomeV16 {
             fee_a,
             fee_b,
@@ -11298,12 +11301,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut risk_increasing = false;
         let mut long_has_source_claims = false;
         let mut short_has_source_claims = false;
+        let recertify_after_fill = requests.len() == 1;
         let mut i = 0usize;
         while i < requests.len() {
             let applied = self.apply_trade_after_refresh_not_atomic(
                 long_account,
                 short_account,
                 requests[i],
+                recertify_after_fill,
             )?;
             outcome.fill_count = outcome
                 .fill_count
@@ -11325,6 +11330,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims |= applied.long_has_source_claims;
             short_has_source_claims |= applied.short_has_source_claims;
             i += 1;
+        }
+        if !recertify_after_fill {
+            self.certify_account_after_local_settlement_with_price_override(long_account, None)?;
+            self.certify_account_after_local_settlement_with_price_override(short_account, None)?;
         }
         self.finish_trade_checks_not_atomic(
             long_account,
