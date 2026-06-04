@@ -989,22 +989,44 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
 fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {
     let size_units_raw: u8 = kani::any();
     let loss_weight_raw: u8 = kani::any();
+    let first_account_long: bool = kani::any();
     kani::assume((1..=4).contains(&size_units_raw));
     kani::assume((1..=4).contains(&loss_weight_raw));
     let size_q = size_units_raw as u128 * POS_SCALE;
     let loss_weight = loss_weight_raw as u128 * POS_SCALE;
+    let signed_size_q = if first_account_long {
+        size_q as i128
+    } else {
+        -(size_q as i128)
+    };
+    let (abs_q, first_delta, second_delta) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed_size_q).unwrap();
     let mut asset = AssetStateV16::default();
     let before = asset;
 
-    kani_add_open_interest_for_new_position(&mut asset, SideV16::Long, size_q, loss_weight)
-        .unwrap();
-    kani_add_open_interest_for_new_position(&mut asset, SideV16::Short, size_q, loss_weight)
-        .unwrap();
+    let first_side = if first_delta > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let second_side = if second_delta > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    kani_add_open_interest_for_new_position(&mut asset, first_side, abs_q, loss_weight).unwrap();
+    kani_add_open_interest_for_new_position(&mut asset, second_side, abs_q, loss_weight).unwrap();
 
     kani::cover!(
-        size_units_raw > 1 && loss_weight_raw > 1,
-        "trade open-interest accounting covers nontrivial size and weight"
+        first_account_long && size_units_raw > 1 && loss_weight_raw > 1,
+        "trade open-interest accounting covers first-account long with nontrivial size and weight"
     );
+    kani::cover!(
+        !first_account_long && size_units_raw > 1 && loss_weight_raw > 1,
+        "trade open-interest accounting covers first-account short with nontrivial size and weight"
+    );
+    assert_eq!(abs_q, size_q);
+    assert_eq!(first_delta.checked_add(second_delta), Some(0));
     assert_eq!(asset.oi_eff_long_q, size_q);
     assert_eq!(asset.oi_eff_short_q, size_q);
     assert_eq!(asset.loss_weight_sum_long, loss_weight);

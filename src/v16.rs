@@ -13971,36 +13971,45 @@ impl Default for PortfolioAccountV16Account {
 }
 
 impl PortfolioAccountV16Account {
-    pub fn try_empty(header: ProvenanceHeaderV16Account) -> V16Result<Self> {
+    pub fn init_empty_in_place(&mut self, header: ProvenanceHeaderV16Account) -> V16Result<()> {
         let owner = header.try_to_runtime()?.owner;
-        let mut legs = [PortfolioLegV16Account::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        self.provenance_header = header;
+        self.owner = owner;
+        self.capital = V16PodU128::new(0);
+        self.pnl = V16PodI128::new(0);
+        self.reserved_pnl = V16PodU128::new(0);
+        self.fee_credits = V16PodI128::new(0);
+        self.cancel_deposit_escrow = V16PodU128::new(0);
+        self.last_fee_slot = V16PodU64::new(0);
+        self.active_bitmap = [V16PodU64::new(0); V16_ACTIVE_BITMAP_WORDS];
+
         let empty_leg = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut i = 0usize;
         while i < V16_MAX_PORTFOLIO_ASSETS_N {
-            legs[i] = empty_leg;
+            self.legs[i] = empty_leg;
             i += 1;
         }
-        Ok(Self {
-            provenance_header: header,
-            owner,
-            capital: V16PodU128::new(0),
-            pnl: V16PodI128::new(0),
-            reserved_pnl: V16PodU128::new(0),
-            fee_credits: V16PodI128::new(0),
-            cancel_deposit_escrow: V16PodU128::new(0),
-            last_fee_slot: V16PodU64::new(0),
-            active_bitmap: [V16PodU64::new(0); V16_ACTIVE_BITMAP_WORDS],
-            legs,
-            source_domains: [PortfolioSourceDomainV16Account::default();
-                PORTFOLIO_SOURCE_DOMAIN_CAP],
-            health_cert: HealthCertV16Account::default(),
-            stale_state: encode_bool(false),
-            b_stale_state: encode_bool(false),
-            rebalance_lock: encode_bool(false),
-            liquidation_lock: encode_bool(false),
-            close_progress: CloseProgressLedgerV16Account::default(),
-            resolved_payout_receipt: ResolvedPayoutReceiptV16Account::default(),
-        })
+        let mut i = 0usize;
+        while i < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            self.source_domains[i] = PortfolioSourceDomainV16Account::default();
+            i += 1;
+        }
+
+        self.health_cert = HealthCertV16Account::default();
+        self.stale_state = encode_bool(false);
+        self.b_stale_state = encode_bool(false);
+        self.rebalance_lock = encode_bool(false);
+        self.liquidation_lock = encode_bool(false);
+        self.close_progress = CloseProgressLedgerV16Account::default();
+        self.resolved_payout_receipt = ResolvedPayoutReceiptV16Account::default();
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    pub fn try_empty(header: ProvenanceHeaderV16Account) -> V16Result<Self> {
+        let mut out = Self::default();
+        out.init_empty_in_place(header)?;
+        Ok(out)
     }
 }
 
