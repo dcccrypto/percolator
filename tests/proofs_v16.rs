@@ -1166,6 +1166,56 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate() {
+    let threshold_stress_active: bool = kani::any();
+    let bankruptcy_hlock_active: bool = kani::any();
+    let recovery_mode: bool = kani::any();
+    let instruction_bankruptcy_candidate: bool = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.threshold_stress_active = threshold_stress_active as u8;
+    header.bankruptcy_hlock_active = bankruptcy_hlock_active as u8;
+    header.mode = if recovery_mode { 2 } else { 0 };
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let lane = market
+        .kani_h_lock_lane(None, instruction_bankruptcy_candidate)
+        .unwrap();
+    let expected = if threshold_stress_active
+        || bankruptcy_hlock_active
+        || recovery_mode
+        || instruction_bankruptcy_candidate
+    {
+        HLockLaneV16::HMax
+    } else {
+        HLockLaneV16::HMin
+    };
+
+    kani::cover!(
+        lane == HLockLaneV16::HMin,
+        "global h-lock lane covers healthy h_min branch"
+    );
+    kani::cover!(
+        lane == HLockLaneV16::HMax && threshold_stress_active,
+        "global h-lock lane covers threshold stress h_max branch"
+    );
+    kani::cover!(
+        lane == HLockLaneV16::HMax && bankruptcy_hlock_active,
+        "global h-lock lane covers bankruptcy h_max branch"
+    );
+    kani::cover!(
+        lane == HLockLaneV16::HMax && recovery_mode,
+        "global h-lock lane covers recovery h_max branch"
+    );
+    kani::cover!(
+        lane == HLockLaneV16::HMax && instruction_bankruptcy_candidate,
+        "global h-lock lane covers same-instruction candidate h_max branch"
+    );
+    assert_eq!(lane, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {
     let size_units_raw: u8 = kani::any();
     let loss_weight_raw: u8 = kani::any();
