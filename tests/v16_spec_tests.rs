@@ -757,6 +757,55 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
 }
 
 #[test]
+fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let old_market_id = markets[0].engine.asset.market_id.get();
+    let recomputed_empty_source = SourceCreditStateV16 {
+        credit_epoch: 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&recomputed_empty_source);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&recomputed_empty_source);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.retire_empty_asset_not_atomic(0, 1).unwrap();
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Retired
+    );
+
+    market.activate_empty_market_not_atomic(0, 200, 2).unwrap();
+    assert_ne!(
+        market.markets[0].engine.asset.market_id.get(),
+        old_market_id
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_view_rejects_overwithdraw() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 6);

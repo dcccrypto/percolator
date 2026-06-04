@@ -2021,6 +2021,20 @@ impl SourceCreditStateV16 {
         credit_rate_num: CREDIT_RATE_SCALE,
         credit_epoch: 0,
     };
+
+    pub const fn is_empty_amount_shape(self) -> bool {
+        self.positive_claim_bound_num == 0
+            && self.exact_positive_claim_num == 0
+            && self.fresh_reserved_backing_num == 0
+            && self.spent_backing_num == 0
+            && self.provider_receivable_num == 0
+            && self.valid_liened_backing_num == 0
+            && self.impaired_liened_backing_num == 0
+            && self.insurance_credit_reserved_num == 0
+            && self.valid_liened_insurance_num == 0
+            && self.impaired_liened_insurance_num == 0
+            && (self.credit_rate_num == 0 || self.credit_rate_num == CREDIT_RATE_SCALE)
+    }
 }
 
 impl Default for SourceCreditStateV16 {
@@ -4325,8 +4339,7 @@ impl EngineAssetSlotV16Account {
             && state.impaired_liened_backing_num.get() == 0
             && state.insurance_credit_reserved_num.get() == 0
             && state.valid_liened_insurance_num.get() == 0
-            && state.impaired_liened_insurance_num.get() == 0
-            && state.credit_epoch.get() == 0;
+            && state.impaired_liened_insurance_num.get() == 0;
         all_non_rate_fields_empty
             && (state.credit_rate_num.get() == 0
                 || state.credit_rate_num.get() == CREDIT_RATE_SCALE)
@@ -9632,8 +9645,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.explicit_unallocated_loss_short != 0
             || slot.insurance_domain_spent_long.get() != 0
             || slot.insurance_domain_spent_short.get() != 0
-            || long_source != SourceCreditStateV16::EMPTY
-            || short_source != SourceCreditStateV16::EMPTY
+            || !long_source.is_empty_amount_shape()
+            || !short_source.is_empty_amount_shape()
             || !long_bucket.is_empty_amount_shape()
             || !short_bucket.is_empty_amount_shape()
             || long_bucket.market_id != asset.market_id
