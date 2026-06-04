@@ -4400,6 +4400,56 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving() {
+    let selected_budget_raw: u8 = kani::any();
+    let other_budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&selected_budget_raw));
+    kani::assume((1..=8).contains(&other_budget_raw));
+    kani::assume(withdraw_raw <= 16);
+    kani::assume(spent_raw <= selected_budget_raw);
+    kani::assume(reserved_raw <= selected_budget_raw - spent_raw);
+    let selected_budget = selected_budget_raw as u128;
+    let other_budget = other_budget_raw as u128;
+    let spent = spent_raw as u128;
+    let reserved = reserved_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let selected_available = selected_budget - spent - reserved;
+    let vault = selected_budget + other_budget;
+    let insurance = vault;
+    let result = MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+        vault,
+        insurance,
+        0,
+        selected_budget,
+        spent,
+        reserved,
+        withdraw,
+    );
+    let expected_ok = withdraw <= selected_available;
+
+    kani::cover!(
+        withdraw > 1 && expected_ok && other_budget > 1,
+        "domain insurance withdraw delta covers nontrivial scoped success"
+    );
+    kani::cover!(
+        !expected_ok && withdraw <= selected_available + other_budget,
+        "domain insurance withdraw delta rejects overdraw despite other-domain budget"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_vault, next_insurance, next_budget)) = result {
+        assert_eq!(next_vault, vault - withdraw);
+        assert_eq!(next_insurance, insurance - withdraw);
+        assert_eq!(next_budget, selected_budget - withdraw);
+        assert!(next_vault >= next_insurance);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {

@@ -7011,6 +7011,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    fn withdraw_domain_insurance_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget: u128,
+        spent: u128,
+        domain_reserved_atoms: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let global_available = insurance.saturating_sub(source_reserved_atoms);
+        let budget_remaining = budget
+            .saturating_sub(spent)
+            .saturating_sub(domain_reserved_atoms);
+        if amount > global_available.min(budget_remaining) || amount > vault {
+            return Err(V16Error::LockActive);
+        }
+        let next_vault = vault
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let next_insurance = insurance
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let next_budget = budget
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((next_vault, next_insurance, next_budget))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_withdraw_domain_insurance_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget: u128,
+        spent: u128,
+        domain_reserved_atoms: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        Self::withdraw_domain_insurance_delta(
+            vault,
+            insurance,
+            source_reserved_atoms,
+            budget,
+            spent,
+            domain_reserved_atoms,
+            amount,
+        )
+    }
+
     /// Withdraws available insurance from a single domain budget.
     pub fn withdraw_domain_insurance_not_atomic(
         &mut self,
@@ -7018,31 +7067,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         amount: u128,
     ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
-        if amount > self.available_domain_insurance(domain)? || amount > self.header.vault.get() {
-            return Err(V16Error::LockActive);
-        }
+        let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
+        let domain_reserved_atoms = V16Core::amount_from_bound_num(
+            self.insurance_reservation_for_domain(domain)?
+                .insurance_credit_reserved_num,
+        )?;
         let vault_before = self.header.vault.get();
-        let next_vault = vault_before
-            .checked_sub(amount)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let next_insurance = self
-            .header
-            .insurance
-            .get()
-            .checked_sub(amount)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
-        let next_budget = budget
-            .checked_sub(amount)
-            .ok_or(V16Error::CounterUnderflow)?;
-
-        self.set_domain_insurance_budget_core(domain, next_budget, next_insurance)?;
-        self.header.vault = V16PodU128::new(next_vault);
-        self.header.insurance = V16PodU128::new(next_insurance);
+        let (next_vault, next_insurance, next_budget) = Self::withdraw_domain_insurance_delta(
+            vault_before,
+            self.header.insurance.get(),
+            self.header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            budget,
+            spent,
+            domain_reserved_atoms,
+            amount,
+        )?;
+        let next_insurance = V16PodU128::new(next_insurance);
+        let next_vault = V16PodU128::new(next_vault);
+        self.set_domain_insurance_budget_core(domain, next_budget, next_insurance.get())?;
+        self.header.vault = next_vault;
+        self.header.insurance = next_insurance;
         TokenValueFlowProofV16::insurance_capital_to_external_out(
             amount,
             vault_before,
-            next_vault,
+            self.header.vault.get(),
         )?
         .validate()?;
         self.validate_source_domain_ledger(domain)?;
