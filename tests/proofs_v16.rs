@@ -620,6 +620,107 @@ fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts() {
+    let old_market_id_raw: u8 = kani::any();
+    let credit_epoch_raw: u8 = kani::any();
+    let zero_credit_rate: bool = kani::any();
+    let nonempty_claim: bool = kani::any();
+    let price_raw: u16 = kani::any();
+    kani::assume((1..=16).contains(&old_market_id_raw));
+    kani::assume(credit_epoch_raw != 0);
+    kani::assume((1..=10_000).contains(&price_raw));
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let old_market_id = old_market_id_raw as u64;
+    let new_market_id = old_market_id + 1;
+    header.next_market_id = V16PodU64::new(new_market_id);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(0);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+
+    let mut retired_asset = AssetStateV16 {
+        lifecycle: AssetLifecycleV16::Retired,
+        market_id: old_market_id,
+        retired_slot: 1,
+        ..AssetStateV16::default()
+    };
+    retired_asset.a_long = ADL_ONE;
+    retired_asset.a_short = ADL_ONE;
+    let old_backing = BackingBucketV16::empty_for_market(old_market_id);
+    let mut source = SourceCreditStateV16 {
+        credit_epoch: credit_epoch_raw as u64,
+        credit_rate_num: if zero_credit_rate {
+            0
+        } else {
+            CREDIT_RATE_SCALE
+        },
+        ..SourceCreditStateV16::EMPTY
+    };
+    if nonempty_claim {
+        source.positive_claim_bound_num = BOUND_SCALE;
+    }
+    let mut slot = EngineAssetSlotV16Account {
+        asset: AssetStateV16Account::from_runtime(&retired_asset),
+        source_credit_long: SourceCreditStateV16Account::from_runtime(&source),
+        source_credit_short: SourceCreditStateV16Account::from_runtime(&source),
+        backing_long: BackingBucketV16Account::from_runtime(&old_backing),
+        backing_short: BackingBucketV16Account::from_runtime(&old_backing),
+        ..EngineAssetSlotV16Account::default()
+    };
+    let slot_before = slot;
+
+    let result = header.activate_empty_market_slot_not_atomic(0, &mut slot, price_raw as u64, 2);
+
+    kani::cover!(
+        !nonempty_claim && zero_credit_rate && credit_epoch_raw > 1 && price_raw > 100,
+        "retired-slot activation accepts empty source credit with old epoch and zero rate"
+    );
+    kani::cover!(
+        nonempty_claim && credit_epoch_raw > 1,
+        "retired-slot activation rejects nonempty source credit before reuse"
+    );
+    assert_eq!(header.vault, vault_before);
+    assert_eq!(header.c_tot, c_tot_before);
+    assert_eq!(header.insurance, insurance_before);
+    assert_eq!(result.is_ok(), !nonempty_claim);
+    if nonempty_claim {
+        assert_eq!(slot, slot_before);
+        assert_eq!(header.next_market_id.get(), new_market_id);
+    } else {
+        let asset = slot.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+        assert_eq!(asset.market_id, new_market_id);
+        assert_eq!(asset.raw_oracle_target_price, price_raw as u64);
+        assert_eq!(asset.effective_price, price_raw as u64);
+        assert_eq!(
+            slot.source_credit_long.try_to_runtime().unwrap(),
+            SourceCreditStateV16::EMPTY
+        );
+        assert_eq!(
+            slot.source_credit_short.try_to_runtime().unwrap(),
+            SourceCreditStateV16::EMPTY
+        );
+        assert_eq!(
+            slot.backing_long.try_to_runtime().unwrap().market_id,
+            new_market_id
+        );
+        assert_eq!(
+            slot.backing_short.try_to_runtime().unwrap().market_id,
+            new_market_id
+        );
+        assert_eq!(header.next_market_id.get(), new_market_id + 1);
+        assert_eq!(header.asset_set_epoch.get(), 1);
+        assert_eq!(header.risk_epoch.get(), 1);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
