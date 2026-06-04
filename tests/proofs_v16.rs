@@ -1830,6 +1830,56 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
+    let vault_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let bucket_earnings_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(vault_raw <= 20);
+    kani::assume(c_tot_raw <= 10);
+    kani::assume(insurance_raw <= 10);
+    kani::assume(earnings_raw <= 10);
+    kani::assume(bucket_earnings_raw <= earnings_raw);
+    kani::assume(amount_raw <= 10);
+    let vault = vault_raw as u128;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let earnings = earnings_raw as u128;
+    let bucket_earnings = bucket_earnings_raw as u128;
+    let amount = amount_raw as u128;
+    kani::assume(c_tot + insurance + earnings <= vault);
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_credit_backing_provider_earnings_delta(
+        vault,
+        c_tot,
+        insurance,
+        earnings,
+        bucket_earnings,
+        amount,
+    );
+    let expected_ok = c_tot + insurance + earnings + amount <= vault;
+
+    kani::cover!(
+        amount > 0 && expected_ok && c_tot + insurance + earnings < vault,
+        "backing-provider earnings credit covers fee credit from vault slack"
+    );
+    kani::cover!(
+        amount > 0 && !expected_ok && c_tot + insurance + earnings == vault,
+        "backing-provider earnings credit rejects without vault slack"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_earnings, next_bucket_earnings)) = result {
+        assert_eq!(next_earnings, earnings + amount);
+        assert_eq!(next_bucket_earnings, bucket_earnings + amount);
+        assert!(c_tot + insurance + next_earnings <= vault);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {

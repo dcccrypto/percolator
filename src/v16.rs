@@ -6248,6 +6248,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// This does not debit an account or increase the vault; callers must have already
     /// moved value into vault slack. The method rejects if the resulting senior
     /// backing-provider claim would exceed vault coverage.
+    fn credit_backing_provider_earnings_delta(
+        vault: u128,
+        c_tot: u128,
+        insurance: u128,
+        earnings_total: u128,
+        bucket_earnings: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        let next_earnings_total = earnings_total
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        let senior = c_tot
+            .checked_add(insurance)
+            .and_then(|v| v.checked_add(next_earnings_total))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if senior > vault {
+            return Err(V16Error::LockActive);
+        }
+        let next_bucket_earnings = bucket_earnings
+            .checked_add(amount)
+            .ok_or(V16Error::CounterOverflow)?;
+        Ok((next_earnings_total, next_bucket_earnings))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_credit_backing_provider_earnings_delta(
+        vault: u128,
+        c_tot: u128,
+        insurance: u128,
+        earnings_total: u128,
+        bucket_earnings: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        Self::credit_backing_provider_earnings_delta(
+            vault,
+            c_tot,
+            insurance,
+            earnings_total,
+            bucket_earnings,
+            amount,
+        )
+    }
+
     pub fn credit_backing_provider_earnings_not_atomic(
         &mut self,
         domain: usize,
@@ -6257,32 +6300,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
-        let next_earnings_total = self
-            .header
-            .backing_provider_earnings_total
-            .get()
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        let senior = self
-            .header
-            .c_tot
-            .get()
-            .checked_add(self.header.insurance.get())
-            .and_then(|v| v.checked_add(next_earnings_total))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if senior > self.header.vault.get() {
-            return Err(V16Error::LockActive);
-        }
         let mut bucket = self.backing_bucket_for_domain(domain)?;
         if bucket.status != BackingBucketStatusV16::Fresh
             || bucket.expiry_slot <= self.header.current_slot.get()
         {
             return Err(V16Error::LockActive);
         }
-        bucket.utilization_fee_earnings = bucket
-            .utilization_fee_earnings
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
+        let (_, next_bucket_earnings) = Self::credit_backing_provider_earnings_delta(
+            self.header.vault.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+            self.header.backing_provider_earnings_total.get(),
+            bucket.utilization_fee_earnings,
+            amount,
+        )?;
+        bucket.utilization_fee_earnings = next_bucket_earnings;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.validate_source_domain_ledger(domain)?;
         self.validate_shape()
