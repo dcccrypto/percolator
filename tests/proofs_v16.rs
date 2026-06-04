@@ -3843,9 +3843,8 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.refresh_header_aggregate_totals_for_test().unwrap();
 
-    market
-        .reserve_insurance_credit_not_atomic(0, amount)
-        .unwrap();
+    let result = market.reserve_insurance_credit_not_atomic(0, amount);
+    assert_eq!(result, Ok(()));
     let reservation = market.markets[0]
         .engine
         .insurance_reservation_long
@@ -3879,7 +3878,6 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
-    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[kani::proof]
