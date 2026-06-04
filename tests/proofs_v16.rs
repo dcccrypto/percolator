@@ -4,7 +4,9 @@ use percolator::v16::{
     active_bitmap_set, kani_add_open_interest_for_new_position,
     kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
     kani_apply_resolved_payout_receipt_payment, kani_expected_source_credit_rate_num_for_state,
+    kani_health_cert_after_capital_debit,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_loss_stale_trade_scope_allowed, kani_prepare_asset_recovery_transition,
     kani_source_credit_state_realizable_support_for_face,
     kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
     AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
@@ -59,6 +61,135 @@ fn one_market_view_fixture() -> (
     }
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
+    let target: u16 = kani::any();
+    kani::assume((1..=10_000).contains(&target));
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let effective_before = markets[0].engine.asset.effective_price.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let res = market.set_asset_raw_oracle_target_not_atomic(0, target as u64);
+
+    kani::cover!(
+        target > 100,
+        "raw target update covers a nontrivial target/effective lag"
+    );
+    assert_eq!(res, Ok(()));
+    assert_eq!(
+        market.markets[0].engine.asset.raw_oracle_target_price.get(),
+        target as u64
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.effective_price.get(),
+        effective_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_asset_recovery_transition_freezes_price_and_bumps_once() {
+    let raw_price: u16 = kani::any();
+    let use_drain_only: bool = kani::any();
+    let asset_set_epoch: u8 = kani::any();
+    let risk_epoch: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&raw_price));
+    let mut asset = AssetStateV16 {
+        lifecycle: if use_drain_only {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Active
+        },
+        raw_oracle_target_price: 1,
+        effective_price: raw_price as u64,
+        fund_px_last: raw_price as u64,
+        ..AssetStateV16::default()
+    };
+    let (next, next_asset_set_epoch, next_risk_epoch) =
+        kani_prepare_asset_recovery_transition(asset, asset_set_epoch as u64, risk_epoch as u64)
+            .unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.raw_oracle_target_price = asset.effective_price;
+
+    kani::cover!(
+        use_drain_only && raw_price > 100,
+        "asset recovery transition covers drain-only asset with nontrivial price"
+    );
+    assert_eq!(next, asset);
+    assert_eq!(next_asset_set_epoch, asset_set_epoch as u64 + 1);
+    assert_eq!(next_risk_epoch, risk_epoch as u64 + 1);
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_asset_recovery_transition_is_idempotent_after_recovery() {
+    let raw_price: u16 = kani::any();
+    let asset_set_epoch: u8 = kani::any();
+    let risk_epoch: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&raw_price));
+    let asset = AssetStateV16 {
+        lifecycle: AssetLifecycleV16::Recovery,
+        raw_oracle_target_price: raw_price as u64,
+        effective_price: raw_price as u64,
+        fund_px_last: raw_price as u64,
+        ..AssetStateV16::default()
+    };
+    let (next, next_asset_set_epoch, next_risk_epoch) =
+        kani_prepare_asset_recovery_transition(asset, asset_set_epoch as u64, risk_epoch as u64)
+            .unwrap();
+
+    kani::cover!(
+        raw_price > 100,
+        "asset recovery transition covers nontrivial idempotent recovery price"
+    );
+    assert_eq!(next, asset);
+    assert_eq!(next_asset_set_epoch, asset_set_epoch as u64);
+    assert_eq!(next_risk_epoch, risk_epoch as u64);
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets() {
+    let market_loss_stale_active: bool = kani::any();
+    let trade_asset_loss_stale: bool = kani::any();
+    let long_account_loss_stale_exposed: bool = kani::any();
+    let short_account_loss_stale_exposed: bool = kani::any();
+    let allowed = kani_loss_stale_trade_scope_allowed(
+        market_loss_stale_active,
+        trade_asset_loss_stale,
+        long_account_loss_stale_exposed,
+        short_account_loss_stale_exposed,
+    );
+
+    kani::cover!(
+        allowed,
+        "loss-stale scoped trade allows the unrelated-current branch"
+    );
+    kani::cover!(
+        market_loss_stale_active
+            && (trade_asset_loss_stale
+                || long_account_loss_stale_exposed
+                || short_account_loss_stale_exposed)
+            && !allowed,
+        "loss-stale scoped trade denies stale asset or stale account exposure"
+    );
+    assert_eq!(
+        allowed,
+        market_loss_stale_active
+            && !trade_asset_loss_stale
+            && !long_account_loss_stale_exposed
+            && !short_account_loss_stale_exposed
+    );
 }
 
 #[kani::proof]
@@ -1494,6 +1625,149 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=6).contains(&backing_raw));
+    kani::assume((1..=6).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    let backing = backing_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let withdraw_num = withdraw * BOUND_SCALE;
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        valid_liened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: backing_num + BOUND_SCALE,
+        valid_liened_backing_num: BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let (bucket_after, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            bucket,
+            source,
+            withdraw_num,
+        )
+        .unwrap();
+
+    let remaining = backing - withdraw;
+    kani::cover!(
+        withdraw > 0 && remaining > 0,
+        "fresh backing withdraw delta covers partial principal withdrawal"
+    );
+    kani::cover!(
+        withdraw == backing,
+        "fresh backing withdraw delta covers full unliened principal withdrawal"
+    );
+    assert_eq!(
+        bucket_after.fresh_unliened_backing_num,
+        remaining * BOUND_SCALE
+    );
+    assert_eq!(bucket_after.valid_liened_backing_num, BOUND_SCALE);
+    assert_eq!(
+        source_after.fresh_reserved_backing_num,
+        remaining * BOUND_SCALE + BOUND_SCALE
+    );
+    assert_eq!(source_after.valid_liened_backing_num, BOUND_SCALE);
+    assert_eq!(source_after.provider_receivable_num, 0);
+    assert_eq!(source_after.spent_backing_num, 0);
+    if remaining == 0 {
+        assert_eq!(bucket_after.status, BackingBucketStatusV16::Fresh);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((2..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw < backing_raw);
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let withdraw_num = withdraw_raw as u128 * BOUND_SCALE;
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: backing_num,
+        exact_positive_claim_num: backing_num,
+        fresh_reserved_backing_num: backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+
+    let (_bucket_after, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            bucket,
+            source,
+            withdraw_num,
+        )
+        .unwrap();
+    let post_rate = kani_expected_source_credit_rate_num_for_state(source_after).unwrap();
+
+    kani::cover!(
+        withdraw_raw > 1,
+        "counterparty backing withdraw proof covers nontrivial underbacking"
+    );
+    assert!(post_rate < CREDIT_RATE_SCALE);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
+    let equity_raw: u8 = kani::any();
+    let im_raw: u8 = kani::any();
+    let fee_raw: u8 = kani::any();
+    kani::assume(equity_raw <= 20);
+    kani::assume(im_raw <= 20);
+    kani::assume(fee_raw <= 20);
+    let equity = equity_raw as i128;
+    let im = im_raw as u128;
+    let fee = fee_raw as u128;
+    let cert = HealthCertV16 {
+        certified_equity: equity,
+        certified_initial_req: im,
+        certified_maintenance_req: im.saturating_sub(1),
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    let result = kani_health_cert_after_capital_debit(cert, fee);
+
+    if equity >= 0 && (equity as u128) >= fee && (equity as u128 - fee) >= im {
+        let next = result.unwrap();
+        kani::cover!(
+            fee > 0 && im > 0,
+            "health cert fee debit covers positive fee with IM still satisfied"
+        );
+        assert_eq!(next.certified_equity, equity - fee as i128);
+        assert!((next.certified_equity as u128) >= next.certified_initial_req);
+    } else {
+        kani::cover!(
+            fee > 0 && (equity < 0 || (equity as u128).saturating_sub(fee) < im),
+            "health cert fee debit rejects insufficient post-fee IM"
+        );
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
 }
 
 #[kani::proof]

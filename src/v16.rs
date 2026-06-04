@@ -80,6 +80,27 @@ fn apply_backing_provider_earnings_withdraw(
     Ok((next_vault, bucket_earnings - amount))
 }
 
+fn health_cert_after_capital_debit(cert: HealthCertV16, amount: u128) -> V16Result<HealthCertV16> {
+    let amount_i128 = i128::try_from(amount).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let next_equity = cert
+        .certified_equity
+        .checked_sub(amount_i128)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if next_equity < 0 || (next_equity as u128) < cert.certified_initial_req {
+        return Err(V16Error::LockActive);
+    }
+    Ok(HealthCertV16 {
+        certified_equity: next_equity,
+        certified_liq_deficit: if next_equity < 0 {
+            next_equity.unsigned_abs()
+        } else {
+            cert.certified_maintenance_req
+                .saturating_sub(next_equity as u128)
+        },
+        ..cert
+    })
+}
+
 #[cfg(kani)]
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
@@ -104,6 +125,14 @@ pub fn kani_apply_backing_provider_earnings_withdraw(
     amount: u128,
 ) -> V16Result<(u128, u128)> {
     apply_backing_provider_earnings_withdraw(vault, bucket_earnings, amount)
+}
+
+#[cfg(kani)]
+pub fn kani_health_cert_after_capital_debit(
+    cert: HealthCertV16,
+    amount: u128,
+) -> V16Result<HealthCertV16> {
+    health_cert_after_capital_debit(cert, amount)
 }
 
 #[inline]
@@ -324,6 +353,41 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
 struct V16Core;
 
 impl V16Core {
+    fn loss_stale_trade_scope_allowed(
+        market_loss_stale_active: bool,
+        trade_asset_loss_stale: bool,
+        long_account_loss_stale_exposed: bool,
+        short_account_loss_stale_exposed: bool,
+    ) -> bool {
+        market_loss_stale_active
+            && !trade_asset_loss_stale
+            && !long_account_loss_stale_exposed
+            && !short_account_loss_stale_exposed
+    }
+
+    fn prepare_asset_recovery_transition(
+        mut asset: AssetStateV16,
+        asset_set_epoch: u64,
+        risk_epoch: u64,
+    ) -> V16Result<(AssetStateV16, u64, u64)> {
+        match asset.lifecycle {
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => {
+                if asset.effective_price == 0 || asset.effective_price > MAX_ORACLE_PRICE {
+                    return Err(V16Error::InvalidConfig);
+                }
+                let next_asset_set_epoch = asset_set_epoch
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                let next_risk_epoch = risk_epoch.checked_add(1).ok_or(V16Error::CounterOverflow)?;
+                asset.lifecycle = AssetLifecycleV16::Recovery;
+                asset.raw_oracle_target_price = asset.effective_price;
+                Ok((asset, next_asset_set_epoch, next_risk_epoch))
+            }
+            AssetLifecycleV16::Recovery => Ok((asset, asset_set_epoch, risk_epoch)),
+            _ => Err(V16Error::LockActive),
+        }
+    }
+
     #[inline]
     fn amount_from_bound_num(bound_num: u128) -> V16Result<u128> {
         let whole = bound_num / BOUND_SCALE;
@@ -672,6 +736,35 @@ impl V16Core {
             .fresh_reserved_backing_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
+        Ok((bucket, source))
+    }
+
+    fn prepare_counterparty_backing_withdraw_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.fresh_unliened_backing_num < amount
+            || source.fresh_reserved_backing_num < amount
+        {
+            return Err(V16Error::LockActive);
+        }
+        bucket.fresh_unliened_backing_num -= amount;
+        source.fresh_reserved_backing_num -= amount;
+        if bucket.fresh_unliened_backing_num == 0 && bucket.valid_liened_backing_num == 0 {
+            if bucket.impaired_liened_backing_num != 0 {
+                bucket.status = BackingBucketStatusV16::Impaired;
+            } else if bucket.consumed_liened_backing_num != 0 {
+                bucket.status = BackingBucketStatusV16::Expired;
+            } else {
+                bucket.status = BackingBucketStatusV16::Empty;
+                bucket.expiry_slot = 0;
+            }
+        }
         Ok((bucket, source))
     }
 
@@ -1109,6 +1202,30 @@ pub fn kani_expected_source_credit_rate_num_for_state(
     state: SourceCreditStateV16,
 ) -> V16Result<u128> {
     V16Core::expected_source_credit_rate_num_for_state(state)
+}
+
+#[cfg(kani)]
+pub fn kani_loss_stale_trade_scope_allowed(
+    market_loss_stale_active: bool,
+    trade_asset_loss_stale: bool,
+    long_account_loss_stale_exposed: bool,
+    short_account_loss_stale_exposed: bool,
+) -> bool {
+    V16Core::loss_stale_trade_scope_allowed(
+        market_loss_stale_active,
+        trade_asset_loss_stale,
+        long_account_loss_stale_exposed,
+        short_account_loss_stale_exposed,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_prepare_asset_recovery_transition(
+    asset: AssetStateV16,
+    asset_set_epoch: u64,
+    risk_epoch: u64,
+) -> V16Result<(AssetStateV16, u64, u64)> {
+    V16Core::prepare_asset_recovery_transition(asset, asset_set_epoch, risk_epoch)
 }
 
 #[cfg(kani)]
@@ -5533,6 +5650,83 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    /// Deposits external quote into a source domain's fresh counterparty backing.
+    ///
+    /// `amount` is quote atoms. The backing ledger stores BOUND_SCALE-scaled
+    /// amounts, while vault stores quote atoms, so both sides move in one engine
+    /// transition.
+    pub fn deposit_fresh_counterparty_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let backing_num = V16Core::bound_num_from_amount(amount)?;
+        self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        self.header.vault = V16PodU128::new(
+            self.header
+                .vault
+                .get()
+                .checked_add(amount)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    /// Withdraws unliened fresh counterparty-backing principal.
+    ///
+    /// The withdrawal is allowed only if the source domain remains fully backed
+    /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
+    /// prevents a backing provider from withdrawing principal that currently
+    /// supports outstanding source-credit claims.
+    pub fn withdraw_fresh_counterparty_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let backing_num = V16Core::bound_num_from_amount(amount)?;
+        let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            backing_num,
+        )?;
+        let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
+            source,
+            self.header.risk_epoch.get(),
+        )?;
+        if source.credit_rate_num != CREDIT_RATE_SCALE {
+            return Err(V16Error::LockActive);
+        }
+        let next_vault = self
+            .header
+            .vault
+            .get()
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.header.vault = V16PodU128::new(next_vault);
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
     pub fn expire_source_backing_bucket_not_atomic(
         &mut self,
         domain: usize,
@@ -6079,6 +6273,97 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.validate_source_domain_ledger(domain)?;
         self.validate_shape()
+    }
+
+    /// Charges an account-level backing fee and routes it to backing-provider
+    /// earnings and/or domain insurance.
+    ///
+    /// The wrapper owns fee-policy calculation. The engine owns the value
+    /// transition: account capital and `c_tot` decrease by
+    /// `provider_fee + insurance_fee`; provider earnings and domain insurance
+    /// budget increase by their exact routed amounts; vault is unchanged.
+    pub fn charge_account_backing_fee_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        provider_domain: usize,
+        provider_fee: u128,
+        insurance_domain: usize,
+        insurance_fee: u128,
+    ) -> V16Result<u128> {
+        self.domain_asset_side(provider_domain)?;
+        self.domain_asset_side(insurance_domain)?;
+        let total_fee = provider_fee
+            .checked_add(insurance_fee)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total_fee == 0 {
+            return Ok(0);
+        }
+        account.validate_with_market(&self.as_view())?;
+        self.ensure_favorable_action_current_certificate(&account.as_view())?;
+        if account.header.pnl.get() < 0 || account.header.capital.get() < total_fee {
+            return Err(V16Error::LockActive);
+        }
+        let cert = health_cert_after_capital_debit(
+            account.header.health_cert.try_to_runtime()?,
+            total_fee,
+        )?;
+        account.header.capital = V16PodU128::new(
+            account
+                .header
+                .capital
+                .get()
+                .checked_sub(total_fee)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        self.header.c_tot = V16PodU128::new(
+            self.header
+                .c_tot
+                .get()
+                .checked_sub(total_fee)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+
+        if provider_fee != 0 {
+            let mut bucket = self.backing_bucket_for_domain(provider_domain)?;
+            if bucket.status != BackingBucketStatusV16::Fresh
+                || bucket.expiry_slot <= self.header.current_slot.get()
+            {
+                return Err(V16Error::LockActive);
+            }
+            bucket.utilization_fee_earnings = bucket
+                .utilization_fee_earnings
+                .checked_add(provider_fee)
+                .ok_or(V16Error::CounterOverflow)?;
+            self.set_backing_bucket_for_domain(provider_domain, bucket)?;
+            self.validate_source_domain_ledger(provider_domain)?;
+        }
+
+        if insurance_fee != 0 {
+            let next_insurance = self
+                .header
+                .insurance
+                .get()
+                .checked_add(insurance_fee)
+                .ok_or(V16Error::CounterOverflow)?;
+            let (budget, _) = self.domain_insurance_budget_spent(insurance_domain)?;
+            let next_budget = budget
+                .checked_add(insurance_fee)
+                .ok_or(V16Error::CounterOverflow)?;
+            self.header.insurance = V16PodU128::new(next_insurance);
+            self.set_domain_insurance_budget_core(insurance_domain, next_budget, next_insurance)?;
+            self.validate_source_domain_ledger(insurance_domain)?;
+        }
+
+        TokenValueFlowProofV16::account_capital_to_insurance(
+            insurance_fee,
+            self.header.vault.get(),
+            self.header.vault.get(),
+        )?
+        .validate()?;
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(total_fee)
     }
 
     fn account_source_claim_bound_sum_num(account: &PortfolioV16View<'_>) -> V16Result<u128> {
@@ -7257,6 +7542,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             current_slot,
             expiry_slot,
         )
+    }
+
+    #[cfg(kani)]
+    pub fn kani_prepare_counterparty_backing_withdraw_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)
     }
 
     #[cfg(kani)]
@@ -8790,6 +9084,142 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    fn require_asset_mark_pushable(&self, asset_index: usize) -> V16Result<()> {
+        match self.asset_state(asset_index)?.lifecycle {
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => Ok(()),
+            _ => Err(V16Error::LockActive),
+        }
+    }
+
+    fn asset_local_has_position_or_loss_state(&self, asset_index: usize) -> V16Result<bool> {
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(asset.oi_eff_long_q != 0
+            || asset.oi_eff_short_q != 0
+            || asset.stored_pos_count_long != 0
+            || asset.stored_pos_count_short != 0
+            || asset.stale_account_count_long != 0
+            || asset.stale_account_count_short != 0
+            || asset.b_long_num != 0
+            || asset.b_short_num != 0
+            || asset.b_epoch_start_long_num != 0
+            || asset.b_epoch_start_short_num != 0
+            || asset.loss_weight_sum_long != 0
+            || asset.loss_weight_sum_short != 0
+            || asset.social_loss_remainder_long_num != 0
+            || asset.social_loss_remainder_short_num != 0
+            || asset.social_loss_dust_long_num != 0
+            || asset.social_loss_dust_short_num != 0
+            || asset.explicit_unallocated_loss_long != 0
+            || asset.explicit_unallocated_loss_short != 0
+            || asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
+            || slot.pending_domain_loss_barrier_long.get() != 0
+            || slot.pending_domain_loss_barrier_short.get() != 0)
+    }
+
+    fn group_has_position_or_loss_state_for_oracle_reset(&self) -> V16Result<bool> {
+        if self.header.pnl_pos_tot.get() != 0
+            || self.header.stale_certificate_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+            || self.header.negative_pnl_account_count.get() != 0
+            || decode_bool(self.header.bankruptcy_hlock_active)?
+            || decode_bool(self.header.threshold_stress_active)?
+            || decode_bool(self.header.loss_stale_active)?
+            || self.header.recovery_reason.try_to_runtime()?.is_some()
+        {
+            return Ok(true);
+        }
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        let mut i = 0usize;
+        while i < configured_assets {
+            if self.asset_local_has_position_or_loss_state(i)? {
+                return Ok(true);
+            }
+            i += 1;
+        }
+        Ok(false)
+    }
+
+    pub fn set_asset_raw_oracle_target_not_atomic(
+        &mut self,
+        asset_index: usize,
+        raw_oracle_target_price: u64,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || raw_oracle_target_price == 0
+            || raw_oracle_target_price > MAX_ORACLE_PRICE
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        self.require_asset_mark_pushable(asset_index)?;
+        let mut asset = self.asset_state(asset_index)?;
+        asset.raw_oracle_target_price = raw_oracle_target_price;
+        self.set_asset_state(asset_index, asset)?;
+        self.validate_shape()
+    }
+
+    pub fn reset_empty_asset_oracle_anchor_not_atomic(
+        &mut self,
+        asset_index: usize,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || authenticated_price == 0
+            || authenticated_price > MAX_ORACLE_PRICE
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let mut asset = self.asset_state(asset_index)?;
+        if asset.lifecycle != AssetLifecycleV16::Active
+            || self.group_has_position_or_loss_state_for_oracle_reset()?
+        {
+            return Err(V16Error::LockActive);
+        }
+        asset.raw_oracle_target_price = authenticated_price;
+        asset.effective_price = authenticated_price;
+        asset.fund_px_last = authenticated_price;
+        asset.slot_last = now_slot;
+        self.set_asset_state(asset_index, asset)?;
+        self.header.current_slot = V16PodU64::new(now_slot);
+        self.header.slot_last = V16PodU64::new(now_slot);
+        self.validate_shape()
+    }
+
+    pub fn force_asset_recovery_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let asset = self.asset_state(asset_index)?;
+        match asset.lifecycle {
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly => {
+                let (asset, next_asset_set_epoch, next_risk_epoch) =
+                    V16Core::prepare_asset_recovery_transition(
+                        asset,
+                        self.header.asset_set_epoch.get(),
+                        self.header.risk_epoch.get(),
+                    )?;
+                self.set_asset_state(asset_index, asset)?;
+                self.commit_asset_set_epoch_bump(next_asset_set_epoch, next_risk_epoch);
+                self.validate_shape()
+            }
+            AssetLifecycleV16::Recovery => self.validate_shape(),
+            _ => Err(V16Error::LockActive),
+        }
+    }
+
     pub fn accrue_asset_to_not_atomic(
         &mut self,
         asset_index: usize,
@@ -9538,6 +9968,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         Ok(false)
+    }
+
+    fn can_ignore_unrelated_loss_stale_for_trade(
+        &self,
+        long_account: &PortfolioV16View<'_>,
+        short_account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        if !decode_bool(self.header.loss_stale_active)? {
+            return Ok(false);
+        }
+        Ok(V16Core::loss_stale_trade_scope_allowed(
+            true,
+            self.asset_is_loss_stale(asset_index)?,
+            self.account_has_loss_stale_live_leg(long_account)?,
+            self.account_has_loss_stale_live_leg(short_account)?,
+        ))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_can_ignore_unrelated_loss_stale_for_trade(
+        &self,
+        long_account: &PortfolioV16View<'_>,
+        short_account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        self.can_ignore_unrelated_loss_stale_for_trade(long_account, short_account, asset_index)
     }
 
     fn account_fee_anchor_for_loss_currentness(
@@ -11456,6 +11913,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    pub fn execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        request: TradeRequestV16,
+    ) -> V16Result<TradeOutcomeV16> {
+        let outcome = self.execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            long_account,
+            short_account,
+            core::slice::from_ref(&request),
+        )?;
+        Ok(TradeOutcomeV16 {
+            fee_a: outcome.fee_a,
+            fee_b: outcome.fee_b,
+            notional: outcome.notional,
+        })
+    }
+
     pub fn execute_batch_with_fee_in_place_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
@@ -11468,6 +11943,48 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_account,
             requests,
         )
+    }
+
+    pub fn execute_batch_with_fee_loss_stale_scoped_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> V16Result<BatchTradeOutcomeV16> {
+        self.validate_unconfigured_market_tail()?;
+        let mut ignore_unrelated_loss_stale =
+            decode_bool(self.header.loss_stale_active)? && !requests.is_empty();
+        if ignore_unrelated_loss_stale {
+            let mut i = 0usize;
+            while i < requests.len() {
+                if !self.can_ignore_unrelated_loss_stale_for_trade(
+                    &long_account.as_view(),
+                    &short_account.as_view(),
+                    requests[i].asset_index,
+                )? {
+                    ignore_unrelated_loss_stale = false;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        let restore_loss_stale_active = self.header.loss_stale_active;
+        if ignore_unrelated_loss_stale {
+            self.header.loss_stale_active = 0;
+        }
+        let result = self.execute_batch_with_fee_after_tail_validation_not_atomic(
+            long_account,
+            short_account,
+            requests,
+        );
+        if ignore_unrelated_loss_stale {
+            self.header.loss_stale_active = restore_loss_stale_active;
+        }
+        let outcome = result?;
+        self.validate_shape()?;
+        long_account.validate_with_market(&self.as_view())?;
+        short_account.validate_with_market(&self.as_view())?;
+        Ok(outcome)
     }
 
     fn execute_batch_with_fee_after_tail_validation_not_atomic(
