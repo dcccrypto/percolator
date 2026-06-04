@@ -26,7 +26,7 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_TRADE_SIZE_Q, POS_SCALE,
-    SOCIAL_LOSS_DEN,
+    SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -61,6 +61,85 @@ fn one_market_view_fixture() -> (
     }
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
+}
+
+fn one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    (header, markets)
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
+    let account_tag: u8 = kani::any();
+    let owner_tag: u8 = kani::any();
+    let dirty_capital_raw: u8 = kani::any();
+    let dirty_source_raw: u8 = kani::any();
+    kani::assume(dirty_capital_raw != 0);
+    kani::assume(dirty_source_raw != 0);
+
+    let (market_id, _, _) = ids();
+    let (mut market_header, mut markets) = one_market_only_fixture();
+    let mut account_id = [0u8; 32];
+    account_id[0] = account_tag;
+    let mut owner = [0u8; 32];
+    owner[0] = owner_tag;
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        market_id, account_id, owner,
+    ));
+    let mut account = PortfolioAccountV16Account::default();
+
+    account.capital = V16PodU128::new(dirty_capital_raw as u128);
+    account.pnl = V16PodI128::new(dirty_capital_raw as i128);
+    account.active_bitmap = [V16PodU64::new(u64::MAX); V16_ACTIVE_BITMAP_WORDS];
+    account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        ..PortfolioLegV16::EMPTY
+    });
+    account.source_domains[0].domain = V16PodU32::new(dirty_source_raw as u32);
+    account.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account.source_domains[0].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+    account.stale_state = 2;
+    account.b_stale_state = 2;
+    account.rebalance_lock = 1;
+    account.liquidation_lock = 1;
+
+    account.init_empty_in_place(provenance).unwrap();
+
+    let market = MarketGroupV16ViewMut::new(&mut market_header, &mut markets);
+    let account_view = PortfolioV16View::new(&account);
+    kani::cover!(
+        account_tag != 0 && owner_tag != 0 && dirty_capital_raw > 1 && dirty_source_raw > 1,
+        "in-place account init covers dirty pre-state with nontrivial provenance"
+    );
+    assert_eq!(account.provenance_header, provenance);
+    assert_eq!(account.owner, owner);
+    assert_eq!(account.capital.get(), 0);
+    assert_eq!(account.pnl.get(), 0);
+    assert_eq!(account.reserved_pnl.get(), 0);
+    assert_eq!(account.fee_credits.get(), 0);
+    assert_eq!(account.active_bitmap[0].get(), 0);
+    assert!(account.legs[0].try_to_runtime().unwrap().is_empty());
+    assert!(account.source_domains[0].is_sparse_tail_default());
+    assert_eq!(account.stale_state, 0);
+    assert_eq!(account.b_stale_state, 0);
+    assert_eq!(account.rebalance_lock, 0);
+    assert_eq!(account.liquidation_lock, 0);
+    assert_eq!(account_view.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
