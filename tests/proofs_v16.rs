@@ -4629,7 +4629,7 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
     let budget_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&budget_raw));
+    kani::assume(budget_raw > 0);
     let budget = budget_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -4941,8 +4941,8 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
 fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
     let first_raw: u8 = kani::any();
     let second_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&first_raw));
-    kani::assume((1..=5).contains(&second_raw));
+    kani::assume(first_raw > 0);
+    kani::assume(second_raw > 0);
     let first_atoms = first_raw as u128;
     let second_atoms = second_raw as u128;
     let first_num = first_atoms * BOUND_SCALE;
@@ -4998,7 +4998,7 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_fractional_consume_rejects() {
     let atoms_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&atoms_raw));
+    kani::assume(atoms_raw > 0);
     let available_num = (atoms_raw as u128 + 1) * BOUND_SCALE;
     let fractional_num = (atoms_raw as u128 * BOUND_SCALE) + 1;
     let reservation = InsuranceCreditReservationV16 {
@@ -5034,8 +5034,8 @@ fn proof_v16_insurance_lien_fractional_consume_rejects() {
 fn proof_v16_expired_counterparty_backing_bucket_accepts_receivable_refill() {
     let amount_raw: u8 = kani::any();
     let receivable_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&amount_raw));
-    kani::assume((1..=5).contains(&receivable_raw));
+    kani::assume(amount_raw > 0);
+    kani::assume(receivable_raw > 0);
     let amount = amount_raw as u128;
     let receivable = receivable_raw as u128;
     let bucket = BackingBucketV16 {
@@ -5154,7 +5154,7 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_credit_consumption_reports_atoms_not_scaled_backing() {
     let effective_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&effective_raw));
+    kani::assume(effective_raw > 0);
     let effective = effective_raw as u128;
     let (required_face_num, backing_num) =
         MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_amounts_for_effective(
@@ -5220,7 +5220,7 @@ fn proof_v16_counterparty_credit_consumption_reports_atoms_not_scaled_backing() 
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_source_credit_support_does_not_debit_vault_or_insurance() {
     let amount_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&amount_raw));
+    kani::assume(amount_raw > 0);
     let amount = amount_raw as u128;
     let vault_before: u128 = kani::any();
     kani::assume(vault_before <= 1_000_000);
@@ -5266,7 +5266,7 @@ fn proof_v16_counterparty_source_credit_support_does_not_debit_vault_or_insuranc
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital() {
     let amount_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&amount_raw));
+    kani::assume(amount_raw > 0);
     let amount = amount_raw as u128;
     let c_tot_before: u128 = kani::any();
     kani::assume(amount <= c_tot_before && c_tot_before <= 1_000_000);
