@@ -9834,6 +9834,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    pub fn finalize_side_reset_not_atomic(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let pending_barrier = self.pending_domain_loss_barrier_count(asset_index, side)?;
+        let mut asset = self.asset_state(asset_index)?;
+        match side {
+            SideV16::Long => match asset.mode_long {
+                SideModeV16::Normal => return Ok(()),
+                SideModeV16::DrainOnly => return Err(V16Error::LockActive),
+                SideModeV16::ResetPending => {
+                    if asset.stored_pos_count_long != 0
+                        || asset.stale_account_count_long != 0
+                        || asset.pending_obligation_count_long != 0
+                        || pending_barrier != 0
+                    {
+                        return Err(V16Error::Stale);
+                    }
+                    asset.mode_long = SideModeV16::Normal;
+                }
+            },
+            SideV16::Short => match asset.mode_short {
+                SideModeV16::Normal => return Ok(()),
+                SideModeV16::DrainOnly => return Err(V16Error::LockActive),
+                SideModeV16::ResetPending => {
+                    if asset.stored_pos_count_short != 0
+                        || asset.stale_account_count_short != 0
+                        || asset.pending_obligation_count_short != 0
+                        || pending_barrier != 0
+                    {
+                        return Err(V16Error::Stale);
+                    }
+                    asset.mode_short = SideModeV16::Normal;
+                }
+            },
+        }
+        self.set_asset_state(asset_index, asset)?;
+        self.header.risk_epoch = V16PodU64::new(
+            self.header
+                .risk_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.as_view().validate_header_aggregate_totals()?;
+        self.validate_shape_audit_scan()
+    }
+
     fn account_b_loss_bound(account: &PortfolioV16View<'_>) -> V16Result<u128> {
         let mut bound = 0u128;
         let mut slot = 0usize;
@@ -13262,7 +13312,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             return Err(V16Error::InvalidConfig);
         }
-        self.validate_shape()
+        self.as_view().validate_header_aggregate_totals()?;
+        self.validate_shape_audit_scan()
     }
 
     pub fn close_resolved_account_not_atomic(

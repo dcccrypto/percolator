@@ -19,10 +19,10 @@ use percolator::v16::{
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
-    StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config, V16Error,
-    V16PodI128, V16PodU128, V16PodU32, V16PodU64, PORTFOLIO_SOURCE_DOMAIN_CAP,
-    V16_EMPTY_ACTIVE_BITMAP,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
+    TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_TRADE_SIZE_Q, POS_SCALE,
@@ -73,6 +73,209 @@ fn one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) 
         view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
     }
     (header, markets)
+}
+
+fn one_market_persisted_slot_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    (header, markets)
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
+    let finalize_long: bool = kani::any();
+    let (mut header, mut markets) = one_market_persisted_slot_fixture();
+    header.vault = V16PodU128::new(11);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(3);
+    let risk_epoch_before = header.risk_epoch.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    if finalize_long {
+        asset.mode_long = SideModeV16::ResetPending;
+    } else {
+        asset.mode_short = SideModeV16::ResetPending;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let side = if finalize_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.finalize_side_reset_not_atomic(0, side);
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        finalize_long,
+        "long ResetPending side finalizes through the public API"
+    );
+    kani::cover!(
+        !finalize_long,
+        "short ResetPending side finalizes through the public API"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    if finalize_long {
+        assert_eq!(after.mode_long, SideModeV16::Normal);
+    } else {
+        assert_eq!(after.mode_short, SideModeV16::Normal);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_public_finalize_side_reset_rejects_each_blocker_without_mutation() {
+    let finalize_long: bool = kani::any();
+    let blocker_kind: u8 = kani::any();
+    kani::assume(blocker_kind <= 3);
+
+    let (mut header, mut markets) = one_market_persisted_slot_fixture();
+    header.vault = V16PodU128::new(11);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(3);
+    let risk_epoch_before = header.risk_epoch.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    if finalize_long {
+        asset.mode_long = SideModeV16::ResetPending;
+        match blocker_kind {
+            0 => asset.stored_pos_count_long = 1,
+            1 => asset.stale_account_count_long = 1,
+            2 => asset.pending_obligation_count_long = 1,
+            _ => markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        }
+    } else {
+        asset.mode_short = SideModeV16::ResetPending;
+        match blocker_kind {
+            0 => asset.stored_pos_count_short = 1,
+            1 => asset.stale_account_count_short = 1,
+            2 => asset.pending_obligation_count_short = 1,
+            _ => markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1),
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let side = if finalize_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.finalize_side_reset_not_atomic(0, side);
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        blocker_kind == 0 && finalize_long,
+        "stored-position blocker prevents public reset finalization"
+    );
+    kani::cover!(
+        blocker_kind == 3 && !finalize_long,
+        "pending-barrier blocker prevents public reset finalization"
+    );
+    assert_eq!(result, Err(V16Error::Stale));
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    if finalize_long {
+        assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    } else {
+        assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
+    let exact_raw: u8 = kani::any();
+    let bound_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let decrease_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&exact_raw));
+    kani::assume((1..=4).contains(&bound_raw));
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume((1..=4).contains(&decrease_raw));
+    kani::assume(decrease_raw <= bound_raw);
+    kani::assume((residual_raw as u128) <= (exact_raw as u128 + bound_raw as u128));
+
+    let exact_num = exact_raw as u128 * BOUND_SCALE;
+    let bound_num = bound_raw as u128 * BOUND_SCALE;
+    let decrease_num = decrease_raw as u128 * BOUND_SCALE;
+    let total_before = exact_num + bound_num;
+    let numerator_before = residual_raw as u128 * BOUND_SCALE;
+
+    let (mut header, mut markets) = one_market_persisted_slot_fixture();
+    header.mode = 1; // Resolved
+    header.vault = V16PodU128::new(13);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(3);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: residual_raw as u128,
+            terminal_claim_exact_receipts_num: exact_num,
+            terminal_claim_bound_unreceipted_num: bound_num,
+            current_payout_rate_num: numerator_before,
+            current_payout_rate_den: total_before,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.refine_resolved_unreceipted_bound_not_atomic(decrease_num);
+    let ledger = market
+        .header
+        .resolved_payout_ledger
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        decrease_raw > 1 && residual_raw < exact_raw + bound_raw,
+        "resolved refinement covers a nontrivial haircut and bound decrease"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        ledger.terminal_claim_bound_unreceipted_num,
+        bound_num - decrease_num
+    );
+    assert!(
+        ledger.current_payout_rate_num * total_before
+            >= numerator_before * ledger.current_payout_rate_den
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
 }
 
 #[kani::proof]

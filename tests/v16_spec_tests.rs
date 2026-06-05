@@ -8,8 +8,8 @@ use percolator::v16::{
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config,
-    V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
+    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -169,6 +169,103 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(market.header.insurance.get(), 50);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::ResetPending;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Long)
+        .unwrap();
+
+    let finalized = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(finalized.mode_long, SideModeV16::Normal);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_finalize_side_reset_rejects_blocked_pending_side() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_short = SideModeV16::ResetPending;
+    asset.pending_obligation_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.finalize_side_reset_not_atomic(0, SideV16::Short),
+        Err(V16Error::Stale)
+    );
+
+    let blocked = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(blocked.mode_short, SideModeV16::ResetPending);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_resolved_bound_refinement_uses_public_monotone_api() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+    header.vault = V16PodU128::new(50);
+    let exact_num = 2 * BOUND_SCALE;
+    let bound_num = 4 * BOUND_SCALE;
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: 3,
+            terminal_claim_exact_receipts_num: exact_num,
+            terminal_claim_bound_unreceipted_num: bound_num,
+            current_payout_rate_num: 3 * BOUND_SCALE,
+            current_payout_rate_den: exact_num + bound_num,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .refine_resolved_unreceipted_bound_not_atomic(2 * BOUND_SCALE)
+        .unwrap();
+
+    let refined = market
+        .header
+        .resolved_payout_ledger
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(
+        refined.terminal_claim_bound_unreceipted_num,
+        2 * BOUND_SCALE
+    );
+    assert!(
+        refined.current_payout_rate_num * (exact_num + bound_num)
+            >= (3 * BOUND_SCALE) * refined.current_payout_rate_den,
+        "bound refinement must not reduce already-quoted payout rate"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    market.validate_shape().unwrap();
 }
 
 #[test]
