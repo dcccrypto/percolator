@@ -2906,7 +2906,7 @@ fn proof_v16_residual_excludes_senior_backing_provider_earnings() {
 #[kani::solver(cadical)]
 fn proof_v16_resolved_winddown_releases_liened_source_claim() {
     let units_raw: u8 = kani::any();
-    kani::assume((1..=4).contains(&units_raw));
+    kani::assume(units_raw > 0);
     let amount = (units_raw as u128) * BOUND_SCALE;
 
     let backing_bucket = BackingBucketV16 {
@@ -2933,8 +2933,8 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
         )
         .unwrap();
     kani::cover!(
-        units_raw > 1,
-        "terminal wind-down releases nontrivial counterparty lien"
+        units_raw > 4,
+        "terminal wind-down releases wide counterparty lien"
     );
     assert_eq!(bucket_after.valid_liened_backing_num, 0);
     assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
@@ -2952,7 +2952,7 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
 fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
     let units_raw: u8 = kani::any();
     let status_is_expired: bool = kani::any();
-    kani::assume((1..=4).contains(&units_raw));
+    kani::assume(units_raw > 0);
     let amount = (units_raw as u128) * BOUND_SCALE;
 
     let backing_bucket = BackingBucketV16 {
@@ -2983,8 +2983,8 @@ fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
         )
         .unwrap();
     kani::cover!(
-        status_is_expired && units_raw > 1,
-        "terminal wind-down releases nontrivial expired-status counterparty lien"
+        status_is_expired && units_raw > 4,
+        "terminal wind-down releases wide expired-status counterparty lien"
     );
     assert_eq!(bucket_after.valid_liened_backing_num, 0);
     assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
@@ -3003,7 +3003,7 @@ fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
 fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
     let units_raw: u8 = kani::any();
     let impaired_case: bool = kani::any();
-    kani::assume((1..=4).contains(&units_raw));
+    kani::assume(units_raw > 0);
     let amount = (units_raw as u128) * BOUND_SCALE;
     let valid = if impaired_case { 0 } else { amount };
     let impaired = amount - valid;
@@ -3030,12 +3030,12 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
         .unwrap();
 
     kani::cover!(
-        impaired_case && units_raw > 1,
-        "terminal wind-down releases nontrivial impaired insurance lien"
+        impaired_case && units_raw > 4,
+        "terminal wind-down releases wide impaired insurance lien"
     );
     kani::cover!(
-        !impaired_case && units_raw > 1,
-        "terminal wind-down still releases nontrivial valid insurance lien"
+        !impaired_case && units_raw > 4,
+        "terminal wind-down still releases wide valid insurance lien"
     );
     assert_eq!(reservation_after.insurance_credit_reserved_num, 0);
     assert_eq!(reservation_after.valid_liened_insurance_num, 0);
