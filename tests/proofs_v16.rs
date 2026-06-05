@@ -1039,7 +1039,7 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
 #[kani::solver(cadical)]
 fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let amount_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&amount_raw));
+    kani::assume(amount_raw > 0);
     let amount = amount_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(10);
@@ -1073,8 +1073,8 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let result = market.withdraw_not_atomic(&mut account, amount);
 
     kani::cover!(
-        amount > 1,
-        "nonflat withdraw proof covers nontrivial rejected amount"
+        amount > 5,
+        "nonflat withdraw proof covers wide rejected amount"
     );
     assert_eq!(result, Err(V16Error::Stale));
     assert_eq!(market.header.vault, vault_before);
