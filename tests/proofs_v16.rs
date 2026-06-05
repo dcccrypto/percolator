@@ -1784,21 +1784,24 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
-    let capital_raw: u8 = kani::any();
-    let fee_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 10);
-    kani::assume(fee_raw <= 10);
-    let capital = capital_raw as u128;
-    let requested_fee = fee_raw as u128;
+    let capital: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let requested_fee: u128 = kani::any();
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - capital);
     let expected = capital.min(requested_fee);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(100 + capital);
+    header.vault = V16PodU128::new(insurance + capital);
     header.c_tot = V16PodU128::new(capital);
-    header.insurance = V16PodU128::new(100);
+    header.insurance = V16PodU128::new(insurance);
     account_header.capital = V16PodU128::new(capital);
     account_header.pnl = V16PodI128::new(0);
     let vault_before = header.vault.get();
-    let senior_before = header.c_tot.get() + header.insurance.get();
+    let senior_before = header
+        .c_tot
+        .get()
+        .checked_add(header.insurance.get())
+        .unwrap();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -1822,16 +1825,14 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
     );
     assert_eq!(account.header.capital.get(), capital - expected);
     assert_eq!(market.header.c_tot.get(), capital - expected);
-    assert_eq!(market.header.insurance.get(), 100 + expected);
+    assert_eq!(market.header.insurance.get(), insurance + expected);
 }
 
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_trade_fee_helper_does_not_charge_negative_pnl_account() {
-    let requested_fee_raw: u8 = kani::any();
-    kani::assume(requested_fee_raw <= 10);
-    let requested_fee = requested_fee_raw as u128;
+    let requested_fee: u128 = kani::any();
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(110);
     header.c_tot = V16PodU128::new(10);
