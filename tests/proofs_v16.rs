@@ -1636,8 +1636,8 @@ fn proof_v16_final_batch_margin_gate_accepts_only_final_certified_im() {
 fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
     let long_units_raw: u8 = kani::any();
     let short_units_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&long_units_raw));
-    kani::assume((1..=5).contains(&short_units_raw));
+    kani::assume(long_units_raw > 0);
+    kani::assume(short_units_raw > 0);
     kani::assume(long_units_raw != short_units_raw);
     let (mut header, mut markets, _) = one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
@@ -1653,12 +1653,12 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
     let result = market.validate_shape();
 
     kani::cover!(
-        long_units_raw > short_units_raw,
-        "OI mismatch proof covers long-heavy invalid state"
+        long_units_raw > 5 && long_units_raw > short_units_raw,
+        "OI mismatch proof covers wide long-heavy invalid state"
     );
     kani::cover!(
-        short_units_raw > long_units_raw,
-        "OI mismatch proof covers short-heavy invalid state"
+        short_units_raw > 5 && short_units_raw > long_units_raw,
+        "OI mismatch proof covers wide short-heavy invalid state"
     );
     assert_eq!(result, Err(V16Error::InvalidConfig));
 }
@@ -1669,8 +1669,8 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
 fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     let long_position_raw: u8 = kani::any();
     let short_position_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&long_position_raw));
-    kani::assume((1..=5).contains(&short_position_raw));
+    kani::assume(long_position_raw > 0);
+    kani::assume(short_position_raw > 0);
     let long_position = long_position_raw as i128 * POS_SCALE as i128;
     let short_position = -(short_position_raw as i128 * POS_SCALE as i128);
     let (mut header, mut markets, _) = one_market_view_fixture();
@@ -1688,12 +1688,12 @@ fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
         .unwrap();
 
     kani::cover!(
-        long_position_raw > 1,
-        "pending-domain barrier proof covers nontrivial long position"
+        long_position_raw > 5,
+        "pending-domain barrier proof covers wide long position"
     );
     kani::cover!(
-        short_position_raw > 1,
-        "pending-domain barrier proof covers nontrivial unrelated short position"
+        short_position_raw > 5,
+        "pending-domain barrier proof covers wide unrelated short position"
     );
     assert!(closes_long);
     assert!(opens_long);
