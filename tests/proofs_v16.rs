@@ -1951,10 +1951,14 @@ fn proof_v16_backing_utilization_fee_never_charges_negative_pnl_account() {
     let capital: u128 = kani::any();
     let fee: u128 = kani::any();
     let earnings: u128 = kani::any();
+    let loss_raw: u8 = kani::any();
+    kani::assume(loss_raw > 0);
+    let loss = loss_raw as i128;
     let group_c_tot = capital;
 
     let (charged, next_capital, next_c_tot, next_earnings) =
-        kani_apply_backing_utilization_fee_charge(capital, group_c_tot, earnings, -1, fee).unwrap();
+        kani_apply_backing_utilization_fee_charge(capital, group_c_tot, earnings, -loss, fee)
+            .unwrap();
 
     kani::cover!(
         fee > 0 && capital > 0,
