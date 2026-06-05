@@ -5111,7 +5111,7 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
     let claim_raw: u8 = kani::any();
     let available_raw: u8 = kani::any();
     let required_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=32).contains(&claim_raw));
     kani::assume(available_raw < claim_raw);
     kani::assume(required_raw > available_raw);
     kani::assume(required_raw <= claim_raw);
@@ -5138,8 +5138,8 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
         "underbacked source-credit proof covers zero-backed domain"
     );
     kani::cover!(
-        available_raw != 0 && required_raw > available_raw,
-        "underbacked source-credit proof covers partially backed domain"
+        available_raw > 8 && required_raw > available_raw,
+        "underbacked source-credit proof covers wide partially backed domain"
     );
     if let Ok((required_face_num, required_backing_num)) = sized {
         assert!(required_face_num > source.positive_claim_bound_num);
