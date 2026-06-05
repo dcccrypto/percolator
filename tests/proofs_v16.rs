@@ -2666,13 +2666,13 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let backing_raw: u8 = kani::any();
-    kani::assume((1..=3).contains(&a_raw));
-    kani::assume((1..=3).contains(&b_raw));
+    kani::assume((1..=31).contains(&a_raw));
+    kani::assume((1..=31).contains(&b_raw));
     let a = a_raw as u128;
     let b = b_raw as u128;
     let total = a + b;
     // Undercapitalized (haircut) OR exactly-backed regime: backing <= total claim.
-    kani::assume(backing_raw <= 6);
+    kani::assume(backing_raw <= 62);
     kani::assume(backing_raw as u128 <= total);
     let backing = backing_raw as u128;
 
