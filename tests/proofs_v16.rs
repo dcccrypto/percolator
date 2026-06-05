@@ -4656,21 +4656,16 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving() {
-    let selected_budget_raw: u8 = kani::any();
-    let other_budget_raw: u8 = kani::any();
-    let spent_raw: u8 = kani::any();
-    let reserved_raw: u8 = kani::any();
-    let withdraw_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&selected_budget_raw));
-    kani::assume((1..=8).contains(&other_budget_raw));
-    kani::assume(withdraw_raw <= 16);
-    kani::assume(spent_raw <= selected_budget_raw);
-    kani::assume(reserved_raw <= selected_budget_raw - spent_raw);
-    let selected_budget = selected_budget_raw as u128;
-    let other_budget = other_budget_raw as u128;
-    let spent = spent_raw as u128;
-    let reserved = reserved_raw as u128;
-    let withdraw = withdraw_raw as u128;
+    let selected_budget: u128 = kani::any();
+    let other_budget: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let reserved: u128 = kani::any();
+    let withdraw: u128 = kani::any();
+    kani::assume(selected_budget > 0);
+    kani::assume(spent <= selected_budget);
+    kani::assume(reserved <= selected_budget - spent);
+    kani::assume(other_budget <= u128::MAX - selected_budget);
+    kani::assume(withdraw <= selected_budget + other_budget);
     let selected_available = selected_budget - spent - reserved;
     let vault = selected_budget + other_budget;
     let insurance = vault;
@@ -4706,24 +4701,21 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
-    let budget_raw: u8 = kani::any();
-    let old_spent_raw: u8 = kani::any();
-    let new_spent_raw: u8 = kani::any();
-    let other_remaining_raw: u8 = kani::any();
-    let extra_insurance_raw: u8 = kani::any();
-    kani::assume((1..=12).contains(&budget_raw));
-    kani::assume(old_spent_raw <= budget_raw);
-    kani::assume(new_spent_raw <= budget_raw);
-    kani::assume(other_remaining_raw <= 12);
-    kani::assume(extra_insurance_raw <= 3);
-    let budget = budget_raw as u128;
-    let old_spent = old_spent_raw as u128;
-    let new_spent = new_spent_raw as u128;
-    let other_remaining = other_remaining_raw as u128;
+    let budget: u128 = kani::any();
+    let old_spent: u128 = kani::any();
+    let new_spent: u128 = kani::any();
+    let other_remaining: u128 = kani::any();
+    let extra_insurance: u128 = kani::any();
+    kani::assume(budget > 0);
+    kani::assume(old_spent <= budget);
+    kani::assume(new_spent <= budget);
     let old_remaining = budget - old_spent;
     let new_remaining = budget - new_spent;
+    kani::assume(other_remaining <= u128::MAX - old_remaining);
+    kani::assume(other_remaining <= u128::MAX - new_remaining);
     let total_remaining = old_remaining + other_remaining;
-    let insurance = total_remaining + extra_insurance_raw as u128;
+    kani::assume(extra_insurance <= u128::MAX - total_remaining);
+    let insurance = total_remaining + extra_insurance;
     let result = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_spent_delta(
         total_remaining,
         insurance,
@@ -4753,25 +4745,22 @@ fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance() {
-    let old_budget_raw: u8 = kani::any();
-    let spent_raw: u8 = kani::any();
-    let add_raw: u8 = kani::any();
-    let other_remaining_raw: u8 = kani::any();
-    let extra_insurance_raw: u8 = kani::any();
-    kani::assume((1..=12).contains(&old_budget_raw));
-    kani::assume(spent_raw <= old_budget_raw);
-    kani::assume(add_raw <= 12);
-    kani::assume(other_remaining_raw <= 12);
-    kani::assume(extra_insurance_raw <= 3);
-    let old_budget = old_budget_raw as u128;
-    let spent = spent_raw as u128;
-    let add = add_raw as u128;
+    let old_budget: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let add: u128 = kani::any();
+    let other_remaining: u128 = kani::any();
+    let extra_insurance: u128 = kani::any();
+    kani::assume(old_budget > 0);
+    kani::assume(spent <= old_budget);
+    kani::assume(add <= u128::MAX - old_budget);
     let new_budget = old_budget + add;
-    let other_remaining = other_remaining_raw as u128;
     let old_remaining = old_budget - spent;
     let new_remaining = new_budget - spent;
+    kani::assume(other_remaining <= u128::MAX - old_remaining);
+    kani::assume(other_remaining <= u128::MAX - new_remaining);
     let total_remaining = old_remaining + other_remaining;
-    let insurance = total_remaining + extra_insurance_raw as u128;
+    kani::assume(extra_insurance <= u128::MAX - total_remaining);
+    let insurance = total_remaining + extra_insurance;
     let result = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
         total_remaining,
         insurance,
@@ -4783,7 +4772,7 @@ fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance(
     let expected_ok = expected_total <= insurance;
 
     kani::cover!(
-        expected_ok && add > 0 && extra_insurance_raw > 0,
+        expected_ok && add > 0 && extra_insurance > 0,
         "domain budget delta covers backed budget credit"
     );
     kani::cover!(
