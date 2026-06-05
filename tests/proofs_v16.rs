@@ -1301,7 +1301,7 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     let claim_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&claim_raw));
+    kani::assume(claim_raw > 0);
     let claim = claim_raw as u128;
     let claim_num = claim * BOUND_SCALE;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
