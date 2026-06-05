@@ -2273,7 +2273,7 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
 #[kani::solver(cadical)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let stale_market_id_raw: u8 = kani::any();
-    kani::assume((2..=10).contains(&stale_market_id_raw));
+    kani::assume(stale_market_id_raw > 1);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     let leg = PortfolioLegV16 {
         active: true,
