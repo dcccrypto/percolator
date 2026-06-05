@@ -4089,14 +4089,18 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
 #[kani::solver(cadical)]
 fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let budget_raw: u8 = kani::any();
-    kani::assume(budget_raw <= 5);
+    let loss_raw: u8 = kani::any();
+    kani::assume(budget_raw <= 10);
+    kani::assume((1..=10).contains(&loss_raw));
     let budget = budget_raw as u128;
+    let loss = loss_raw as u128;
+    let expected_used = budget.min(loss);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(10);
     header.insurance = V16PodU128::new(10);
     header.negative_pnl_account_count = V16PodU64::new(1);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
-    account_header.pnl = V16PodI128::new(-5);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.refresh_header_aggregate_totals_for_test().unwrap();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -4107,16 +4111,23 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
 
     kani::cover!(budget == 0 && used == 0, "zero domain budget spend branch");
     kani::cover!(
-        budget > 0 && used == budget,
-        "positive domain budget spend branch"
+        budget > 0 && budget < loss && used == budget,
+        "domain budget spend proof covers budget-capped branch"
     );
-    assert_eq!(used, budget);
-    assert_eq!(market.header.insurance.get(), 10 - budget);
+    kani::cover!(
+        loss < budget && used == loss,
+        "domain budget spend proof covers loss-capped branch"
+    );
+    assert_eq!(used, expected_used);
+    assert_eq!(market.header.insurance.get(), 10 - expected_used);
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
-        budget
+        expected_used
     );
-    assert_eq!(account.header.pnl.get(), -5 + budget as i128);
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + expected_used as i128
+    );
 }
 
 #[kani::proof]
