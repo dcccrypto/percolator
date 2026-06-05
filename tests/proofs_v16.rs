@@ -3230,9 +3230,9 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let residual_raw: u8 = kani::any();
-    kani::assume((1..=16).contains(&a_raw));
-    kani::assume((1..=16).contains(&b_raw));
-    kani::assume((1..=32).contains(&residual_raw));
+    kani::assume((1..=32).contains(&a_raw));
+    kani::assume((1..=32).contains(&b_raw));
+    kani::assume((1..=64).contains(&residual_raw));
     let a_claim = a_raw as u128;
     let b_claim = b_raw as u128;
     let total_claim = a_claim + b_claim;
