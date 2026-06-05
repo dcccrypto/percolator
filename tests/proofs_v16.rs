@@ -218,10 +218,10 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     let bound_raw: u8 = kani::any();
     let residual_raw: u8 = kani::any();
     let decrease_raw: u8 = kani::any();
-    kani::assume((1..=4).contains(&exact_raw));
-    kani::assume((1..=4).contains(&bound_raw));
-    kani::assume((1..=8).contains(&residual_raw));
-    kani::assume((1..=4).contains(&decrease_raw));
+    kani::assume((1..=32).contains(&exact_raw));
+    kani::assume((1..=32).contains(&bound_raw));
+    kani::assume((1..=32).contains(&residual_raw));
+    kani::assume((1..=32).contains(&decrease_raw));
     kani::assume(decrease_raw <= bound_raw);
     kani::assume((residual_raw as u128) <= (exact_raw as u128 + bound_raw as u128));
 
