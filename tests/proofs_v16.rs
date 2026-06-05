@@ -3855,9 +3855,8 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
     let residual_raw: u8 = kani::any();
     let chunk_raw: u8 = kani::any();
     let rem_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&residual_raw));
-    kani::assume((1..=10).contains(&chunk_raw));
-    kani::assume(rem_raw <= 8);
+    kani::assume(residual_raw > 0);
+    kani::assume(chunk_raw > 0);
     let residual = residual_raw as u128;
     let chunk = chunk_raw as u128;
     let expected = residual.min(chunk);
