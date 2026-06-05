@@ -4135,7 +4135,7 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
 #[kani::solver(cadical)]
 fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
     let reserved_raw: u8 = kani::any();
-    kani::assume(reserved_raw <= 5);
+    kani::assume(reserved_raw <= 10);
     let reserved = reserved_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(10);
@@ -4165,6 +4165,10 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
     kani::cover!(
         reserved > 0,
         "reserved insurance proof covers nonzero encumbrance"
+    );
+    kani::cover!(
+        reserved == 10 && used == 0,
+        "reserved insurance proof covers fully encumbered domain budget"
     );
     assert_eq!(used, 10 - reserved);
     assert_eq!(market.header.insurance.get(), reserved);
