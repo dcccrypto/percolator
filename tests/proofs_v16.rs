@@ -3354,11 +3354,11 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     let insurance_raw: u8 = kani::any();
     let max_slot_raw: u8 = kani::any();
     let overrun_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&gross_raw));
-    kani::assume(c_tot_raw <= 10);
-    kani::assume(insurance_raw <= 10);
-    kani::assume((1..=10).contains(&max_slot_raw));
-    kani::assume((1..=5).contains(&overrun_raw));
+    kani::assume(gross_raw > 0);
+    kani::assume(c_tot_raw <= 64);
+    kani::assume(insurance_raw <= 64);
+    kani::assume(max_slot_raw > 0);
+    kani::assume(overrun_raw > 0);
     let gross = gross_raw as u128;
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
