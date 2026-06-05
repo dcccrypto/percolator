@@ -1235,7 +1235,7 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
 #[kani::solver(cadical)]
 fn proof_v16_open_source_claim_exposure_blocks_convert() {
     let claim_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&claim_raw));
+    kani::assume(claim_raw > 0);
     let claim = claim_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     let market_id = markets[0].engine.asset.market_id.get();
@@ -1293,8 +1293,8 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         .unwrap();
 
     kani::cover!(
-        blocked && claim > 1,
-        "active source-claim exposure reaches convert guard for symbolic claim"
+        blocked && claim > 10,
+        "active source-claim exposure reaches convert guard for wide symbolic claim"
     );
     assert!(blocked);
 }
