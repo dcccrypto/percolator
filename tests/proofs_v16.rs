@@ -3136,7 +3136,7 @@ fn proof_v16_live_positive_kf_delta_without_source_rejects() {
 fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
     let terminal_raw: u8 = kani::any();
     let paid_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&terminal_raw));
+    kani::assume(terminal_raw > 0);
     kani::assume(paid_raw <= terminal_raw);
     let terminal = terminal_raw as u128;
     let paid = paid_raw as u128;
@@ -3167,8 +3167,8 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
 fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     let claimable_raw: u8 = kani::any();
     let vault_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&claimable_raw));
-    kani::assume(vault_raw <= 5);
+    kani::assume((1..=16).contains(&claimable_raw));
+    kani::assume(vault_raw <= 16);
     let claimable = claimable_raw as u128;
     let vault = vault_raw as u128;
     let paid_before = 2u128;
@@ -3232,9 +3232,9 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let residual_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&a_raw));
-    kani::assume((1..=5).contains(&b_raw));
-    kani::assume((1..=10).contains(&residual_raw));
+    kani::assume((1..=16).contains(&a_raw));
+    kani::assume((1..=16).contains(&b_raw));
+    kani::assume((1..=32).contains(&residual_raw));
     let a_claim = a_raw as u128;
     let b_claim = b_raw as u128;
     let total_claim = a_claim + b_claim;
