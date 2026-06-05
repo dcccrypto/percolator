@@ -1829,13 +1829,20 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_trade_fee_helper_does_not_charge_negative_pnl_account() {
+    let capital: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let loss_raw: u8 = kani::any();
     let requested_fee: u128 = kani::any();
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - capital);
+    kani::assume(loss_raw > 0);
+    let loss = loss_raw as i128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(110);
-    header.c_tot = V16PodU128::new(10);
-    header.insurance = V16PodU128::new(100);
-    account_header.capital = V16PodU128::new(10);
-    account_header.pnl = V16PodI128::new(-1);
+    header.vault = V16PodU128::new(insurance + capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-loss);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -1856,7 +1863,7 @@ fn proof_v16_trade_fee_helper_does_not_charge_negative_pnl_account() {
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(account.header.capital, capital_before);
-    assert_eq!(account.header.pnl.get(), -1);
+    assert_eq!(account.header.pnl.get(), -loss);
 }
 
 #[kani::proof]
