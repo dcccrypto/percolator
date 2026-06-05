@@ -167,7 +167,7 @@ fn proof_v16_k_pair_mul_div_floor_matches_small_reference() {
 #[kani::solver(cadical)]
 fn proof_v16_k_pair_zero_cases_return_zero() {
     let den_raw: u8 = kani::any();
-    kani::assume((1..=40).contains(&den_raw));
+    kani::assume(den_raw > 0);
     let den = den_raw as u128;
 
     kani::cover!(den > 1, "K-pair zero-delta and zero-basis branches");
