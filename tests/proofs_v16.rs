@@ -3768,8 +3768,8 @@ fn proof_v16_funding_rate_cap_rejects_before_accrual_mutation() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_only() {
-    let residual_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&residual_raw));
+    let residual_raw: u64 = kani::any();
+    kani::assume(residual_raw > 0);
     let residual = residual_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
     header.mode = 1;
@@ -3781,8 +3781,8 @@ fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_onl
         .unwrap();
 
     kani::cover!(
-        residual > 1,
-        "resolved residual booking proof covers nontrivial explicit residual"
+        residual > u8::MAX as u128,
+        "resolved residual booking proof covers wide explicit residual"
     );
     assert_eq!(outcome.booked_loss, 0);
     assert_eq!(outcome.explicit_loss, residual);
@@ -3799,10 +3799,9 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     let residual_raw: u8 = kani::any();
     let booked_raw: u8 = kani::any();
     let rem_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&residual_raw));
-    kani::assume((1..=10).contains(&booked_raw));
+    kani::assume(residual_raw > 0);
+    kani::assume(booked_raw > 0);
     kani::assume(booked_raw <= residual_raw);
-    kani::assume(rem_raw <= 8);
     let residual = residual_raw as u128;
     let booked = booked_raw as u128;
     let rem = rem_raw as u128;
@@ -3831,8 +3830,8 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     let expected_rem = numerator % SOCIAL_LOSS_DEN;
 
     kani::cover!(
-        residual > booked,
-        "live residual booking proof covers bounded partial booking"
+        residual > booked && booked > 10,
+        "live residual booking proof covers wide partial booking"
     );
     kani::cover!(
         rem != 0,
