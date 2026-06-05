@@ -4654,6 +4654,43 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed() {
+    let amount_raw: u8 = kani::any();
+    kani::assume(amount_raw > 0);
+    let amount = amount_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(amount);
+    header.insurance = V16PodU128::new(amount);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .credit_domain_insurance_budget_not_atomic(0, amount)
+        .unwrap();
+
+    kani::cover!(
+        amount > 1,
+        "public domain budget credit covers nontrivial already-collected fee"
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        amount
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        amount
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving() {
