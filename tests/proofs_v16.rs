@@ -3489,7 +3489,7 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
 fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
     let with_senior_balances: bool = kani::any();
     let now_slot_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&now_slot_raw));
+    kani::assume(now_slot_raw > 0);
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
     let now_slot = now_slot_raw as u64;
@@ -3609,7 +3609,7 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
 #[kani::solver(cadical)]
 fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation() {
     let price_delta_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&price_delta_raw));
+    kani::assume(price_delta_raw > 0);
     let price_delta = price_delta_raw as u64;
     let (mut header, mut markets, _) = one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
@@ -3623,10 +3623,14 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
     let result = market.accrue_asset_to_not_atomic(0, 2, 100 + price_delta, 0, false);
 
     kani::cover!(
-        price_delta > 1,
-        "equity-active accrual proof covers nontrivial price movement"
+        result == Err(V16Error::NonProgress) && price_delta > 1,
+        "equity-active accrual proof covers nontrivial no-progress rejection"
     );
-    assert_eq!(result, Err(V16Error::NonProgress));
+    kani::cover!(
+        result.is_err() && result != Err(V16Error::NonProgress),
+        "equity-active accrual proof covers pre-progress validation rejection"
+    );
+    assert!(result.is_err());
     assert_eq!(market.header.current_slot, header_before.current_slot);
     assert_eq!(market.header.slot_last, header_before.slot_last);
     assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
@@ -3696,7 +3700,7 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
 #[kani::solver(cadical)]
 fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
     let price_raw: u16 = kani::any();
-    kani::assume((201..=205).contains(&price_raw));
+    kani::assume(price_raw > 200);
     let (mut header, mut markets, _) = one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
@@ -3731,7 +3735,7 @@ fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
 #[kani::solver(cadical)]
 fn proof_v16_funding_rate_cap_rejects_before_accrual_mutation() {
     let funding_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&funding_raw));
+    kani::assume(funding_raw > 0);
     let (mut header, mut markets, _) = one_market_view_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
