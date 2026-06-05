@@ -930,10 +930,6 @@ fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
     let supplied_raw: u8 = kani::any();
     let capacity_raw: u8 = kani::any();
     let configured_raw: u8 = kani::any();
-    kani::assume(supplied_raw <= 8);
-    kani::assume(capacity_raw <= 8);
-    kani::assume(configured_raw <= 8);
-
     let supplied = supplied_raw as usize;
     let capacity = capacity_raw as usize;
     let configured = configured_raw as usize;
@@ -958,11 +954,11 @@ fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
     let extension_index_raw: u8 = kani::any();
-    kani::assume((1..=2).contains(&extension_index_raw));
+    kani::assume((1..=8).contains(&extension_index_raw));
     let extension_index = extension_index_raw as usize;
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 9, 0).unwrap();
     let zero_fill = EngineAssetSlotV16Account::default();
     let mut dirty_extension = EngineAssetSlotV16Account::default();
     dirty_extension.insurance_domain_spent_long = V16PodU128::new(1);
