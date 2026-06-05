@@ -641,7 +641,7 @@ fn proof_v16_sparse_source_domain_validation_rejects_unoccupied_tagged_slot() {
 #[kani::solver(cadical)]
 fn proof_v16_sparse_source_domain_validation_accepts_domain_indexed_claim() {
     let claim_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=16).contains(&claim_raw));
     let claim_num = claim_raw as u128 * BOUND_SCALE;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     account_header.pnl = V16PodI128::new(claim_raw as i128);
