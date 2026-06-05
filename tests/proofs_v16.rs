@@ -3060,10 +3060,10 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
     let insurance_raw: u8 = kani::any();
     let earnings_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
-    kani::assume(c_tot_raw <= 4);
-    kani::assume(insurance_raw <= 4);
-    kani::assume(earnings_raw <= 4);
-    kani::assume(surplus_raw <= 4);
+    kani::assume(c_tot_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(earnings_raw <= 16);
+    kani::assume(surplus_raw <= 16);
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
     let earnings = earnings_raw as u128;
@@ -3087,8 +3087,8 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
     market.refresh_header_aggregate_totals_for_test().unwrap();
 
     kani::cover!(
-        c_tot > 0 && insurance > 0 && earnings > 0 && surplus > 0,
-        "residual reconciliation covers all senior buckets nonzero with junior surplus"
+        c_tot > 4 && insurance > 4 && earnings > 4 && surplus > 4,
+        "residual reconciliation covers wide senior buckets with junior surplus"
     );
     // Valid, reachable shape (senior stack within vault).
     assert_eq!(market.validate_shape(), Ok(()));
