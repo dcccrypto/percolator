@@ -2125,8 +2125,8 @@ fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
     let backing_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
-    kani::assume((1..=6).contains(&backing_raw));
-    kani::assume((1..=6).contains(&withdraw_raw));
+    kani::assume(backing_raw > 0);
+    kani::assume(withdraw_raw > 0);
     kani::assume(withdraw_raw <= backing_raw);
     let backing = backing_raw as u128;
     let withdraw = withdraw_raw as u128;
@@ -2187,8 +2187,8 @@ fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() 
 fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
     let backing_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
-    kani::assume((2..=8).contains(&backing_raw));
-    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(backing_raw > 1);
+    kani::assume(withdraw_raw > 0);
     kani::assume(withdraw_raw < backing_raw);
     let backing_num = backing_raw as u128 * BOUND_SCALE;
     let withdraw_num = withdraw_raw as u128 * BOUND_SCALE;
