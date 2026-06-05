@@ -1707,72 +1707,76 @@ fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
-    let loss_raw: u8 = kani::any();
-    let capital_raw: u8 = kani::any();
-    let partial_close_raw: u8 = kani::any();
-    kani::assume((2..=10).contains(&loss_raw));
-    kani::assume((1..loss_raw).contains(&capital_raw));
-    kani::assume((1..=9).contains(&partial_close_raw));
-    let loss = -(loss_raw as i128);
-    let undercapitalized = capital_raw as u128;
-    let partial_close_q = partial_close_raw as u128;
+    let loss_abs: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let leg_abs_q: u128 = kani::any();
+    let close_q: u128 = kani::any();
+    kani::assume((1..=MAX_VAULT_TVL).contains(&loss_abs));
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume((1..=MAX_TRADE_SIZE_Q).contains(&leg_abs_q));
+    kani::assume((1..=leg_abs_q).contains(&close_q));
+    let loss = -(loss_abs as i128);
     let mut two_leg_bitmap = V16_EMPTY_ACTIVE_BITMAP;
     active_bitmap_set(&mut two_leg_bitmap, 0).unwrap();
     active_bitmap_set(&mut two_leg_bitmap, 1).unwrap();
     let mut single_leg_bitmap = V16_EMPTY_ACTIVE_BITMAP;
     active_bitmap_set(&mut single_leg_bitmap, 0).unwrap();
 
-    let full_close_with_other_risk =
-        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            loss,
-            undercapitalized,
-            two_leg_bitmap,
-            0,
-            10,
-            10,
-        )
-        .unwrap();
-    let partial_close_with_other_risk =
-        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            loss,
-            undercapitalized,
-            two_leg_bitmap,
-            0,
-            partial_close_q,
-            10,
-        )
-        .unwrap();
+    let close_with_other_risk = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+        loss,
+        capital,
+        two_leg_bitmap,
+        0,
+        close_q,
+        leg_abs_q,
+    )
+    .unwrap();
     let full_close_without_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
             loss,
-            undercapitalized,
+            capital,
             single_leg_bitmap,
             0,
-            10,
-            10,
+            leg_abs_q,
+            leg_abs_q,
+        )
+        .unwrap();
+    let partial_close_without_other_risk =
+        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+            loss,
+            capital,
+            single_leg_bitmap,
+            0,
+            close_q,
+            leg_abs_q,
         )
         .unwrap();
     let covered_loss_with_other_risk =
         kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
             loss,
-            loss_raw as u128,
+            loss_abs,
             two_leg_bitmap,
             0,
-            10,
-            10,
+            close_q,
+            leg_abs_q,
         )
         .unwrap();
+    let uncovered = loss_abs > capital;
 
     kani::cover!(
-        loss_raw > 5
-            && capital_raw > 1
-            && full_close_with_other_risk
-            && partial_close_with_other_risk,
+        uncovered && close_q == leg_abs_q && close_with_other_risk,
         "liquidation guard detects symbolic uncovered loss with remaining open risk"
     );
-    assert!(full_close_with_other_risk);
-    assert!(partial_close_with_other_risk);
+    kani::cover!(
+        uncovered && close_q < leg_abs_q && partial_close_without_other_risk,
+        "liquidation guard detects partial close preserving the only active leg"
+    );
+    assert_eq!(close_with_other_risk, uncovered);
     assert!(!full_close_without_other_risk);
+    assert_eq!(
+        partial_close_without_other_risk,
+        uncovered && close_q < leg_abs_q
+    );
     assert!(!covered_loss_with_other_risk);
 }
 
