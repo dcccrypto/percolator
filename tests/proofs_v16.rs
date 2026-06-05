@@ -2471,8 +2471,8 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
 fn proof_v16_positive_pnl_requires_full_source_claim_attribution() {
     let pnl_raw: u8 = kani::any();
     let missing_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&pnl_raw));
-    kani::assume((1..=10).contains(&missing_raw));
+    kani::assume(pnl_raw > 0);
+    kani::assume(missing_raw > 0);
     let pnl = pnl_raw as i128;
     let required = pnl_raw as u128 * BOUND_SCALE;
     let missing = (missing_raw as u128).min(required);
