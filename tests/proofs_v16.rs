@@ -25,8 +25,8 @@ use percolator::v16::{
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_TRADE_SIZE_Q, POS_SCALE,
-    SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL,
+    POS_SCALE, SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -1892,12 +1892,10 @@ fn proof_v16_public_explicit_fee_charge_moves_current_capital_to_insurance_only(
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_negative_pnl_settlement_consumes_principal_before_residual() {
-    let capital_raw: u8 = kani::any();
-    let loss_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 10);
-    kani::assume((1..=10).contains(&loss_raw));
-    let capital = capital_raw as u128;
-    let loss = loss_raw as u128;
+    let capital: u128 = kani::any();
+    let loss: u128 = kani::any();
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume((1..=MAX_VAULT_TVL).contains(&loss));
     let paid_expected = capital.min(loss);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(capital);
