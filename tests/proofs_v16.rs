@@ -790,7 +790,6 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
 #[kani::solver(cadical)]
 fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
     let growth_raw: u8 = kani::any();
-    kani::assume(growth_raw <= 3);
     let new_capacity = 1 + growth_raw as u32;
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -831,7 +830,7 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let zero_credit_rate: bool = kani::any();
     let nonempty_claim: bool = kani::any();
     let price_raw: u16 = kani::any();
-    kani::assume((1..=16).contains(&old_market_id_raw));
+    kani::assume(old_market_id_raw != 0);
     kani::assume(credit_epoch_raw != 0);
     kani::assume((1..=10_000).contains(&price_raw));
 
@@ -4087,14 +4086,14 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
 fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let budget_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
-    kani::assume(budget_raw <= 10);
-    kani::assume((1..=10).contains(&loss_raw));
+    kani::assume(budget_raw <= 32);
+    kani::assume((1..=32).contains(&loss_raw));
     let budget = budget_raw as u128;
     let loss = loss_raw as u128;
     let expected_used = budget.min(loss);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.insurance = V16PodU128::new(10);
+    header.vault = V16PodU128::new(32);
+    header.insurance = V16PodU128::new(32);
     header.negative_pnl_account_count = V16PodU64::new(1);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
     account_header.pnl = V16PodI128::new(-(loss as i128));
@@ -4116,7 +4115,7 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         "domain budget spend proof covers loss-capped branch"
     );
     assert_eq!(used, expected_used);
-    assert_eq!(market.header.insurance.get(), 10 - expected_used);
+    assert_eq!(market.header.insurance.get(), 32 - expected_used);
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
         expected_used
@@ -4132,13 +4131,13 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
 #[kani::solver(cadical)]
 fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
     let reserved_raw: u8 = kani::any();
-    kani::assume(reserved_raw <= 10);
+    kani::assume(reserved_raw <= 32);
     let reserved = reserved_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.insurance = V16PodU128::new(10);
+    header.vault = V16PodU128::new(32);
+    header.insurance = V16PodU128::new(32);
     header.negative_pnl_account_count = V16PodU64::new(1);
-    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(10);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(32);
     markets[0].engine.insurance_reservation_short =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
             insurance_credit_reserved_num: reserved * BOUND_SCALE,
@@ -4150,7 +4149,7 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    account_header.pnl = V16PodI128::new(-10);
+    account_header.pnl = V16PodI128::new(-32);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.refresh_header_aggregate_totals_for_test().unwrap();
@@ -4164,14 +4163,14 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
         "reserved insurance proof covers nonzero encumbrance"
     );
     kani::cover!(
-        reserved == 10 && used == 0,
+        reserved == 32 && used == 0,
         "reserved insurance proof covers fully encumbered domain budget"
     );
-    assert_eq!(used, 10 - reserved);
+    assert_eq!(used, 32 - reserved);
     assert_eq!(market.header.insurance.get(), reserved);
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
-        10 - reserved
+        32 - reserved
     );
     assert_eq!(account.header.pnl.get(), -(reserved as i128));
 }
