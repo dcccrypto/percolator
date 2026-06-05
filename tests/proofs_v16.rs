@@ -733,9 +733,16 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral() {
-    let with_senior_balances: bool = kani::any();
-    let c_tot = if with_senior_balances { 7 } else { 0 };
-    let insurance = if with_senior_balances { 4 } else { 0 };
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let price_raw: u16 = kani::any();
+    let slot_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume(slot_raw > 0);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let initial_price = price_raw as u64;
+    let activation_slot = slot_raw as u64;
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
@@ -748,17 +755,19 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
     let insurance_before = header.insurance;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    market
+        .activate_empty_market_not_atomic(0, initial_price, activation_slot)
+        .unwrap();
     let slot = &market.markets[0].engine;
     let asset = slot.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        with_senior_balances,
+        c_tot > 0 && insurance > 0 && initial_price > 100 && activation_slot > 1,
         "public market activation covers nonzero symbolic senior-balance case"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
     assert_eq!(asset.market_id, 1);
-    assert_eq!(asset.effective_price, 100);
+    assert_eq!(asset.effective_price, initial_price);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
