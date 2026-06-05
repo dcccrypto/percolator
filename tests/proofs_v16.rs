@@ -1943,15 +1943,9 @@ fn proof_v16_negative_pnl_settlement_consumes_principal_before_residual() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_utilization_fee_never_charges_negative_pnl_account() {
-    let capital_raw: u8 = kani::any();
-    let fee_raw: u8 = kani::any();
-    let earnings_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 10);
-    kani::assume(fee_raw <= 10);
-    kani::assume(earnings_raw <= 10);
-    let capital = capital_raw as u128;
-    let fee = fee_raw as u128;
-    let earnings = earnings_raw as u128;
+    let capital: u128 = kani::any();
+    let fee: u128 = kani::any();
+    let earnings: u128 = kani::any();
     let group_c_tot = capital;
 
     let (charged, next_capital, next_c_tot, next_earnings) =
@@ -1971,17 +1965,13 @@ fn proof_v16_backing_utilization_fee_never_charges_negative_pnl_account() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_utilization_fee_is_capped_by_capital_and_conserves_ctot_to_earnings() {
-    let capital_raw: u8 = kani::any();
-    let fee_raw: u8 = kani::any();
-    let earnings_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 10);
-    kani::assume(fee_raw <= 10);
-    kani::assume(earnings_raw <= 10);
-    let capital = capital_raw as u128;
-    let fee = fee_raw as u128;
-    let earnings = earnings_raw as u128;
+    let capital: u128 = kani::any();
+    let fee: u128 = kani::any();
+    let earnings: u128 = kani::any();
     let group_c_tot = capital;
     let expected = capital.min(fee);
+    kani::assume(capital <= u128::MAX - earnings);
+    kani::assume(expected <= u128::MAX - earnings);
 
     let (charged, next_capital, next_c_tot, next_earnings) =
         kani_apply_backing_utilization_fee_charge(capital, group_c_tot, earnings, 0, fee).unwrap();
@@ -1998,22 +1988,20 @@ fn proof_v16_backing_utilization_fee_is_capped_by_capital_and_conserves_ctot_to_
     assert_eq!(next_capital, capital - expected);
     assert_eq!(next_c_tot, group_c_tot - expected);
     assert_eq!(next_earnings, earnings + expected);
-    assert_eq!(next_c_tot + next_earnings, group_c_tot + earnings);
+    assert_eq!(
+        next_c_tot.checked_add(next_earnings).unwrap(),
+        group_c_tot.checked_add(earnings).unwrap()
+    );
 }
 
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
-    let vault_raw: u8 = kani::any();
-    let earnings_raw: u8 = kani::any();
-    let amount_raw: u8 = kani::any();
-    kani::assume(vault_raw <= 20);
-    kani::assume(earnings_raw <= vault_raw);
-    kani::assume(amount_raw <= 20);
-    let vault = vault_raw as u128;
-    let earnings = earnings_raw as u128;
-    let amount = amount_raw as u128;
+    let vault: u128 = kani::any();
+    let earnings: u128 = kani::any();
+    let amount: u128 = kani::any();
+    kani::assume(earnings <= vault);
     let result = kani_apply_backing_provider_earnings_withdraw(vault, earnings, amount);
 
     if amount <= earnings {
@@ -2086,25 +2074,18 @@ fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault(
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
-    let vault_raw: u8 = kani::any();
-    let c_tot_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    let earnings_raw: u8 = kani::any();
-    let bucket_earnings_raw: u8 = kani::any();
-    let amount_raw: u8 = kani::any();
-    kani::assume(vault_raw <= 20);
-    kani::assume(c_tot_raw <= 10);
-    kani::assume(insurance_raw <= 10);
-    kani::assume(earnings_raw <= 10);
-    kani::assume(bucket_earnings_raw <= earnings_raw);
-    kani::assume(amount_raw <= 10);
-    let vault = vault_raw as u128;
-    let c_tot = c_tot_raw as u128;
-    let insurance = insurance_raw as u128;
-    let earnings = earnings_raw as u128;
-    let bucket_earnings = bucket_earnings_raw as u128;
-    let amount = amount_raw as u128;
-    kani::assume(c_tot + insurance + earnings <= vault);
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let earnings: u128 = kani::any();
+    let bucket_earnings: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let senior_before = c_tot
+        .checked_add(insurance)
+        .and_then(|v| v.checked_add(earnings));
+    kani::assume(senior_before.is_some());
+    kani::assume(senior_before.unwrap() <= vault);
+    kani::assume(bucket_earnings <= earnings);
 
     let result = MarketGroupV16ViewMut::<u64>::kani_credit_backing_provider_earnings_delta(
         vault,
@@ -2114,21 +2095,32 @@ fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
         bucket_earnings,
         amount,
     );
-    let expected_ok = c_tot + insurance + earnings + amount <= vault;
+    let next_earnings_expected = earnings.checked_add(amount);
+    let next_bucket_expected = bucket_earnings.checked_add(amount);
+    let senior_after = senior_before.unwrap().checked_add(amount);
+    let expected_ok = next_earnings_expected.is_some()
+        && next_bucket_expected.is_some()
+        && senior_after.map(|v| v <= vault).unwrap_or(false);
 
     kani::cover!(
-        amount > 0 && expected_ok && c_tot + insurance + earnings < vault,
+        amount > 0 && expected_ok && senior_before.unwrap() < vault,
         "backing-provider earnings credit covers fee credit from vault slack"
     );
     kani::cover!(
-        amount > 0 && !expected_ok && c_tot + insurance + earnings == vault,
+        amount > 0 && !expected_ok && senior_before.unwrap() == vault,
         "backing-provider earnings credit rejects without vault slack"
     );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_earnings, next_bucket_earnings)) = result {
-        assert_eq!(next_earnings, earnings + amount);
-        assert_eq!(next_bucket_earnings, bucket_earnings + amount);
-        assert!(c_tot + insurance + next_earnings <= vault);
+        assert_eq!(next_earnings, next_earnings_expected.unwrap());
+        assert_eq!(next_bucket_earnings, next_bucket_expected.unwrap());
+        assert!(
+            c_tot
+                .checked_add(insurance)
+                .and_then(|v| v.checked_add(next_earnings))
+                .unwrap()
+                <= vault
+        );
     }
 }
 
@@ -4213,26 +4205,23 @@ fn proof_v16_new_unfunded_domain_cannot_consume_shared_insurance() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
-    let insurance_raw: u8 = kani::any();
-    let budget_raw: u8 = kani::any();
-    let c_tot_raw: u8 = kani::any();
-    let capital_raw: u8 = kani::any();
-    let amount_raw: u8 = kani::any();
-    kani::assume(insurance_raw <= 10);
-    kani::assume(budget_raw <= insurance_raw);
-    kani::assume(c_tot_raw <= 10);
-    kani::assume(capital_raw <= 10);
-    kani::assume(amount_raw <= 10);
-    let insurance = insurance_raw as u128;
-    let budgeted = budget_raw as u128;
-    let c_tot = c_tot_raw as u128;
-    let capital = capital_raw as u128;
-    let amount = amount_raw as u128;
+    let insurance: u128 = kani::any();
+    let budgeted: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let amount: u128 = kani::any();
+    kani::assume(budgeted <= insurance);
+    kani::assume(c_tot <= u128::MAX - insurance);
 
     let result = MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
         insurance, budgeted, c_tot, capital, amount,
     );
-    let expected_ok = amount <= insurance && budgeted <= insurance - amount;
+    let next_c_tot_expected = c_tot.checked_add(amount);
+    let next_capital_expected = capital.checked_add(amount);
+    let expected_ok = amount <= insurance
+        && budgeted <= insurance - amount
+        && next_c_tot_expected.is_some()
+        && next_capital_expected.is_some();
 
     kani::cover!(
         amount > 0 && expected_ok && budgeted < insurance,
@@ -4245,12 +4234,12 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_insurance, next_c_tot, next_capital)) = result {
         assert_eq!(next_insurance, insurance - amount);
-        assert_eq!(next_c_tot, c_tot + amount);
-        assert_eq!(next_capital, capital + amount);
+        assert_eq!(next_c_tot, next_c_tot_expected.unwrap());
+        assert_eq!(next_capital, next_capital_expected.unwrap());
         assert!(budgeted <= next_insurance);
         assert_eq!(
-            next_insurance + next_c_tot,
-            insurance + c_tot,
+            next_insurance.checked_add(next_c_tot).unwrap(),
+            insurance.checked_add(c_tot).unwrap(),
             "insurance-to-account credit preserves senior stock"
         );
     }
@@ -4657,36 +4646,40 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving() {
     let selected_budget: u128 = kani::any();
-    let other_budget: u128 = kani::any();
     let spent: u128 = kani::any();
-    let reserved: u128 = kani::any();
+    let domain_reserved: u128 = kani::any();
+    let source_reserved: u128 = kani::any();
+    let global_available: u128 = kani::any();
     let withdraw: u128 = kani::any();
     kani::assume(selected_budget > 0);
     kani::assume(spent <= selected_budget);
-    kani::assume(reserved <= selected_budget - spent);
-    kani::assume(other_budget <= u128::MAX - selected_budget);
-    kani::assume(withdraw <= selected_budget + other_budget);
-    let selected_available = selected_budget - spent - reserved;
-    let vault = selected_budget + other_budget;
-    let insurance = vault;
+    kani::assume(domain_reserved <= selected_budget - spent);
+    kani::assume(source_reserved <= u128::MAX - global_available);
+    let selected_available = selected_budget - spent - domain_reserved;
+    let insurance = source_reserved + global_available;
+    let vault = insurance;
     let result = MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
         vault,
         insurance,
-        0,
+        source_reserved,
         selected_budget,
         spent,
-        reserved,
+        domain_reserved,
         withdraw,
     );
-    let expected_ok = withdraw <= selected_available;
+    let expected_ok = withdraw <= selected_available.min(global_available);
 
     kani::cover!(
-        withdraw > 1 && expected_ok && other_budget > 1,
-        "domain insurance withdraw delta covers nontrivial scoped success"
+        withdraw > 1 && expected_ok && selected_available <= global_available,
+        "domain insurance withdraw delta covers nontrivial domain-scoped success"
     );
     kani::cover!(
-        !expected_ok && withdraw <= selected_available + other_budget,
-        "domain insurance withdraw delta rejects overdraw despite other-domain budget"
+        withdraw <= selected_available && withdraw > global_available,
+        "domain insurance withdraw delta rejects globally reserved insurance"
+    );
+    kani::cover!(
+        withdraw <= global_available && withdraw > selected_available,
+        "domain insurance withdraw delta rejects selected-domain overdraw"
     );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_vault, next_insurance, next_budget)) = result {
@@ -4694,6 +4687,17 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
         assert_eq!(next_insurance, insurance - withdraw);
         assert_eq!(next_budget, selected_budget - withdraw);
         assert!(next_vault >= next_insurance);
+        assert_eq!(
+            next_insurance - source_reserved,
+            global_available - withdraw
+        );
+        assert_eq!(
+            next_budget - spent - domain_reserved,
+            selected_available - withdraw
+        );
+        if selected_available <= global_available {
+            assert!(next_budget - spent - domain_reserved <= next_insurance - source_reserved);
+        }
     }
 }
 
