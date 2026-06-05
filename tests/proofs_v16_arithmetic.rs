@@ -98,8 +98,7 @@ fn proof_v16_mul_div_ceil_u256_is_floor_plus_remainder_indicator() {
 fn proof_v16_ceil_div_positive_checked_matches_small_reference() {
     let n_raw: u8 = kani::any();
     let d_raw: u8 = kani::any();
-    kani::assume(n_raw <= 80);
-    kani::assume((1..=40).contains(&d_raw));
+    kani::assume(d_raw > 0);
 
     let n = n_raw as u128;
     let d = d_raw as u128;
