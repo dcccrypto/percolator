@@ -5318,7 +5318,7 @@ fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital
 fn proof_v16_nontrivial_public_profile_satisfies_symbolic_mm_envelope() {
     let x_raw: u16 = kani::any();
 
-    kani::assume((1..=4_096).contains(&x_raw));
+    kani::assume(x_raw > 0);
 
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
     cfg.maintenance_margin_bps = 10_000;
@@ -5358,7 +5358,7 @@ fn proof_v16_symbolic_conservative_fee_profile_satisfies_mm_envelope_on_small_no
     kani::assume(min_liq_abs_raw <= 3);
     kani::assume(liq_fee_cap_raw <= 3);
     kani::assume(min_liq_abs_raw <= liq_fee_cap_raw);
-    kani::assume((1..=512).contains(&x_raw));
+    kani::assume(x_raw > 0);
 
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
     cfg.maintenance_margin_bps = 10_000;
@@ -5394,7 +5394,7 @@ fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals()
     let x_raw: u16 = kani::any();
 
     kani::assume(funding_e9_raw <= 50);
-    kani::assume((1..=1024).contains(&x_raw));
+    kani::assume(x_raw > 0);
 
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
     cfg.maintenance_margin_bps = 10_000;
