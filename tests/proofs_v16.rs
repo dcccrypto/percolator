@@ -4296,7 +4296,7 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
 #[kani::solver(cadical)]
 fn proof_v16_view_positive_funding_charges_long_side() {
     let units_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&units_raw));
+    kani::assume(units_raw > 0);
     let units = units_raw as i128;
     let (k_now, f_now, net) = run_funding_target_sign_case(true, units);
     kani::cover!(
@@ -4313,7 +4313,7 @@ fn proof_v16_view_positive_funding_charges_long_side() {
 #[kani::solver(cadical)]
 fn proof_v16_view_negative_funding_pays_long_side() {
     let units_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&units_raw));
+    kani::assume(units_raw > 0);
     let units = units_raw as i128;
     let (k_now, f_now, net) = run_funding_target_sign_case(false, units);
     kani::cover!(
