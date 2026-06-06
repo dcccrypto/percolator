@@ -5872,6 +5872,7 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
     let domain_reserved: u128 = kani::any();
     let source_reserved: u128 = kani::any();
     let global_available: u128 = kani::any();
+    let vault: u128 = kani::any();
     let withdraw: u128 = kani::any();
     kani::assume(selected_budget > 0);
     kani::assume(spent <= selected_budget);
@@ -5879,7 +5880,6 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
     kani::assume(source_reserved <= u128::MAX - global_available);
     let selected_available = selected_budget - spent - domain_reserved;
     let insurance = source_reserved + global_available;
-    let vault = insurance;
     let result = MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
         vault,
         insurance,
@@ -5889,7 +5889,7 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
         domain_reserved,
         withdraw,
     );
-    let expected_ok = withdraw <= selected_available.min(global_available);
+    let expected_ok = withdraw <= selected_available.min(global_available).min(vault);
 
     kani::cover!(
         withdraw > 1 && expected_ok && selected_available <= global_available,
@@ -5903,12 +5903,17 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
         withdraw <= global_available && withdraw > selected_available,
         "domain insurance withdraw delta rejects selected-domain overdraw"
     );
+    kani::cover!(
+        withdraw <= selected_available && withdraw <= global_available && withdraw > vault,
+        "domain insurance withdraw delta rejects vault-liquidity overdraw"
+    );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_vault, next_insurance, next_budget)) = result {
         assert_eq!(next_vault, vault - withdraw);
         assert_eq!(next_insurance, insurance - withdraw);
         assert_eq!(next_budget, selected_budget - withdraw);
-        assert!(next_vault >= next_insurance);
+        assert_eq!(vault - next_vault, insurance - next_insurance);
+        assert_eq!(vault - next_vault, selected_budget - next_budget);
         assert_eq!(
             next_insurance - source_reserved,
             global_available - withdraw
@@ -5920,6 +5925,9 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
         if selected_available <= global_available {
             assert!(next_budget - spent - domain_reserved <= next_insurance - source_reserved);
         }
+    } else {
+        assert!(withdraw > selected_available || withdraw > global_available || withdraw > vault);
+        assert_eq!(result, Err(V16Error::LockActive));
     }
 }
 
