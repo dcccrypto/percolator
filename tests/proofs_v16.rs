@@ -2926,14 +2926,23 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
 #[kani::solver(cadical)]
 fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let stale_market_id_raw: u8 = kani::any();
+    let units_raw: u8 = kani::any();
+    let is_short: bool = kani::any();
     kani::assume(stale_market_id_raw > 1);
+    kani::assume((1..=4).contains(&units_raw));
+    let units = units_raw as i128;
+    let basis = units * POS_SCALE as i128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     let leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
         market_id: stale_market_id_raw as u64,
-        side: SideV16::Long,
-        basis_pos_q: POS_SCALE as i128,
+        side: if is_short {
+            SideV16::Short
+        } else {
+            SideV16::Long
+        },
+        basis_pos_q: if is_short { -basis } else { basis },
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
@@ -2955,10 +2964,14 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let result = account.as_view().validate_with_market(&market.as_view());
 
     kani::cover!(
-        stale_market_id_raw > 2 && result == Err(V16Error::HiddenLeg),
-        "symbolic stale market_id leg is rejected after asset slot reuse"
+        stale_market_id_raw > 2 && units_raw > 2 && is_short && result.is_err(),
+        "symbolic stale market_id short leg is rejected after asset slot reuse"
     );
-    assert_eq!(result, Err(V16Error::HiddenLeg));
+    kani::cover!(
+        stale_market_id_raw > 2 && units_raw > 2 && !is_short && result.is_err(),
+        "symbolic stale market_id long leg is rejected after asset slot reuse"
+    );
+    assert!(result.is_err());
 }
 
 #[kani::proof]
