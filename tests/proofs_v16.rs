@@ -4500,6 +4500,138 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
     assert!(source_after.is_empty_amount_shape());
 }
 
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_invalid() {
+    let amount_units_raw: u8 = kani::any();
+    let reservation_reserved_raw: u8 = kani::any();
+    let reservation_valid_raw: u8 = kani::any();
+    let reservation_impaired_raw: u8 = kani::any();
+    let source_reserved_raw: u8 = kani::any();
+    let source_valid_raw: u8 = kani::any();
+    let source_impaired_raw: u8 = kani::any();
+    let force_unaligned: bool = kani::any();
+    kani::assume(amount_units_raw <= 8);
+    kani::assume(reservation_reserved_raw <= 8);
+    kani::assume(reservation_valid_raw <= 8);
+    kani::assume(reservation_impaired_raw <= 8);
+    kani::assume(source_reserved_raw <= 8);
+    kani::assume(source_valid_raw <= 8);
+    kani::assume(source_impaired_raw <= 8);
+
+    let aligned_amount = amount_units_raw as u128 * BOUND_SCALE;
+    let amount = if force_unaligned {
+        aligned_amount + 1
+    } else {
+        aligned_amount
+    };
+    let reservation_reserved = reservation_reserved_raw as u128 * BOUND_SCALE;
+    let reservation_valid = reservation_valid_raw as u128 * BOUND_SCALE;
+    let reservation_impaired = reservation_impaired_raw as u128 * BOUND_SCALE;
+    let source_reserved = source_reserved_raw as u128 * BOUND_SCALE;
+    let source_valid = source_valid_raw as u128 * BOUND_SCALE;
+    let source_impaired = source_impaired_raw as u128 * BOUND_SCALE;
+    let reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: reservation_reserved,
+        valid_liened_insurance_num: reservation_valid,
+        impaired_liened_insurance_num: reservation_impaired,
+        ..InsuranceCreditReservationV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        insurance_credit_reserved_num: source_reserved,
+        valid_liened_insurance_num: source_valid,
+        impaired_liened_insurance_num: source_impaired,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_terminal_release_delta(
+        reservation,
+        source,
+        amount,
+    );
+    let valid_release = amount.min(reservation_valid);
+    let impaired_release = amount - valid_release;
+    let expected_ok = amount == 0
+        || (!force_unaligned
+            && reservation_reserved >= amount
+            && source_reserved >= amount
+            && source_valid >= valid_release
+            && reservation_impaired >= impaired_release
+            && source_impaired >= impaired_release);
+
+    kani::cover!(amount == 0, "terminal insurance release covers zero no-op");
+    kani::cover!(
+        amount > 0 && force_unaligned,
+        "terminal insurance release rejects unaligned bound amount"
+    );
+    kani::cover!(
+        !force_unaligned && amount > 0 && reservation_reserved < amount,
+        "terminal insurance release rejects insufficient reservation total"
+    );
+    kani::cover!(
+        !force_unaligned
+            && amount > 0
+            && reservation_reserved >= amount
+            && source_reserved >= amount
+            && source_valid < valid_release,
+        "terminal insurance release rejects insufficient source valid lien"
+    );
+    kani::cover!(
+        !force_unaligned
+            && amount > 0
+            && valid_release < amount
+            && reservation_impaired < impaired_release,
+        "terminal insurance release rejects insufficient impaired reservation"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release == amount && reservation_reserved > amount,
+        "terminal insurance release covers valid-only partial release"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release > 0 && valid_release < amount,
+        "terminal insurance release covers mixed valid and impaired release"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release == 0,
+        "terminal insurance release covers impaired-only release"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        let (next_reservation, next_source) = result.unwrap();
+        assert_eq!(
+            next_reservation.insurance_credit_reserved_num,
+            reservation_reserved - amount
+        );
+        assert_eq!(
+            next_reservation.valid_liened_insurance_num,
+            reservation_valid - valid_release
+        );
+        assert_eq!(
+            next_reservation.impaired_liened_insurance_num,
+            reservation_impaired - impaired_release
+        );
+        assert_eq!(
+            next_source.insurance_credit_reserved_num,
+            source_reserved - amount
+        );
+        assert_eq!(
+            next_source.valid_liened_insurance_num,
+            source_valid - valid_release
+        );
+        assert_eq!(
+            next_source.impaired_liened_insurance_num,
+            source_impaired - impaired_release
+        );
+    } else if force_unaligned && amount > 0 {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    } else {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    }
+}
+
 // General guard for the Finding-B class ("junior payout pool must exclude ALL
 // senior funds"): residual() must be exactly the junior surplus that makes the
 // full stock reconciliation balance — vault = senior_capital + insurance +
