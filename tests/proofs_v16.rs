@@ -2346,6 +2346,82 @@ fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_state() {
+    let existing_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(existing_raw <= 8);
+    kani::assume((1..=8).contains(&amount_raw));
+    let existing = existing_raw as u128;
+    let amount = amount_raw as u128;
+    let existing_num = existing * BOUND_SCALE;
+    let amount_num = amount * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(existing);
+    if existing != 0 {
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: existing_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: existing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+    }
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, amount, 10)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        existing == 0 && amount > 1,
+        "public counterparty backing deposit covers first backing deposit"
+    );
+    kani::cover!(
+        existing > 0 && amount > 1,
+        "public counterparty backing deposit covers additive fresh-bucket deposit"
+    );
+    assert_eq!(market.header.vault.get(), vault_before + amount);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(bucket.expiry_slot, 10);
+    assert_eq!(bucket.fresh_unliened_backing_num, existing_num + amount_num);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.consumed_liened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, existing_num + amount_num);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        bucket.fresh_unliened_backing_num,
+        source.fresh_reserved_backing_num
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
