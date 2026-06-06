@@ -8,14 +8,14 @@
 //! fully-diluted receipt is cleared so the portfolio can dematerialize — i.e. the market
 //! is drainable, not permanently stranded.
 
-use percolator::v16::{
+use percolator::BOUND_SCALE;
+use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     V16Config, V16PodI128, V16PodU128, V16PodU64,
 };
-use percolator::BOUND_SCALE;
 use proptest::prelude::*;
 
 fn market_id() -> [u8; 32] {

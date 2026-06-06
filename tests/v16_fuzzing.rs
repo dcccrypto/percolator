@@ -1,6 +1,6 @@
 #![cfg(feature = "fuzz")]
 
-use percolator::v16::{
+use percolator::{
     EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioV16View,

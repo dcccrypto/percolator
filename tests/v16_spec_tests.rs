@@ -1,4 +1,4 @@
-use percolator::v16::{
+use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
     HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
@@ -1526,12 +1526,12 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     let outcome = market
         .permissionless_crank_not_atomic(
             &mut account,
-            percolator::v16::PermissionlessCrankRequestV16 {
+            percolator::PermissionlessCrankRequestV16 {
                 now_slot: 10,
                 asset_index: 0,
                 effective_price: 100,
                 funding_rate_e9: 0,
-                action: percolator::v16::PermissionlessCrankActionV16::Liquidate(
+                action: percolator::PermissionlessCrankActionV16::Liquidate(
                     LiquidationRequestV16 {
                         asset_index: 0,
                         close_q: POS_SCALE,
@@ -1546,7 +1546,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
 
     assert_eq!(
         outcome,
-        percolator::v16::PermissionlessProgressOutcomeV16::AccountCurrent
+        percolator::PermissionlessProgressOutcomeV16::AccountCurrent
     );
     assert_eq!(market.header.loss_stale_active, 0);
     assert_eq!(market.header.slot_last.get(), 10);
