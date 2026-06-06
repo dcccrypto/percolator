@@ -2998,7 +2998,14 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
             fee > 0 && im > 0 && maintenance > im,
             "health cert fee debit covers positive fee with IM still satisfied"
         );
+        kani::cover!(
+            next_equity_expected.unwrap() as u128 == im,
+            "health cert fee debit covers exact post-fee IM boundary"
+        );
         assert_eq!(next.certified_equity, next_equity_expected.unwrap());
+        assert_eq!(next.certified_initial_req, im);
+        assert_eq!(next.certified_maintenance_req, maintenance);
+        assert_eq!(next.valid, cert.valid);
         assert!((next.certified_equity as u128) >= next.certified_initial_req);
         assert_eq!(
             next.certified_liq_deficit,
@@ -3013,6 +3020,13 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
             fee > i128::MAX as u128 || next_equity_expected.is_none(),
             "health cert fee debit covers arithmetic rejection"
         );
+        if fee > i128::MAX as u128 {
+            assert_eq!(result, Err(V16Error::ArithmeticOverflow));
+        } else if next_equity_expected.is_none() {
+            assert_eq!(result, Err(V16Error::ArithmeticOverflow));
+        } else {
+            assert_eq!(result, Err(V16Error::LockActive));
+        }
     }
 }
 
