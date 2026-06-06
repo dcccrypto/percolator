@@ -1293,17 +1293,14 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 #[kani::solver(cadical)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let resolved_slot_raw: u16 = kani::any();
-    let c_tot_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    let surplus_raw: u8 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let surplus: u128 = kani::any();
     kani::assume(resolved_slot_raw > 0);
-    kani::assume(c_tot_raw <= 8);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
+    kani::assume(c_tot <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - c_tot);
+    kani::assume(surplus <= MAX_VAULT_TVL - c_tot - insurance);
     let resolved_slot = resolved_slot_raw as u64;
-    let c_tot = c_tot_raw as u128;
-    let insurance = insurance_raw as u128;
-    let surplus = surplus_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
@@ -1319,8 +1316,8 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     market.resolve_market_not_atomic(resolved_slot).unwrap();
 
     kani::cover!(
-        resolved_slot > 10 && c_tot > 0 && insurance > 0 && surplus > 0,
-        "resolved market transition covers wide future authenticated slot over symbolic value state"
+        resolved_slot > 10 && c_tot > 255 && insurance > 255 && surplus > 255,
+        "resolved market transition covers future authenticated slot over wide symbolic value state"
     );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
