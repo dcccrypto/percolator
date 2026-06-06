@@ -3923,8 +3923,8 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
 fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     let claimable_raw: u8 = kani::any();
     let vault_raw: u8 = kani::any();
-    kani::assume((1..=16).contains(&claimable_raw));
-    kani::assume(vault_raw <= 16);
+    kani::assume((1..=64).contains(&claimable_raw));
+    kani::assume(vault_raw <= 64);
     let claimable = claimable_raw as u128;
     let vault = vault_raw as u128;
     let paid_before = 2u128;
@@ -3954,6 +3954,11 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
             paid_effective: paid_before,
             finalized: false,
         });
+    let ledger_before = header.resolved_payout_ledger;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let account_capital_before = account_header.capital;
+    let account_pnl_before = account_header.pnl;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
@@ -3977,7 +3982,14 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     );
     assert_eq!(paid, payout);
     assert_eq!(market.header.vault.get(), vault - payout);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.header.resolved_payout_ledger, ledger_before);
+    assert_eq!(account.header.capital, account_capital_before);
+    assert_eq!(account.header.pnl, account_pnl_before);
     assert_eq!(receipt.paid_effective, paid_before + payout);
+    assert_eq!(receipt.terminal_positive_claim_face, terminal);
+    assert_eq!(receipt.prior_bound_contribution_num, terminal * BOUND_SCALE);
     assert_eq!(receipt.finalized, payout == claimable);
 }
 
