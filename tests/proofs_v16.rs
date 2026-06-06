@@ -3572,6 +3572,12 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
     account_header.capital = V16PodU128::new(capital);
     account_header.pnl = V16PodI128::new(0);
     let vault_before = header.vault.get();
+    let pnl_before = account_header.pnl.get();
+    let health_valid_before = account_header.health_cert.valid;
+    let pnl_pos_tot_before = header.pnl_pos_tot.get();
+    let pnl_pos_bound_tot_num_before = header.pnl_pos_bound_tot_num.get();
+    let source_claim_bound_total_num_before = header.source_claim_bound_total_num.get();
+    let negative_pnl_count_before = header.negative_pnl_account_count.get();
     let senior_before = header
         .c_tot
         .get()
@@ -3596,6 +3602,10 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
         requested_fee == 0 || capital == 0,
         "trade fee helper covers zero-charge no-op"
     );
+    kani::cover!(
+        expected > 0 && account.header.health_cert.valid == 0,
+        "trade fee helper invalidates health certificate only when capital moves"
+    );
     assert_eq!(charged, expected);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(
@@ -3609,6 +3619,25 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
     assert_eq!(account.header.capital.get(), capital - expected);
     assert_eq!(market.header.c_tot.get(), capital - expected);
     assert_eq!(market.header.insurance.get(), insurance + expected);
+    assert_eq!(account.header.pnl.get(), pnl_before);
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl_pos_tot_before);
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        pnl_pos_bound_tot_num_before
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        source_claim_bound_total_num_before
+    );
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        negative_pnl_count_before
+    );
+    if expected == 0 {
+        assert_eq!(account.header.health_cert.valid, health_valid_before);
+    } else {
+        assert_eq!(account.header.health_cert.valid, 0);
+    }
 }
 
 #[kani::proof]
