@@ -5282,10 +5282,19 @@ fn proof_v16_counterparty_credit_consumption_reports_atoms_not_scaled_backing() 
     assert_eq!(backing_after_create.fresh_unliened_backing_num, 0);
     assert_eq!(backing_after_create.valid_liened_backing_num, backing_num);
     assert_eq!(backing_after_create.consumed_liened_backing_num, 0);
+    assert_eq!(
+        source_after_create.positive_claim_bound_num,
+        required_face_num
+    );
+    assert_eq!(
+        source_after_create.exact_positive_claim_num,
+        required_face_num
+    );
     assert_eq!(source_after_create.fresh_reserved_backing_num, backing_num);
     assert_eq!(source_after_create.valid_liened_backing_num, backing_num);
     assert_eq!(source_after_create.spent_backing_num, 0);
     assert_eq!(source_after_create.provider_receivable_num, 0);
+    assert_eq!(source_after_create.credit_rate_num, CREDIT_RATE_SCALE);
 
     let (backing_after_consume, source_after_consume) =
         MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
@@ -5312,10 +5321,19 @@ fn proof_v16_counterparty_credit_consumption_reports_atoms_not_scaled_backing() 
         backing_after_consume.consumed_liened_backing_num,
         backing_num
     );
+    assert_eq!(
+        source_after_consume.positive_claim_bound_num,
+        required_face_num
+    );
+    assert_eq!(
+        source_after_consume.exact_positive_claim_num,
+        required_face_num
+    );
     assert_eq!(source_after_consume.fresh_reserved_backing_num, 0);
     assert_eq!(source_after_consume.valid_liened_backing_num, 0);
     assert_eq!(source_after_consume.spent_backing_num, backing_num);
     assert_eq!(source_after_consume.provider_receivable_num, backing_num);
+    assert_eq!(source_after_consume.credit_rate_num, CREDIT_RATE_SCALE);
 }
 
 #[kani::proof]
