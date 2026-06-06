@@ -4868,12 +4868,24 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
         capital - expected_paid - expected_fee
     );
     assert_eq!(account.header.pnl.get(), expected_pnl);
+    assert_eq!(
+        market.header.c_tot.get(),
+        capital - expected_paid - expected_fee
+    );
     assert_eq!(market.header.insurance.get(), expected_fee);
     assert_eq!(market.header.vault.get(), capital);
     assert_eq!(
         market.header.c_tot.get() + market.header.insurance.get(),
         capital - expected_paid
     );
+    if hidden_loss > capital {
+        assert_eq!(expected_fee, 0);
+        assert_eq!(market.header.bankruptcy_hlock_active, 1);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+    } else {
+        assert_eq!(account.header.pnl.get(), 0);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    }
 }
 
 #[kani::proof]
