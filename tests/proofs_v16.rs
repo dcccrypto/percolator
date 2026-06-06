@@ -26,9 +26,10 @@ use percolator::v16::{
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
-    BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
+    TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT,
+    MAX_BACKING_FEE_UTIL_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
@@ -100,6 +101,36 @@ fn one_market_persisted_slot_fixture() -> (MarketGroupV16HeaderAccount, [Market<
     asset.slot_last = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     (header, markets)
+}
+
+fn one_market_direct_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    let mut markets = [Market::new(
+        0u64,
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    (header, markets, PortfolioAccountV16Account::default())
 }
 
 fn empty_recovery_slot_for_market(
@@ -3016,6 +3047,383 @@ fn proof_v16_backing_utilization_fee_quote_atoms_is_exact_floor_and_time_bounded
     } else {
         assert!(rate.is_err() && lien_atoms > 0 && dt > 0);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_collection_first_touch_initializes_cursor_without_value_move() {
+    let capital_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let current_slot_raw: u8 = kani::any();
+    kani::assume(lien_raw > 0);
+    kani::assume(current_slot_raw > 0);
+    let capital = capital_raw as u128;
+    let lien_num = lien_raw as u128 * BOUND_SCALE;
+    let current_slot = current_slot_raw as u64;
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert.valid = 1;
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: V16PodU64::new(0),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let earnings_before = market.header.backing_provider_earnings_total.get();
+    let mut account = PortfolioV16ViewMut {
+        header: &mut account_header,
+    };
+    let capital_before = account.header.capital.get();
+    let charged = market
+        .kani_collect_account_backing_utilization_fee_for_domain_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        capital > 0 && lien_raw > 1 && current_slot > 1,
+        "first backing-utilization collection covers nontrivial lien cursor initialization"
+    );
+    assert_eq!(charged, 0);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_fee_last_slot
+            .get(),
+        current_slot
+    );
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_capital_at_risk_fee_revenue
+            .get(),
+        0
+    );
+    assert_eq!(account.header.health_cert.valid, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_collection_full_charge_conserves_senior_value() {
+    let slack_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let revenue_raw: u8 = kani::any();
+    kani::assume(slack_raw <= 4);
+    kani::assume(earnings_raw <= 4);
+    kani::assume(revenue_raw <= 4);
+    let lien_atoms = 1u128;
+    let lien_num = lien_atoms * BOUND_SCALE;
+    let dt = 1u64;
+    let earnings_before = earnings_raw as u128;
+    let revenue_before = revenue_raw as u128;
+    let last_slot = 3u64;
+    let current_slot = last_slot + dt;
+    let requested_fee = lien_atoms * dt as u128;
+    let capital = requested_fee + slack_raw as u128;
+    let expected_charged = requested_fee;
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.config.backing_fee_base_rate_e9_per_slot =
+        V16PodU64::new(MAX_BACKING_FEE_RATE_E9_PER_SLOT);
+    header.config.backing_fee_slope_at_kink_e9_per_slot = V16PodU64::new(0);
+    header.config.backing_fee_slope_above_kink_e9_per_slot = V16PodU64::new(0);
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(capital + earnings_before);
+    header.c_tot = V16PodU128::new(capital);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings_before);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.health_cert.valid = 1;
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: V16PodU64::new(last_slot),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(revenue_before),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: lien_num,
+            valid_liened_backing_num: lien_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: lien_num,
+        utilization_fee_earnings: earnings_before,
+        expiry_slot: current_slot + 1,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let insurance_before = market.header.insurance.get();
+    let mut account = PortfolioV16ViewMut {
+        header: &mut account_header,
+    };
+    let charged = market
+        .kani_collect_account_backing_utilization_fee_for_domain_not_atomic(&mut account, 0)
+        .unwrap();
+    let bucket_after = market.kani_backing_bucket_for_domain(0).unwrap();
+
+    kani::cover!(
+        slack_raw > 0,
+        "backing-utilization collection covers nontrivial full positive-capital fee charge"
+    );
+    assert_eq!(charged, expected_charged);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_fee_last_slot
+            .get(),
+        current_slot
+    );
+    assert_eq!(account.header.capital.get(), capital - expected_charged);
+    assert_eq!(market.header.c_tot.get(), capital - expected_charged);
+    assert_eq!(
+        bucket_after.utilization_fee_earnings,
+        earnings_before + expected_charged
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before + expected_charged
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_capital_at_risk_fee_revenue
+            .get(),
+        revenue_before + expected_charged
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get()
+    );
+    assert_eq!(
+        account.header.health_cert.valid,
+        if expected_charged > 0 { 0 } else { 1 }
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_collection_cap_charge_conserves_senior_value() {
+    let earnings_raw: u8 = kani::any();
+    let revenue_raw: u8 = kani::any();
+    kani::assume(earnings_raw <= 4);
+    kani::assume(revenue_raw <= 4);
+    let lien_atoms = 2u128;
+    let lien_num = lien_atoms * BOUND_SCALE;
+    let dt = 1u64;
+    let expected_charged = 1u128;
+    let capital = expected_charged;
+    let earnings_before = earnings_raw as u128;
+    let revenue_before = revenue_raw as u128;
+    let last_slot = 3u64;
+    let current_slot = last_slot + dt;
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.config.backing_fee_base_rate_e9_per_slot =
+        V16PodU64::new(MAX_BACKING_FEE_RATE_E9_PER_SLOT);
+    header.config.backing_fee_slope_at_kink_e9_per_slot = V16PodU64::new(0);
+    header.config.backing_fee_slope_above_kink_e9_per_slot = V16PodU64::new(0);
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(capital + earnings_before);
+    header.c_tot = V16PodU128::new(capital);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings_before);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.health_cert.valid = 1;
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: V16PodU64::new(last_slot),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(revenue_before),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: lien_num,
+            valid_liened_backing_num: lien_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: lien_num,
+        utilization_fee_earnings: earnings_before,
+        expiry_slot: current_slot + 1,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let insurance_before = market.header.insurance.get();
+    let mut account = PortfolioV16ViewMut {
+        header: &mut account_header,
+    };
+    let charged = market
+        .kani_collect_account_backing_utilization_fee_for_domain_not_atomic(&mut account, 0)
+        .unwrap();
+    let bucket_after = market.kani_backing_bucket_for_domain(0).unwrap();
+
+    kani::cover!(
+        earnings_raw > 0 || revenue_raw > 0,
+        "backing-utilization collection covers nontrivial capital-capped fee charge"
+    );
+    assert_eq!(charged, expected_charged);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_fee_last_slot
+            .get(),
+        current_slot
+    );
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(
+        bucket_after.utilization_fee_earnings,
+        earnings_before + expected_charged
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before + expected_charged
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_capital_at_risk_fee_revenue
+            .get(),
+        revenue_before + expected_charged
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get()
+    );
+    assert_eq!(account.header.health_cert.valid, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_collection_negative_pnl_never_draws_capital() {
+    let capital_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let revenue_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 16);
+    kani::assume(earnings_raw <= 16);
+    kani::assume(revenue_raw <= 16);
+    let capital = capital_raw as u128;
+    let earnings_before = earnings_raw as u128;
+    let revenue_before = revenue_raw as u128;
+    let lien_num = BOUND_SCALE;
+    let last_slot = 3u64;
+    let current_slot = last_slot + 1;
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.config.backing_fee_base_rate_e9_per_slot =
+        V16PodU64::new(MAX_BACKING_FEE_RATE_E9_PER_SLOT);
+    header.config.backing_fee_slope_at_kink_e9_per_slot = V16PodU64::new(0);
+    header.config.backing_fee_slope_above_kink_e9_per_slot = V16PodU64::new(0);
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(capital + earnings_before);
+    header.c_tot = V16PodU128::new(capital);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings_before);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-1);
+    account_header.health_cert.valid = 1;
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: V16PodU64::new(last_slot),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(revenue_before),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: lien_num,
+            valid_liened_backing_num: lien_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: lien_num,
+        utilization_fee_earnings: earnings_before,
+        expiry_slot: current_slot + 1,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let insurance_before = market.header.insurance.get();
+    let mut account = PortfolioV16ViewMut {
+        header: &mut account_header,
+    };
+    let charged = market
+        .kani_collect_account_backing_utilization_fee_for_domain_not_atomic(&mut account, 0)
+        .unwrap();
+    let bucket_after = market.kani_backing_bucket_for_domain(0).unwrap();
+
+    kani::cover!(
+        capital > 0,
+        "negative-PnL backing-utilization collection covers loss-bearing capital guard"
+    );
+    assert_eq!(charged, 0);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_fee_last_slot
+            .get(),
+        current_slot
+    );
+    assert_eq!(account.header.capital.get(), capital);
+    assert_eq!(market.header.c_tot.get(), capital);
+    assert_eq!(bucket_after.utilization_fee_earnings, earnings_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_capital_at_risk_fee_revenue
+            .get(),
+        revenue_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.health_cert.valid, 1);
 }
 
 #[kani::proof]

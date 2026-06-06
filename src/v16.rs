@@ -5556,6 +5556,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    #[cfg(kani)]
+    pub fn kani_backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
+        self.backing_bucket_for_domain(domain)
+    }
+
     fn set_backing_bucket_for_domain(
         &mut self,
         domain: usize,
@@ -9215,6 +9220,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             );
         account.header.health_cert.valid = 0;
         Ok(charged)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_collect_account_backing_utilization_fee_for_domain_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)
     }
 
     fn mark_leg_b_stale(
