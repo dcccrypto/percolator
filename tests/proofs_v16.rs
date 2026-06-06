@@ -6592,10 +6592,10 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
-    let claim_raw: u8 = kani::any();
-    let available_raw: u8 = kani::any();
-    let required_raw: u8 = kani::any();
-    kani::assume((1..=64).contains(&claim_raw));
+    let claim_raw: u16 = kani::any();
+    let available_raw: u16 = kani::any();
+    let required_raw: u16 = kani::any();
+    kani::assume((1..=256).contains(&claim_raw));
     kani::assume(available_raw < claim_raw);
     kani::assume(required_raw > available_raw);
     kani::assume(required_raw <= claim_raw);
@@ -6625,7 +6625,13 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
         available_raw > 8 && required_raw > available_raw,
         "underbacked source-credit proof covers wide partially backed domain"
     );
+    kani::cover!(
+        claim_raw > 64,
+        "underbacked source-credit proof covers widened claim domain"
+    );
+    assert!(source.credit_rate_num < CREDIT_RATE_SCALE);
     if let Ok((required_face_num, required_backing_num)) = sized {
+        assert_eq!(required_backing_num, required_credit * BOUND_SCALE);
         assert!(required_face_num > source.positive_claim_bound_num);
         assert!(required_backing_num > available_num);
     } else {
