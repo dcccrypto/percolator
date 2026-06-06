@@ -6427,6 +6427,7 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
     assert_eq!(reservation.consumed_insurance_num, first_num);
     assert_eq!(source.insurance_credit_reserved_num, second_num);
     assert_eq!(source.valid_liened_insurance_num, second_num);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
 
     let (reservation, source, spent, insurance) =
         MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_consume_delta(
@@ -6447,8 +6448,11 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
     assert_eq!(reservation.consumed_insurance_num, total_num);
+    assert_eq!(reservation.impaired_liened_insurance_num, 0);
     assert_eq!(source.insurance_credit_reserved_num, 0);
     assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(source.impaired_liened_insurance_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
 }
 
 #[kani::proof]
