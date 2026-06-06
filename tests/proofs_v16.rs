@@ -5242,6 +5242,90 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_insurance_lien_consume_debits_only_domain_insurance() {
+    let atom_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&atom_raw));
+    let atoms = atom_raw as u128;
+    let amount = atoms * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(atoms);
+    header.insurance = V16PodU128::new(atoms);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: amount,
+            valid_liened_insurance_num: amount,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            insurance_credit_reserved_num: amount,
+            valid_liened_insurance_num: amount,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .consume_source_credit_lien_from_insurance_not_atomic(0, amount)
+        .unwrap();
+    let reservation = market.markets[0]
+        .engine
+        .insurance_reservation_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        atom_raw > 1,
+        "public insurance lien consume spends a nontrivial domain amount"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        atoms
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        atoms
+    );
+    assert_eq!(reservation.insurance_credit_reserved_num, 0);
+    assert_eq!(reservation.valid_liened_insurance_num, 0);
+    assert_eq!(reservation.impaired_liened_insurance_num, 0);
+    assert_eq!(reservation.consumed_insurance_num, amount);
+    assert_eq!(source.insurance_credit_reserved_num, 0);
+    assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(source.impaired_liened_insurance_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_epoch, 1);
+}
+
+#[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
