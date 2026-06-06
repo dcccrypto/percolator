@@ -4837,15 +4837,19 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
 #[kani::solver(cadical)]
 fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let budget_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
     kani::assume(budget_raw <= 32);
+    kani::assume(insurance_raw <= 32);
     kani::assume((1..=32).contains(&loss_raw));
+    kani::assume(budget_raw <= insurance_raw);
     let budget = budget_raw as u128;
+    let insurance = insurance_raw as u128;
     let loss = loss_raw as u128;
     let expected_used = budget.min(loss);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(32);
-    header.insurance = V16PodU128::new(32);
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
     account_header.pnl = V16PodI128::new(-(loss as i128));
@@ -4867,7 +4871,9 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         "domain budget spend proof covers loss-capped branch"
     );
     assert_eq!(used, expected_used);
-    assert_eq!(market.header.insurance.get(), 32 - expected_used);
+    assert_eq!(market.header.insurance.get(), insurance - expected_used);
+    assert_eq!(market.header.vault.get(), insurance);
+    assert_eq!(market.header.c_tot.get(), 0);
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
         expected_used
