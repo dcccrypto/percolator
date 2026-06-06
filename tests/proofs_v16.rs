@@ -6223,6 +6223,91 @@ fn proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
+    let amount_raw: u8 = kani::any();
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    let expired: bool = kani::any();
+    kani::assume(amount_raw <= 8);
+    kani::assume(fresh_raw <= 8);
+    kani::assume(valid_raw <= 8);
+    kani::assume(status_raw <= 3);
+
+    let current_slot = 10u64;
+    let expiry_slot = if expired { current_slot } else { 20 };
+    let amount = amount_raw as u128 * BOUND_SCALE;
+    let fresh = fresh_raw as u128 * BOUND_SCALE;
+    let valid = valid_raw as u128 * BOUND_SCALE;
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Fresh,
+        1 => BackingBucketStatusV16::Expired,
+        2 => BackingBucketStatusV16::Impaired,
+        _ => BackingBucketStatusV16::Empty,
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: fresh,
+        valid_liened_backing_num: valid,
+        expiry_slot,
+        status,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        valid_liened_backing_num: valid,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+        bucket,
+        source,
+        current_slot,
+        amount,
+    );
+    let expected_ok =
+        amount == 0 || (status == BackingBucketStatusV16::Fresh && !expired && fresh >= amount);
+
+    kani::cover!(
+        amount == 0 && status != BackingBucketStatusV16::Fresh,
+        "counterparty lien create zero amount is an idempotent no-op before status checks"
+    );
+    kani::cover!(
+        amount > 0 && status != BackingBucketStatusV16::Fresh,
+        "counterparty lien create rejects non-Fresh buckets"
+    );
+    kani::cover!(
+        amount > 0 && status == BackingBucketStatusV16::Fresh && expired,
+        "counterparty lien create rejects expired Fresh buckets"
+    );
+    kani::cover!(
+        amount > 0 && status == BackingBucketStatusV16::Fresh && !expired && fresh < amount,
+        "counterparty lien create rejects insufficient fresh backing"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh > amount && valid > 0,
+        "counterparty lien create partially moves fresh backing into an existing lien"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh == amount,
+        "counterparty lien create can lien all currently fresh backing"
+    );
+
+    if expected_ok {
+        let (next_bucket, next_source) = result.unwrap();
+        assert_eq!(next_bucket.status, status);
+        assert_eq!(next_bucket.expiry_slot, expiry_slot);
+        assert_eq!(next_bucket.fresh_unliened_backing_num, fresh - amount);
+        assert_eq!(next_bucket.valid_liened_backing_num, valid + amount);
+        assert_eq!(next_source.valid_liened_backing_num, valid + amount);
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_value_movement() {
