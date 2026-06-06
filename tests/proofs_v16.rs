@@ -2509,9 +2509,11 @@ fn proof_v16_positive_pnl_requires_full_source_claim_attribution() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_source_credit_rate_never_exceeds_available_backing_ratio() {
-    let claim_atoms = kani::any::<u8>() as u128;
-    let backing_atoms = kani::any::<u8>() as u128;
+    let claim_atoms = kani::any::<u16>() as u128;
+    let backing_atoms = kani::any::<u16>() as u128;
     kani::assume(claim_atoms > 0);
+    kani::assume(claim_atoms <= 511);
+    kani::assume(backing_atoms <= 511);
     let claim_num = claim_atoms * BOUND_SCALE;
     let backing_num = backing_atoms * BOUND_SCALE;
     let state = SourceCreditStateV16 {
