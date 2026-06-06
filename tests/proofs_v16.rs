@@ -4217,6 +4217,20 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     let bad_account = PortfolioV16ViewMut::new(&mut bad_header);
     let rejected = bad_account.validate_with_market(&market.as_view());
 
+    let understated_rejected = if residual > 0 {
+        let mut understated_header = account_header;
+        let understated = CloseProgressLedgerV16 {
+            residual_remaining: residual - 1,
+            ..base
+        };
+        understated_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&understated);
+        let understated_account = PortfolioV16ViewMut::new(&mut understated_header);
+        understated_account.validate_with_market(&market.as_view())
+    } else {
+        Err(V16Error::InvalidLeg)
+    };
+
     kani::cover!(
         residual == 0,
         "close progress proof covers finalized residual"
@@ -4229,8 +4243,13 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
         progress != 0,
         "close progress proof covers nonzero close cure progress"
     );
+    kani::cover!(
+        residual > 1,
+        "close progress proof covers understated residual rejection"
+    );
     assert_eq!(ok, Ok(()));
     assert_eq!(rejected, Err(V16Error::InvalidLeg));
+    assert_eq!(understated_rejected, Err(V16Error::InvalidLeg));
 }
 
 #[kani::proof]
