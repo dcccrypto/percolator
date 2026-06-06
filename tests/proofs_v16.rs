@@ -2871,10 +2871,12 @@ fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() 
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
-    let backing_raw: u8 = kani::any();
-    let withdraw_raw: u8 = kani::any();
+    let backing_raw: u16 = kani::any();
+    let withdraw_raw: u16 = kani::any();
     kani::assume(backing_raw > 1);
     kani::assume(withdraw_raw > 0);
+    kani::assume(backing_raw <= 1024);
+    kani::assume(withdraw_raw <= 1024);
     kani::assume(withdraw_raw < backing_raw);
     let backing_num = backing_raw as u128 * BOUND_SCALE;
     let withdraw_num = withdraw_raw as u128 * BOUND_SCALE;
@@ -2893,7 +2895,7 @@ fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
         ..BackingBucketV16::EMPTY
     };
 
-    let (_bucket_after, source_after) =
+    let (bucket_after, source_after) =
         MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
             bucket,
             source,
@@ -2903,9 +2905,24 @@ fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
     let post_rate = kani_expected_source_credit_rate_num_for_state(source_after).unwrap();
 
     kani::cover!(
-        withdraw_raw > 1,
-        "counterparty backing withdraw proof covers nontrivial underbacking"
+        backing_raw > 255 && withdraw_raw > 1,
+        "counterparty backing withdraw proof covers widened nontrivial underbacking"
     );
+    assert_eq!(
+        bucket_after.fresh_unliened_backing_num,
+        backing_num - withdraw_num
+    );
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(source_after.positive_claim_bound_num, backing_num);
+    assert_eq!(source_after.exact_positive_claim_num, backing_num);
+    assert_eq!(
+        source_after.fresh_reserved_backing_num,
+        backing_num - withdraw_num
+    );
+    assert_eq!(source_after.valid_liened_backing_num, 0);
+    assert_eq!(source_after.provider_receivable_num, 0);
+    assert_eq!(source_after.spent_backing_num, 0);
+    assert!(source_after.fresh_reserved_backing_num < source_after.positive_claim_bound_num);
     assert!(post_rate < CREDIT_RATE_SCALE);
 }
 
