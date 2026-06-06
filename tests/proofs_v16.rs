@@ -6428,6 +6428,131 @@ fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_m
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed() {
+    let amount_raw: u8 = kani::any();
+    let bucket_fresh_raw: u8 = kani::any();
+    let bucket_valid_raw: u8 = kani::any();
+    let bucket_consumed_raw: u8 = kani::any();
+    let bucket_impaired_raw: u8 = kani::any();
+    let source_fresh_raw: u8 = kani::any();
+    let source_valid_raw: u8 = kani::any();
+    let source_spent_raw: u8 = kani::any();
+    let source_receivable_raw: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    kani::assume(amount_raw <= 8);
+    kani::assume(bucket_fresh_raw <= 8);
+    kani::assume(bucket_valid_raw <= 8);
+    kani::assume(bucket_consumed_raw <= 8);
+    kani::assume(bucket_impaired_raw <= 8);
+    kani::assume(source_fresh_raw <= 8);
+    kani::assume(source_valid_raw <= 8);
+    kani::assume(source_spent_raw <= 8);
+    kani::assume(source_receivable_raw <= 8);
+    kani::assume(status_raw <= 3);
+
+    let amount = amount_raw as u128 * BOUND_SCALE;
+    let bucket_fresh = bucket_fresh_raw as u128 * BOUND_SCALE;
+    let bucket_valid = bucket_valid_raw as u128 * BOUND_SCALE;
+    let bucket_consumed = bucket_consumed_raw as u128 * BOUND_SCALE;
+    let bucket_impaired = bucket_impaired_raw as u128 * BOUND_SCALE;
+    let source_fresh = source_fresh_raw as u128 * BOUND_SCALE;
+    let source_valid = source_valid_raw as u128 * BOUND_SCALE;
+    let source_spent = source_spent_raw as u128 * BOUND_SCALE;
+    let source_receivable = source_receivable_raw as u128 * BOUND_SCALE;
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Fresh,
+        1 => BackingBucketStatusV16::Expired,
+        2 => BackingBucketStatusV16::Impaired,
+        _ => BackingBucketStatusV16::Empty,
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: bucket_fresh,
+        valid_liened_backing_num: bucket_valid,
+        consumed_liened_backing_num: bucket_consumed,
+        impaired_liened_backing_num: bucket_impaired,
+        status,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: source_fresh,
+        valid_liened_backing_num: source_valid,
+        spent_backing_num: source_spent,
+        provider_receivable_num: source_receivable,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+        bucket, source, amount,
+    );
+    let expected_ok =
+        amount == 0 || (bucket_valid >= amount && source_valid >= amount && source_fresh >= amount);
+
+    kani::cover!(
+        amount == 0 && bucket_valid == 0 && source_fresh == 0,
+        "counterparty lien consume covers zero no-op before support checks"
+    );
+    kani::cover!(
+        amount > 0 && bucket_valid < amount,
+        "counterparty lien consume rejects insufficient bucket valid backing"
+    );
+    kani::cover!(
+        amount > 0 && bucket_valid >= amount && source_valid < amount,
+        "counterparty lien consume rejects insufficient source valid backing"
+    );
+    kani::cover!(
+        amount > 0 && bucket_valid >= amount && source_valid >= amount && source_fresh < amount,
+        "counterparty lien consume rejects insufficient source fresh reservation"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && bucket_valid > amount && source_fresh > amount,
+        "counterparty lien consume covers partial consumption with remaining lien"
+    );
+    kani::cover!(
+        expected_ok
+            && amount > 0
+            && bucket_fresh == 0
+            && bucket_valid == amount
+            && bucket_impaired == 0,
+        "counterparty lien consume covers terminal consumption status transition"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        let (next_bucket, next_source) = result.unwrap();
+        let expected_status =
+            if amount != 0 && bucket_fresh == 0 && bucket_valid == amount && bucket_impaired == 0 {
+                BackingBucketStatusV16::Expired
+            } else {
+                status
+            };
+        assert_eq!(next_bucket.fresh_unliened_backing_num, bucket_fresh);
+        assert_eq!(next_bucket.valid_liened_backing_num, bucket_valid - amount);
+        assert_eq!(
+            next_bucket.consumed_liened_backing_num,
+            bucket_consumed + amount
+        );
+        assert_eq!(next_bucket.impaired_liened_backing_num, bucket_impaired);
+        assert_eq!(next_bucket.status, expected_status);
+        assert_eq!(
+            next_source.fresh_reserved_backing_num,
+            source_fresh - amount
+        );
+        assert_eq!(next_source.valid_liened_backing_num, source_valid - amount);
+        assert_eq!(next_source.spent_backing_num, source_spent + amount);
+        assert_eq!(
+            next_source.provider_receivable_num,
+            source_receivable + amount
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_value_movement() {
