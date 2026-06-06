@@ -5366,7 +5366,7 @@ fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_nontrivial_public_profile_satisfies_symbolic_mm_envelope() {
-    let x_raw: u16 = kani::any();
+    let x_raw: u32 = kani::any();
 
     kani::assume(x_raw > 0);
 
@@ -5401,7 +5401,7 @@ fn proof_v16_symbolic_conservative_fee_profile_satisfies_mm_envelope_on_small_no
     let liq_fee_bps: u16 = kani::any();
     let min_liq_abs_raw: u8 = kani::any();
     let liq_fee_cap_raw: u8 = kani::any();
-    let x_raw: u16 = kani::any();
+    let x_raw: u32 = kani::any();
 
     kani::assume((1..=250).contains(&price_move_bps));
     kani::assume(liq_fee_bps <= 250);
@@ -5441,7 +5441,7 @@ fn proof_v16_symbolic_conservative_fee_profile_satisfies_mm_envelope_on_small_no
 #[kani::solver(cadical)]
 fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals() {
     let funding_e9_raw: u16 = kani::any();
-    let x_raw: u16 = kani::any();
+    let x_raw: u32 = kani::any();
 
     kani::assume(funding_e9_raw <= 50);
     kani::assume(x_raw > 0);
