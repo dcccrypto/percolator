@@ -230,16 +230,16 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     let bound_raw: u8 = kani::any();
     let residual_raw: u8 = kani::any();
     let decrease_raw: u8 = kani::any();
-    let c_tot_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    let surplus_raw: u8 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let surplus: u128 = kani::any();
     kani::assume((1..=32).contains(&exact_raw));
     kani::assume((1..=32).contains(&bound_raw));
     kani::assume((1..=32).contains(&residual_raw));
     kani::assume((1..=32).contains(&decrease_raw));
-    kani::assume(c_tot_raw <= 8);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
+    kani::assume(c_tot <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - c_tot);
+    kani::assume(surplus <= MAX_VAULT_TVL - c_tot - insurance);
     kani::assume(decrease_raw <= bound_raw);
     kani::assume((residual_raw as u128) <= (exact_raw as u128 + bound_raw as u128));
 
@@ -248,9 +248,6 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     let decrease_num = decrease_raw as u128 * BOUND_SCALE;
     let total_before = exact_num + bound_num;
     let numerator_before = residual_raw as u128 * BOUND_SCALE;
-    let c_tot = c_tot_raw as u128;
-    let insurance = insurance_raw as u128;
-    let surplus = surplus_raw as u128;
 
     let (mut header, mut markets) = one_market_persisted_slot_fixture();
     header.mode = 1; // Resolved
@@ -284,10 +281,10 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     kani::cover!(
         decrease_raw > 1
             && residual_raw < exact_raw + bound_raw
-            && c_tot > 0
-            && insurance > 0
-            && surplus > 0,
-        "resolved refinement covers nontrivial haircut over symbolic value state"
+            && c_tot > 255
+            && insurance > 255
+            && surplus > 255,
+        "resolved refinement covers nontrivial haircut over wide symbolic value state"
     );
     assert_eq!(result, Ok(()));
     assert_eq!(
