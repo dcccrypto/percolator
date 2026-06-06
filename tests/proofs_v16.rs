@@ -2004,6 +2004,108 @@ fn proof_v16_backing_utilization_fee_is_capped_by_capital_and_conserves_ctot_to_
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_account_backing_fee_split_preserves_senior_stock() {
+    let provider_fee_raw: u8 = kani::any();
+    let insurance_fee_raw: u8 = kani::any();
+    let margin_slack_raw: u8 = kani::any();
+    kani::assume(provider_fee_raw <= 4);
+    kani::assume(insurance_fee_raw <= 4);
+    kani::assume(provider_fee_raw > 0 || insurance_fee_raw > 0);
+    kani::assume((1..=8).contains(&margin_slack_raw));
+    let provider_fee = provider_fee_raw as u128;
+    let insurance_fee = insurance_fee_raw as u128;
+    let total_fee = provider_fee + insurance_fee;
+    let capital = total_fee + margin_slack_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: margin_slack_raw as u128,
+        certified_maintenance_req: margin_slack_raw as u128,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let earnings_before = market.header.backing_provider_earnings_total.get();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let charged = market
+        .charge_account_backing_fee_not_atomic(&mut account, 0, provider_fee, 1, insurance_fee)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        provider_fee > 0 && insurance_fee > 0,
+        "public account backing fee covers provider and insurance split"
+    );
+    kani::cover!(
+        provider_fee == 0 && insurance_fee > 0,
+        "public account backing fee covers insurance-only split"
+    );
+    kani::cover!(
+        provider_fee > 0 && insurance_fee == 0,
+        "public account backing fee covers provider-only split"
+    );
+    assert_eq!(charged, total_fee);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before - total_fee);
+    assert_eq!(account.header.capital.get(), capital - total_fee);
+    assert_eq!(
+        market.header.insurance.get(),
+        insurance_before + insurance_fee
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before + provider_fee
+    );
+    assert_eq!(bucket.utilization_fee_earnings, provider_fee);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        insurance_fee
+    );
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get(),
+        c_tot_before + insurance_before + earnings_before
+    );
+    assert_eq!(
+        account.header.health_cert.certified_equity.get(),
+        margin_slack_raw as i128
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
