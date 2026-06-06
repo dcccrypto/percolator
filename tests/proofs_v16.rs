@@ -2954,8 +2954,11 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
     );
     assert_eq!(bucket_after.valid_liened_backing_num, 0);
     assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
+    assert_eq!(bucket_after.consumed_liened_backing_num, 0);
     assert_eq!(source_after.valid_liened_backing_num, 0);
     assert_eq!(source_after.fresh_reserved_backing_num, amount);
+    assert_eq!(source_after.spent_backing_num, 0);
+    assert_eq!(source_after.provider_receivable_num, 0);
 }
 
 // The terminal counterparty-lien release must also ignore bucket status/expiry:
