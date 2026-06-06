@@ -2332,6 +2332,14 @@ fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
                 .unwrap()
                 <= vault
         );
+    } else if next_earnings_expected.is_none() {
+        assert_eq!(result, Err(V16Error::CounterOverflow));
+    } else if senior_after.is_none() {
+        assert_eq!(result, Err(V16Error::ArithmeticOverflow));
+    } else if senior_after.unwrap() > vault {
+        assert_eq!(result, Err(V16Error::LockActive));
+    } else {
+        assert_eq!(result, Err(V16Error::CounterOverflow));
     }
 }
 
