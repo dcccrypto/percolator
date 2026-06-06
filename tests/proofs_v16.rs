@@ -816,13 +816,22 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
 #[kani::solver(cadical)]
 fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
     let growth_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
     let new_capacity = 1 + growth_raw as u32;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    header.vault = V16PodU128::new(11);
-    header.c_tot = V16PodU128::new(7);
-    header.insurance = V16PodU128::new(4);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -835,8 +844,8 @@ fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
     let config = header.config.try_to_runtime_shape().unwrap();
 
     kani::cover!(
-        new_capacity > 1,
-        "public market capacity growth covers actual growth"
+        new_capacity > 1 && c_tot > 0 && insurance > 0 && surplus > 0,
+        "public market capacity growth covers actual growth over symbolic value state"
     );
     assert_eq!(header.asset_slot_capacity.get(), new_capacity);
     assert_eq!(config.max_market_slots, new_capacity);
@@ -854,15 +863,29 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let old_market_id_raw: u8 = kani::any();
     let credit_epoch_raw: u8 = kani::any();
     let zero_credit_rate: bool = kani::any();
-    let nonempty_claim: bool = kani::any();
+    let claim_units_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     let price_raw: u16 = kani::any();
     kani::assume(old_market_id_raw != 0);
     kani::assume(credit_epoch_raw != 0);
+    kani::assume(claim_units_raw <= 8);
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
     kani::assume((1..=10_000).contains(&price_raw));
+    let nonempty_claim = claim_units_raw != 0;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
 
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let old_market_id = old_market_id_raw as u64;
     let new_market_id = old_market_id + 1;
     header.next_market_id = V16PodU64::new(new_market_id);
@@ -890,9 +913,7 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
         },
         ..SourceCreditStateV16::EMPTY
     };
-    if nonempty_claim {
-        source.positive_claim_bound_num = BOUND_SCALE;
-    }
+    source.positive_claim_bound_num = (claim_units_raw as u128) * BOUND_SCALE;
     let mut slot = EngineAssetSlotV16Account {
         asset: AssetStateV16Account::from_runtime(&retired_asset),
         source_credit_long: SourceCreditStateV16Account::from_runtime(&source),
@@ -906,12 +927,18 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let result = header.activate_empty_market_slot_not_atomic(0, &mut slot, price_raw as u64, 2);
 
     kani::cover!(
-        !nonempty_claim && zero_credit_rate && credit_epoch_raw > 1 && price_raw > 100,
-        "retired-slot activation accepts empty source credit with old epoch and zero rate"
+        !nonempty_claim
+            && zero_credit_rate
+            && credit_epoch_raw > 1
+            && price_raw > 100
+            && c_tot > 0
+            && insurance > 0
+            && surplus > 0,
+        "retired-slot activation accepts empty source credit with old epoch, zero rate, and symbolic value state"
     );
     kani::cover!(
-        nonempty_claim && credit_epoch_raw > 1,
-        "retired-slot activation rejects nonempty source credit before reuse"
+        nonempty_claim && claim_units_raw > 4 && credit_epoch_raw > 1,
+        "retired-slot activation rejects symbolic nonempty source credit before reuse"
     );
     assert_eq!(header.vault, vault_before);
     assert_eq!(header.c_tot, c_tot_before);
