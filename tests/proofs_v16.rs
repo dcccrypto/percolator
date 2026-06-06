@@ -4841,6 +4841,74 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_domain_insurance_withdraw_is_budget_scoped_and_value_conserving() {
+    let budget_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&budget_raw));
+    kani::assume(withdraw_raw > 0 && withdraw_raw <= budget_raw);
+    kani::assume(surplus_raw <= 8);
+    let budget = budget_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(budget + surplus);
+    header.insurance = V16PodU128::new(budget + surplus);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let remaining_before = header.insurance_domain_budget_remaining_total.get();
+    let long_budget_before = markets[0].engine.insurance_domain_budget_long.get();
+    let short_budget_before = markets[0].engine.insurance_domain_budget_short.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .withdraw_domain_insurance_not_atomic(0, withdraw)
+        .unwrap();
+
+    kani::cover!(
+        withdraw < budget,
+        "public domain insurance withdraw covers partial selected-domain withdrawal"
+    );
+    kani::cover!(
+        withdraw == budget,
+        "public domain insurance withdraw covers full selected-domain withdrawal"
+    );
+    kani::cover!(
+        surplus > 0,
+        "public domain insurance withdraw preserves unrelated unbudgeted surplus"
+    );
+    assert_eq!(market.header.vault.get(), vault_before - withdraw);
+    assert_eq!(market.header.insurance.get(), insurance_before - withdraw);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining_before - withdraw
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        long_budget_before - withdraw
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget_before
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        surplus
+    );
+    assert_eq!(
+        long_budget_before - market.markets[0].engine.insurance_domain_budget_long.get(),
+        vault_before - market.header.vault.get()
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
