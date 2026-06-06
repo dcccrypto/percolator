@@ -4277,6 +4277,10 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         "credit-account-from-insurance delta covers nonzero unbudgeted surplus reward"
     );
     kani::cover!(
+        amount > 0 && expected_ok && amount == insurance - budgeted,
+        "credit-account-from-insurance delta covers exact unbudgeted surplus consumption"
+    );
+    kani::cover!(
         amount > 0 && !expected_ok && budgeted == insurance,
         "credit-account-from-insurance delta covers rejecting fully budgeted insurance"
     );
@@ -4286,6 +4290,7 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         assert_eq!(next_c_tot, next_c_tot_expected.unwrap());
         assert_eq!(next_capital, next_capital_expected.unwrap());
         assert!(budgeted <= next_insurance);
+        assert_eq!(next_insurance - budgeted, insurance - budgeted - amount);
         assert_eq!(
             next_insurance.checked_add(next_c_tot).unwrap(),
             insurance.checked_add(c_tot).unwrap(),
