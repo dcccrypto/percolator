@@ -2194,17 +2194,31 @@ fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
     let vault: u128 = kani::any();
     let earnings: u128 = kani::any();
     let amount: u128 = kani::any();
-    kani::assume(earnings <= vault);
     let result = kani_apply_backing_provider_earnings_withdraw(vault, earnings, amount);
+    let expected_ok = amount <= earnings && amount <= vault;
 
-    if amount <= earnings {
-        let (next_vault, next_earnings) = result.unwrap();
+    kani::cover!(
+        amount == earnings && amount > 0 && expected_ok,
+        "provider earnings withdraw covers full earned payout"
+    );
+    kani::cover!(amount == 0, "provider earnings withdraw covers zero no-op");
+    kani::cover!(
+        amount <= earnings && amount > vault,
+        "provider earnings withdraw rejects vault underflow even if bucket has earnings"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_vault, next_earnings)) = result {
         kani::cover!(
             amount > 0 && amount < earnings,
             "provider earnings withdraw covers partial earned payout"
         );
         assert_eq!(next_vault, vault - amount);
         assert_eq!(next_earnings, earnings - amount);
+        assert_eq!(vault - next_vault, earnings - next_earnings);
+        assert_eq!(
+            next_vault.checked_sub(next_earnings),
+            vault.checked_sub(earnings)
+        );
     } else {
         kani::cover!(
             amount > earnings,
