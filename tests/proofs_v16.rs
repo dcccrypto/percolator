@@ -3350,6 +3350,141 @@ fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() 
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_delta_status_transitions_are_exact() {
+    let amount_raw: u8 = kani::any();
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let consumed_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    let source_short: bool = kani::any();
+    kani::assume(amount_raw <= 8);
+    kani::assume(fresh_raw <= 8);
+    kani::assume(valid_raw <= 8);
+    kani::assume(consumed_raw <= 8);
+    kani::assume(impaired_raw <= 8);
+    kani::assume(status_raw <= 3);
+
+    let amount = amount_raw as u128 * BOUND_SCALE;
+    let fresh = fresh_raw as u128 * BOUND_SCALE;
+    let valid = valid_raw as u128 * BOUND_SCALE;
+    let consumed = consumed_raw as u128 * BOUND_SCALE;
+    let impaired = impaired_raw as u128 * BOUND_SCALE;
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Fresh,
+        1 => BackingBucketStatusV16::Expired,
+        2 => BackingBucketStatusV16::Impaired,
+        _ => BackingBucketStatusV16::Empty,
+    };
+    let source_fresh_reserved = if source_short && amount > 0 {
+        amount - 1
+    } else {
+        fresh + valid
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: fresh,
+        valid_liened_backing_num: valid,
+        consumed_liened_backing_num: consumed,
+        impaired_liened_backing_num: impaired,
+        expiry_slot: 10,
+        status,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: source_fresh_reserved,
+        valid_liened_backing_num: valid,
+        spent_backing_num: consumed,
+        provider_receivable_num: consumed,
+        impaired_liened_backing_num: impaired,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+        bucket, source, amount,
+    );
+    let expected_ok = amount == 0
+        || (status == BackingBucketStatusV16::Fresh
+            && fresh >= amount
+            && source_fresh_reserved >= amount);
+
+    kani::cover!(
+        amount == 0 && status != BackingBucketStatusV16::Fresh,
+        "counterparty backing withdraw zero amount is an idempotent no-op before status checks"
+    );
+    kani::cover!(
+        amount > 0 && status != BackingBucketStatusV16::Fresh,
+        "counterparty backing withdraw rejects non-Fresh buckets"
+    );
+    kani::cover!(
+        amount > 0 && status == BackingBucketStatusV16::Fresh && fresh < amount,
+        "counterparty backing withdraw rejects insufficient bucket backing"
+    );
+    kani::cover!(
+        amount > 0
+            && status == BackingBucketStatusV16::Fresh
+            && fresh >= amount
+            && source_fresh_reserved < amount,
+        "counterparty backing withdraw rejects insufficient source backing"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh > amount,
+        "counterparty backing withdraw partial success remains Fresh"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh == amount && valid > 0,
+        "counterparty backing withdraw full unliened success with valid liens remains Fresh"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh == amount && valid == 0 && impaired > 0,
+        "counterparty backing withdraw full unliened success with impaired liens becomes Impaired"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && fresh == amount && valid == 0 && impaired == 0 && consumed > 0,
+        "counterparty backing withdraw full unliened success with consumed receivable becomes Expired"
+    );
+    kani::cover!(
+        expected_ok
+            && amount > 0
+            && fresh == amount
+            && valid == 0
+            && impaired == 0
+            && consumed == 0,
+        "counterparty backing withdraw full unliened success with no obligations becomes Empty"
+    );
+
+    if expected_ok {
+        let (next_bucket, next_source) = result.unwrap();
+        assert_eq!(next_bucket.fresh_unliened_backing_num, fresh - amount);
+        assert_eq!(
+            next_source.fresh_reserved_backing_num,
+            source_fresh_reserved - amount
+        );
+        assert_eq!(next_bucket.valid_liened_backing_num, valid);
+        assert_eq!(next_source.valid_liened_backing_num, valid);
+        assert_eq!(next_bucket.consumed_liened_backing_num, consumed);
+        assert_eq!(next_source.provider_receivable_num, consumed);
+        assert_eq!(next_bucket.impaired_liened_backing_num, impaired);
+        assert_eq!(next_source.impaired_liened_backing_num, impaired);
+        if amount == 0 || fresh > amount || valid > 0 {
+            assert_eq!(next_bucket.status, status);
+        } else if impaired > 0 {
+            assert_eq!(next_bucket.status, BackingBucketStatusV16::Impaired);
+        } else if consumed > 0 {
+            assert_eq!(next_bucket.status, BackingBucketStatusV16::Expired);
+        } else {
+            assert_eq!(next_bucket.status, BackingBucketStatusV16::Empty);
+            assert_eq!(next_bucket.expiry_slot, 0);
+        }
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_cannot_underback_claims() {
