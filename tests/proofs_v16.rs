@@ -5589,20 +5589,51 @@ fn proof_v16_public_insurance_lien_consume_debits_only_domain_insurance() {
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
     let amount_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     kani::assume(amount_raw > 0);
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
     let amount = amount_raw as u128 * BOUND_SCALE;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.insurance = V16PodU128::new(10);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let budget_total_before = header.insurance_domain_budget_remaining_total;
+    let long_budget_before = markets[0].engine.insurance_domain_budget_long;
+    let short_budget_before = markets[0].engine.insurance_domain_budget_short;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     let result = market.reserve_insurance_credit_not_atomic(0, amount);
 
     kani::cover!(
-        result == Err(V16Error::LockActive),
-        "unfunded domain insurance reservation reaches isolation guard"
+        result == Err(V16Error::LockActive) && insurance > 0 && surplus > 0,
+        "unfunded domain insurance reservation reaches isolation guard despite global insurance"
     );
     assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        budget_total_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        long_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short,
+        short_budget_before
+    );
 }
 
 #[kani::proof]
