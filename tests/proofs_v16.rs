@@ -4888,14 +4888,27 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
+    let budget_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
     let reserved_raw: u8 = kani::any();
+    kani::assume(budget_raw <= 32);
+    kani::assume(insurance_raw <= 32);
+    kani::assume((1..=32).contains(&loss_raw));
     kani::assume(reserved_raw <= 32);
+    kani::assume(reserved_raw <= budget_raw);
+    kani::assume(budget_raw <= insurance_raw);
+    let budget = budget_raw as u128;
+    let insurance = insurance_raw as u128;
+    let loss = loss_raw as u128;
     let reserved = reserved_raw as u128;
+    let unreserved_budget = budget - reserved;
+    let expected_used = unreserved_budget.min(loss);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(32);
-    header.insurance = V16PodU128::new(32);
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1);
-    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(32);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
     markets[0].engine.insurance_reservation_short =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
             insurance_credit_reserved_num: reserved * BOUND_SCALE,
@@ -4907,7 +4920,7 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    account_header.pnl = V16PodI128::new(-32);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.refresh_header_aggregate_totals_for_test().unwrap();
@@ -4921,16 +4934,29 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
         "reserved insurance proof covers nonzero encumbrance"
     );
     kani::cover!(
-        reserved == 32 && used == 0,
+        reserved == budget && used == 0,
         "reserved insurance proof covers fully encumbered domain budget"
     );
-    assert_eq!(used, 32 - reserved);
-    assert_eq!(market.header.insurance.get(), reserved);
+    kani::cover!(
+        reserved < budget && unreserved_budget < loss && used == unreserved_budget,
+        "reserved insurance proof covers unreserved-budget-capped branch"
+    );
+    kani::cover!(
+        loss < unreserved_budget && used == loss,
+        "reserved insurance proof covers loss-capped branch"
+    );
+    assert_eq!(used, expected_used);
+    assert_eq!(market.header.insurance.get(), insurance - expected_used);
+    assert_eq!(market.header.vault.get(), insurance);
+    assert_eq!(market.header.c_tot.get(), 0);
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
-        32 - reserved
+        expected_used
     );
-    assert_eq!(account.header.pnl.get(), -(reserved as i128));
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + expected_used as i128
+    );
 }
 
 #[kani::proof]
