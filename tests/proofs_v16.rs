@@ -2507,6 +2507,53 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_claims() {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    let backing = backing_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing);
+    header.pnl_pos_bound_tot = V16PodU128::new(backing);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(backing_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: backing_num,
+            exact_positive_claim_num: backing_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let result = market.withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    kani::cover!(
+        withdraw_raw == 1,
+        "public counterparty backing withdraw rejects minimal underbacking"
+    );
+    kani::cover!(
+        withdraw_raw > 1,
+        "public counterparty backing withdraw rejects nontrivial underbacking"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
