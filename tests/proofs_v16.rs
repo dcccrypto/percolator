@@ -5143,6 +5143,73 @@ fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_m
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_value_movement() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&amount_raw));
+    let atoms = amount_raw as u128;
+    let amount = atoms * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(atoms);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: amount,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: amount,
+            valid_liened_backing_num: amount,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .impair_source_credit_lien_from_counterparty_not_atomic(0, amount)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        amount_raw > 1,
+        "public counterparty lien impair is nontrivial"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.impaired_liened_backing_num, amount);
+    assert_eq!(bucket.consumed_liened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.impaired_liened_backing_num, amount);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_epoch, 1);
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
