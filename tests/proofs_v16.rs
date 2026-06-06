@@ -5930,14 +5930,13 @@ fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_value() {
-    let budget_raw: u8 = kani::any();
-    let old_spent_raw: u8 = kani::any();
-    let new_spent_raw: u8 = kani::any();
-    let surplus_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&budget_raw));
+    let budget_raw: u16 = kani::any();
+    let old_spent_raw: u16 = kani::any();
+    let new_spent_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume(budget_raw > 0);
     kani::assume(old_spent_raw <= budget_raw);
     kani::assume(new_spent_raw <= budget_raw);
-    kani::assume(surplus_raw <= 8);
     let budget = budget_raw as u128;
     let old_spent = old_spent_raw as u128;
     let new_spent = new_spent_raw as u128;
@@ -5963,8 +5962,8 @@ fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_val
         "public domain spent setter covers increasing spent"
     );
     kani::cover!(
-        new_spent < old_spent,
-        "public domain spent setter covers clearing spent with backed budget"
+        new_spent < old_spent && surplus > 255,
+        "public domain spent setter covers clearing spent with wide backed surplus"
     );
     kani::cover!(
         new_spent == old_spent,
