@@ -2422,6 +2422,91 @@ fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_s
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    let backing = backing_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let withdraw_num = withdraw * BOUND_SCALE;
+    let remaining_num = backing_num - withdraw_num;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        withdraw_raw < backing_raw,
+        "public counterparty backing withdraw covers partial principal withdrawal"
+    );
+    kani::cover!(
+        withdraw_raw == backing_raw,
+        "public counterparty backing withdraw covers full principal withdrawal"
+    );
+    assert_eq!(market.header.vault.get(), vault_before - withdraw);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(bucket.fresh_unliened_backing_num, remaining_num);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.consumed_liened_backing_num, 0);
+    assert_eq!(bucket.impaired_liened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, remaining_num);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_epoch, 1);
+    if remaining_num == 0 {
+        assert_eq!(bucket.status, BackingBucketStatusV16::Empty);
+        assert_eq!(bucket.expiry_slot, 0);
+    } else {
+        assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(bucket.expiry_slot, 10);
+    }
+    assert_eq!(
+        bucket.fresh_unliened_backing_num,
+        source.fresh_reserved_backing_num
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
