@@ -1228,14 +1228,16 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
     let fee_rate_raw: u8 = kani::any();
     let insurance: u128 = kani::any();
     let surplus: u128 = kani::any();
-    kani::assume(capital <= MAX_VAULT_TVL);
-    kani::assume(insurance <= MAX_VAULT_TVL - capital);
-    kani::assume(surplus <= MAX_VAULT_TVL - capital - insurance);
+    let senior = capital.checked_add(insurance);
+    kani::assume(senior.is_some());
+    let vault = senior.unwrap().checked_add(surplus);
+    kani::assume(vault.is_some());
+    kani::assume(reserved_raw <= pnl_raw);
     let pnl = pnl_raw as i128;
     let reserved = reserved_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
-    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.vault = V16PodU128::new(vault.unwrap());
     header.c_tot = V16PodU128::new(capital);
     header.insurance = V16PodU128::new(insurance);
     account_header.capital = V16PodU128::new(capital);
@@ -1257,16 +1259,15 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
     let convert_result = market.convert_released_pnl_to_capital_not_atomic(&mut account);
 
     kani::cover!(
-        capital > 10
-            && fee_rate_raw > 10
-            && pnl > 10
-            && reserved > 10
-            && insurance > 255
-            && surplus > 255,
-        "recovery mode blocks fee sync and positive PnL conversion over wide symbolic value state"
+        capital > MAX_VAULT_TVL && fee_rate_raw > 10 && pnl > 10 && reserved > 10,
+        "recovery mode blocks fee sync and positive PnL conversion beyond configured TVL-scale values"
     );
-    assert!(fee_result.is_err());
-    assert!(convert_result.is_err());
+    kani::cover!(
+        insurance > 0 && surplus > 0,
+        "recovery mode blocks fee sync and conversion with senior insurance and junior surplus"
+    );
+    assert_eq!(fee_result, Err(V16Error::LockActive));
+    assert_eq!(convert_result, Err(V16Error::LockActive));
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
