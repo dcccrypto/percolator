@@ -1,10 +1,11 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty, active_bitmap_set,
-    backing_domain_fee_split_for_lien_delta_num, kani_add_open_interest_for_new_position,
-    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
-    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
+    active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
+    backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
+    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
+    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
+    kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -472,7 +473,7 @@ fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
     assert_eq!(account.fee_credits.get(), 0);
     assert_eq!(account.active_bitmap[0].get(), 0);
     assert!(account.legs[0].try_to_runtime().unwrap().is_empty());
-    assert!(account.source_domains[0].is_sparse_tail_default());
+    assert!(account.source_domains[0].kani_is_sparse_tail_default());
     assert_eq!(account.stale_state, 0);
     assert_eq!(account.b_stale_state, 0);
     assert_eq!(account.rebalance_lock, 0);
@@ -2093,7 +2094,7 @@ fn proof_v16_dynamic_market_account_len_roundtrips_capacity_and_offsets() {
     let capacity = capacity_raw as usize;
     let index = index_raw as usize;
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
-    let stride = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride::<u8>();
+    let stride = MarketGroupV16HeaderAccount::kani_dynamic_asset_slot_stride::<u8>();
     kani::assume(stride > 1);
 
     let len_result = MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<u8>(capacity);
@@ -2163,7 +2164,7 @@ fn proof_v16_dynamic_market_account_len_fails_closed_on_arithmetic_overflow() {
     let capacity: usize = kani::any();
     let index: usize = kani::any();
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
-    let stride = MarketGroupV16HeaderAccount::dynamic_asset_slot_stride::<u8>();
+    let stride = MarketGroupV16HeaderAccount::kani_dynamic_asset_slot_stride::<u8>();
     kani::assume(stride > 1);
     let max_capacity_without_len_overflow = (usize::MAX - header_len) / stride;
     kani::assume(capacity > max_capacity_without_len_overflow);

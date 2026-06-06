@@ -236,7 +236,7 @@ pub fn active_bitmap_get(bitmap: V16ActiveBitmap, leg_slot_index: usize) -> bool
 }
 
 #[inline]
-pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
+fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16Result<()> {
     if leg_slot_index >= V16_MAX_PORTFOLIO_ASSETS_N {
         return Err(V16Error::InvalidConfig);
     }
@@ -244,6 +244,14 @@ pub fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) ->
     let bit = leg_slot_index % 64;
     bitmap[word] |= 1u64 << bit;
     Ok(())
+}
+
+#[cfg(kani)]
+pub fn kani_active_bitmap_set(
+    bitmap: &mut V16ActiveBitmap,
+    leg_slot_index: usize,
+) -> V16Result<()> {
+    active_bitmap_set(bitmap, leg_slot_index)
 }
 
 #[inline]
@@ -4691,8 +4699,13 @@ impl Default for MarketGroupV16HeaderAccount {
 }
 
 impl MarketGroupV16HeaderAccount {
-    pub fn dynamic_asset_slot_stride<T: MarketWrapperPod>() -> usize {
+    fn dynamic_asset_slot_stride<T: MarketWrapperPod>() -> usize {
         core::mem::size_of::<Market<T>>()
+    }
+
+    #[cfg(kani)]
+    pub fn kani_dynamic_asset_slot_stride<T: MarketWrapperPod>() -> usize {
+        Self::dynamic_asset_slot_stride::<T>()
     }
 
     pub fn dynamic_market_group_account_len<T: MarketWrapperPod>(
@@ -14353,13 +14366,18 @@ impl PortfolioSourceDomainV16Account {
     }
 
     #[inline]
-    pub fn has_default_sparse_tag(self) -> bool {
+    fn has_default_sparse_tag(self) -> bool {
         self.domain.get() == 0 && self.source_claim_market_id.get() == 0
     }
 
     #[inline]
-    pub fn is_sparse_tail_default(self) -> bool {
+    fn is_sparse_tail_default(self) -> bool {
         self.has_default_sparse_tag() && !self.is_occupied()
+    }
+
+    #[cfg(kani)]
+    pub fn kani_is_sparse_tail_default(self) -> bool {
+        self.is_sparse_tail_default()
     }
 }
 
