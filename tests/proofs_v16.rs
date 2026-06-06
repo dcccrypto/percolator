@@ -2507,6 +2507,91 @@ fn proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_buck
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_liened_backing() {
+    let fresh_raw: u8 = kani::any();
+    let liened_raw: u8 = kani::any();
+    kani::assume(fresh_raw <= 8);
+    kani::assume(liened_raw <= 8);
+    kani::assume(fresh_raw != 0 || liened_raw != 0);
+    let fresh_atoms = fresh_raw as u128;
+    let liened_atoms = liened_raw as u128;
+    let fresh_num = fresh_atoms * BOUND_SCALE;
+    let liened_num = liened_atoms * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(fresh_atoms + liened_atoms);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: fresh_num,
+        valid_liened_backing_num: liened_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: fresh_num + liened_num,
+            valid_liened_backing_num: liened_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .expire_source_backing_bucket_not_atomic(0, 10)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        fresh_raw > 0 && liened_raw == 0,
+        "public backing expiry covers fresh-only expired bucket"
+    );
+    kani::cover!(
+        liened_raw > 0,
+        "public backing expiry covers liened backing impairment"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.impaired_liened_backing_num, liened_num);
+    assert_eq!(bucket.consumed_liened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.impaired_liened_backing_num, liened_num);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_epoch, 1);
+    if liened_num == 0 {
+        assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+    } else {
+        assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
+    }
+    assert_eq!(
+        bucket.impaired_liened_backing_num,
+        source.impaired_liened_backing_num
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
     let backing_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
