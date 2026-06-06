@@ -6631,20 +6631,86 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
 #[kani::solver(cadical)]
 fn proof_v16_live_positive_kf_delta_without_source_rejects() {
     let delta_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    let start_negative: bool = kani::any();
     kani::assume(delta_raw > 0);
+    kani::assume(loss_raw > 0);
     let delta = delta_raw as i128;
+    let loss = loss_raw as i128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    account_header.pnl = V16PodI128::new(0);
+    if start_negative {
+        account_header.pnl = V16PodI128::new(-loss);
+        header.negative_pnl_account_count = V16PodU64::new(1);
+    } else {
+        account_header.pnl = V16PodI128::new(0);
+    }
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let pnl_pos_tot_before = header.pnl_pos_tot;
+    let pnl_pos_bound_tot_num_before = header.pnl_pos_bound_tot_num;
+    let source_credit_before = markets[0].engine.source_credit_long;
+    let source_domain_before = account_header.source_domains[0];
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let result = market.kani_apply_signed_kf_delta_to_pnl(&mut account, delta, None);
 
     kani::cover!(
-        delta > 10,
-        "live positive K/F delta without source reaches wide fail-closed guard"
+        !start_negative && delta > 10,
+        "live positive K/F delta without source rejects before minting claim"
     );
-    assert_eq!(result, Err(V16Error::InvalidLeg));
+    kani::cover!(
+        start_negative && delta > loss,
+        "live positive K/F delta without source burns excess face against existing loss"
+    );
+    if start_negative {
+        assert_eq!(result, Ok((0, delta as u128)));
+        assert_eq!(account.header.pnl.get(), -loss);
+        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+        assert_eq!(market.header.pnl_pos_tot.get(), 0);
+        assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+        assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .source_credit_long
+                .positive_claim_bound_num,
+            source_credit_before.positive_claim_bound_num
+        );
+        assert_eq!(
+            account.header.source_domains[0].source_claim_bound_num,
+            source_domain_before.source_claim_bound_num
+        );
+        assert_eq!(
+            account.header.source_domains[0].source_claim_market_id,
+            source_domain_before.source_claim_market_id
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+        assert_eq!(market.header.vault, vault_before);
+        assert_eq!(market.header.c_tot, c_tot_before);
+        assert_eq!(market.header.pnl_pos_tot, pnl_pos_tot_before);
+        assert_eq!(
+            market.header.pnl_pos_bound_tot_num,
+            pnl_pos_bound_tot_num_before
+        );
+        assert_eq!(account.header.pnl.get(), 0);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .source_credit_long
+                .positive_claim_bound_num,
+            source_credit_before.positive_claim_bound_num
+        );
+        assert_eq!(
+            account.header.source_domains[0].source_claim_bound_num,
+            source_domain_before.source_claim_bound_num
+        );
+        assert_eq!(
+            account.header.source_domains[0].source_claim_market_id,
+            source_domain_before.source_claim_market_id
+        );
+    }
 }
 
 #[kani::proof]
