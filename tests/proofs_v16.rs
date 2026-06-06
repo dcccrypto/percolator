@@ -4254,6 +4254,81 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_closed() {
+    const RATE_DEN: u128 = 17;
+    let terminal_raw: u8 = kani::any();
+    let paid_raw: u8 = kani::any();
+    let low_raw: u8 = kani::any();
+    let high_raw: u8 = kani::any();
+    kani::assume((1..=64).contains(&terminal_raw));
+    kani::assume(low_raw <= high_raw);
+    kani::assume(high_raw as u128 <= RATE_DEN);
+    kani::assume(paid_raw <= terminal_raw);
+
+    let terminal = terminal_raw as u128;
+    let paid = paid_raw as u128;
+    let low = low_raw as u128;
+    let high = high_raw as u128;
+    let gross_low = terminal * low / RATE_DEN;
+    let gross_high = terminal * high / RATE_DEN;
+    let receipt = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: terminal * BOUND_SCALE,
+        live_released_face_at_receipt: terminal,
+        terminal_positive_claim_face: terminal,
+        paid_effective: paid,
+        finalized: paid == terminal,
+    };
+    let low_ledger = ResolvedPayoutLedgerV16 {
+        snapshot_residual: 0,
+        terminal_claim_exact_receipts_num: terminal * BOUND_SCALE,
+        terminal_claim_bound_unreceipted_num: 0,
+        current_payout_rate_num: low,
+        current_payout_rate_den: RATE_DEN,
+        snapshot_slot: 1,
+        payout_halted: false,
+        finalized: false,
+    };
+    let high_ledger = ResolvedPayoutLedgerV16 {
+        current_payout_rate_num: high,
+        ..low_ledger
+    };
+
+    let claim_low = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt, low_ledger,
+    );
+    let claim_high = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt,
+        high_ledger,
+    );
+
+    kani::cover!(
+        low < high && paid <= gross_low && gross_high > gross_low,
+        "resolved receipt rate monotonicity covers a strictly improving payout rate"
+    );
+    kani::cover!(
+        paid > gross_low,
+        "resolved receipt claimability rejects a receipt overpaid at the lower payout rate"
+    );
+    kani::cover!(
+        low == high && paid <= gross_low,
+        "resolved receipt rate monotonicity covers equal-rate idempotence"
+    );
+    assert!(gross_high >= gross_low);
+    if paid <= gross_low {
+        let low_value = claim_low.unwrap();
+        let high_value = claim_high.unwrap();
+        assert_eq!(low_value, gross_low - paid);
+        assert_eq!(high_value, gross_high - paid);
+        assert!(high_value >= low_value);
+    } else {
+        assert_eq!(claim_low, Err(V16Error::InvalidLeg));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
