@@ -2,9 +2,9 @@
 
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty, active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, kani_add_open_interest_for_new_position,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
@@ -28,9 +28,9 @@ use percolator::v16::{
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_ORACLE_PRICE,
-    MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE, SOCIAL_LOSS_DEN,
-    V16_ACTIVE_BITMAP_WORDS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
+    SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -97,6 +97,27 @@ fn one_market_persisted_slot_fixture() -> (MarketGroupV16HeaderAccount, [Market<
     asset.slot_last = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     (header, markets)
+}
+
+fn empty_recovery_slot_for_market(
+    market_id: u64,
+    price: u64,
+    slot_last: u64,
+    budget_long: u128,
+    budget_short: u128,
+) -> EngineAssetSlotV16Account {
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(market_id);
+    let mut asset = AssetStateV16::default();
+    asset.market_id = market_id;
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.raw_oracle_target_price = price;
+    asset.effective_price = price;
+    asset.fund_px_last = price;
+    asset.slot_last = slot_last;
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    slot.insurance_domain_budget_long = V16PodU128::new(budget_long);
+    slot.insurance_domain_budget_short = V16PodU128::new(budget_short);
+    slot
 }
 
 #[kani::proof]
@@ -1041,6 +1062,149 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
         assert_eq!(header.asset_set_epoch.get(), 1);
         assert_eq!(header.risk_epoch.get(), 1);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market() {
+    let budget_long_raw: u8 = kani::any();
+    let budget_short_raw: u8 = kani::any();
+    let next_market_id_before_raw: u8 = kani::any();
+    let activation_count_before: u64 = kani::any();
+    let asset_set_epoch_before: u64 = kani::any();
+    let risk_epoch_before: u64 = kani::any();
+    let price_raw: u16 = kani::any();
+    let now_slot_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume(next_market_id_before_raw > 0);
+    kani::assume(now_slot_raw > 0);
+    let budget_long = budget_long_raw as u128;
+    let budget_short = budget_short_raw as u128;
+    let next_market_id_before = next_market_id_before_raw as u64;
+    let old_slot = empty_recovery_slot_for_market(1, 100, 10, budget_long, budget_short);
+    let restarted =
+        MarketGroupV16ViewMut::<u64>::kani_restarted_asset_slot_preserving_insurance_budget(
+            &old_slot,
+            next_market_id_before,
+            price_raw as u64,
+            now_slot_raw as u64,
+        );
+    let counters = MarketGroupV16ViewMut::<u64>::kani_asset_restart_next_counters(
+        next_market_id_before,
+        activation_count_before,
+        asset_set_epoch_before,
+        risk_epoch_before,
+    );
+    let expected_counter_ok = activation_count_before != u64::MAX
+        && asset_set_epoch_before != u64::MAX
+        && risk_epoch_before != u64::MAX
+        && next_market_id_before != u64::MAX;
+    let asset = restarted.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        budget_long > 0 && budget_short > 0 && expected_counter_ok,
+        "restart core covers nonzero preserved domain budgets"
+    );
+    kani::cover!(
+        !expected_counter_ok,
+        "restart core covers counter overflow rejection"
+    );
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(asset.market_id, next_market_id_before);
+    assert_eq!(asset.raw_oracle_target_price, price_raw as u64);
+    assert_eq!(asset.effective_price, price_raw as u64);
+    assert_eq!(asset.fund_px_last, price_raw as u64);
+    assert_eq!(asset.slot_last, now_slot_raw as u64);
+    assert_eq!(
+        restarted.insurance_domain_budget_long.get(),
+        old_slot.insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        restarted.insurance_domain_budget_short.get(),
+        old_slot.insurance_domain_budget_short.get()
+    );
+    assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
+    assert_eq!(restarted.insurance_domain_spent_short.get(), 0);
+    let source = restarted.source_credit_long.try_to_runtime().unwrap();
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.impaired_liened_backing_num, 0);
+    assert_eq!(source.insurance_credit_reserved_num, 0);
+    assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(source.impaired_liened_insurance_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        restarted.backing_long.try_to_runtime().unwrap().market_id,
+        next_market_id_before
+    );
+    assert_eq!(counters.is_ok(), expected_counter_ok);
+    if let Ok((next_market_id, activation_count, asset_set_epoch, risk_epoch)) = counters {
+        assert_eq!(next_market_id, next_market_id_before + 1);
+        assert_eq!(activation_count, activation_count_before + 1);
+        assert_eq!(asset_set_epoch, asset_set_epoch_before + 1);
+        assert_eq!(risk_epoch, risk_epoch_before + 1);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers() {
+    let market_id_raw: u8 = kani::any();
+    let price_raw: u16 = kani::any();
+    let retired_slot_raw: u8 = kani::any();
+    let slot_last_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume(market_id_raw > 0);
+    kani::assume(retired_slot_raw > 0);
+    let mut old_asset = AssetStateV16::default();
+    old_asset.market_id = market_id_raw as u64;
+    old_asset.lifecycle = AssetLifecycleV16::Retired;
+    old_asset.retired_slot = retired_slot_raw as u64;
+    old_asset.raw_oracle_target_price = price_raw as u64;
+    old_asset.effective_price = price_raw as u64;
+    old_asset.fund_px_last = price_raw as u64;
+    old_asset.slot_last = slot_last_raw as u64;
+
+    let canonical = MarketGroupV16ViewMut::<u64>::kani_canonical_retired_asset_slot(old_asset);
+    let asset = canonical.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        market_id_raw > 1 && retired_slot_raw > 1 && price_raw > 100,
+        "canonical retired slot covers nontrivial retired identity"
+    );
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(asset.market_id, old_asset.market_id);
+    assert_eq!(asset.retired_slot, old_asset.retired_slot);
+    assert_eq!(
+        asset.raw_oracle_target_price,
+        old_asset.raw_oracle_target_price
+    );
+    assert_eq!(asset.effective_price, old_asset.effective_price);
+    assert_eq!(canonical.insurance_domain_budget_long.get(), 0);
+    assert_eq!(canonical.insurance_domain_budget_short.get(), 0);
+    assert_eq!(canonical.insurance_domain_spent_long.get(), 0);
+    assert_eq!(canonical.insurance_domain_spent_short.get(), 0);
+    assert_eq!(
+        canonical.source_credit_long.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        canonical.backing_long.try_to_runtime().unwrap().market_id,
+        old_asset.market_id
+    );
+    assert_eq!(
+        canonical
+            .insurance_reservation_long
+            .try_to_runtime()
+            .unwrap(),
+        InsuranceCreditReservationV16::EMPTY
+    );
 }
 
 #[kani::proof]
@@ -2476,6 +2640,82 @@ fn proof_v16_negative_pnl_settlement_consumes_principal_before_residual() {
         assert_eq!(market.header.negative_pnl_account_count.get(), 1);
     } else {
         assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_domain_fee_split_for_lien_delta_is_exact_and_conservative() {
+    let atoms_raw: u8 = kani::any();
+    let fee_raw: u16 = kani::any();
+    let share_raw: u16 = kani::any();
+    let unaligned: bool = kani::any();
+    let invalid_fee: bool = kani::any();
+    let invalid_share: bool = kani::any();
+    kani::assume(atoms_raw <= 64);
+    kani::assume(fee_raw <= MAX_MARGIN_BPS as u16);
+    kani::assume(share_raw <= MAX_MARGIN_BPS as u16);
+    let atoms = atoms_raw as u128;
+    let lien_delta_num = atoms * BOUND_SCALE + u128::from(unaligned);
+    let fee_bps = if invalid_fee {
+        MAX_MARGIN_BPS as u16 + 1
+    } else {
+        fee_raw
+    };
+    let share_bps = if invalid_share {
+        MAX_MARGIN_BPS as u16 + 1
+    } else {
+        share_raw
+    };
+
+    let result = backing_domain_fee_split_for_lien_delta_num(lien_delta_num, fee_bps, share_bps);
+    let expected_ok = !unaligned && !invalid_fee && !invalid_share;
+
+    kani::cover!(
+        expected_ok
+            && atoms > 1
+            && fee_bps > 0
+            && share_bps > 0
+            && share_bps < MAX_MARGIN_BPS as u16,
+        "backing domain fee split covers mixed provider/insurance routing"
+    );
+    kani::cover!(
+        expected_ok && atoms > 0 && fee_bps == MAX_MARGIN_BPS as u16,
+        "backing domain fee split covers full-fee cap"
+    );
+    kani::cover!(
+        expected_ok && atoms > 0 && fee_bps > 0 && share_bps == 0,
+        "backing domain fee split covers provider-only routing"
+    );
+    kani::cover!(
+        expected_ok && atoms > 0 && fee_bps > 0 && share_bps == MAX_MARGIN_BPS as u16,
+        "backing domain fee split covers insurance-only routing"
+    );
+    kani::cover!(
+        unaligned,
+        "backing domain fee split rejects unaligned lien delta"
+    );
+    kani::cover!(
+        invalid_fee || invalid_share,
+        "backing domain fee split rejects invalid bps"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok(split) = result {
+        let expected_fee = if atoms == 0 || fee_bps == 0 {
+            0
+        } else {
+            let num = atoms * fee_bps as u128;
+            num / MAX_MARGIN_BPS as u128 + u128::from(num % MAX_MARGIN_BPS as u128 != 0)
+        };
+        let expected_insurance = expected_fee * share_bps as u128 / MAX_MARGIN_BPS as u128;
+        assert_eq!(split.lien_delta_atoms, atoms);
+        assert_eq!(split.total_fee, expected_fee);
+        assert_eq!(split.insurance_fee, expected_insurance);
+        assert_eq!(split.provider_fee + split.insurance_fee, split.total_fee);
+        assert!(split.total_fee <= atoms);
+    } else {
+        assert!(unaligned || invalid_fee || invalid_share);
     }
 }
 
@@ -7279,6 +7519,71 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
         assert!(withdraw > selected_available || withdraw > global_available || withdraw > vault);
         assert_eq!(result, Err(V16Error::LockActive));
     }
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_domain_insurance_withdraw_capacity_matches_budget_reserved_and_vault_min() {
+    let budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let domain_reserved_raw: u8 = kani::any();
+    let other_reserved_raw: u8 = kani::any();
+    let global_available_raw: u8 = kani::any();
+    let vault_raw: u8 = kani::any();
+    kani::assume(budget_raw > 0);
+    kani::assume(spent_raw <= budget_raw);
+    kani::assume(domain_reserved_raw <= budget_raw - spent_raw);
+    let budget = budget_raw as u128;
+    let spent = spent_raw as u128;
+    let domain_reserved = domain_reserved_raw as u128;
+    let other_reserved = other_reserved_raw as u128;
+    let global_available = global_available_raw as u128;
+    let vault = vault_raw as u128;
+    let insurance = domain_reserved + other_reserved + global_available;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(vault);
+    header.insurance = V16PodU128::new(insurance);
+    header.source_insurance_credit_reserved_total_atoms =
+        V16PodU128::new(domain_reserved + other_reserved);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget - spent);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(spent);
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: domain_reserved * BOUND_SCALE,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let capacity = market.domain_insurance_withdraw_capacity(0).unwrap();
+    let remaining = market.domain_insurance_budget_remaining(0).unwrap();
+    let selected_available = budget - spent - domain_reserved;
+    let expected_capacity = selected_available.min(global_available).min(vault);
+
+    kani::cover!(
+        expected_capacity > 0
+            && selected_available <= global_available
+            && selected_available <= vault,
+        "domain withdraw capacity covers selected-domain budget as binding constraint"
+    );
+    kani::cover!(
+        expected_capacity > 0 && global_available < selected_available && global_available <= vault,
+        "domain withdraw capacity covers globally reserved insurance as binding constraint"
+    );
+    kani::cover!(
+        expected_capacity > 0 && vault < selected_available && vault < global_available,
+        "domain withdraw capacity covers vault liquidity as binding constraint"
+    );
+    kani::cover!(
+        expected_capacity == 0 && (selected_available == 0 || global_available == 0 || vault == 0),
+        "domain withdraw capacity covers zero-capacity boundary"
+    );
+    assert_eq!(remaining, budget - spent);
+    assert_eq!(capacity, expected_capacity);
+    assert!(capacity <= remaining);
+    assert!(capacity <= global_available);
+    assert!(capacity <= vault);
 }
 
 #[kani::proof]

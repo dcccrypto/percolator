@@ -32,6 +32,43 @@ pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
 pub const MAX_BACKING_FEE_UTIL_BPS: u64 = 10_000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackingDomainFeeSplitV16 {
+    pub lien_delta_atoms: u128,
+    pub total_fee: u128,
+    pub provider_fee: u128,
+    pub insurance_fee: u128,
+}
+
+pub fn backing_domain_fee_split_for_lien_delta_num(
+    lien_delta_num: u128,
+    fee_bps: u16,
+    insurance_share_bps: u16,
+) -> V16Result<BackingDomainFeeSplitV16> {
+    if fee_bps as u64 > MAX_MARGIN_BPS || insurance_share_bps as u64 > MAX_MARGIN_BPS {
+        return Err(V16Error::InvalidConfig);
+    }
+    if lien_delta_num % BOUND_SCALE != 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    let lien_delta_atoms = lien_delta_num / BOUND_SCALE;
+    let total_fee = checked_fee_bps(lien_delta_atoms, fee_bps as u64)?;
+    let insurance_fee = wide_mul_div_floor_u128(
+        total_fee,
+        insurance_share_bps as u128,
+        MAX_MARGIN_BPS as u128,
+    );
+    let provider_fee = total_fee
+        .checked_sub(insurance_fee)
+        .ok_or(V16Error::CounterUnderflow)?;
+    Ok(BackingDomainFeeSplitV16 {
+        lien_delta_atoms,
+        total_fee,
+        provider_fee,
+        insurance_fee,
+    })
+}
+
 fn apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
@@ -7308,6 +7345,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(global_available.min(budget_remaining))
     }
 
+    pub fn domain_insurance_budget_remaining(&self, domain: usize) -> V16Result<u128> {
+        let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
+        Self::domain_budget_remaining_parts(budget, spent)
+    }
+
+    pub fn domain_insurance_withdraw_capacity(&self, domain: usize) -> V16Result<u128> {
+        self.domain_asset_side(domain)?;
+        Ok(self
+            .available_domain_insurance(domain)?
+            .min(self.header.vault.get()))
+    }
+
     fn consume_domain_insurance_for_negative_pnl(
         &mut self,
         asset_index: usize,
@@ -9815,6 +9864,99 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn commit_asset_set_epoch_bump(&mut self, next_asset_set_epoch: u64, next_risk_epoch: u64) {
         self.header.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+    }
+
+    fn asset_restart_next_counters(
+        next_market_id_before: u64,
+        activation_count_before: u64,
+        asset_set_epoch_before: u64,
+        risk_epoch_before: u64,
+    ) -> V16Result<(u64, u64, u64, u64)> {
+        Ok((
+            next_market_id_before
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+            activation_count_before
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+            asset_set_epoch_before
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+            risk_epoch_before
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        ))
+    }
+
+    fn restarted_asset_slot_preserving_insurance_budget(
+        old_slot: &EngineAssetSlotV16Account,
+        market_id: u64,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> EngineAssetSlotV16Account {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = market_id;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = authenticated_price;
+        asset.effective_price = authenticated_price;
+        asset.fund_px_last = authenticated_price;
+        asset.slot_last = now_slot;
+        let mut restarted = EngineAssetSlotV16Account::empty_for_market(market_id);
+        restarted.asset = AssetStateV16Account::from_runtime(&asset);
+        restarted.insurance_domain_budget_long = old_slot.insurance_domain_budget_long;
+        restarted.insurance_domain_budget_short = old_slot.insurance_domain_budget_short;
+        restarted
+    }
+
+    fn canonical_retired_asset_slot(old_asset: AssetStateV16) -> EngineAssetSlotV16Account {
+        let mut canonical_asset = AssetStateV16::default();
+        canonical_asset.market_id = old_asset.market_id;
+        canonical_asset.retired_slot = old_asset.retired_slot;
+        canonical_asset.lifecycle = AssetLifecycleV16::Retired;
+        canonical_asset.raw_oracle_target_price = old_asset.raw_oracle_target_price;
+        canonical_asset.effective_price = old_asset.effective_price;
+        canonical_asset.fund_px_last = old_asset.fund_px_last;
+        canonical_asset.slot_last = old_asset.slot_last;
+        let mut canonical_slot = EngineAssetSlotV16Account::empty_for_market(old_asset.market_id);
+        canonical_slot.asset = AssetStateV16Account::from_runtime(&canonical_asset);
+        canonical_slot
+    }
+
+    #[cfg(kani)]
+    pub fn kani_asset_restart_next_counters(
+        next_market_id_before: u64,
+        activation_count_before: u64,
+        asset_set_epoch_before: u64,
+        risk_epoch_before: u64,
+    ) -> V16Result<(u64, u64, u64, u64)> {
+        Self::asset_restart_next_counters(
+            next_market_id_before,
+            activation_count_before,
+            asset_set_epoch_before,
+            risk_epoch_before,
+        )
+    }
+
+    #[cfg(kani)]
+    pub fn kani_restarted_asset_slot_preserving_insurance_budget(
+        old_slot: &EngineAssetSlotV16Account,
+        market_id: u64,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> EngineAssetSlotV16Account {
+        Self::restarted_asset_slot_preserving_insurance_budget(
+            old_slot,
+            market_id,
+            authenticated_price,
+            now_slot,
+        )
+    }
+
+    #[cfg(kani)]
+    pub fn kani_canonical_retired_asset_slot(
+        old_asset: AssetStateV16,
+    ) -> EngineAssetSlotV16Account {
+        Self::canonical_retired_asset_slot(old_asset)
     }
 
     fn require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
@@ -13638,6 +13780,95 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             _ => Err(V16Error::LockActive),
         }
+    }
+
+    /// Restarts an empty Recovery/Retired asset with a fresh market_id.
+    ///
+    /// Domain insurance budgets are preserved exactly. All position, loss,
+    /// source-credit, backing, reservation, spent, and barrier state must already
+    /// be empty, so stale legs from the old market_id fail closed after restart.
+    pub fn restart_empty_asset_preserving_insurance_budget_not_atomic(
+        &mut self,
+        asset_index: usize,
+        authenticated_price: u64,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || authenticated_price == 0
+            || authenticated_price > MAX_ORACLE_PRICE
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        let old_asset = self.asset_state(asset_index)?;
+        if !matches!(
+            old_asset.lifecycle,
+            AssetLifecycleV16::Recovery | AssetLifecycleV16::Retired
+        ) || old_asset.market_id == 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        self.require_empty_asset_lifecycle_state(asset_index)?;
+
+        let market_id = self.header.next_market_id.get();
+        if market_id == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let (next_market_id, next_activation_count, next_asset_set_epoch, next_risk_epoch) =
+            Self::asset_restart_next_counters(
+                market_id,
+                self.header.asset_activation_count.get(),
+                self.header.asset_set_epoch.get(),
+                self.header.risk_epoch.get(),
+            )?;
+
+        let slot = self.markets[asset_index].engine_slot_mut();
+        *slot = Self::restarted_asset_slot_preserving_insurance_budget(
+            slot,
+            market_id,
+            authenticated_price,
+            now_slot,
+        );
+
+        self.header.next_market_id = V16PodU64::new(next_market_id);
+        self.header.current_slot = V16PodU64::new(now_slot);
+        self.header.asset_activation_count = V16PodU64::new(next_activation_count);
+        self.header.last_asset_activation_slot = V16PodU64::new(now_slot);
+        self.header.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    /// Rewrites an empty retired slot into the canonical retired representation.
+    ///
+    /// This is value-neutral and only succeeds after all domain budgets, spent
+    /// amounts, source-credit, backing, reservations, and barriers are zero.
+    pub fn canonicalize_retired_empty_asset_slot_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let old_asset = self.asset_state(asset_index)?;
+        if old_asset.lifecycle != AssetLifecycleV16::Retired
+            || old_asset.market_id == 0
+            || old_asset.retired_slot == 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        let slot = self.markets[asset_index].engine_slot();
+        if slot.insurance_domain_budget_long.get() != 0
+            || slot.insurance_domain_budget_short.get() != 0
+            || slot.insurance_domain_spent_long.get() != 0
+            || slot.insurance_domain_spent_short.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        self.require_empty_asset_lifecycle_state(asset_index)?;
+
+        *self.markets[asset_index].engine_slot_mut() =
+            Self::canonical_retired_asset_slot(old_asset);
+        self.validate_shape()
     }
 
     pub fn activate_empty_market_not_atomic(

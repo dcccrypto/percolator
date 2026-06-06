@@ -813,6 +813,87 @@ fn v16_public_force_asset_recovery_freezes_mark_and_is_idempotent() {
 }
 
 #[test]
+fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(2, 10).unwrap();
+        market.force_asset_recovery_not_atomic(1, 2).unwrap();
+    }
+    let old_market_id = markets[1].engine.asset.market_id.get();
+    let budget_before = markets[1].engine.insurance_domain_budget_long.get();
+    let budget_total_before = header.insurance_domain_budget_remaining_total.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
+        .unwrap();
+    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(asset.market_id, old_market_id);
+    assert_eq!(asset.raw_oracle_target_price, 222);
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        budget_before
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget_total_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_canonicalize_retired_empty_asset_slot_clears_inert_domain_state() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    }
+    let old_market_id = markets[1].engine.asset.market_id.get();
+    let inert_empty_source = SourceCreditStateV16 {
+        credit_epoch: 7,
+        credit_rate_num: 0,
+        ..SourceCreditStateV16::EMPTY
+    };
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&inert_empty_source);
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&inert_empty_source);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .canonicalize_retired_empty_asset_slot_not_atomic(1)
+        .unwrap();
+    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(asset.market_id, old_market_id);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_reused_market_slot_rejects_old_market_id_leg() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 16);
