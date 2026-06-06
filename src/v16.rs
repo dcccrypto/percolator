@@ -1298,6 +1298,31 @@ pub fn kani_source_credit_state_realizable_support_for_face(
 }
 
 #[cfg(kani)]
+pub fn kani_backing_utilization_rate_e9_for_source_state(
+    config: V16Config,
+    source: SourceCreditStateV16,
+) -> V16Result<u64> {
+    V16Core::backing_utilization_rate_e9_for_source_state(config, source)
+}
+
+#[cfg(kani)]
+pub fn kani_backing_utilization_fee_quote_atoms_for_lien(
+    config: V16Config,
+    source: SourceCreditStateV16,
+    lien_backing_num: u128,
+    from_slot: u64,
+    to_slot: u64,
+) -> V16Result<u128> {
+    V16Core::backing_utilization_fee_quote_atoms_for_lien(
+        config,
+        source,
+        lien_backing_num,
+        from_slot,
+        to_slot,
+    )
+}
+
+#[cfg(kani)]
 pub fn kani_target_effective_lag_adverse_delta(
     side: SideV16,
     effective_price: u64,

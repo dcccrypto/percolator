@@ -5,6 +5,8 @@ use percolator::v16::{
     backing_domain_fee_split_for_lien_delta_num, kani_add_open_interest_for_new_position,
     kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
     kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
+    kani_backing_utilization_fee_quote_atoms_for_lien,
+    kani_backing_utilization_rate_e9_for_source_state,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
@@ -25,6 +27,7 @@ use percolator::v16::{
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
@@ -2782,6 +2785,236 @@ fn proof_v16_backing_utilization_fee_is_capped_by_capital_and_conserves_ctot_to_
         );
     } else {
         assert_eq!(result, Err(V16Error::CounterOverflow));
+    }
+}
+
+fn symbolic_backing_fee_config(
+    kink_raw: u16,
+    base_raw: u8,
+    slope_at_raw: u8,
+    slope_above_raw: u8,
+) -> V16Config {
+    let mut config = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    config.backing_fee_kink_util_bps =
+        kink_raw.max(1).min((MAX_BACKING_FEE_UTIL_BPS - 1) as u16) as u64;
+    config.backing_fee_base_rate_e9_per_slot = base_raw as u64;
+    config.backing_fee_slope_at_kink_e9_per_slot = slope_at_raw as u64;
+    config.backing_fee_slope_above_kink_e9_per_slot = slope_above_raw as u64;
+    config
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_rate_zero_and_invalid_source_branches_are_exact() {
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let kink_raw: u16 = kani::any();
+    let base_raw: u8 = kani::any();
+    let slope_at_raw: u8 = kani::any();
+    let slope_above_raw: u8 = kani::any();
+    kani::assume(fresh_raw <= 32);
+    kani::assume(valid_raw <= 48);
+    kani::assume(kink_raw <= MAX_BACKING_FEE_UTIL_BPS as u16);
+    let fresh = fresh_raw as u128;
+    let valid = valid_raw as u128;
+    kani::assume(valid == 0 || fresh == 0 || valid > fresh);
+    let config = symbolic_backing_fee_config(kink_raw, base_raw, slope_at_raw, slope_above_raw);
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh * BOUND_SCALE,
+        valid_liened_backing_num: valid * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = kani_backing_utilization_rate_e9_for_source_state(config, source);
+    let expected = if valid == 0 {
+        Ok(0)
+    } else if fresh == 0 || valid > fresh {
+        Err(V16Error::InvalidConfig)
+    } else {
+        unreachable!()
+    };
+
+    kani::cover!(
+        valid == 0 && fresh > 0,
+        "backing utilization rate covers zero-lien no-charge branch"
+    );
+    kani::cover!(
+        valid > 0 && fresh == 0,
+        "backing utilization rate rejects liened source with zero backing"
+    );
+    kani::cover!(
+        valid > fresh && fresh > 0,
+        "backing utilization rate rejects over-liened source state"
+    );
+    assert_eq!(result, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_rate_below_kink_matches_exact_schedule() {
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let base_raw: u8 = kani::any();
+    let slope_at_raw: u8 = kani::any();
+    let slope_above_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&fresh_raw));
+    kani::assume((1..=32).contains(&valid_raw));
+    kani::assume(valid_raw <= fresh_raw);
+    let fresh = fresh_raw as u128;
+    let valid = valid_raw as u128;
+    let config = symbolic_backing_fee_config(8_000, base_raw, slope_at_raw, slope_above_raw);
+    let kink = config.backing_fee_kink_util_bps;
+    let util_bps = (valid * MAX_BACKING_FEE_UTIL_BPS as u128 / fresh) as u64;
+    kani::assume(util_bps <= kink);
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh * BOUND_SCALE,
+        valid_liened_backing_num: valid * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let rate = kani_backing_utilization_rate_e9_for_source_state(config, source).unwrap();
+    let expected = config.backing_fee_base_rate_e9_per_slot
+        + (config.backing_fee_slope_at_kink_e9_per_slot * util_bps / kink);
+
+    kani::cover!(
+        util_bps < kink && valid < fresh,
+        "backing utilization below-kink proof covers strict below-kink utilization"
+    );
+    kani::cover!(
+        util_bps == kink,
+        "backing utilization below-kink proof covers exact kink boundary"
+    );
+    assert_eq!(rate, expected);
+    assert!(rate >= config.backing_fee_base_rate_e9_per_slot);
+    assert!(
+        rate <= config.backing_fee_base_rate_e9_per_slot
+            + config.backing_fee_slope_at_kink_e9_per_slot
+    );
+    assert!(rate <= MAX_BACKING_FEE_RATE_E9_PER_SLOT);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_rate_above_kink_matches_exact_schedule() {
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let base_raw: u8 = kani::any();
+    let slope_at_raw: u8 = kani::any();
+    let slope_above_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&fresh_raw));
+    kani::assume((1..=32).contains(&valid_raw));
+    kani::assume(valid_raw <= fresh_raw);
+    let fresh = fresh_raw as u128;
+    let valid = valid_raw as u128;
+    let config = symbolic_backing_fee_config(8_000, base_raw, slope_at_raw, slope_above_raw);
+    let kink = config.backing_fee_kink_util_bps;
+    let util_bps = (valid * MAX_BACKING_FEE_UTIL_BPS as u128 / fresh) as u64;
+    kani::assume(util_bps > kink);
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh * BOUND_SCALE,
+        valid_liened_backing_num: valid * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let rate = kani_backing_utilization_rate_e9_for_source_state(config, source).unwrap();
+    let expected = config.backing_fee_base_rate_e9_per_slot
+        + config.backing_fee_slope_at_kink_e9_per_slot
+        + (config.backing_fee_slope_above_kink_e9_per_slot * (util_bps - kink)
+            / (MAX_BACKING_FEE_UTIL_BPS - kink));
+
+    kani::cover!(
+        util_bps > kink && valid < fresh,
+        "backing utilization above-kink proof covers partial above-kink utilization"
+    );
+    kani::cover!(
+        util_bps == MAX_BACKING_FEE_UTIL_BPS,
+        "backing utilization above-kink proof covers full utilization cap"
+    );
+    assert_eq!(rate, expected);
+    assert!(
+        rate >= config.backing_fee_base_rate_e9_per_slot
+            + config.backing_fee_slope_at_kink_e9_per_slot
+    );
+    assert!(
+        rate <= config.backing_fee_base_rate_e9_per_slot
+            + config.backing_fee_slope_at_kink_e9_per_slot
+            + config.backing_fee_slope_above_kink_e9_per_slot
+    );
+    assert!(rate <= MAX_BACKING_FEE_RATE_E9_PER_SLOT);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_utilization_fee_quote_atoms_is_exact_floor_and_time_bounded() {
+    let fresh_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let dt_raw: u8 = kani::any();
+    let kink_raw: u16 = kani::any();
+    let base_raw: u8 = kani::any();
+    let slope_at_raw: u8 = kani::any();
+    let slope_above_raw: u8 = kani::any();
+    kani::assume(fresh_raw <= 64);
+    kani::assume(valid_raw <= 80);
+    kani::assume(lien_raw <= 64);
+    kani::assume(dt_raw <= 16);
+    kani::assume(kink_raw <= MAX_BACKING_FEE_UTIL_BPS as u16);
+    let fresh = fresh_raw as u128;
+    let valid = valid_raw as u128;
+    let lien_atoms = lien_raw as u128;
+    let dt = dt_raw as u64;
+    let config = symbolic_backing_fee_config(kink_raw, base_raw, slope_at_raw, slope_above_raw);
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh * BOUND_SCALE,
+        valid_liened_backing_num: valid * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let lien_backing_num = lien_atoms * BOUND_SCALE;
+    let from_slot = 10u64;
+    let to_slot = from_slot + dt;
+
+    let rate = kani_backing_utilization_rate_e9_for_source_state(config, source);
+    let result = kani_backing_utilization_fee_quote_atoms_for_lien(
+        config,
+        source,
+        lien_backing_num,
+        from_slot,
+        to_slot,
+    );
+    let expected_ok = lien_atoms == 0 || dt == 0 || rate.is_ok();
+
+    kani::cover!(
+        result == Ok(0) && lien_atoms == 0 && dt > 0,
+        "backing utilization fee covers zero-lien no-op"
+    );
+    kani::cover!(
+        result == Ok(0) && lien_atoms > 0 && dt == 0,
+        "backing utilization fee covers zero-time no-op"
+    );
+    kani::cover!(
+        expected_ok && lien_atoms > 0 && dt > 1 && rate.unwrap_or(0) > 0,
+        "backing utilization fee covers nontrivial positive fee path"
+    );
+    kani::cover!(
+        !expected_ok && valid > fresh && valid > 0 && lien_atoms > 0 && dt > 0,
+        "backing utilization fee rejects invalid source state"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok(fee) = result {
+        if lien_atoms == 0 || dt == 0 || rate.unwrap() == 0 {
+            assert_eq!(fee, 0);
+        } else {
+            let expected =
+                lien_atoms * rate.unwrap() as u128 * dt as u128 / BACKING_FEE_RATE_DEN_E9;
+            assert_eq!(fee, expected);
+            assert!(fee <= lien_atoms * dt as u128);
+        }
+    } else {
+        assert!(rate.is_err() && lien_atoms > 0 && dt > 0);
     }
 }
 
