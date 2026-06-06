@@ -4618,9 +4618,16 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     );
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
+    assert_eq!(reservation.impaired_liened_insurance_num, 0);
     assert_eq!(reservation.consumed_insurance_num, amount);
     assert_eq!(source.insurance_credit_reserved_num, 0);
     assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(source.impaired_liened_insurance_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        atoms
+    );
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_long.get(),
         atoms
