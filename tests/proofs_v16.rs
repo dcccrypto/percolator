@@ -1315,6 +1315,232 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     assert_eq!(market.header.last_asset_activation_slot.get(), now_slot);
 }
 
+fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>() {
+    let restart_retired: bool = kani::any();
+    let selected_long_budget_raw: u8 = kani::any();
+    let selected_short_budget_raw: u8 = kani::any();
+    let other_long_budget_raw: u8 = kani::any();
+    let other_short_budget_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let price_raw: u16 = kani::any();
+    assert!(SELECTED_INDEX < 2);
+    kani::assume((1..=10_000).contains(&price_raw));
+    let selected_index = SELECTED_INDEX;
+    let other_index = 1usize - selected_index;
+
+    let current_slot = 5u64;
+    let now_slot = 6u64;
+    let next_market_id_before = 3u64;
+    let old_activation_count = 2u64;
+    let old_asset_epoch = 4u64;
+    let old_risk_epoch = 7u64;
+    let selected_long_budget = selected_long_budget_raw as u128;
+    let selected_short_budget = selected_short_budget_raw as u128;
+    let other_long_budget = other_long_budget_raw as u128;
+    let other_short_budget = other_short_budget_raw as u128;
+    let budget_total =
+        selected_long_budget + selected_short_budget + other_long_budget + other_short_budget;
+    let senior_slack = slack_raw as u128;
+    let insurance = budget_total + senior_slack;
+
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 2, 0).unwrap();
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.next_market_id = V16PodU64::new(next_market_id_before);
+    header.asset_activation_count = V16PodU64::new(old_activation_count);
+    header.last_asset_activation_slot = V16PodU64::new(current_slot);
+    header.asset_set_epoch = V16PodU64::new(old_asset_epoch);
+    header.risk_epoch = V16PodU64::new(old_risk_epoch);
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_total);
+
+    let mut markets = [
+        Market::new(10u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(20u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut selected_asset = AssetStateV16::default();
+    selected_asset.market_id = (selected_index + 1) as u64;
+    selected_asset.lifecycle = if restart_retired {
+        AssetLifecycleV16::Retired
+    } else {
+        AssetLifecycleV16::Recovery
+    };
+    selected_asset.raw_oracle_target_price = 100;
+    selected_asset.effective_price = 100;
+    selected_asset.fund_px_last = 100;
+    selected_asset.slot_last = current_slot;
+    selected_asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    markets[selected_index].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    markets[selected_index].engine.insurance_domain_budget_long =
+        V16PodU128::new(selected_long_budget);
+    markets[selected_index].engine.insurance_domain_budget_short =
+        V16PodU128::new(selected_short_budget);
+
+    let mut other_asset = AssetStateV16::default();
+    other_asset.market_id = (other_index + 1) as u64;
+    other_asset.lifecycle = AssetLifecycleV16::Active;
+    other_asset.raw_oracle_target_price = 111;
+    other_asset.effective_price = 111;
+    other_asset.fund_px_last = 111;
+    other_asset.slot_last = current_slot;
+    markets[other_index].engine.asset = AssetStateV16Account::from_runtime(&other_asset);
+    markets[other_index].engine.insurance_domain_budget_long = V16PodU128::new(other_long_budget);
+    markets[other_index].engine.insurance_domain_budget_short = V16PodU128::new(other_short_budget);
+
+    let vault_before = header.vault.get();
+    let insurance_before = header.insurance.get();
+    let c_tot_before = header.c_tot.get();
+    let budget_total_before = header.insurance_domain_budget_remaining_total.get();
+    let selected_wrapper_before = markets[selected_index].wrapper;
+    let other_wrapper_before = markets[other_index].wrapper;
+    let other_asset_before = markets[other_index].engine.asset.try_to_runtime().unwrap();
+    let other_budget_long_before = markets[other_index]
+        .engine
+        .insurance_domain_budget_long
+        .get();
+    let other_budget_short_before = markets[other_index]
+        .engine
+        .insurance_domain_budget_short
+        .get();
+    let selected_budget_long_before = markets[selected_index]
+        .engine
+        .insurance_domain_budget_long
+        .get();
+    let selected_budget_short_before = markets[selected_index]
+        .engine
+        .insurance_domain_budget_short
+        .get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(
+            selected_index,
+            price_raw as u64,
+            now_slot,
+        )
+        .unwrap();
+
+    kani::cover!(
+        selected_long_budget > 0 && selected_short_budget > 0,
+        "two-slot restart covers selected asset with nonzero preserved budgets"
+    );
+    kani::cover!(
+        other_long_budget > 0 && other_short_budget > 0 && senior_slack > 0,
+        "two-slot restart covers unrelated funded asset and senior slack"
+    );
+
+    let restarted = market.markets[selected_index].engine;
+    let restarted_asset = restarted.asset.try_to_runtime().unwrap();
+    assert_eq!(restarted_asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(restarted_asset.market_id, next_market_id_before);
+    assert_eq!(restarted_asset.raw_oracle_target_price, price_raw as u64);
+    assert_eq!(restarted_asset.effective_price, price_raw as u64);
+    assert_eq!(restarted_asset.fund_px_last, price_raw as u64);
+    assert_eq!(restarted_asset.slot_last, now_slot);
+    assert_eq!(
+        restarted.insurance_domain_budget_long.get(),
+        selected_budget_long_before
+    );
+    assert_eq!(
+        restarted.insurance_domain_budget_short.get(),
+        selected_budget_short_before
+    );
+    assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
+    assert_eq!(restarted.insurance_domain_spent_short.get(), 0);
+    assert_eq!(
+        restarted.source_credit_long.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        restarted.source_credit_short.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        restarted.backing_long.try_to_runtime().unwrap().market_id,
+        next_market_id_before
+    );
+    assert_eq!(
+        restarted.backing_short.try_to_runtime().unwrap().market_id,
+        next_market_id_before
+    );
+
+    assert_eq!(
+        market.markets[selected_index].wrapper,
+        selected_wrapper_before
+    );
+    assert_eq!(market.markets[other_index].wrapper, other_wrapper_before);
+    let other_asset_after = market.markets[other_index]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(other_asset_after.market_id, other_asset_before.market_id);
+    assert_eq!(other_asset_after.lifecycle, other_asset_before.lifecycle);
+    assert_eq!(
+        other_asset_after.raw_oracle_target_price,
+        other_asset_before.raw_oracle_target_price
+    );
+    assert_eq!(
+        other_asset_after.effective_price,
+        other_asset_before.effective_price
+    );
+    assert_eq!(
+        other_asset_after.fund_px_last,
+        other_asset_before.fund_px_last
+    );
+    assert_eq!(other_asset_after.slot_last, other_asset_before.slot_last);
+    assert_eq!(
+        market.markets[other_index]
+            .engine
+            .insurance_domain_budget_long
+            .get(),
+        other_budget_long_before
+    );
+    assert_eq!(
+        market.markets[other_index]
+            .engine
+            .insurance_domain_budget_short
+            .get(),
+        other_budget_short_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget_total_before
+    );
+    assert_eq!(
+        market.header.next_market_id.get(),
+        next_market_id_before + 1
+    );
+    assert_eq!(
+        market.header.asset_activation_count.get(),
+        old_activation_count + 1
+    );
+    assert_eq!(market.header.asset_set_epoch.get(), old_asset_epoch + 1);
+    assert_eq!(market.header.risk_epoch.get(), old_risk_epoch + 1);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.header.last_asset_activation_slot.get(), now_slot);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_restart_asset_zero_preserves_only_selected_slot_in_two_slot_view() {
+    assert_v16_public_restart_two_slot_selected_only::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_restart_nonzero_asset_preserves_only_selected_slot_in_two_slot_view() {
+    assert_v16_public_restart_two_slot_selected_only::<1>();
+}
+
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
