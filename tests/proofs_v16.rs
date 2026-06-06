@@ -1148,6 +1148,90 @@ fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_market_capacity_growth_rejects_invalid_requests_without_mutation() {
+    let blocker: u8 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let surplus: u128 = kani::any();
+    kani::assume(blocker <= 5);
+    kani::assume(c_tot <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - c_tot);
+    kani::assume(surplus <= MAX_VAULT_TVL - c_tot - insurance);
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+
+    let (new_capacity, new_max_market_slots, expected_err) = match blocker {
+        0 => {
+            header.mode = 1;
+            (3, 3, V16Error::InvalidConfig)
+        }
+        1 => (1, 1, V16Error::InvalidConfig),
+        2 => (3, 1, V16Error::InvalidConfig),
+        3 => (3, 4, V16Error::InvalidConfig),
+        4 => {
+            header.asset_set_epoch = V16PodU64::new(u64::MAX);
+            (3, 3, V16Error::CounterOverflow)
+        }
+        _ => {
+            header.risk_epoch = V16PodU64::new(u64::MAX);
+            (3, 3, V16Error::CounterOverflow)
+        }
+    };
+
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let config_before = header.config;
+    let capacity_before = header.asset_slot_capacity;
+    let mode_before = header.mode;
+    let asset_set_epoch_before = header.asset_set_epoch;
+    let risk_epoch_before = header.risk_epoch;
+
+    let result = header.grow_asset_slot_capacity_not_atomic(new_capacity, new_max_market_slots);
+
+    kani::cover!(
+        blocker == 0 && c_tot > 255 && insurance > 255 && surplus > 255,
+        "capacity growth rejects non-live market without value mutation"
+    );
+    kani::cover!(
+        blocker == 1,
+        "capacity growth rejects shrinking allocated capacity"
+    );
+    kani::cover!(
+        blocker == 2,
+        "capacity growth rejects shrinking configured market slots"
+    );
+    kani::cover!(
+        blocker == 3,
+        "capacity growth rejects configured market slots beyond allocated capacity"
+    );
+    kani::cover!(
+        blocker == 4,
+        "capacity growth rejects asset-set epoch overflow before mutation"
+    );
+    kani::cover!(
+        blocker == 5,
+        "capacity growth rejects risk epoch overflow before mutation"
+    );
+    assert_eq!(result, Err(expected_err));
+    assert_eq!(header.vault, vault_before);
+    assert_eq!(header.c_tot, c_tot_before);
+    assert_eq!(header.insurance, insurance_before);
+    assert_eq!(header.config, config_before);
+    assert_eq!(header.asset_slot_capacity, capacity_before);
+    assert_eq!(header.mode, mode_before);
+    assert_eq!(header.asset_set_epoch, asset_set_epoch_before);
+    assert_eq!(header.risk_epoch, risk_epoch_before);
+}
+
+#[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts() {
