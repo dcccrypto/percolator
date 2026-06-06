@@ -10471,6 +10471,65 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_residual_reward_credit_is_capped_by_principal_and_crystallized_loss() {
+    let crystallized_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let received_raw: u8 = kani::any();
+    let crystallized = crystallized_raw as u128;
+    let spent = spent_raw as u128;
+    let principal = principal_raw as u128;
+    let received_before = received_raw as u128;
+    kani::assume(spent <= crystallized);
+
+    let mut trader_header = PortfolioAccountV16Account::default();
+    trader_header.residual_crystallized_loss_atoms_total = V16PodU128::new(crystallized);
+    trader_header.residual_spent_principal_atoms_total = V16PodU128::new(spent);
+    let mut lp_header = PortfolioAccountV16Account::default();
+    lp_header.residual_received_atoms_total = V16PodU128::new(received_before);
+    let mut trader = PortfolioV16ViewMut {
+        header: &mut trader_header,
+    };
+    let mut lp = PortfolioV16ViewMut {
+        header: &mut lp_header,
+    };
+
+    let credit = MarketGroupV16ViewMut::<u64>::kani_transfer_account_residual_reward_credit(
+        &mut trader,
+        &mut lp,
+        principal,
+    )
+    .unwrap();
+    let available = crystallized - spent;
+
+    kani::cover!(
+        principal > available && available > 0,
+        "residual reward proof covers crystallized-loss cap"
+    );
+    kani::cover!(
+        principal <= available && principal > 0,
+        "residual reward proof covers principal cap"
+    );
+    assert_eq!(credit, principal.min(available));
+    assert!(credit <= principal);
+    assert!(credit <= available);
+    assert_eq!(
+        trader.header.residual_spent_principal_atoms_total.get(),
+        spent + credit
+    );
+    assert!(
+        trader.header.residual_spent_principal_atoms_total.get()
+            <= trader.header.residual_crystallized_loss_atoms_total.get()
+    );
+    assert_eq!(
+        lp.header.residual_received_atoms_total.get(),
+        received_before + credit
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
     let claim_raw: u16 = kani::any();
     let available_raw: u16 = kani::any();

@@ -1803,6 +1803,122 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_residual_reward_credit_uses_real_principal_not_notional() {
+    let (mut header, mut markets) = market_fixture(1, 1_000);
+    header.config.initial_margin_bps = V16PodU64::new(500);
+    header.config.maintenance_margin_bps = V16PodU64::new(500);
+    header.config.min_nonzero_im_req = V16PodU128::new(2);
+    header.config.min_nonzero_mm_req = V16PodU128::new(1);
+    let mut taker_header = account_fixture(1, 23);
+    let mut lp_header = account_fixture(1, 24);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+        market.deposit_not_atomic(&mut taker, 10_000).unwrap();
+        market.deposit_not_atomic(&mut lp, 10_000).unwrap();
+    }
+
+    taker_header.residual_crystallized_loss_atoms_total = V16PodU128::new(10_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut taker,
+            &mut lp,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 1_000,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        taker.header.residual_spent_principal_atoms_total.get(),
+        50,
+        "1 lot at price 1000 with 500 bps IM spends only 50 atoms of residual budget"
+    );
+    assert_eq!(lp.header.residual_received_atoms_total.get(), 50);
+    assert_ne!(
+        lp.header.residual_received_atoms_total.get(),
+        1_000,
+        "counter must not credit leveraged notional"
+    );
+    taker.validate_with_market(&market.as_view()).unwrap();
+    lp.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_residual_reward_credit_is_capped_by_available_crystallized_loss() {
+    let (mut header, mut markets) = market_fixture(1, 1_000);
+    header.config.initial_margin_bps = V16PodU64::new(500);
+    header.config.maintenance_margin_bps = V16PodU64::new(500);
+    let mut taker_header = account_fixture(1, 25);
+    let mut lp_header = account_fixture(1, 26);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+        market.deposit_not_atomic(&mut taker, 10_000).unwrap();
+        market.deposit_not_atomic(&mut lp, 10_000).unwrap();
+    }
+
+    taker_header.residual_crystallized_loss_atoms_total = V16PodU128::new(30);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut taker,
+            &mut lp,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 1_000,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(taker.header.residual_spent_principal_atoms_total.get(), 30);
+    assert_eq!(lp.header.residual_received_atoms_total.get(), 30);
+    taker.validate_with_market(&market.as_view()).unwrap();
+    lp.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_principal_loss_crystallizes_residual_budget_monotonically() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 27);
+    header.vault = V16PodU128::new(100);
+    header.c_tot = V16PodU128::new(100);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.capital = V16PodU128::new(100);
+    account_header.pnl = V16PodI128::new(-40);
+    account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(7);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .sync_account_fee_to_slot_not_atomic(&mut account, 1, 0)
+        .unwrap();
+
+    assert_eq!(account.header.capital.get(), 60);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        47,
+        "historical crystallized-loss budget only increases by real capital consumed"
+    );
+    account.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 18);

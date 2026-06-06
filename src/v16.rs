@@ -2503,6 +2503,11 @@ impl<'a> PortfolioV16View<'a> {
         if self.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
+        if self.header.residual_spent_principal_atoms_total.get()
+            > self.header.residual_crystallized_loss_atoms_total.get()
+        {
+            return Err(V16Error::InvalidLeg);
+        }
         self.validate_source_credit_shape_with_market(market)?;
         let source_claim_sum_num = self.source_claim_bound_sum_num()?;
         if source_claim_sum_num != 0 {
@@ -5466,6 +5471,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
+        if account.header.residual_spent_principal_atoms_total.get()
+            > account.header.residual_crystallized_loss_atoms_total.get()
+        {
+            return Err(V16Error::InvalidLeg);
+        }
         PortfolioV16View::validate_resolved_payout_receipt_static(
             account.header.resolved_payout_receipt.try_to_runtime()?,
         )?;
@@ -8254,6 +8264,127 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn record_account_residual_crystallized_loss(
+        account: &mut PortfolioV16ViewMut<'_>,
+        atoms: u128,
+    ) -> V16Result<()> {
+        if atoms == 0 {
+            return Ok(());
+        }
+        account.header.residual_crystallized_loss_atoms_total = V16PodU128::new(
+            account
+                .header
+                .residual_crystallized_loss_atoms_total
+                .get()
+                .checked_add(atoms)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        Ok(())
+    }
+
+    fn transfer_account_residual_reward_credit(
+        trader: &mut PortfolioV16ViewMut<'_>,
+        lp: &mut PortfolioV16ViewMut<'_>,
+        principal_atoms: u128,
+    ) -> V16Result<u128> {
+        if principal_atoms == 0 {
+            return Ok(0);
+        }
+        let crystallized = trader.header.residual_crystallized_loss_atoms_total.get();
+        let spent = trader.header.residual_spent_principal_atoms_total.get();
+        let available = crystallized
+            .checked_sub(spent)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let credit = available.min(principal_atoms);
+        if credit == 0 {
+            return Ok(0);
+        }
+        trader.header.residual_spent_principal_atoms_total =
+            V16PodU128::new(spent.checked_add(credit).ok_or(V16Error::CounterOverflow)?);
+        lp.header.residual_received_atoms_total = V16PodU128::new(
+            lp.header
+                .residual_received_atoms_total
+                .get()
+                .checked_add(credit)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        Ok(credit)
+    }
+
+    fn initial_margin_requirement_for_abs_q(
+        config: V16Config,
+        abs_q: u128,
+        price: u64,
+    ) -> V16Result<u128> {
+        let notional = risk_notional_ceil(abs_q, price)?;
+        margin_requirement(
+            notional,
+            config.initial_margin_bps,
+            config.min_nonzero_im_req,
+        )
+    }
+
+    fn increased_initial_margin_principal(
+        config: V16Config,
+        old_abs_q: u128,
+        new_abs_q: u128,
+        price: u64,
+    ) -> V16Result<u128> {
+        if new_abs_q <= old_abs_q {
+            return Ok(0);
+        }
+        let old_req = Self::initial_margin_requirement_for_abs_q(config, old_abs_q, price)?;
+        let new_req = Self::initial_margin_requirement_for_abs_q(config, new_abs_q, price)?;
+        Ok(new_req.saturating_sub(old_req))
+    }
+
+    fn transfer_trade_residual_reward_credit(
+        &self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        trade_preflight: &TradePositionPreflightV16,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let config = self.header.config.try_to_runtime_shape()?;
+        let price = self.asset_state(asset_index)?.effective_price;
+        let long_principal = Self::increased_initial_margin_principal(
+            config,
+            trade_preflight.long_old_abs_q,
+            trade_preflight.long_new_abs_q,
+            price,
+        )?;
+        let short_principal = Self::increased_initial_margin_principal(
+            config,
+            trade_preflight.short_old_abs_q,
+            trade_preflight.short_new_abs_q,
+            price,
+        )?;
+        if trade_preflight.long_new_abs_q > trade_preflight.long_old_abs_q {
+            Self::transfer_account_residual_reward_credit(
+                long_account,
+                short_account,
+                short_principal,
+            )?;
+        }
+        if trade_preflight.short_new_abs_q > trade_preflight.short_old_abs_q {
+            Self::transfer_account_residual_reward_credit(
+                short_account,
+                long_account,
+                long_principal,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(kani)]
+    pub fn kani_transfer_account_residual_reward_credit(
+        trader: &mut PortfolioV16ViewMut<'_>,
+        lp: &mut PortfolioV16ViewMut<'_>,
+        principal_atoms: u128,
+    ) -> V16Result<u128> {
+        Self::transfer_account_residual_reward_credit(trader, lp, principal_atoms)
+    }
+
     #[cfg(kani)]
     pub fn kani_set_account_pnl(
         &mut self,
@@ -8695,6 +8826,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
         self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        Self::record_account_residual_crystallized_loss(account, backing)?;
         account.header.health_cert.valid = 0;
         Ok(())
     }
@@ -12168,6 +12300,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_delta,
             trade_preflight.short_lookup,
         )?;
+        self.transfer_trade_residual_reward_credit(
+            long_account,
+            short_account,
+            &trade_preflight,
+            request.asset_index,
+        )?;
         if recertify_after_fill {
             let price = self.asset_state(request.asset_index)?.effective_price;
             self.recertify_account_after_trade_delta(
@@ -12595,6 +12733,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.capital = V16PodU128::new(capital);
         self.header.c_tot = V16PodU128::new(c_tot);
         self.set_account_pnl_after_principal_settlement(account, new_pnl)?;
+        Self::record_account_residual_crystallized_loss(account, paid)?;
         if new_pnl < 0 {
             self.header.bankruptcy_hlock_active = 1;
         }
@@ -14389,6 +14528,13 @@ pub struct PortfolioAccountV16Account {
     pub capital: V16PodU128,
     pub pnl: V16PodI128,
     pub reserved_pnl: V16PodU128,
+    // Monotonic reward-accounting counters. These do not affect margin or solvency:
+    // crystallized_loss increments only when real account capital is consumed by
+    // loss settlement; spent_principal caps how much of that budget has rewarded
+    // counterparties; received is the LP-side total earned for matching that budget.
+    pub residual_crystallized_loss_atoms_total: V16PodU128,
+    pub residual_spent_principal_atoms_total: V16PodU128,
+    pub residual_received_atoms_total: V16PodU128,
     pub fee_credits: V16PodI128,
     pub cancel_deposit_escrow: V16PodU128,
     pub last_fee_slot: V16PodU64,
@@ -14418,6 +14564,9 @@ impl PortfolioAccountV16Account {
         self.capital = V16PodU128::new(0);
         self.pnl = V16PodI128::new(0);
         self.reserved_pnl = V16PodU128::new(0);
+        self.residual_crystallized_loss_atoms_total = V16PodU128::new(0);
+        self.residual_spent_principal_atoms_total = V16PodU128::new(0);
+        self.residual_received_atoms_total = V16PodU128::new(0);
         self.fee_credits = V16PodI128::new(0);
         self.cancel_deposit_escrow = V16PodU128::new(0);
         self.last_fee_slot = V16PodU64::new(0);
