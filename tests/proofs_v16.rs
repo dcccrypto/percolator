@@ -2134,6 +2134,98 @@ fn proof_v16_backing_provider_earnings_credit_requires_vault_slack() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let existing_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(existing_raw <= 8);
+    kani::assume((1..=8).contains(&amount_raw));
+    kani::assume(surplus_raw <= 8);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let existing = existing_raw as u128;
+    let amount = amount_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(c_tot + insurance + existing + amount + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(existing);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        utilization_fee_earnings: existing,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let total_before = header.backing_provider_earnings_total.get();
+    let bucket_before = markets[0]
+        .engine
+        .backing_long
+        .utilization_fee_earnings
+        .get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .credit_backing_provider_earnings_not_atomic(0, amount)
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        existing > 0 && amount > 1,
+        "public backing earnings credit covers additive provider earnings"
+    );
+    kani::cover!(
+        surplus == 0,
+        "public backing earnings credit covers exact vault-slack boundary"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        total_before + amount
+    );
+    assert_eq!(bucket.utilization_fee_earnings, bucket_before + amount);
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get()
+            <= market.header.vault.get()
+    );
+    assert_eq!(
+        market.header.vault.get()
+            - market.header.c_tot.get()
+            - market.header.insurance.get()
+            - market.header.backing_provider_earnings_total.get(),
+        surplus
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() {
