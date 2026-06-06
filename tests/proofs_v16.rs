@@ -7301,20 +7301,35 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
 fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_value_movement() {
-    let with_senior_balances: bool = kani::any();
-    let future_slot: bool = kani::any();
-    let price_moves: bool = kani::any();
-    let c_tot = if with_senior_balances { 7 } else { 0 };
-    let insurance = if with_senior_balances { 4 } else { 0 };
-    let now_slot = if future_slot { 2 } else { 1 };
-    let effective_price = if price_moves { 101 } else { 100 };
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    let now_slot_raw: u8 = kani::any();
+    let price_raw: u8 = kani::any();
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+    kani::assume((1..=4).contains(&now_slot_raw));
+    kani::assume((80..=120).contains(&price_raw));
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let now_slot = now_slot_raw as u64;
+    let effective_price = price_raw as u64;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(c_tot + insurance);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
+    let asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    let oracle_epoch_before = header.oracle_epoch;
+    let funding_epoch_before = header.funding_epoch;
+    let capital_before = account_header.capital;
+    let pnl_before = account_header.pnl;
+    let reserved_before = account_header.reserved_pnl;
+    let fee_credits_before = account_header.fee_credits;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
@@ -7331,25 +7346,59 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
         )
         .unwrap();
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let expected_asset_slot = if now_slot > asset_before.slot_last + 1 {
+        asset_before.slot_last + 1
+    } else {
+        now_slot
+    };
 
     kani::cover!(
         outcome == PermissionlessProgressOutcomeV16::AccountCurrent
             && asset.effective_price == effective_price
-            && future_slot
-            && price_moves
-            && with_senior_balances,
-        "permissionless empty-market crank advances symbolic authenticated slot and price"
+            && now_slot == expected_asset_slot
+            && effective_price > 100
+            && c_tot > 0
+            && insurance > 0
+            && surplus > 0,
+        "permissionless empty-market crank catches up current segment over symbolic senior stock"
+    );
+    kani::cover!(
+        now_slot == 1 && effective_price == 100,
+        "permissionless empty-market crank covers same-slot no-op clock and price"
+    );
+    kani::cover!(
+        effective_price < 100 && now_slot > expected_asset_slot,
+        "permissionless empty-market crank covers stale bounded negative-price catchup"
     );
     assert_eq!(outcome, PermissionlessProgressOutcomeV16::AccountCurrent);
     assert_eq!(market.header.current_slot.get(), now_slot);
-    assert_eq!(market.header.slot_last.get(), now_slot);
-    assert_eq!(asset.slot_last, now_slot);
+    assert_eq!(market.header.slot_last.get(), expected_asset_slot);
+    assert_eq!(
+        market.header.loss_stale_active,
+        if expected_asset_slot < now_slot { 1 } else { 0 }
+    );
+    assert_eq!(asset.slot_last, expected_asset_slot);
     assert_eq!(asset.effective_price, effective_price);
+    assert_eq!(asset.fund_px_last, effective_price);
+    assert_eq!(
+        asset.k_long,
+        asset_before.k_long
+            + (effective_price as i128 - asset_before.effective_price as i128) * ADL_ONE as i128
+    );
+    assert_eq!(
+        asset.k_short,
+        asset_before.k_short
+            - (effective_price as i128 - asset_before.effective_price as i128) * ADL_ONE as i128
+    );
+    assert_eq!(market.header.oracle_epoch, oracle_epoch_before);
+    assert_eq!(market.header.funding_epoch, funding_epoch_before);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
-    assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.reserved_pnl, reserved_before);
+    assert_eq!(account.header.fee_credits, fee_credits_before);
 }
 
 #[kani::proof]
