@@ -38,6 +38,9 @@ pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
 pub const MAX_RECOVERY_FALLBACK_DEVIATION_BPS: u64 = MAX_RESOLVE_PRICE_DEVIATION_BPS;
 
 pub mod v16;
+#[cfg(kani)]
 pub mod wide_math;
+#[cfg(not(kani))]
+mod wide_math;
 
 pub use v16::*;
