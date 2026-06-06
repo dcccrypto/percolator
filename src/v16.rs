@@ -10317,14 +10317,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 short_lookup.current_q,
                 short_lookup.next_q,
             ));
-        if touches_pending_domain_barrier {
-            return Err(V16Error::LockActive);
-        }
-        if risk_increasing
-            && (self.asset_is_loss_stale(request.asset_index)? || target_effective_lag)
-        {
-            return Err(V16Error::LockActive);
-        }
+        trade_preflight_risk_gate(
+            risk_increasing,
+            self.asset_is_loss_stale(request.asset_index)?,
+            target_effective_lag,
+            touches_pending_domain_barrier,
+        )?;
         Ok(TradePositionPreflightV16 {
             risk_increasing,
             long_lookup,
@@ -14311,9 +14309,38 @@ fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool
     Ok(next.unsigned_abs() > current.unsigned_abs())
 }
 
+fn trade_preflight_risk_gate(
+    risk_increasing: bool,
+    asset_loss_stale: bool,
+    target_effective_lag: bool,
+    touches_pending_domain_barrier: bool,
+) -> V16Result<()> {
+    if touches_pending_domain_barrier
+        || (risk_increasing && (asset_loss_stale || target_effective_lag))
+    {
+        return Err(V16Error::LockActive);
+    }
+    Ok(())
+}
+
 #[cfg(kani)]
 pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     position_delta_increases_risk(current, delta_q)
+}
+
+#[cfg(kani)]
+pub fn kani_trade_preflight_risk_gate(
+    risk_increasing: bool,
+    asset_loss_stale: bool,
+    target_effective_lag: bool,
+    touches_pending_domain_barrier: bool,
+) -> V16Result<()> {
+    trade_preflight_risk_gate(
+        risk_increasing,
+        asset_loss_stale,
+        target_effective_lag,
+        touches_pending_domain_barrier,
+    )
 }
 
 fn margin_requirement(notional: u128, bps: u64, floor: u128) -> V16Result<u128> {

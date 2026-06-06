@@ -8,12 +8,12 @@ use percolator::v16::{
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
-    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -1669,6 +1669,81 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
         if increases {
             assert!(next != 0);
         }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_preflight_risk_gate_blocks_only_unsafe_risk_increase() {
+    let long_current: i128 = kani::any();
+    let short_current: i128 = kani::any();
+    let trade_size: i128 = kani::any();
+    let asset_loss_stale: bool = kani::any();
+    let target_effective_lag: bool = kani::any();
+    let pending_barrier: bool = kani::any();
+    kani::assume(long_current != i128::MIN);
+    kani::assume(short_current != i128::MIN);
+    kani::assume(long_current.unsigned_abs() <= MAX_POSITION_ABS_Q);
+    kani::assume(short_current.unsigned_abs() <= MAX_POSITION_ABS_Q);
+    kani::assume(trade_size != 0 && trade_size != i128::MIN);
+    kani::assume(trade_size.unsigned_abs() <= MAX_TRADE_SIZE_Q);
+    let short_delta_opt = trade_size.checked_neg();
+    kani::assume(short_delta_opt.is_some());
+    let short_delta = short_delta_opt.unwrap();
+    let long_next_opt = long_current.checked_add(trade_size);
+    let short_next_opt = short_current.checked_add(short_delta);
+    kani::assume(long_next_opt.is_some());
+    kani::assume(short_next_opt.is_some());
+    let long_next = long_next_opt.unwrap();
+    let short_next = short_next_opt.unwrap();
+    let long_risk_result = kani_position_delta_increases_risk(long_current, trade_size);
+    let short_risk_result = kani_position_delta_increases_risk(short_current, short_delta);
+    kani::assume(long_risk_result.is_ok());
+    kani::assume(short_risk_result.is_ok());
+    let long_risk = long_risk_result.unwrap();
+    let short_risk = short_risk_result.unwrap();
+    let risk_increasing = long_risk || short_risk;
+    let result = kani_trade_preflight_risk_gate(
+        risk_increasing,
+        asset_loss_stale,
+        target_effective_lag,
+        pending_barrier,
+    );
+    let expected_blocked =
+        pending_barrier || (risk_increasing && (asset_loss_stale || target_effective_lag));
+
+    kani::cover!(
+        expected_blocked && asset_loss_stale && !target_effective_lag && !pending_barrier,
+        "trade preflight risk gate blocks risk increase on loss-stale asset"
+    );
+    kani::cover!(
+        expected_blocked && target_effective_lag && !asset_loss_stale && !pending_barrier,
+        "trade preflight risk gate blocks risk increase on target/effective lag"
+    );
+    kani::cover!(
+        !risk_increasing && (asset_loss_stale || target_effective_lag) && !pending_barrier,
+        "trade preflight risk gate allows pure spread reduction under stale-or-lag state"
+    );
+    kani::cover!(
+        risk_increasing && !asset_loss_stale && !target_effective_lag && !pending_barrier,
+        "trade preflight risk gate allows healthy risk increase"
+    );
+    kani::cover!(
+        pending_barrier && !risk_increasing,
+        "trade preflight risk gate blocks pending-domain barrier even for non-increasing deltas"
+    );
+    kani::cover!(
+        trade_size.unsigned_abs() > 1024 && long_current.unsigned_abs() > 1024,
+        "trade preflight risk gate proof covers wide symbolic position and trade magnitudes"
+    );
+    assert_eq!(long_next, long_current.checked_add(trade_size).unwrap());
+    assert_eq!(short_next, short_current.checked_add(short_delta).unwrap());
+    assert_eq!(result.is_ok(), !expected_blocked);
+    if expected_blocked {
+        assert_eq!(result, Err(V16Error::LockActive));
+    } else {
+        assert_eq!(result, Ok(()));
     }
 }
 
