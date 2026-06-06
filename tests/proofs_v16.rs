@@ -5700,9 +5700,8 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 #[kani::solver(cadical)]
 fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed() {
     let amount_raw: u8 = kani::any();
-    let existing_raw: u8 = kani::any();
+    let existing_raw: u16 = kani::any();
     kani::assume(amount_raw > 0);
-    kani::assume(existing_raw <= 8);
     let amount = amount_raw as u128;
     let existing_budget = existing_raw as u128;
     let (mut header, mut markets) = one_market_only_fixture();
@@ -5727,8 +5726,8 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
         "public domain budget credit covers nontrivial already-collected fee"
     );
     kani::cover!(
-        existing_budget > 0 && amount > 1,
-        "public domain budget credit covers additive existing-budget branch"
+        existing_budget > 255 && amount > 1,
+        "public domain budget credit covers wide additive existing-budget branch"
     );
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
