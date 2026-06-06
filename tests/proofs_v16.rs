@@ -1178,18 +1178,15 @@ fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_withdraw() {
-    let capital_raw: u8 = kani::any();
-    let amount_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    let surplus_raw: u8 = kani::any();
-    kani::assume(capital_raw > 0);
-    kani::assume(amount_raw > 0);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
-    let capital = capital_raw as u128;
-    let amount = amount_raw as u128;
-    let insurance = insurance_raw as u128;
-    let surplus = surplus_raw as u128;
+    let capital: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let surplus: u128 = kani::any();
+    kani::assume(capital > 0);
+    kani::assume(amount > 0);
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - capital);
+    kani::assume(surplus <= MAX_VAULT_TVL - capital - insurance);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
     header.vault = V16PodU128::new(capital + insurance + surplus);
@@ -1206,7 +1203,7 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
     let result = market.withdraw_not_atomic(&mut account, amount);
 
     kani::cover!(
-        amount > 10 && capital > 10 && insurance > 0 && surplus > 0,
+        amount > 255 && capital > 255 && insurance > 255 && surplus > 255,
         "recovery mode blocks ordinary withdraw over wide symbolic value state"
     );
     assert_eq!(result, Err(V16Error::LockActive));
