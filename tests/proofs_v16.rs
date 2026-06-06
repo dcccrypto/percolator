@@ -26,10 +26,10 @@ use percolator::v16::{
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error, V16PodI128, V16PodU128,
-    V16PodU32, V16PodU64, BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT,
-    MAX_BACKING_FEE_UTIL_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error,
+    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
+    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
@@ -2531,19 +2531,26 @@ fn proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit() {
 #[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_withdraw() {
     let capital: u128 = kani::any();
+    let other_capital: u128 = kani::any();
     let amount: u128 = kani::any();
     let insurance: u128 = kani::any();
     let surplus: u128 = kani::any();
     kani::assume(capital > 0);
     kani::assume(amount > 0);
-    let senior = capital.checked_add(insurance);
+    let c_tot = capital.checked_add(other_capital);
+    kani::assume(c_tot.is_some());
+    let senior = c_tot.unwrap().checked_add(insurance);
     kani::assume(senior.is_some());
     let vault = senior.unwrap().checked_add(surplus);
     kani::assume(vault.is_some());
+    kani::assume(vault.unwrap() <= MAX_VAULT_TVL);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    ));
     header.vault = V16PodU128::new(vault.unwrap());
-    header.c_tot = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(c_tot.unwrap());
     header.insurance = V16PodU128::new(insurance);
     account_header.capital = V16PodU128::new(capital);
     let vault_before = header.vault;
@@ -2556,18 +2563,20 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
     let result = market.withdraw_not_atomic(&mut account, amount);
 
     kani::cover!(
-        amount > MAX_VAULT_TVL && capital > MAX_VAULT_TVL,
-        "recovery mode blocks ordinary withdraw beyond configured TVL-scale values"
+        amount > MAX_VAULT_TVL && capital > 0,
+        "recovery mode blocks ordinary withdraw request beyond configured TVL-scale values"
     );
     kani::cover!(
-        insurance > 0 && surplus > 0,
-        "recovery mode blocks ordinary withdraw while senior insurance and junior surplus exist"
+        other_capital > 0 && insurance > 0 && surplus > 0,
+        "recovery mode blocks ordinary withdraw with independent aggregate state"
     );
     assert_eq!(result, Err(V16Error::LockActive));
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
