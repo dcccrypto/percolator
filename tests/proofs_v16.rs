@@ -7387,6 +7387,118 @@ fn proof_v16_expired_counterparty_backing_bucket_accepts_receivable_refill() {
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_add_delta_refills_or_rejects_by_bucket_state() {
+    let amount_raw: u8 = kani::any();
+    let receivable_raw: u8 = kani::any();
+    let fresh_raw: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    let same_expiry: bool = kani::any();
+    let stale_expiry: bool = kani::any();
+    kani::assume(amount_raw <= 8);
+    kani::assume(receivable_raw <= 8);
+    kani::assume(fresh_raw <= 8);
+    kani::assume(status_raw <= 3);
+
+    let current_slot = 10u64;
+    let requested_expiry = if stale_expiry { current_slot } else { 20 };
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Empty,
+        1 => BackingBucketStatusV16::Expired,
+        2 => BackingBucketStatusV16::Fresh,
+        _ => BackingBucketStatusV16::Impaired,
+    };
+    let bucket_expiry = if status == BackingBucketStatusV16::Fresh && same_expiry {
+        requested_expiry
+    } else {
+        17
+    };
+    let amount = amount_raw as u128;
+    let receivable = receivable_raw as u128;
+    let fresh_before = if status == BackingBucketStatusV16::Fresh {
+        fresh_raw as u128
+    } else {
+        0
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: fresh_before,
+        consumed_liened_backing_num: receivable,
+        expiry_slot: bucket_expiry,
+        status,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh_before,
+        spent_backing_num: receivable,
+        provider_receivable_num: receivable,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_add_delta(
+        bucket,
+        source,
+        amount,
+        current_slot,
+        requested_expiry,
+    );
+    let valid_bucket = matches!(
+        status,
+        BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired
+    ) || (status == BackingBucketStatusV16::Fresh && same_expiry);
+    let expected_ok = amount > 0 && !stale_expiry && valid_bucket;
+
+    kani::cover!(
+        expected_ok && status == BackingBucketStatusV16::Empty && amount > receivable,
+        "counterparty backing add covers fresh empty bucket and complete receivable refill"
+    );
+    kani::cover!(
+        expected_ok && status == BackingBucketStatusV16::Expired && amount < receivable,
+        "counterparty backing add covers expired bucket partial receivable refill"
+    );
+    kani::cover!(
+        expected_ok && status == BackingBucketStatusV16::Fresh && fresh_before > 0,
+        "counterparty backing add covers additive fresh bucket with matching expiry"
+    );
+    kani::cover!(
+        amount == 0 || stale_expiry,
+        "counterparty backing add rejects zero amount or non-future expiry"
+    );
+    kani::cover!(
+        amount > 0 && !stale_expiry && status == BackingBucketStatusV16::Fresh && !same_expiry,
+        "counterparty backing add rejects fresh bucket with mismatched expiry"
+    );
+
+    if expected_ok {
+        let (next_bucket, next_source) = result.unwrap();
+        let refill = amount.min(receivable);
+        assert_eq!(next_bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(next_bucket.expiry_slot, requested_expiry);
+        assert_eq!(
+            next_bucket.fresh_unliened_backing_num,
+            fresh_before + amount
+        );
+        assert_eq!(
+            next_source.fresh_reserved_backing_num,
+            fresh_before + amount
+        );
+        assert_eq!(next_bucket.consumed_liened_backing_num, receivable - refill);
+        assert_eq!(next_source.provider_receivable_num, receivable - refill);
+        assert_eq!(next_source.spent_backing_num, receivable);
+        assert_eq!(
+            next_source.provider_receivable_num + refill,
+            source.provider_receivable_num
+        );
+    } else if amount == 0 || stale_expiry {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
