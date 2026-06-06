@@ -9291,6 +9291,83 @@ fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_val
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_domain_insurance_spent_setter_rejects_invalid_without_mutation() {
+    let budget_raw: u8 = kani::any();
+    let old_spent_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let invalid_domain: bool = kani::any();
+    kani::assume(budget_raw > 0);
+    kani::assume(old_spent_raw <= budget_raw);
+    let budget = budget_raw as u128;
+    let old_spent = old_spent_raw as u128;
+    let surplus = surplus_raw as u128;
+    let spent = budget + 1;
+    let domain = if invalid_domain { 2 } else { 0 };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(budget + surplus);
+    header.insurance = V16PodU128::new(budget + surplus);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget - old_spent);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(old_spent);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let remaining_before = header.insurance_domain_budget_remaining_total.get();
+    let long_budget_before = markets[0].engine.insurance_domain_budget_long.get();
+    let long_spent_before = markets[0].engine.insurance_domain_spent_long.get();
+    let short_budget_before = markets[0].engine.insurance_domain_budget_short.get();
+    let short_spent_before = markets[0].engine.insurance_domain_spent_short.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let result = market.set_domain_insurance_spent(domain, spent);
+
+    kani::cover!(
+        invalid_domain,
+        "spent setter rejects invalid domain before budget mutation"
+    );
+    kani::cover!(
+        !invalid_domain && old_spent < budget,
+        "spent setter rejects spent above budget before budget mutation"
+    );
+    assert_eq!(
+        result,
+        if invalid_domain {
+            Err(V16Error::InvalidLeg)
+        } else {
+            Err(V16Error::InvalidConfig)
+        }
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        long_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        long_spent_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        short_spent_before
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance() {
