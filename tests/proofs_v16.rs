@@ -5024,6 +5024,14 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
             first_num,
         )
         .unwrap();
+    assert_eq!(spent, first_atoms);
+    assert_eq!(insurance, second_atoms);
+    assert_eq!(reservation.insurance_credit_reserved_num, second_num);
+    assert_eq!(reservation.valid_liened_insurance_num, second_num);
+    assert_eq!(reservation.consumed_insurance_num, first_num);
+    assert_eq!(source.insurance_credit_reserved_num, second_num);
+    assert_eq!(source.valid_liened_insurance_num, second_num);
+
     let (reservation, source, spent, insurance) =
         MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_consume_delta(
             reservation,
