@@ -37,10 +37,9 @@ fn fresh_activated_market() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 1, 0).unwrap();
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
     (header, markets)
 }
 

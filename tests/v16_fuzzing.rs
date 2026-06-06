@@ -20,8 +20,8 @@ fn fuzz_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     cfg.public_b_chunk_atoms = 1;
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
-    MarketGroupV16ViewMut::new(&mut header, &mut markets)
-        .activate_empty_market_not_atomic(0, 1, 1)
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 1, 1)
         .unwrap();
     (header, markets)
 }

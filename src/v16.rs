@@ -5737,6 +5737,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
@@ -9770,7 +9771,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
-    pub fn declare_permissionless_recovery(
+    fn declare_permissionless_recovery(
         &mut self,
         reason: PermissionlessRecoveryReasonV16,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
@@ -9789,14 +9790,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(reason));
         self.validate_shape()?;
         Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(reason))
-    }
-
-    pub fn declare_explicit_loss_or_dust_audit_overflow_not_atomic(
-        &mut self,
-    ) -> V16Result<PermissionlessProgressOutcomeV16> {
-        self.declare_permissionless_recovery(
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-        )
     }
 
     pub fn permissionless_crank_not_atomic(
@@ -13778,6 +13771,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(test, kani, feature = "fuzz"))]
     pub fn activate_empty_market_not_atomic(
         &mut self,
         asset_index: u32,

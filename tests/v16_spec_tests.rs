@@ -29,12 +29,18 @@ fn market_fixture(
     let mut markets = (0..market_slots)
         .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
         .collect::<Vec<_>>();
+    for i in 0..market_slots as usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                init_price,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
     {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        for i in 0..market_slots as usize {
-            view.activate_empty_market_not_atomic(i as u32, init_price, (i + 1) as u64)
-                .unwrap();
-        }
+        let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         view.validate_shape().unwrap();
     }
     (header, markets)
@@ -904,8 +910,10 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.retire_empty_asset_not_atomic(0, 1).unwrap();
-        market.activate_empty_market_not_atomic(0, 200, 2).unwrap();
     }
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 200, 2)
+        .unwrap();
     assert_ne!(markets[0].engine.asset.market_id.get(), old_market_id);
 
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
@@ -962,7 +970,10 @@ fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
         AssetLifecycleV16::Retired
     );
 
-    market.activate_empty_market_not_atomic(0, 200, 2).unwrap();
+    market
+        .header
+        .activate_empty_market_slot_not_atomic(0, &mut market.markets[0], 200, 2)
+        .unwrap();
     assert_ne!(
         market.markets[0].engine.asset.market_id.get(),
         old_market_id
