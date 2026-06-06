@@ -23,10 +23,14 @@ fn market_id() -> [u8; 32] {
 }
 
 fn empty_account() -> PortfolioAccountV16Account {
-    PortfolioAccountV16Account::try_empty(ProvenanceHeaderV16Account::from_runtime(
-        &ProvenanceHeaderV16::new(market_id(), [2u8; 32], [2u8; 32]),
-    ))
-    .unwrap()
+    let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        market_id(),
+        [2u8; 32],
+        [2u8; 32],
+    ));
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(header).unwrap();
+    account
 }
 
 fn fresh_activated_market() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {

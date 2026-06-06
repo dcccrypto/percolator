@@ -14662,7 +14662,7 @@ impl PortfolioAccountV16Account {
         Ok(())
     }
 
-    #[cfg(not(target_os = "solana"))]
+    #[cfg(kani)]
     pub fn try_empty(header: ProvenanceHeaderV16Account) -> V16Result<Self> {
         let mut out = Self::default();
         out.init_empty_in_place(header)?;

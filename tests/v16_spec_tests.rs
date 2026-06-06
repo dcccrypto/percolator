@@ -48,7 +48,9 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
         owner,
     ));
     let _ = v16_domain_count_for_market_slots(market_slots).unwrap();
-    PortfolioAccountV16Account::try_empty(header).unwrap()
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(header).unwrap();
+    account
 }
 
 fn signed_q(q: u128) -> i128 {

@@ -31,7 +31,9 @@ fn fuzz_account(account_id: [u8; 32]) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
         market_id, account_id, owner,
     ));
-    PortfolioAccountV16Account::try_empty(header).unwrap()
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(header).unwrap();
+    account
 }
 
 fn assert_fuzz_invariants(
