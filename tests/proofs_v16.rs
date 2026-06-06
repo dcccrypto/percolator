@@ -7481,6 +7481,76 @@ fn proof_v16_counterparty_source_credit_support_does_not_debit_vault_or_insuranc
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_support_to_account_capital_requires_exact_mixed_source_sum() {
+    let counterparty_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let overcredit: bool = kani::any();
+    let vault_raw: u16 = kani::any();
+    let counterparty = counterparty_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let source_sum = counterparty + insurance + surplus;
+    let requested_credit = if overcredit {
+        source_sum + 1
+    } else {
+        source_sum
+    };
+    let vault = vault_raw as u128;
+
+    let result = TokenValueFlowProofV16::support_to_account_capital(
+        requested_credit,
+        counterparty,
+        insurance,
+        surplus,
+        vault,
+        vault,
+    );
+
+    kani::cover!(
+        !overcredit && counterparty > 0 && insurance > 0 && surplus > 0,
+        "mixed support sources exactly credit account capital"
+    );
+    kani::cover!(
+        !overcredit && counterparty > 0 && insurance == 0 && surplus == 0,
+        "counterparty-only support remains valid"
+    );
+    kani::cover!(
+        overcredit && counterparty > 0 && insurance > 0,
+        "over-crediting beyond mixed support sources rejects"
+    );
+
+    if overcredit {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    } else {
+        let proof = result.unwrap();
+        assert_eq!(proof.vault_before, vault);
+        assert_eq!(proof.vault_after, vault);
+        assert_eq!(proof.external_quote_in, 0);
+        assert_eq!(proof.external_quote_out, 0);
+        assert_eq!(
+            proof.debits[TokenValueClassV16::AccountCapital as usize],
+            source_sum
+        );
+        assert_eq!(
+            proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+            counterparty
+        );
+        assert_eq!(
+            proof.credits[TokenValueClassV16::CloseInsuranceSpent as usize],
+            insurance
+        );
+        assert_eq!(
+            proof.credits[TokenValueClassV16::UnallocatedProtocolSurplus as usize],
+            surplus
+        );
+        assert_eq!(proof.validate(), Ok(()));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital() {
