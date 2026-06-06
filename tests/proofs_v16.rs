@@ -1073,6 +1073,65 @@ fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_insurance_domain_mapping_is_in_bounds_unique_and_roundtrips() {
+    let asset_raw: u8 = kani::any();
+    let side_is_short: bool = kani::any();
+    kani::assume(asset_raw < 4);
+    let asset_index = asset_raw as usize;
+    let side = if side_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 4, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 4, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, EngineAssetSlotV16Account::default()),
+        Market::new(2u64, EngineAssetSlotV16Account::default()),
+        Market::new(3u64, EngineAssetSlotV16Account::default()),
+    ];
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let domain = market
+        .kani_insurance_domain_index(asset_index, side)
+        .unwrap();
+    let long_domain = market
+        .kani_insurance_domain_index(asset_index, SideV16::Long)
+        .unwrap();
+    let short_domain = market
+        .kani_insurance_domain_index(asset_index, SideV16::Short)
+        .unwrap();
+    let roundtrip = market.kani_domain_asset_side(domain).unwrap();
+    let invalid_asset = market.kani_insurance_domain_index(4, side);
+    let invalid_domain = market.kani_domain_asset_side(8);
+
+    kani::cover!(
+        asset_index == 0 && !side_is_short,
+        "domain mapping covers asset-zero long domain"
+    );
+    kani::cover!(
+        asset_index > 1 && side_is_short,
+        "domain mapping covers nonzero short domain"
+    );
+    kani::cover!(
+        invalid_asset == Err(V16Error::InvalidLeg) && invalid_domain == Err(V16Error::InvalidLeg),
+        "domain mapping covers invalid asset and invalid domain rejection"
+    );
+    assert!(domain < 8);
+    assert_eq!(domain, asset_index * 2 + usize::from(side_is_short));
+    assert_eq!(roundtrip, (asset_index, side));
+    assert_eq!(long_domain, asset_index * 2);
+    assert_eq!(short_domain, asset_index * 2 + 1);
+    assert_ne!(long_domain, short_domain);
+    assert_eq!(invalid_asset, Err(V16Error::InvalidLeg));
+    assert_eq!(invalid_domain, Err(V16Error::InvalidLeg));
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {

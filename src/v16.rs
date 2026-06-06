@@ -5401,6 +5401,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((asset_index, side))
     }
 
+    #[cfg(kani)]
+    pub fn kani_domain_asset_side(&self, domain: usize) -> V16Result<(usize, SideV16)> {
+        self.domain_asset_side(domain)
+    }
+
     fn insurance_domain_index(&self, asset_index: usize, side: SideV16) -> V16Result<usize> {
         if asset_index >= self.header.config.max_market_slots.get() as usize {
             return Err(V16Error::InvalidLeg);
@@ -5411,6 +5416,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.domain_asset_side(domain)?;
         Ok(domain)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_insurance_domain_index(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<usize> {
+        self.insurance_domain_index(asset_index, side)
     }
 
     fn source_credit_for_domain(&self, domain: usize) -> V16Result<SourceCreditStateV16> {
