@@ -2398,13 +2398,28 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
+    let start_capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     let amount_raw: u8 = kani::any();
+    kani::assume(start_capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
     kani::assume(amount_raw > 0);
+    let start_capital = start_capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(10);
-    header.c_tot = V16PodU128::new(10);
-    account_header.capital = V16PodU128::new(10);
+    let c_tot_before = start_capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    header.vault = V16PodU128::new(vault_before);
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(start_capital);
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -2424,22 +2439,30 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
         stale: false,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
-    let capital_before = account_header.capital;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let result = market.withdraw_not_atomic(&mut account, amount);
 
     kani::cover!(
-        amount > 5,
-        "nonflat withdraw proof covers wide rejected amount"
+        start_capital > 0 && other_capital > 0 && insurance > 0 && surplus > 0 && amount > 5,
+        "nonflat withdraw rejection covers nonempty senior state without value mutation"
+    );
+    kani::cover!(
+        start_capital == 0 && amount > 0,
+        "nonflat withdraw rejection covers zero-capital active account"
     );
     assert_eq!(result, Err(V16Error::Stale));
-    assert_eq!(market.header.vault, vault_before);
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(account.header.capital.get(), start_capital);
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+        surplus
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
