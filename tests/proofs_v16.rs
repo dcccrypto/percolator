@@ -2315,25 +2315,53 @@ fn proof_v16_view_overwithdraw_rejects() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
+    let start_capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     let amount_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&amount_raw));
+    kani::assume(start_capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    kani::assume(amount_raw <= start_capital_raw);
+    let start_capital = start_capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let c_tot_before = start_capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(vault_before);
+    account_header.capital = V16PodU128::new(start_capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
-    market.deposit_not_atomic(&mut account, 10).unwrap();
-    let vault_before = market.header.vault.get();
-    let c_tot_before = market.header.c_tot.get();
-    let insurance_before = market.header.insurance.get();
-    let capital_before = account.header.capital.get();
 
     market.withdraw_not_atomic(&mut account, amount).unwrap();
 
-    kani::cover!(amount > 1, "successful withdraw covers nontrivial amount");
+    kani::cover!(
+        amount > 0 && amount < start_capital && other_capital > 0 && insurance > 0 && surplus > 0,
+        "successful withdraw covers partial exit from nonempty senior state"
+    );
+    kani::cover!(
+        amount > 0 && amount == start_capital && other_capital > 0,
+        "successful withdraw covers full account-capital exit with unrelated capital"
+    );
+    kani::cover!(
+        amount == 0 && start_capital > 0 && other_capital > 0,
+        "successful withdraw covers zero-amount no-op over nonempty senior state"
+    );
     assert_eq!(market.header.vault.get(), vault_before - amount);
     assert_eq!(market.header.c_tot.get(), c_tot_before - amount);
-    assert_eq!(account.header.capital.get(), capital_before - amount);
-    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), start_capital - amount);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+        surplus
+    );
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
