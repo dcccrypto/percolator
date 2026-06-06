@@ -1024,20 +1024,51 @@ fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
-    let amount_raw: u16 = kani::any();
-    kani::assume(amount_raw <= 1_000);
+    let start_capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(start_capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    kani::assume(amount_raw <= 16);
+    let start_capital = start_capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let amount = amount_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let c_tot_before = start_capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(vault_before);
+    account_header.capital = V16PodU128::new(start_capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     market.deposit_not_atomic(&mut account, amount).unwrap();
 
-    kani::cover!(amount > 0, "view deposit covers nonzero amount");
-    assert_eq!(account.header.capital.get(), amount);
-    assert_eq!(market.header.c_tot.get(), amount);
-    assert_eq!(market.header.vault.get(), amount);
+    kani::cover!(
+        amount > 0 && start_capital > 0 && other_capital > 0 && insurance > 0 && surplus > 0,
+        "view deposit covers nonzero deposit into nonempty senior state"
+    );
+    kani::cover!(
+        amount == 0 && start_capital > 0 && other_capital > 0,
+        "view deposit covers zero-amount no-op over nonempty senior state"
+    );
+    assert_eq!(account.header.capital.get(), start_capital + amount);
+    assert_eq!(market.header.c_tot.get(), c_tot_before + amount);
+    assert_eq!(market.header.vault.get(), vault_before + amount);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+        surplus
+    );
     assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
