@@ -3755,14 +3755,6 @@ pub struct BResidualBookingOutcomeV16 {
     pub remaining_after: u128,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QuantityAdlOutcomeV16 {
-    pub closed_q: u128,
-    pub opposite_a_after: u128,
-    pub reset_started: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessCrankActionV16 {
     Refresh,
@@ -9421,7 +9413,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
     }
 
-    pub fn settle_account_b_chunk(
+    fn settle_account_b_chunk(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
@@ -11609,209 +11601,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(outcome)
     }
 
-    pub fn apply_quantity_adl_after_residual_for_account_not_atomic(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-        bankrupt_side: SideV16,
-        close_q: u128,
-    ) -> V16Result<QuantityAdlOutcomeV16> {
-        account.validate_with_market(&self.as_view())?;
-        self.validate_configured_asset_index(asset_index)?;
-        let ledger = account.header.close_progress.try_to_runtime()?;
-        let leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
-        if !ledger.active
-            || !ledger.finalized
-            || ledger.residual_remaining != 0
-            || ledger.asset_index as usize != asset_index
-            || ledger.domain_side != opposite_side(bankrupt_side)
-        {
-            return Err(V16Error::LockActive);
-        }
-        if !leg.active
-            || leg.stale
-            || leg.b_stale
-            || leg.side != bankrupt_side
-            || close_q != leg.basis_pos_q.unsigned_abs()
-        {
-            return Err(V16Error::InvalidLeg);
-        }
-        self.ensure_close_progress_not_expired(ledger)?;
-        self.ensure_open_close_snapshot_current_or_recovery(&account.as_view(), ledger)?;
-        let out =
-            self.apply_quantity_adl_after_residual_internal(asset_index, bankrupt_side, close_q)?;
-        self.advance_close_progress_quantity_adl(account, out.closed_q)?;
-        self.clear_leg_after_quantity_adl(account, asset_index, leg)?;
-        self.validate_shape()?;
-        account.validate_with_market(&self.as_view())?;
-        Ok(out)
-    }
-
-    fn advance_close_progress_quantity_adl(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        quantity_adl_applied_q: u128,
-    ) -> V16Result<()> {
-        if quantity_adl_applied_q == 0 {
-            return Err(V16Error::NonProgress);
-        }
-        let mut ledger = account.header.close_progress.try_to_runtime()?;
-        self.ensure_close_progress_not_expired(ledger)?;
-        if !ledger.active || !ledger.finalized || ledger.residual_remaining != 0 {
-            return Err(V16Error::LockActive);
-        }
-        if ledger.quantity_adl_applied_q != 0 {
-            return Err(V16Error::LockActive);
-        }
-        ledger.quantity_adl_applied_q = quantity_adl_applied_q;
-        account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
-        account.header.health_cert.valid = 0;
-        Ok(())
-    }
-
-    fn clear_leg_after_quantity_adl(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-        leg: PortfolioLegV16,
-    ) -> V16Result<()> {
-        self.validate_configured_asset_index(asset_index)?;
-        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
-        if !leg.active
-            || leg.stale
-            || leg.b_stale
-            || account.header.legs[leg_slot].try_to_runtime()? != leg
-        {
-            return Err(V16Error::InvalidLeg);
-        }
-
-        let mut asset = self.asset_state(asset_index)?;
-        let prior_reset_epoch = match leg.side {
-            SideV16::Long => {
-                asset.mode_long == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
-            }
-            SideV16::Short => {
-                asset.mode_short == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
-            }
-        };
-        match leg.side {
-            SideV16::Long => {
-                asset.stored_pos_count_long = asset
-                    .stored_pos_count_long
-                    .checked_sub(1)
-                    .ok_or(V16Error::CounterUnderflow)?;
-                if !prior_reset_epoch {
-                    asset.loss_weight_sum_long = asset
-                        .loss_weight_sum_long
-                        .checked_sub(leg.loss_weight)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                }
-            }
-            SideV16::Short => {
-                asset.stored_pos_count_short = asset
-                    .stored_pos_count_short
-                    .checked_sub(1)
-                    .ok_or(V16Error::CounterUnderflow)?;
-                if !prior_reset_epoch {
-                    asset.loss_weight_sum_short = asset
-                        .loss_weight_sum_short
-                        .checked_sub(leg.loss_weight)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                }
-            }
-        }
-        self.set_asset_state(asset_index, asset)?;
-        account.header.legs[leg_slot] =
-            PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
-        let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        active_bitmap_clear(&mut bitmap, leg_slot)?;
-        account.header.active_bitmap = bitmap.map(V16PodU64::new);
-        account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())
-    }
-
-    fn apply_quantity_adl_after_residual_internal(
-        &mut self,
-        asset_index: usize,
-        bankrupt_side: SideV16,
-        close_q: u128,
-    ) -> V16Result<QuantityAdlOutcomeV16> {
-        self.validate_configured_asset_index(asset_index)?;
-        if close_q == 0 {
-            return Err(V16Error::InvalidLeg);
-        }
-        let opp = opposite_side(bankrupt_side);
-        let asset = self.asset_state(asset_index)?;
-        let (liq_oi_before, opp_oi_before, opp_a_before) = match (bankrupt_side, opp) {
-            (SideV16::Long, SideV16::Short) => {
-                (asset.oi_eff_long_q, asset.oi_eff_short_q, asset.a_short)
-            }
-            (SideV16::Short, SideV16::Long) => {
-                (asset.oi_eff_short_q, asset.oi_eff_long_q, asset.a_long)
-            }
-            _ => unreachable!(),
-        };
-        if close_q > liq_oi_before || close_q > opp_oi_before {
-            return Err(V16Error::InvalidLeg);
-        }
-        let liq_oi_after = liq_oi_before - close_q;
-        let opp_oi_after = opp_oi_before - close_q;
-        let mut reset_started = false;
-        let mut opposite_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before)
-        };
-
-        let force_full_reset = opp_oi_after != 0 && opposite_a_after == 0;
-        let final_liq_oi_after = if force_full_reset { 0 } else { liq_oi_after };
-        let final_opp_oi_after = if force_full_reset { 0 } else { opp_oi_after };
-        if force_full_reset {
-            opposite_a_after = ADL_ONE;
-        }
-
-        let mut asset = asset;
-        match bankrupt_side {
-            SideV16::Long => asset.oi_eff_long_q = final_liq_oi_after,
-            SideV16::Short => asset.oi_eff_short_q = final_liq_oi_after,
-        }
-        match opp {
-            SideV16::Long => {
-                asset.oi_eff_long_q = final_opp_oi_after;
-                asset.a_long =
-                    opposite_a_after.max(if final_opp_oi_after == 0 { ADL_ONE } else { 1 });
-                if final_opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
-                    asset.mode_long = SideModeV16::DrainOnly;
-                }
-            }
-            SideV16::Short => {
-                asset.oi_eff_short_q = final_opp_oi_after;
-                asset.a_short =
-                    opposite_a_after.max(if final_opp_oi_after == 0 { ADL_ONE } else { 1 });
-                if final_opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
-                    asset.mode_short = SideModeV16::DrainOnly;
-                }
-            }
-        }
-        self.set_asset_state(asset_index, asset)?;
-
-        if final_liq_oi_after == 0 {
-            self.begin_full_drain_reset_inner(asset_index, bankrupt_side)?;
-            reset_started = true;
-        }
-        if final_opp_oi_after == 0 {
-            self.begin_full_drain_reset_inner(asset_index, opp)?;
-            reset_started = true;
-        }
-        Ok(QuantityAdlOutcomeV16 {
-            closed_q: close_q,
-            opposite_a_after,
-            reset_started,
-        })
-    }
-
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
@@ -12785,7 +12574,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    pub fn settle_negative_pnl_from_principal_not_atomic(
+    fn settle_negative_pnl_from_principal_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
@@ -12927,7 +12716,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(charged)
     }
 
-    pub fn charge_account_fee_not_atomic(
+    fn charge_account_fee_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,

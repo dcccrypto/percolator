@@ -122,16 +122,17 @@ fn apply_fuzz_action(
             }
         }
         2 => {
+            let fee_slot = header.current_slot.get().saturating_add(1);
             let mut market = MarketGroupV16ViewMut::new(header, markets);
             if target_a {
                 let mut account = PortfolioV16ViewMut::new(account_a);
                 market
-                    .charge_account_fee_not_atomic(&mut account, amount)
+                    .sync_account_fee_to_slot_not_atomic(&mut account, fee_slot, amount)
                     .map(|_| ())
             } else {
                 let mut account = PortfolioV16ViewMut::new(account_b);
                 market
-                    .charge_account_fee_not_atomic(&mut account, amount)
+                    .sync_account_fee_to_slot_not_atomic(&mut account, fee_slot, amount)
                     .map(|_| ())
             }
         }
