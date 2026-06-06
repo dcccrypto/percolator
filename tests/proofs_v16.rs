@@ -6530,8 +6530,8 @@ fn proof_v16_expired_counterparty_backing_bucket_accepts_receivable_refill() {
 fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
     let effective_raw: u8 = kani::any();
     let divisor_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&effective_raw));
-    kani::assume((1..=8).contains(&divisor_raw));
+    kani::assume((1..=32).contains(&effective_raw));
+    kani::assume((1..=32).contains(&divisor_raw));
     let effective = effective_raw as u128;
     let divisor = divisor_raw as u128;
     let rate = CREDIT_RATE_SCALE / divisor;
@@ -6550,6 +6550,10 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
     kani::cover!(
         divisor > 1 && required_face_num > required_backing_num,
         "partial-rate source lien sizing branch"
+    );
+    kani::cover!(
+        effective_raw > 8 && divisor_raw > 8,
+        "source lien sizing proof covers widened effective credit and haircut rate"
     );
     assert_eq!(required_backing_num, effective * BOUND_SCALE);
     if rate == CREDIT_RATE_SCALE {
