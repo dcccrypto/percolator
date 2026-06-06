@@ -4953,6 +4953,88 @@ fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_value() {
+    let budget_raw: u8 = kani::any();
+    let old_spent_raw: u8 = kani::any();
+    let new_spent_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&budget_raw));
+    kani::assume(old_spent_raw <= budget_raw);
+    kani::assume(new_spent_raw <= budget_raw);
+    kani::assume(surplus_raw <= 8);
+    let budget = budget_raw as u128;
+    let old_spent = old_spent_raw as u128;
+    let new_spent = new_spent_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(budget + surplus);
+    header.insurance = V16PodU128::new(budget + surplus);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget - old_spent);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(old_spent);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let budget_before = markets[0].engine.insurance_domain_budget_long.get();
+    let short_budget_before = markets[0].engine.insurance_domain_budget_short.get();
+    let short_spent_before = markets[0].engine.insurance_domain_spent_short.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market.set_domain_insurance_spent(0, new_spent).unwrap();
+
+    kani::cover!(
+        new_spent > old_spent,
+        "public domain spent setter covers increasing spent"
+    );
+    kani::cover!(
+        new_spent < old_spent,
+        "public domain spent setter covers clearing spent with backed budget"
+    );
+    kani::cover!(
+        new_spent == old_spent,
+        "public domain spent setter covers no-op spent rewrite"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        new_spent
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        short_spent_before
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget - new_spent
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get() + new_spent,
+        market.markets[0].engine.insurance_domain_budget_long.get()
+    );
+    assert!(
+        market.header.insurance_domain_budget_remaining_total.get()
+            <= market.header.insurance.get()
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        surplus + new_spent
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance() {
