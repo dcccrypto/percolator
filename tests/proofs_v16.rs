@@ -5156,6 +5156,18 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
     }
     assert!(required_face_num >= required_backing_num);
     assert!(realized_scaled >= required_backing_num);
+    if required_face_num > 0 {
+        let previous_realized_scaled = required_face_num
+            .checked_sub(1)
+            .unwrap()
+            .checked_mul(rate)
+            .unwrap()
+            / CREDIT_RATE_SCALE;
+        assert!(
+            previous_realized_scaled < required_backing_num,
+            "source-credit lien face must be the minimal scaled face that realizes the required backing"
+        );
+    }
 }
 
 #[kani::proof]
