@@ -2967,9 +2967,12 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
-    let with_senior_balances: bool = kani::any();
-    let c_tot = if with_senior_balances { 7 } else { 0 };
-    let insurance = if with_senior_balances { 3 } else { 0 };
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
@@ -2985,8 +2988,8 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        with_senior_balances && asset.lifecycle == AssetLifecycleV16::DrainOnly,
-        "active asset can enter drain-only without moving nonzero senior balances"
+        c_tot > 0 && insurance > 0 && asset.lifecycle == AssetLifecycleV16::DrainOnly,
+        "active asset can enter drain-only without moving symbolic senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::DrainOnly);
     assert_eq!(market.header.vault, vault_before);
