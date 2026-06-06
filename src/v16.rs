@@ -690,6 +690,7 @@ impl V16Core {
         ))
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn prepare_source_positive_claim_bound_delta(
         mut source: SourceCreditStateV16,
         claim_bound_num: u128,
@@ -805,6 +806,7 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn prepare_counterparty_lien_release_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -894,6 +896,7 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn prepare_counterparty_lien_impair_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -1000,6 +1003,7 @@ impl V16Core {
         Ok((reservation, source))
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn prepare_insurance_lien_release_delta(
         mut reservation: InsuranceCreditReservationV16,
         mut source: SourceCreditStateV16,
@@ -1054,6 +1058,7 @@ impl V16Core {
         Ok((reservation, source))
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn prepare_insurance_lien_impair_delta(
         mut reservation: InsuranceCreditReservationV16,
         mut source: SourceCreditStateV16,
@@ -5747,15 +5752,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    pub fn recompute_source_credit_rate_not_atomic(&mut self, domain: usize) -> V16Result<u128> {
-        self.recompute_source_credit_domain_after_mutation(domain)?;
-        let rate = self.source_credit_for_domain(domain)?.credit_rate_num;
-        self.reservation_encumbrance_proof_for_domain(domain)?
-            .validate()?;
-        self.validate_shape()?;
-        Ok(rate)
-    }
-
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn add_source_positive_claim_bound_not_atomic(
         &mut self,
         domain: usize,
@@ -5879,6 +5876,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .validate()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn add_fresh_counterparty_backing_not_atomic(
         &mut self,
         domain: usize,
@@ -6008,6 +6006,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn create_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -6049,6 +6048,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -6117,6 +6117,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn consume_source_credit_lien_from_counterparty_core_not_atomic(
         &mut self,
         domain: usize,
@@ -6148,6 +6149,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn consume_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -6157,6 +6159,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn impair_source_credit_lien_from_counterparty_core_not_atomic(
         &mut self,
         domain: usize,
@@ -6188,6 +6191,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn impair_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -6197,6 +6201,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn reserve_insurance_credit_not_atomic(
         &mut self,
         domain: usize,
@@ -6257,6 +6262,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn create_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -6297,6 +6303,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -6359,6 +6366,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn consume_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -6407,6 +6415,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn impair_source_credit_lien_from_insurance_core_not_atomic(
         &mut self,
         domain: usize,
@@ -6438,6 +6447,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn impair_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -6671,6 +6681,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::CounterUnderflow)
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn impair_account_source_credit_insurance_lien_fields(
         account: &mut PortfolioV16ViewMut<'_>,
         domain: usize,
@@ -7046,7 +7057,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
-    pub fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
+    fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
         V16Core::available_backing_num_for_source_credit_state(
             self.source_credit_for_domain(domain)?,
         )
@@ -13178,6 +13189,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13244,6 +13256,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(released_effective)
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn impair_account_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

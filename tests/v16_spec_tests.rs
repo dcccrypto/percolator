@@ -1000,6 +1000,7 @@ fn v16_view_rejects_overwithdraw() {
     assert_eq!(err, Err(V16Error::LockActive));
 }
 
+#[cfg(feature = "fuzz")]
 #[test]
 fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
     let (mut header, mut markets) = market_fixture(1, 100);
@@ -1277,6 +1278,7 @@ fn v16_public_backing_principal_deposit_and_withdraw_move_vault_and_source_state
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[cfg(feature = "fuzz")]
 #[test]
 fn v16_public_backing_principal_withdraw_rejects_if_claims_would_be_underbacked() {
     let (mut header, mut markets) = market_fixture(1, 100);
