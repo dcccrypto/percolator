@@ -5258,6 +5258,14 @@ fn proof_v16_counterparty_credit_consumption_reports_atoms_not_scaled_backing() 
             backing_num,
         )
         .unwrap();
+    assert_eq!(backing_after_create.fresh_unliened_backing_num, 0);
+    assert_eq!(backing_after_create.valid_liened_backing_num, backing_num);
+    assert_eq!(backing_after_create.consumed_liened_backing_num, 0);
+    assert_eq!(source_after_create.fresh_reserved_backing_num, backing_num);
+    assert_eq!(source_after_create.valid_liened_backing_num, backing_num);
+    assert_eq!(source_after_create.spent_backing_num, 0);
+    assert_eq!(source_after_create.provider_receivable_num, 0);
+
     let (backing_after_consume, source_after_consume) =
         MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
             backing_after_create,
