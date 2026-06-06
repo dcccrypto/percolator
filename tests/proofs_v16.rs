@@ -1217,19 +1217,17 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() {
-    let capital_raw: u8 = kani::any();
+    let capital: u128 = kani::any();
     let pnl_raw: u8 = kani::any();
     let reserved_raw: u8 = kani::any();
     let fee_rate_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    let surplus_raw: u8 = kani::any();
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
-    let capital = capital_raw as u128;
+    let insurance: u128 = kani::any();
+    let surplus: u128 = kani::any();
+    kani::assume(capital <= MAX_VAULT_TVL);
+    kani::assume(insurance <= MAX_VAULT_TVL - capital);
+    kani::assume(surplus <= MAX_VAULT_TVL - capital - insurance);
     let pnl = pnl_raw as i128;
     let reserved = reserved_raw as u128;
-    let insurance = insurance_raw as u128;
-    let surplus = surplus_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
     header.vault = V16PodU128::new(capital + insurance + surplus);
@@ -1258,9 +1256,9 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
             && fee_rate_raw > 10
             && pnl > 10
             && reserved > 10
-            && insurance > 0
-            && surplus > 0,
-        "recovery mode blocks fee sync and wide positive PnL conversion over symbolic value state"
+            && insurance > 255
+            && surplus > 255,
+        "recovery mode blocks fee sync and positive PnL conversion over wide symbolic value state"
     );
     assert!(fee_result.is_err());
     assert!(convert_result.is_err());
