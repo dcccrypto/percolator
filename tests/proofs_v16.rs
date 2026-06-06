@@ -368,8 +368,20 @@ fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
 #[kani::solver(cadical)]
 fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let target: u16 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     kani::assume((1..=10_000).contains(&target));
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
@@ -379,8 +391,8 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let res = market.set_asset_raw_oracle_target_not_atomic(0, target as u64);
 
     kani::cover!(
-        target > 100,
-        "raw target update covers a nontrivial target/effective lag"
+        target > 100 && c_tot > 0 && insurance > 0 && surplus > 0,
+        "raw target update covers nontrivial target/effective lag over symbolic value state"
     );
     assert_eq!(res, Ok(()));
     assert_eq!(
@@ -1245,12 +1257,21 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 #[kani::solver(cadical)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let resolved_slot_raw: u16 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     kani::assume(resolved_slot_raw > 0);
+    kani::assume(c_tot_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
     let resolved_slot = resolved_slot_raw as u64;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.vault = V16PodU128::new(7);
-    header.c_tot = V16PodU128::new(3);
-    header.insurance = V16PodU128::new(4);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
     header.loss_stale_active = 1;
     header.current_slot = V16PodU64::new(1);
     header.slot_last = V16PodU64::new(1);
@@ -1262,8 +1283,8 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     market.resolve_market_not_atomic(resolved_slot).unwrap();
 
     kani::cover!(
-        resolved_slot > 10,
-        "resolved market transition covers wide future authenticated slot"
+        resolved_slot > 10 && c_tot > 0 && insurance > 0 && surplus > 0,
+        "resolved market transition covers wide future authenticated slot over symbolic value state"
     );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
