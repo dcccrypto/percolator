@@ -1030,29 +1030,44 @@ fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
     let extension_index_raw: u8 = kani::any();
+    let invalid_index_raw: u8 = kani::any();
     kani::assume(extension_index_raw > 0);
     let extension_index = extension_index_raw as usize;
+    let invalid_index = 256usize + invalid_index_raw as usize;
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 256, 0).unwrap();
     let zero_fill = EngineAssetSlotV16Account::default();
+    let mut canonical_disabled_extension = EngineAssetSlotV16Account::default();
+    canonical_disabled_extension.insurance_domain_budget_long = V16PodU128::new(MAX_VAULT_TVL);
+    canonical_disabled_extension.insurance_domain_budget_short = V16PodU128::new(MAX_VAULT_TVL);
     let mut dirty_extension = EngineAssetSlotV16Account::default();
     dirty_extension.insurance_domain_spent_long = V16PodU128::new(1);
 
     let zero_extension =
         header.kani_validate_dynamic_market_slot_shape_at(extension_index, &zero_fill);
+    let canonical_disabled_result = header
+        .kani_validate_dynamic_market_slot_shape_at(extension_index, &canonical_disabled_extension);
     let dirty_extension_result =
         header.kani_validate_dynamic_market_slot_shape_at(extension_index, &dirty_extension);
     let configured_dirty_result =
         header.kani_validate_dynamic_market_slot_shape_at(0, &dirty_extension);
+    let out_of_capacity_result =
+        header.kani_validate_dynamic_market_slot_shape_at(invalid_index, &zero_fill);
 
     kani::cover!(
         extension_index > 1,
         "dynamic extension slot proof covers later realloc slot"
     );
+    kani::cover!(
+        invalid_index > 256,
+        "dynamic extension slot proof covers out-of-capacity slot index"
+    );
     assert_eq!(zero_extension, Ok(()));
+    assert_eq!(canonical_disabled_result, Ok(()));
     assert_eq!(dirty_extension_result, Err(V16Error::InvalidConfig));
     assert_eq!(configured_dirty_result, Ok(()));
+    assert_eq!(out_of_capacity_result, Err(V16Error::InvalidConfig));
 }
 
 #[kani::proof]
