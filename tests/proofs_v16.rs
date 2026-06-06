@@ -6,14 +6,15 @@ use percolator::v16::{
     kani_apply_resolved_payout_receipt_payment, kani_expected_source_credit_rate_num_for_state,
     kani_health_cert_after_capital_debit,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_loss_stale_trade_scope_allowed, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
+    kani_source_credit_state_realizable_support_for_face, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -1997,6 +1998,68 @@ fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     assert!(closes_long);
     assert!(opens_long);
     assert!(!unrelated_short);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_domain_loss_barrier_allows_only_same_side_reductions() {
+    let touches_barrier: bool = kani::any();
+    let current: i128 = kani::any();
+    let next: i128 = kani::any();
+    kani::assume(current != i128::MIN);
+    kani::assume(next != i128::MIN);
+    kani::assume(current.unsigned_abs() <= MAX_POSITION_ABS_Q);
+    kani::assume(next.unsigned_abs() <= MAX_POSITION_ABS_Q);
+
+    let blocked =
+        kani_pending_domain_loss_barrier_blocks_position_change(touches_barrier, current, next);
+    let same_side_reduction_or_flat = current != 0
+        && (next == 0 || current.signum() == next.signum())
+        && next.unsigned_abs() < current.unsigned_abs();
+
+    kani::cover!(
+        touches_barrier && current == 0 && next != 0 && blocked,
+        "pending-domain barrier blocks opening new touched risk"
+    );
+    kani::cover!(
+        touches_barrier
+            && current != 0
+            && current.signum() == next.signum()
+            && next.unsigned_abs() > current.unsigned_abs()
+            && blocked,
+        "pending-domain barrier blocks same-side risk increase"
+    );
+    kani::cover!(
+        touches_barrier
+            && current != 0
+            && next != 0
+            && current.signum() != next.signum()
+            && blocked,
+        "pending-domain barrier blocks side flips"
+    );
+    kani::cover!(
+        touches_barrier && current != 0 && next == 0 && !blocked,
+        "pending-domain barrier permits flat obligation"
+    );
+    kani::cover!(
+        touches_barrier && same_side_reduction_or_flat && next != 0 && !blocked,
+        "pending-domain barrier permits same-side risk reduction"
+    );
+    kani::cover!(
+        !touches_barrier && current != next && !blocked,
+        "pending-domain barrier ignores unrelated position changes"
+    );
+    assert_eq!(blocked, touches_barrier && !same_side_reduction_or_flat);
+    if touches_barrier && same_side_reduction_or_flat {
+        assert!(!blocked);
+    }
+    if touches_barrier && current == 0 && next != 0 {
+        assert!(blocked);
+    }
+    if touches_barrier && current != 0 && next != 0 && current.signum() != next.signum() {
+        assert!(blocked);
+    }
 }
 
 #[kani::proof]

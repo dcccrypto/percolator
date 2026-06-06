@@ -10122,10 +10122,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_basis_or_zero(next)?;
-        if !self.position_change_touches_pending_domain_loss_barrier(asset_index, current, next)? {
-            return Ok(false);
-        }
-        Ok(!same_side_risk_reduction_or_flat_obligation(current, next))
+        Ok(pending_domain_loss_barrier_blocks_position_change(
+            self.position_change_touches_pending_domain_loss_barrier(asset_index, current, next)?,
+            current,
+            next,
+        ))
     }
 
     fn h_lock_lane(
@@ -10301,27 +10302,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
             || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
-        let touches_pending_domain_barrier =
-            (self.position_change_touches_pending_domain_loss_barrier(
+        let blocked_by_pending_domain_barrier = pending_domain_loss_barrier_blocks_position_change(
+            self.position_change_touches_pending_domain_loss_barrier(
                 request.asset_index,
                 long_lookup.current_q,
                 long_lookup.next_q,
-            )? && !same_side_risk_reduction_or_flat_obligation(
-                long_lookup.current_q,
-                long_lookup.next_q,
-            )) || (self.position_change_touches_pending_domain_loss_barrier(
-                request.asset_index,
+            )?,
+            long_lookup.current_q,
+            long_lookup.next_q,
+        )
+            || pending_domain_loss_barrier_blocks_position_change(
+                self.position_change_touches_pending_domain_loss_barrier(
+                    request.asset_index,
+                    short_lookup.current_q,
+                    short_lookup.next_q,
+                )?,
                 short_lookup.current_q,
                 short_lookup.next_q,
-            )? && !same_side_risk_reduction_or_flat_obligation(
-                short_lookup.current_q,
-                short_lookup.next_q,
-            ));
+            );
         trade_preflight_risk_gate(
             risk_increasing,
             self.asset_is_loss_stale(request.asset_index)?,
             target_effective_lag,
-            touches_pending_domain_barrier,
+            blocked_by_pending_domain_barrier,
         )?;
         Ok(TradePositionPreflightV16 {
             risk_increasing,
@@ -10658,9 +10661,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::HiddenLeg);
         }
         let new = lookup.next_q;
-        if self.position_change_touches_pending_domain_loss_barrier(asset_index, current, new)?
-            && !same_side_risk_reduction_or_flat_obligation(current, new)
-        {
+        if pending_domain_loss_barrier_blocks_position_change(
+            self.position_change_touches_pending_domain_loss_barrier(asset_index, current, new)?,
+            current,
+            new,
+        ) {
             return Err(V16Error::LockActive);
         }
         if current == 0 {
@@ -14681,6 +14686,23 @@ fn same_side_risk_reduction_or_flat_obligation(current: i128, next: i128) -> boo
     current != 0
         && (next == 0 || current.signum() == next.signum())
         && next.unsigned_abs() < current.unsigned_abs()
+}
+
+fn pending_domain_loss_barrier_blocks_position_change(
+    touches_barrier: bool,
+    current: i128,
+    next: i128,
+) -> bool {
+    touches_barrier && !same_side_risk_reduction_or_flat_obligation(current, next)
+}
+
+#[cfg(kani)]
+pub fn kani_pending_domain_loss_barrier_blocks_position_change(
+    touches_barrier: bool,
+    current: i128,
+    next: i128,
+) -> bool {
+    pending_domain_loss_barrier_blocks_position_change(touches_barrier, current, next)
 }
 
 fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
