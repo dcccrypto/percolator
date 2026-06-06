@@ -4977,9 +4977,16 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
             ..SourceCreditStateV16::EMPTY
         });
     account_header.pnl = V16PodI128::new(-(loss as i128));
+    let reservation_before = markets[0].engine.insurance_reservation_short;
+    let source_before = markets[0].engine.source_credit_short;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.refresh_header_aggregate_totals_for_test().unwrap();
+    let budget_total_before = market.header.insurance_domain_budget_remaining_total.get();
+    let reserved_total_before = market
+        .header
+        .source_insurance_credit_reserved_total_atoms
+        .get();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let used = market
         .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account)
@@ -5009,6 +5016,22 @@ fn proof_v16_reserved_domain_insurance_cannot_be_double_spent_by_bankruptcy() {
         market.markets[0].engine.insurance_domain_spent_short.get(),
         expected_used
     );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget_total_before - expected_used
+    );
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        reserved_total_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_reservation_short,
+        reservation_before
+    );
+    assert_eq!(market.markets[0].engine.source_credit_short, source_before);
     assert_eq!(
         account.header.pnl.get(),
         -(loss as i128) + expected_used as i128
