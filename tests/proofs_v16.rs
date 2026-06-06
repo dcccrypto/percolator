@@ -4724,14 +4724,22 @@ fn proof_v16_domain_insurance_deposit_updates_o1_remaining_total() {
 #[kani::solver(cadical)]
 fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed() {
     let amount_raw: u8 = kani::any();
+    let existing_raw: u8 = kani::any();
     kani::assume(amount_raw > 0);
+    kani::assume(existing_raw <= 8);
     let amount = amount_raw as u128;
+    let existing_budget = existing_raw as u128;
     let (mut header, mut markets) = one_market_only_fixture();
-    header.vault = V16PodU128::new(amount);
-    header.insurance = V16PodU128::new(amount);
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
-    let insurance_before = header.insurance;
+    header.vault = V16PodU128::new(existing_budget + amount);
+    header.insurance = V16PodU128::new(existing_budget + amount);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(existing_budget);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(existing_budget);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let remaining_before = header.insurance_domain_budget_remaining_total.get();
+    let long_budget_before = markets[0].engine.insurance_domain_budget_long.get();
+    let short_budget_before = markets[0].engine.insurance_domain_budget_short.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     market
@@ -4742,16 +4750,32 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
         amount > 1,
         "public domain budget credit covers nontrivial already-collected fee"
     );
-    assert_eq!(market.header.vault, vault_before);
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(market.header.insurance, insurance_before);
+    kani::cover!(
+        existing_budget > 0 && amount > 1,
+        "public domain budget credit covers additive existing-budget branch"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
     assert_eq!(
         market.header.insurance_domain_budget_remaining_total.get(),
-        amount
+        remaining_before + amount
     );
     assert_eq!(
         market.markets[0].engine.insurance_domain_budget_long.get(),
-        amount
+        long_budget_before + amount
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget_before
+    );
+    assert_eq!(
+        market.header.insurance.get(),
+        market.header.insurance_domain_budget_remaining_total.get()
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get() - remaining_before,
+        market.markets[0].engine.insurance_domain_budget_long.get() - long_budget_before
     );
     assert_eq!(market.validate_shape(), Ok(()));
 }
