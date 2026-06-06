@@ -1,7 +1,7 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    kani_adjust_u128, kani_checked_fee_bps, kani_scaled_adl_delta_fast, risk_notional_ceil,
+    kani_adjust_u128, kani_checked_fee_bps, kani_risk_notional_ceil, kani_scaled_adl_delta_fast,
 };
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
@@ -296,7 +296,7 @@ fn proof_v16_risk_notional_ceil_unaligned_ceil_is_correct() {
     let abs_pos_q = q_raw as u128;
     let price = price_raw as u64;
 
-    let got = risk_notional_ceil(abs_pos_q, price);
+    let got = kani_risk_notional_ceil(abs_pos_q, price);
 
     // Independent ceil via round-up-by-add (distinct from the fast path's
     // divide-then-correct), computed in u128 (product <= 4000*4000 < u128).

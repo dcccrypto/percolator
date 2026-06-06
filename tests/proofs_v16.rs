@@ -6402,7 +6402,7 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
     assert_eq!(source_after.insurance_credit_reserved_num, 0);
     assert_eq!(source_after.valid_liened_insurance_num, 0);
     assert_eq!(source_after.impaired_liened_insurance_num, 0);
-    assert!(source_after.is_empty_amount_shape());
+    assert_eq!(source_after, SourceCreditStateV16::EMPTY);
 }
 
 #[kani::proof]

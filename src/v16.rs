@@ -2137,7 +2137,7 @@ impl SourceCreditStateV16 {
         credit_epoch: 0,
     };
 
-    pub const fn is_empty_amount_shape(self) -> bool {
+    const fn is_empty_amount_shape(self) -> bool {
         self.positive_claim_bound_num == 0
             && self.exact_positive_claim_num == 0
             && self.fresh_reserved_backing_num == 0
@@ -2968,7 +2968,7 @@ impl CloseProgressLedgerV16 {
         residual_remaining: 0,
     };
 
-    pub fn has_pending_residual(self) -> bool {
+    fn has_pending_residual(self) -> bool {
         self.active && !self.finalized && !self.canceled && self.residual_remaining != 0
     }
 
@@ -14446,16 +14446,16 @@ pub struct AccountBSettlementChunkV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RiskScoreV16 {
-    pub certified_liq_deficit: u128,
-    pub unsettled_b_loss_bound: u128,
-    pub stale_loss_bound: u128,
-    pub gross_risk_notional: u128,
-    pub active_leg_count: u32,
+struct RiskScoreV16 {
+    certified_liq_deficit: u128,
+    unsettled_b_loss_bound: u128,
+    stale_loss_bound: u128,
+    gross_risk_notional: u128,
+    active_leg_count: u32,
 }
 
 impl RiskScoreV16 {
-    pub fn strictly_reduces_from(self, before: Self) -> bool {
+    fn strictly_reduces_from(self, before: Self) -> bool {
         self < before
     }
 }
@@ -14468,7 +14468,7 @@ pub enum PermissionlessProgressOutcomeV16 {
     RecoveryDeclared(PermissionlessRecoveryReasonV16),
 }
 
-pub fn risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+fn risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
     if abs_pos_q == 0 {
         return Ok(0);
     }
@@ -14488,7 +14488,12 @@ pub fn risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
     .ok_or(V16Error::ArithmeticOverflow)
 }
 
-pub fn account_equity_from_parts(capital: u128, pnl: i128, fee_credits: i128) -> V16Result<i128> {
+#[cfg(kani)]
+pub fn kani_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    risk_notional_ceil(abs_pos_q, price)
+}
+
+fn account_equity_from_parts(capital: u128, pnl: i128, fee_credits: i128) -> V16Result<i128> {
     validate_non_min_i128(pnl)?;
     validate_fee_credits(fee_credits)?;
     let capital = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
