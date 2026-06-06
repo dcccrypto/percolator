@@ -3204,11 +3204,39 @@ enum AccountRefreshCertOutcomeV16 {
     BChunk(AccountBSettlementChunkV16),
 }
 
+#[cfg(kani)]
 pub const V16_TOKEN_VALUE_CLASS_COUNT: usize = 17;
+#[cfg(not(kani))]
+const V16_TOKEN_VALUE_CLASS_COUNT: usize = 17;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(kani)]
 pub enum TokenValueClassV16 {
+    TokenVault = 0,
+    SeniorCapital = 1,
+    InsuranceCapital = 2,
+    AccountCapital = 3,
+    CloseSupportConsumed = 4,
+    CloseInsuranceSpent = 5,
+    CloseCounterpartyCreditConsumed = 6,
+    BResidualBooked = 7,
+    PendingObligationEscrow = 8,
+    PendingObligationCredit = 9,
+    ExplicitBackedLoss = 10,
+    SettlementRoundingResidue = 11,
+    CancelDepositEscrow = 12,
+    ResolvedPayoutPaid = 13,
+    ProtocolFeePaid = 14,
+    ExternalQuote = 15,
+    UnallocatedProtocolSurplus = 16,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(kani))]
+#[allow(dead_code)]
+enum TokenValueClassV16 {
     TokenVault = 0,
     SeniorCapital = 1,
     InsuranceCapital = 2,
@@ -3230,6 +3258,7 @@ pub enum TokenValueClassV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(kani)]
 pub struct TokenValueFlowProofV16 {
     pub debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
     pub credits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
@@ -3237,6 +3266,18 @@ pub struct TokenValueFlowProofV16 {
     pub external_quote_out: u128,
     pub vault_before: u128,
     pub vault_after: u128,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(not(kani))]
+struct TokenValueFlowProofV16 {
+    debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
+    credits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
+    external_quote_in: u128,
+    external_quote_out: u128,
+    vault_before: u128,
+    vault_after: u128,
 }
 
 impl TokenValueFlowProofV16 {
@@ -3482,30 +3523,30 @@ impl TokenValueFlowProofV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReservationEncumbranceProofV16 {
-    pub domain: u16,
-    pub exact_positive_claim_num: u128,
-    pub positive_claim_bound_num: u128,
-    pub source_fresh_reserved_backing_num: u128,
-    pub source_spent_backing_num: u128,
-    pub source_provider_receivable_num: u128,
-    pub bucket_fresh_unliened_backing_num: u128,
-    pub bucket_valid_liened_backing_num: u128,
-    pub bucket_consumed_liened_backing_num: u128,
-    pub source_valid_liened_backing_num: u128,
-    pub source_impaired_liened_backing_num: u128,
-    pub bucket_impaired_liened_backing_num: u128,
-    pub source_insurance_credit_reserved_num: u128,
-    pub reservation_insurance_credit_reserved_num: u128,
-    pub source_valid_liened_insurance_num: u128,
-    pub reservation_valid_liened_insurance_num: u128,
-    pub source_impaired_liened_insurance_num: u128,
-    pub reservation_impaired_liened_insurance_num: u128,
-    pub source_credit_rate_num: u128,
+struct ReservationEncumbranceProofV16 {
+    domain: u16,
+    exact_positive_claim_num: u128,
+    positive_claim_bound_num: u128,
+    source_fresh_reserved_backing_num: u128,
+    source_spent_backing_num: u128,
+    source_provider_receivable_num: u128,
+    bucket_fresh_unliened_backing_num: u128,
+    bucket_valid_liened_backing_num: u128,
+    bucket_consumed_liened_backing_num: u128,
+    source_valid_liened_backing_num: u128,
+    source_impaired_liened_backing_num: u128,
+    bucket_impaired_liened_backing_num: u128,
+    source_insurance_credit_reserved_num: u128,
+    reservation_insurance_credit_reserved_num: u128,
+    source_valid_liened_insurance_num: u128,
+    reservation_valid_liened_insurance_num: u128,
+    source_impaired_liened_insurance_num: u128,
+    reservation_impaired_liened_insurance_num: u128,
+    source_credit_rate_num: u128,
 }
 
 impl ReservationEncumbranceProofV16 {
-    pub fn validate(&self) -> V16Result<()> {
+    fn validate(&self) -> V16Result<()> {
         let fresh_reserved = self
             .bucket_fresh_unliened_backing_num
             .checked_add(self.bucket_valid_liened_backing_num)
@@ -3550,6 +3591,7 @@ impl ReservationEncumbranceProofV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(kani)]
 pub struct StockReconciliationProofV16 {
     pub token_vault: u128,
     pub senior_capital_total: u128,
@@ -3559,6 +3601,7 @@ pub struct StockReconciliationProofV16 {
     pub unallocated_protocol_surplus: u128,
 }
 
+#[cfg(kani)]
 impl StockReconciliationProofV16 {
     pub fn validate(&self) -> V16Result<()> {
         let accounted = self
@@ -3577,21 +3620,21 @@ impl StockReconciliationProofV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SourceCreditLienAggregateProofV16 {
-    pub domain: u16,
-    pub source_claim_bound_num: u128,
-    pub face_claim_locked_num: u128,
-    pub counterparty_face_claim_locked_num: u128,
-    pub insurance_face_claim_locked_num: u128,
-    pub effective_credit_reserved: u128,
-    pub counterparty_backing_reserved_num: u128,
-    pub insurance_backing_reserved_num: u128,
-    pub impaired_face_claim_num: u128,
-    pub impaired_effective_credit_reserved: u128,
+struct SourceCreditLienAggregateProofV16 {
+    domain: u16,
+    source_claim_bound_num: u128,
+    face_claim_locked_num: u128,
+    counterparty_face_claim_locked_num: u128,
+    insurance_face_claim_locked_num: u128,
+    effective_credit_reserved: u128,
+    counterparty_backing_reserved_num: u128,
+    insurance_backing_reserved_num: u128,
+    impaired_face_claim_num: u128,
+    impaired_effective_credit_reserved: u128,
 }
 
 impl SourceCreditLienAggregateProofV16 {
-    pub fn validate(&self) -> V16Result<()> {
+    fn validate(&self) -> V16Result<()> {
         let backing_face = self
             .counterparty_face_claim_locked_num
             .checked_add(self.insurance_face_claim_locked_num)
@@ -5732,7 +5775,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
-    pub fn reservation_encumbrance_proof_for_domain(
+    fn reservation_encumbrance_proof_for_domain(
         &self,
         domain: usize,
     ) -> V16Result<ReservationEncumbranceProofV16> {
@@ -5759,29 +5802,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source_impaired_liened_insurance_num: source.impaired_liened_insurance_num,
             reservation_impaired_liened_insurance_num: reservation.impaired_liened_insurance_num,
             source_credit_rate_num: source.credit_rate_num,
-        })
-    }
-
-    pub fn source_credit_lien_proof_for_account_domain(
-        &self,
-        account: &PortfolioV16View<'_>,
-        domain: usize,
-    ) -> V16Result<SourceCreditLienAggregateProofV16> {
-        self.domain_asset_side(domain)?;
-        let source = account.source_domain(domain)?;
-        Ok(SourceCreditLienAggregateProofV16 {
-            domain: u16::try_from(domain).map_err(|_| V16Error::ArithmeticOverflow)?,
-            source_claim_bound_num: source.source_claim_bound_num.get(),
-            face_claim_locked_num: source.source_claim_liened_num.get(),
-            counterparty_face_claim_locked_num: source.source_claim_counterparty_liened_num.get(),
-            insurance_face_claim_locked_num: source.source_claim_insurance_liened_num.get(),
-            effective_credit_reserved: source.source_lien_effective_reserved.get(),
-            counterparty_backing_reserved_num: source.source_lien_counterparty_backing_num.get(),
-            insurance_backing_reserved_num: source.source_lien_insurance_backing_num.get(),
-            impaired_face_claim_num: source.source_claim_impaired_num.get(),
-            impaired_effective_credit_reserved: source
-                .source_lien_impaired_effective_reserved
-                .get(),
         })
     }
 
