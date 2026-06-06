@@ -7197,25 +7197,45 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
-    let c_tot_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    let current_slot_raw: u8 = kani::any();
     let now_slot_raw: u8 = kani::any();
-    kani::assume(c_tot_raw <= 8);
-    kani::assume(insurance_raw <= 8);
+    let reason_sel: u8 = kani::any();
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+    kani::assume(current_slot_raw > 0);
     kani::assume(now_slot_raw > 0);
+    kani::assume(reason_sel <= 2);
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let current_slot = current_slot_raw as u64;
     let now_slot = now_slot_raw as u64;
+    let reason = match reason_sel {
+        0 => PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        1 => PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
+        _ => PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+    };
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.vault = V16PodU128::new(c_tot + insurance);
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
     account_header.capital = V16PodU128::new(c_tot);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
+    let current_slot_before = header.current_slot;
+    let slot_last_before = header.slot_last;
+    let asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
     let capital_before = account_header.capital;
     let pnl_before = account_header.pnl;
+    let reserved_before = account_header.reserved_pnl;
+    let fee_credits_before = account_header.fee_credits;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -7227,40 +7247,54 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
                 asset_index: 0,
                 effective_price: 100,
                 funding_rate_e9: 0,
-                action: PermissionlessCrankActionV16::Recover(
-                    PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-                ),
+                action: PermissionlessCrankActionV16::Recover(reason),
             },
         )
         .unwrap();
 
     kani::cover!(
-        matches!(
-            outcome,
-            PermissionlessProgressOutcomeV16::RecoveryDeclared(
-                PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-            )
-        ) && now_slot > 1
+        outcome == PermissionlessProgressOutcomeV16::RecoveryDeclared(reason)
+            && now_slot > 1
             && c_tot > 0
-            && insurance > 0,
-        "permissionless recovery crank reaches recovery declaration over symbolic senior balances"
+            && insurance > 0
+            && surplus > 0,
+        "permissionless recovery crank reaches recovery declaration over symbolic senior balances and vault slack"
+    );
+    kani::cover!(
+        reason == PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
+        "permissionless recovery crank covers blocked-segment recovery reason"
+    );
+    kani::cover!(
+        reason == PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        "permissionless recovery crank covers oracle-unavailable recovery reason"
     );
     assert_eq!(
         outcome,
-        PermissionlessProgressOutcomeV16::RecoveryDeclared(
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-        )
+        PermissionlessProgressOutcomeV16::RecoveryDeclared(reason)
     );
     assert_eq!(market.header.mode, 2);
     assert_eq!(
         market.header.recovery_reason.try_to_runtime().unwrap(),
-        Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow)
+        Some(reason)
     );
+    assert_eq!(market.header.current_slot, current_slot_before);
+    assert_eq!(market.header.slot_last, slot_last_before);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset_after.market_id, asset_before.market_id);
+    assert_eq!(asset_after.lifecycle, asset_before.lifecycle);
+    assert_eq!(asset_after.effective_price, asset_before.effective_price);
+    assert_eq!(
+        asset_after.raw_oracle_target_price,
+        asset_before.raw_oracle_target_price
+    );
+    assert_eq!(asset_after.slot_last, asset_before.slot_last);
     assert_eq!(account.header.capital, capital_before);
     assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.reserved_pnl, reserved_before);
+    assert_eq!(account.header.fee_credits, fee_credits_before);
 }
 
 #[kani::proof]
