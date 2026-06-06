@@ -2291,24 +2291,52 @@ fn proof_v16_insurance_domain_mapping_is_in_bounds_unique_and_roundtrips() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
-    let capital_raw: u8 = kani::any();
+    let start_capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
     let extra_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&capital_raw));
-    kani::assume((1..=8).contains(&extra_raw));
-    let capital = capital_raw as u128;
-    let withdraw = capital + extra_raw as u128;
+    kani::assume(start_capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    kani::assume((1..=16).contains(&extra_raw));
+    let start_capital = start_capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let withdraw = start_capital + extra_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let c_tot_before = start_capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(vault_before);
+    account_header.capital = V16PodU128::new(start_capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
-    market.deposit_not_atomic(&mut account, capital).unwrap();
 
     let result = market.withdraw_not_atomic(&mut account, withdraw);
 
     kani::cover!(
-        extra_raw > 1,
-        "view overwithdraw lock branch reachable for symbolic overdraw amount"
+        start_capital > 0 && other_capital > 0 && insurance > 0 && surplus > 0 && extra_raw > 1,
+        "overwithdraw rejection covers nonempty senior state without value mutation"
+    );
+    kani::cover!(
+        start_capital == 0 && withdraw > 0,
+        "overwithdraw rejection covers zero-capital account"
     );
     assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(account.header.capital.get(), start_capital);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+        surplus
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
