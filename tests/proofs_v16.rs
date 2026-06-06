@@ -6459,10 +6459,13 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_fractional_consume_rejects() {
-    let atoms_raw: u8 = kani::any();
+    let atoms_raw: u16 = kani::any();
+    let fractional_raw: u16 = kani::any();
     kani::assume(atoms_raw > 0);
+    kani::assume(atoms_raw <= 4096);
+    kani::assume(fractional_raw > 0);
     let available_num = (atoms_raw as u128 + 1) * BOUND_SCALE;
-    let fractional_num = (atoms_raw as u128 * BOUND_SCALE) + 1;
+    let fractional_num = (atoms_raw as u128 * BOUND_SCALE) + fractional_raw as u128;
     let reservation = InsuranceCreditReservationV16 {
         insurance_credit_reserved_num: available_num,
         valid_liened_insurance_num: available_num,
@@ -6484,8 +6487,8 @@ fn proof_v16_insurance_lien_fractional_consume_rejects() {
     );
 
     kani::cover!(
-        fractional_num > BOUND_SCALE,
-        "fractional insurance-lien consume reaches alignment guard"
+        atoms_raw > 255 && fractional_raw > 1,
+        "fractional insurance-lien consume covers widened non-atom-aligned support"
     );
     assert_eq!(result, Err(V16Error::InvalidConfig));
 }
