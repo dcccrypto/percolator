@@ -5893,18 +5893,19 @@ fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance(
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
-    let nontrivial_atoms: bool = kani::any();
-    let atoms = if nontrivial_atoms { 3 } else { 1 };
+    let atoms_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&atoms_raw));
+    let atoms = atoms_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (mut header, mut markets, _) = one_market_view_fixture();
+    let (mut header, mut markets) = one_market_only_fixture();
     header.vault = V16PodU128::new(atoms);
     header.insurance = V16PodU128::new(atoms);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.refresh_header_aggregate_totals_for_test().unwrap();
 
     let result = market.reserve_insurance_credit_not_atomic(0, amount);
     assert_eq!(result, Ok(()));
@@ -5920,8 +5921,8 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
         .unwrap();
 
     kani::cover!(
-        nontrivial_atoms,
-        "funded domain insurance reservation is nontrivial and symbolic"
+        atoms_raw > 1,
+        "funded domain insurance reservation covers nontrivial symbolic amount"
     );
     assert_eq!(reservation.insurance_credit_reserved_num, amount);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
