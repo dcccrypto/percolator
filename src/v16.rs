@@ -5956,6 +5956,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     pub fn expire_source_backing_bucket_not_atomic(
         &mut self,
         domain: usize,
