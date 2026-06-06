@@ -2789,6 +2789,47 @@ impl<'a> PortfolioV16View<'a> {
     pub fn kani_active_leg_slot_for_asset(&self, asset_index: usize) -> V16Result<Option<usize>> {
         self.active_leg_slot_for_asset(asset_index)
     }
+
+    fn is_empty_for_dematerialization(&self) -> V16Result<bool> {
+        if !active_bitmap_is_empty(self.header.active_bitmap.map(V16PodU64::get))
+            || self.header.capital.get() != 0
+            || self.header.pnl.get() != 0
+            || self.header.reserved_pnl.get() != 0
+            || self.header.fee_credits.get() != 0
+            || self.header.cancel_deposit_escrow.get() != 0
+            || decode_bool(self.header.stale_state)?
+            || decode_bool(self.header.b_stale_state)?
+            || decode_bool(self.header.rebalance_lock)?
+            || decode_bool(self.header.liquidation_lock)?
+        {
+            return Ok(false);
+        }
+
+        let close_progress = self.header.close_progress.try_to_runtime()?;
+        let inert_canceled_close = close_progress.canceled
+            && !close_progress.active
+            && !close_progress.finalized
+            && close_progress.close_id != 0
+            && !close_progress.has_irreversible_progress()
+            && close_progress.residual_remaining == close_progress.gross_loss_at_close_start;
+        if !close_progress.is_empty() && !inert_canceled_close {
+            return Ok(false);
+        }
+
+        let receipt = self.header.resolved_payout_receipt.try_to_runtime()?;
+        if receipt.present && !receipt.finalized {
+            return Ok(false);
+        }
+
+        let mut d = 0usize;
+        while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if self.header.source_domains[d].is_occupied() {
+                return Ok(false);
+            }
+            d += 1;
+        }
+        Ok(true)
+    }
 }
 
 impl<'a> PortfolioV16ViewMut<'a> {
@@ -5278,6 +5319,42 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn validate_shape(&self) -> V16Result<()> {
         self.as_view().validate_shape()
+    }
+
+    pub fn register_empty_materialized_portfolio_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        account.validate_with_market(&self.as_view())?;
+        if !account.is_empty_for_dematerialization()? {
+            return Err(V16Error::LockActive);
+        }
+        self.header.materialized_portfolio_count = V16PodU64::new(
+            self.header
+                .materialized_portfolio_count
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.validate_shape_audit_scan()
+    }
+
+    pub fn deregister_empty_materialized_portfolio_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        account.validate_with_market(&self.as_view())?;
+        if !account.is_empty_for_dematerialization()? {
+            return Err(V16Error::LockActive);
+        }
+        self.header.materialized_portfolio_count = V16PodU64::new(
+            self.header
+                .materialized_portfolio_count
+                .get()
+                .checked_sub(1)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        self.validate_shape_audit_scan()
     }
 
     #[cfg(any(test, kani))]

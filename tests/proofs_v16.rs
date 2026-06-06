@@ -483,6 +483,174 @@ fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+fn proof_v16_public_materialized_portfolio_register_is_value_neutral() {
+    let count_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(count_raw < u8::MAX);
+
+    let (mut header, mut markets, account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    header.c_tot = V16PodU128::new(c_tot_raw as u128);
+    header.insurance = V16PodU128::new(insurance_raw as u128);
+    header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.register_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        count_raw > 2 && c_tot_raw > 2 && insurance_raw > 2 && surplus_raw > 2,
+        "materialized portfolio register covers nontrivial senior value state"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_raw as u64 + 1
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    assert_eq!(
+        account.validate_with_market(&market.as_view()),
+        Ok(()),
+        "registering an empty portfolio must not mutate account safety shape"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_materialized_portfolio_deregister_is_value_neutral() {
+    let count_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(count_raw > 0);
+
+    let (mut header, mut markets, account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    header.c_tot = V16PodU128::new(c_tot_raw as u128);
+    header.insurance = V16PodU128::new(insurance_raw as u128);
+    header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        count_raw > 2 && c_tot_raw > 2 && insurance_raw > 2 && surplus_raw > 2,
+        "materialized portfolio deregister covers nontrivial senior value state"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_raw as u64 - 1
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    assert_eq!(
+        account.validate_with_market(&market.as_view()),
+        Ok(()),
+        "deregistering an empty portfolio must not mutate account safety shape"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_materialized_portfolio_register_rejects_value_state_before_mutation() {
+    let count_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(count_raw < u8::MAX);
+    kani::assume(capital_raw > 0);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    header.c_tot = V16PodU128::new(capital_raw as u128);
+    header.vault = V16PodU128::new(capital_raw as u128 + surplus_raw as u128);
+    account_header.capital = V16PodU128::new(capital_raw as u128);
+
+    let count_before = header.materialized_portfolio_count.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.register_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        count_raw > 2 && capital_raw > 2 && surplus_raw > 2,
+        "materialized portfolio register rejection covers nontrivial account capital"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_materialized_portfolio_deregister_rejects_value_state_before_mutation() {
+    let count_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(count_raw > 0);
+    kani::assume(capital_raw > 0);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    header.c_tot = V16PodU128::new(capital_raw as u128);
+    header.vault = V16PodU128::new(capital_raw as u128 + surplus_raw as u128);
+    account_header.capital = V16PodU128::new(capital_raw as u128);
+
+    let count_before = header.materialized_portfolio_count.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        count_raw > 2 && capital_raw > 2 && surplus_raw > 2,
+        "materialized portfolio deregister rejection covers nontrivial account capital"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
 fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let target: u16 = kani::any();
     let c_tot: u128 = kani::any();
