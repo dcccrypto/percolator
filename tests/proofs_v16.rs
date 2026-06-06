@@ -2584,22 +2584,33 @@ fn proof_v16_recovery_mode_blocks_withdraw() {
 #[kani::solver(cadical)]
 fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() {
     let capital: u128 = kani::any();
+    let other_capital: u128 = kani::any();
     let pnl_raw: u8 = kani::any();
     let reserved_raw: u8 = kani::any();
     let fee_rate_raw: u8 = kani::any();
+    let now_slot_raw: u8 = kani::any();
     let insurance: u128 = kani::any();
     let surplus: u128 = kani::any();
-    let senior = capital.checked_add(insurance);
+    let c_tot = capital.checked_add(other_capital);
+    kani::assume(c_tot.is_some());
+    let senior = c_tot.unwrap().checked_add(insurance);
     kani::assume(senior.is_some());
     let vault = senior.unwrap().checked_add(surplus);
     kani::assume(vault.is_some());
+    kani::assume(vault.unwrap() <= MAX_VAULT_TVL);
     kani::assume(reserved_raw <= pnl_raw);
+    kani::assume(now_slot_raw > 0);
     let pnl = pnl_raw as i128;
     let reserved = reserved_raw as u128;
+    let now_slot = now_slot_raw as u64;
+    let fee_rate = fee_rate_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    ));
     header.vault = V16PodU128::new(vault.unwrap());
-    header.c_tot = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(c_tot.unwrap());
     header.insurance = V16PodU128::new(insurance);
     account_header.capital = V16PodU128::new(capital);
     account_header.pnl = V16PodI128::new(pnl);
@@ -2615,17 +2626,16 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
-    let fee_result =
-        market.sync_account_fee_to_slot_not_atomic(&mut account, 1, fee_rate_raw as u128);
+    let fee_result = market.sync_account_fee_to_slot_not_atomic(&mut account, now_slot, fee_rate);
     let convert_result = market.convert_released_pnl_to_capital_not_atomic(&mut account);
 
     kani::cover!(
-        capital > MAX_VAULT_TVL && fee_rate_raw > 10 && pnl > 10 && reserved > 10,
-        "recovery mode blocks fee sync and positive PnL conversion beyond configured TVL-scale values"
+        now_slot > 1 && fee_rate > 0 && pnl > reserved as i128 && other_capital > 0,
+        "recovery mode blocks fee sync and released positive PnL conversion before mutation"
     );
     kani::cover!(
-        insurance > 0 && surplus > 0,
-        "recovery mode blocks fee sync and conversion with senior insurance and junior surplus"
+        pnl > 0 && reserved == pnl as u128 && insurance > 0 && surplus > 0,
+        "recovery mode blocks fee sync and fully reserved positive PnL with senior state"
     );
     assert_eq!(fee_result, Err(V16Error::LockActive));
     assert_eq!(convert_result, Err(V16Error::LockActive));
@@ -2636,6 +2646,8 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
     assert_eq!(account.header.pnl, pnl_before);
     assert_eq!(account.header.reserved_pnl, reserved_before);
     assert_eq!(account.header.last_fee_slot, last_fee_slot_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 #[kani::proof]
