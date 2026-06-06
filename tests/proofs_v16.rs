@@ -5121,6 +5121,12 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
             insurance.checked_add(c_tot).unwrap(),
             "insurance-to-account credit preserves senior stock"
         );
+    } else if amount > insurance {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    } else if budgeted > insurance - amount {
+        assert_eq!(result, Err(V16Error::LockActive));
+    } else {
+        assert_eq!(result, Err(V16Error::ArithmeticOverflow));
     }
 }
 
