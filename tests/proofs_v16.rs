@@ -3240,6 +3240,150 @@ fn proof_v16_batch_outcome_accumulator_is_exact_and_overflow_checked() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_wrapper_shape_distinct_asset_batch_projection_preserves_oi_and_outcome() {
+    let first_account_long0: bool = kani::any();
+    let first_account_long1: bool = kani::any();
+    let q0_units: u8 = kani::any();
+    let q1_units: u8 = kani::any();
+    let loss_weight0_raw: u8 = kani::any();
+    let loss_weight1_raw: u8 = kani::any();
+    let fee_a0: u16 = kani::any();
+    let fee_b0: u16 = kani::any();
+    let fee_a1: u16 = kani::any();
+    let fee_b1: u16 = kani::any();
+    let notional0: u16 = kani::any();
+    let notional1: u16 = kani::any();
+    let risk0: bool = kani::any();
+    let risk1: bool = kani::any();
+    let long_claim0: bool = kani::any();
+    let long_claim1: bool = kani::any();
+    let short_claim0: bool = kani::any();
+    let short_claim1: bool = kani::any();
+
+    kani::assume((1..=8).contains(&q0_units));
+    kani::assume((1..=8).contains(&q1_units));
+    kani::assume(loss_weight0_raw > 0);
+    kani::assume(loss_weight1_raw > 0);
+    kani::assume(notional0 > 0);
+    kani::assume(notional1 > 0);
+    let q0 = q0_units as u128 * POS_SCALE;
+    let q1 = q1_units as u128 * POS_SCALE;
+    let signed_q0 = if first_account_long0 {
+        q0 as i128
+    } else {
+        -(q0 as i128)
+    };
+    let signed_q1 = if first_account_long1 {
+        q1 as i128
+    } else {
+        -(q1 as i128)
+    };
+
+    let (abs_q0, delta_a0, delta_b0) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed_q0).unwrap();
+    let (abs_q1, delta_a1, delta_b1) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed_q1).unwrap();
+    let mut asset0 = AssetStateV16::default();
+    let mut asset1 = AssetStateV16::default();
+    let side_a0 = if delta_a0 > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let side_b0 = if delta_b0 > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let side_a1 = if delta_a1 > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let side_b1 = if delta_b1 > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let loss_weight0 = loss_weight0_raw as u128;
+    let loss_weight1 = loss_weight1_raw as u128;
+    kani_add_open_interest_for_new_position(&mut asset0, side_a0, abs_q0, loss_weight0).unwrap();
+    kani_add_open_interest_for_new_position(&mut asset0, side_b0, abs_q0, loss_weight0).unwrap();
+    kani_add_open_interest_for_new_position(&mut asset1, side_a1, abs_q1, loss_weight1).unwrap();
+    kani_add_open_interest_for_new_position(&mut asset1, side_b1, abs_q1, loss_weight1).unwrap();
+
+    let mut outcome = BatchTradeOutcomeV16 {
+        fill_count: 0,
+        fee_a: 0,
+        fee_b: 0,
+        notional: 0,
+    };
+    let mut risk_increasing = false;
+    let mut long_has_source_claims = false;
+    let mut short_has_source_claims = false;
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk_increasing,
+        &mut long_has_source_claims,
+        &mut short_has_source_claims,
+        fee_a0 as u128,
+        fee_b0 as u128,
+        notional0 as u128,
+        risk0,
+        long_claim0,
+        short_claim0,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk_increasing,
+        &mut long_has_source_claims,
+        &mut short_has_source_claims,
+        fee_a1 as u128,
+        fee_b1 as u128,
+        notional1 as u128,
+        risk1,
+        long_claim1,
+        short_claim1,
+    )
+    .unwrap();
+
+    kani::cover!(
+        first_account_long0 && !first_account_long1 && fee_a0 > 0 && fee_b1 > 0,
+        "wrapper-shape batch projection covers mixed long/short spread with nonzero fees"
+    );
+    kani::cover!(
+        !first_account_long0 && first_account_long1 && risk0 && !risk1,
+        "wrapper-shape batch projection covers inverse spread and asymmetric risk flag"
+    );
+    kani::cover!(
+        long_claim0 && !long_claim1 && !short_claim0 && short_claim1,
+        "wrapper-shape batch projection covers independent source-claim flag aggregation"
+    );
+    assert_ne!(side_a0, side_b0);
+    assert_ne!(side_a1, side_b1);
+    assert_eq!(delta_a0.checked_add(delta_b0), Some(0));
+    assert_eq!(delta_a1.checked_add(delta_b1), Some(0));
+    assert_eq!(asset0.oi_eff_long_q, q0);
+    assert_eq!(asset0.oi_eff_short_q, q0);
+    assert_eq!(asset1.oi_eff_long_q, q1);
+    assert_eq!(asset1.oi_eff_short_q, q1);
+    assert_eq!(asset0.loss_weight_sum_long, loss_weight0);
+    assert_eq!(asset0.loss_weight_sum_short, loss_weight0);
+    assert_eq!(asset1.loss_weight_sum_long, loss_weight1);
+    assert_eq!(asset1.loss_weight_sum_short, loss_weight1);
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(outcome.fee_a, fee_a0 as u128 + fee_a1 as u128);
+    assert_eq!(outcome.fee_b, fee_b0 as u128 + fee_b1 as u128);
+    assert_eq!(outcome.notional, notional0 as u128 + notional1 as u128);
+    assert_eq!(risk_increasing, risk0 || risk1);
+    assert_eq!(long_has_source_claims, long_claim0 || long_claim1);
+    assert_eq!(short_has_source_claims, short_claim0 || short_claim1);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_final_batch_margin_gate_accepts_only_final_certified_im() {
     let equity: i128 = kani::any();
     let req: u128 = kani::any();
