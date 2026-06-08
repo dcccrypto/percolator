@@ -43,7 +43,9 @@ pub mod v16;
 mod v16;
 #[cfg(kani)]
 pub mod wide_math;
-#[cfg(not(kani))]
+#[cfg(all(not(kani), feature = "fork-facade"))]
+pub mod wide_math;
+#[cfg(all(not(kani), not(feature = "fork-facade")))]
 mod wide_math;
 
 #[cfg(kani)]
@@ -83,3 +85,6 @@ pub use v16::lp_vault;
 pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 #[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::FeePolicyUpdateV16;
+// Matrix row 38: wide_math is made pub mod under fork-facade (see mod declaration above)
+// so the wrapper can use percolator::wide_math::U256 in expected_source_credit_rate_num.
+// The module is private by default (frozen surface); fork-facade elevates it to pub.
