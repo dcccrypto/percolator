@@ -1948,6 +1948,10 @@ impl V16Config {
             || self.min_funding_lifetime_slots < self.max_accrual_dt_slots
             || self.max_abs_funding_e9_per_slot > 10_000
             || self.max_price_move_bps_per_slot == 0
+            // fork feature A-10: upper-bound the per-slot price-move cap (toly bounds only the
+            // lower edge == 0). A config with max_price_move_bps_per_slot > MAX_MARGIN_BPS would
+            // admit a price-move budget exceeding full margin, weakening the move guard; reject it.
+            || self.max_price_move_bps_per_slot > MAX_MARGIN_BPS
             || self.max_account_b_settlement_chunks == 0
             || self.max_bankrupt_close_chunks == 0
             || self.max_bankrupt_close_lifetime_slots == 0
@@ -1989,6 +1993,15 @@ impl V16Config {
     pub fn validate_public_user_fund(&self) -> V16Result<()> {
         self.validate_public_user_fund_shape()?;
         self.validate_exact_solvency_envelope()
+    }
+
+    /// fork-facade (A-10): kani-only accessor for the SHAPE check in isolation, so the A-10
+    /// `max_price_move_bps_per_slot > MAX_MARGIN_BPS` clause can be proven operative without the
+    /// solvency-envelope path (which would mask the clause via an unrelated overflow rejection).
+    /// Mirrors frozen's own `kani_*` shim convention; absent from the production surface.
+    #[cfg(kani)]
+    pub fn kani_validate_public_user_fund_shape(&self) -> V16Result<()> {
+        self.validate_public_user_fund_shape()
     }
 
     #[cfg(kani)]
