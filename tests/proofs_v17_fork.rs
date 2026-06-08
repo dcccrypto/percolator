@@ -352,7 +352,6 @@ fn proof_v17_fee_policy_update_no_other_field_mutation() {
 //     documents the API contract ("threshold=0 means always restrict").
 // ============================================================================
 use percolator::v16::HLockLaneV16;
-use percolator::STRESS_CONSUMPTION_SCALE;
 
 fn a1_live_market_header_with_acc(acc: u128) -> MarketGroupV16HeaderAccount {
     let cfg = V16Config::public_user_fund(1, 0, 1);
@@ -383,7 +382,7 @@ fn proof_v17_admit_threshold_lifts_hmax_when_acc_reaches_threshold() {
     kani::assume(threshold < percolator::STRESS_ENVELOPE_TRIGGER_BPS_E9);
     let mut header = a1_live_market_header_with_acc(acc);
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let result = view.kani_h_lock_lane_with_threshold(None, false, Some(threshold));
     assert_eq!(
         result,
@@ -403,7 +402,7 @@ fn proof_v17_admit_threshold_none_preserves_hmin_on_clean_market() {
     kani::assume(acc < percolator::STRESS_ENVELOPE_TRIGGER_BPS_E9);
     let mut header = a1_live_market_header_with_acc(acc);
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let result = view.kani_h_lock_lane_with_threshold(None, false, None);
     assert_eq!(
         result,
@@ -423,7 +422,7 @@ fn proof_v17_admit_threshold_zero_always_lifts_hmax() {
     kani::assume(acc < percolator::STRESS_ENVELOPE_TRIGGER_BPS_E9);
     let mut header = a1_live_market_header_with_acc(acc);
     let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let result = view.kani_h_lock_lane_with_threshold(None, false, Some(0u128));
     assert_eq!(
         result,
