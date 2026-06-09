@@ -253,7 +253,7 @@ fn active_bitmap_set(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V16
     Ok(())
 }
 
-#[cfg(any(kani, test))]
+#[cfg(any(kani, test, feature = "fork-facade"))]
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

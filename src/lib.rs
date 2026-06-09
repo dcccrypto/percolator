@@ -75,9 +75,9 @@ pub use v16::{
     V16_MAX_PORTFOLIO_ASSETS_N,
 };
 
-// kani_active_bitmap_set is gated #[cfg(any(kani, test))] in v16.rs so it only
-// exists in test builds; export it for test harnesses that call it directly.
-#[cfg(test)]
+// kani_active_bitmap_set is gated #[cfg(any(kani, test, feature="fork-facade"))]
+// in v16.rs; re-export it under fork-facade so the wrapper tests can call it.
+#[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::kani_active_bitmap_set;
 
 // v17 fork-facade re-exports — present only when the fork-facade feature is enabled (the wrapper
