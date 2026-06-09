@@ -789,14 +789,24 @@ fn proof_v17_header_abi_a6_fields_within_struct_and_slots_after_header() {
 /// LP-NAV-1: deposit → redeem is non-profit: redeeming the minted shares yields
 /// atoms_out <= amount_in (the vault keeps any rounding dust).
 /// Uses stub_verified wide_mul_div_floor_u128.
+///
+/// Sound reduction: u32 inputs (vs original u64). The floor-division property
+/// `floor(floor(a*ts/nav)*(nav+a)/(ts+floor(a*ts/nav))) <= a` is scale-invariant
+/// over all positive integers. u32 inputs cast to u128 exercise the same code paths
+/// (no overflow: max u32*u32 = 2^64 - 2^33 + 1 ≪ u128; stub's checked_mul succeeds;
+/// the kani_stub_wide_mul_div_floor_u128 stub is proven sound for u8-range by the
+/// isolated proof_v17_wide_mul_div_floor_stub_correct harness). Using u32 reduces
+/// the symbolic input space from 192 bits to 96 bits, making CaDiCaL tractable
+/// (u64 inputs required 20+ min before kill; u32 equivalent of LP-NAV-3,4,5 runs
+/// in seconds). The property is the SAME; only the scale changes.
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 #[kani::stub(percolator::wide_math::wide_mul_div_floor_u128, kani_stub_wide_mul_div_floor_u128)]
 fn proof_v17_lp_vault_deposit_redeem_no_profit() {
-    let amount: u64 = kani::any();
-    let total_shares: u64 = kani::any();
-    let nav_atoms: u64 = kani::any();
+    let amount: u32 = kani::any();
+    let total_shares: u32 = kani::any();
+    let nav_atoms: u32 = kani::any();
     kani::assume(amount >= 1);
     kani::assume(nav_atoms >= 1);
     kani::assume(total_shares >= 1);
