@@ -6631,6 +6631,86 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_final_impaired_source_claim_burn_clears_account_occupancy_counters() {
+    let units_raw: u8 = kani::any();
+    let burn_units_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let impaired_fee_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&units_raw));
+    kani::assume((1..=units_raw).contains(&burn_units_raw));
+    kani::assume((1..=8).contains(&effective_raw));
+    kani::assume(impaired_fee_raw > 0);
+    let claim_num = units_raw as u128 * BOUND_SCALE;
+    let burn_num = burn_units_raw as u128 * BOUND_SCALE;
+    let effective = effective_raw as u128;
+    let impaired_fee = impaired_fee_raw as u128;
+    let expected_next_claim = claim_num - burn_num;
+    let expected_effective_burn = if expected_next_claim == 0 {
+        effective
+    } else {
+        (burn_units_raw as u128).min(effective)
+    };
+    let expected_fee_after = if expected_next_claim == 0 {
+        0
+    } else {
+        impaired_fee
+    };
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(1),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_impaired_num: V16PodU128::new(claim_num),
+        source_lien_impaired_effective_reserved: V16PodU128::new(effective),
+        source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128::new(impaired_fee),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let (burned, effective_burned) =
+        MarketGroupV16ViewMut::<u64>::kani_burn_impaired_account_source_claim_fields(
+            &mut account,
+            0,
+            burn_num,
+        )
+        .unwrap();
+    let source = account.header.source_domains[0];
+
+    kani::cover!(
+        burn_units_raw < units_raw && effective_raw > 4 && impaired_fee_raw > 1,
+        "impaired source-claim burn covers partial burn retaining fee counter"
+    );
+    kani::cover!(
+        burn_units_raw == units_raw && effective_raw > 4 && impaired_fee_raw > 1,
+        "final impaired source-claim burn covers nontrivial fee-counter cleanup"
+    );
+    assert_eq!(burned, burn_num);
+    assert_eq!(effective_burned, expected_effective_burn);
+    assert_eq!(source.source_claim_bound_num.get(), expected_next_claim);
+    assert_eq!(source.source_claim_impaired_num.get(), expected_next_claim);
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved.get(),
+        effective - expected_effective_burn
+    );
+    assert_eq!(
+        source
+            .source_lien_impaired_capital_at_risk_fee_revenue
+            .get(),
+        expected_fee_after
+    );
+    if expected_next_claim == 0 {
+        assert!(
+            !source.is_occupied(),
+            "final impaired source-claim burn must not leave reward counters blocking dematerialization"
+        );
+    } else {
+        assert!(source.is_occupied());
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_invalid() {

@@ -6698,6 +6698,64 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::CounterUnderflow)
     }
 
+    fn burn_impaired_account_source_claim_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        if burn_num == 0 {
+            return Ok((0, 0));
+        }
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::InvalidLeg);
+        }
+        let source = account.header.source_domains[slot];
+        let impaired_burn = source.source_claim_impaired_num.get().min(burn_num);
+        if impaired_burn == 0 {
+            return Ok((0, 0));
+        }
+        let next_impaired = source
+            .source_claim_impaired_num
+            .get()
+            .checked_sub(impaired_burn)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let source = &mut account.header.source_domains[slot];
+        source.source_claim_bound_num = V16PodU128::new(
+            source
+                .source_claim_bound_num
+                .get()
+                .checked_sub(impaired_burn)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_claim_impaired_num = V16PodU128::new(next_impaired);
+        let impaired_effective_burn = if next_impaired == 0 {
+            source.source_lien_impaired_effective_reserved.get()
+        } else {
+            V16Core::amount_from_bound_num(impaired_burn)?
+                .min(source.source_lien_impaired_effective_reserved.get())
+        };
+        source.source_lien_impaired_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_sub(impaired_effective_burn)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        if next_impaired == 0 {
+            source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(0);
+        }
+        Ok((impaired_burn, impaired_effective_burn))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_burn_impaired_account_source_claim_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        Self::burn_impaired_account_source_claim_fields(account, slot, burn_num)
+    }
+
     #[cfg(any(kani, feature = "fuzz"))]
     fn impair_account_source_credit_insurance_lien_fields(
         account: &mut PortfolioV16ViewMut<'_>,
@@ -6807,6 +6865,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source.source_lien_counterparty_backing_num = V16PodU128::new(0);
         source.source_lien_insurance_backing_num = V16PodU128::new(0);
         source.source_lien_fee_last_slot = V16PodU64::new(0);
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
         account.reset_source_domain_slot_if_empty(slot);
         Ok(())
     }
@@ -6879,41 +6938,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
             if burn_num != 0 {
-                let source = account.header.source_domains[slot];
-                let impaired_burn = source.source_claim_impaired_num.get().min(burn_num);
+                let (impaired_burn, impaired_effective_burn) =
+                    Self::burn_impaired_account_source_claim_fields(account, slot, burn_num)?;
                 if impaired_burn != 0 {
-                    let old_impaired = source.source_claim_impaired_num.get();
-                    let next_impaired = old_impaired
-                        .checked_sub(impaired_burn)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    account.header.source_domains[slot].source_claim_bound_num = V16PodU128::new(
-                        account.header.source_domains[slot]
-                            .source_claim_bound_num
-                            .get()
-                            .checked_sub(impaired_burn)
-                            .ok_or(V16Error::CounterUnderflow)?,
-                    );
-                    account.header.source_domains[slot].source_claim_impaired_num =
-                        V16PodU128::new(next_impaired);
-                    let impaired_effective_burn = if next_impaired == 0 {
-                        account.header.source_domains[slot]
-                            .source_lien_impaired_effective_reserved
-                            .get()
-                    } else {
-                        V16Core::amount_from_bound_num(impaired_burn)?.min(
-                            account.header.source_domains[slot]
-                                .source_lien_impaired_effective_reserved
-                                .get(),
-                        )
-                    };
-                    account.header.source_domains[slot].source_lien_impaired_effective_reserved =
-                        V16PodU128::new(
-                            account.header.source_domains[slot]
-                                .source_lien_impaired_effective_reserved
-                                .get()
-                                .checked_sub(impaired_effective_burn)
-                                .ok_or(V16Error::CounterUnderflow)?,
-                        );
                     if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
                         && impaired_effective_burn != 0
                     {
