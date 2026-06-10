@@ -12267,3 +12267,89 @@ fn proof_v16_reset_empty_asset_oracle_anchor_rejects_when_pnl_present() {
         raw_before
     );
 }
+
+// End-to-end proof for the public provider-earnings withdrawal (only the
+// arithmetic delta was proven; this pins the full transition). Withdrawing
+// earned utilization fees exits vault and the earnings class in lockstep:
+// senior capital, insurance, backing principal, and the junior residual pool
+// are all untouched — a provider can extract exactly what was earned and
+// nothing else.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_provider_earnings_withdraw_is_earnings_scoped_and_pool_neutral() {
+    let earnings_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&earnings_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= earnings_raw);
+    kani::assume(surplus_raw <= 8);
+    let earnings = earnings_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let surplus = surplus_raw as u128;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(earnings + surplus);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        utilization_fee_earnings: earnings,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    kani::assume(market.validate_shape() == Ok(()));
+    let residual_before = market.kani_residual();
+
+    market
+        .withdraw_backing_provider_earnings_not_atomic(0, withdraw)
+        .unwrap();
+    let bucket = market.markets[0].engine.backing_long.try_to_runtime().unwrap();
+
+    kani::cover!(withdraw < earnings, "earnings withdraw covers partial extraction");
+    kani::cover!(withdraw == earnings, "earnings withdraw covers full extraction");
+    kani::cover!(surplus > 0, "earnings withdraw covers junior surplus present");
+    // vault and earnings fall in lockstep; nothing else moves.
+    assert_eq!(market.header.vault.get(), earnings + surplus - withdraw);
+    assert_eq!(bucket.utilization_fee_earnings, earnings - withdraw);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings - withdraw
+    );
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    // Junior-pool isolation: the provider extracts earned fees only, never
+    // the haircut/payout pool.
+    assert_eq!(market.kani_residual(), residual_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// The public resolved-payout topup wrapper gates on Resolved mode + a captured
+// snapshot BEFORE any mutation: claiming against a Live market or before
+// snapshot capture must reject with LockActive and change nothing.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_claim_resolved_payout_topup_preflight_rejects_unready() {
+    let live_mode: bool = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    if !live_mode {
+        // Resolved but snapshot NOT captured.
+        header.mode = 1;
+        header.resolved_slot = V16PodU64::new(1);
+    }
+    let vault_before = header.vault.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.claim_resolved_payout_topup_not_atomic(&mut account);
+
+    kani::cover!(live_mode, "topup preflight covers Live-mode rejection");
+    kani::cover!(!live_mode, "topup preflight covers pre-snapshot rejection");
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(account.header.capital.get(), 0);
+}
