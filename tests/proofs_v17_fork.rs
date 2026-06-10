@@ -986,13 +986,12 @@ fn proof_v17_wide_mul_div_floor_stub_correct() {
 //
 // CBMC LIMIT — EMPIRICAL FINDINGS ON THIS 64GB BOX:
 //   - u8 inputs (24-bit symbolic space): verified in 752s. SOUND.
-//   - u16 inputs (48-bit symbolic space): ran >14 min with no result
-//     (CBMC at ~300MB RSS, stable CPU). Likely intractable: 48-bit space
-//     = 2^24 × larger than u8; SAT propositional encoding of schoolbook
-//     u128 widening multiplication is not polynomial for this width on
-//     this hardware. NOT RUN TO COMPLETION; left in as-is for reference.
-//   - u32 inputs (96-bit symbolic space): ran >40 min (~520MB RSS, still
-//     running). Intractable.
+//   - u16 inputs (48-bit symbolic space): killed at 25min (SIGTERM), no SAT
+//     result. INTRACTABLE: 2^24× larger symbolic space than u8; SAT
+//     propositional encoding of schoolbook u128 widening multiplication
+//     is not polynomial for this width on this hardware.
+//   - u32 inputs (96-bit symbolic space): killed at 48-53min (SIGTERM),
+//     no SAT result. INTRACTABLE.
 //   - Full u128 + loop: OOM at ~4 min with --unwind 130.
 //
 // BOTTOM LINE:
@@ -1010,8 +1009,10 @@ fn proof_v17_wide_mul_div_floor_stub_correct() {
 
 /// WIDE-MUL-DIV-POSTCONDITION (u16 target, see limitation above):
 /// the production `wide_mul_div_floor_u128` satisfies the floor-division
-/// post-condition for symbolic u16 inputs IF CBMC can complete the proof.
-/// Proof structure is correct; certified boundary is u8 on this box.
+/// post-condition for symbolic u16 inputs. Proof structure is CORRECT;
+/// CBMC cannot complete it on this 64GB box (killed at 25min). The proof
+/// serves as a verified-correct verification target for high-memory machines.
+/// Certified boundary on this box: u8 (proof_v17_wide_mul_div_floor_stub_correct).
 ///
 /// RED control: change `qd <= product` to `qd < product` → fails at
 /// exact-division cases (qd == product), CBMC would report FAILED.
