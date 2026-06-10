@@ -246,6 +246,24 @@ proptest! {
         // ...and the provider keeps exactly the unconsumed remainder.
         prop_assert_eq!(market.header.vault.get(), backing - paid);
         prop_assert_eq!(market.validate_shape(), Ok(()));
+
+        // NO DOUBLE-PAY (review finding 3): the winner is paid AT MOST its face
+        // (here exactly the realizable portion <= face); the unrealized
+        // remainder is burned with the consumed face, not also paid through the
+        // receipt pool. The account is fully extinguished (pnl=0, capital=0), so
+        // no surviving face can be double-paid.
+        prop_assert!(paid <= pnl);
+        prop_assert_eq!(account.header.pnl.get(), 0);
+        prop_assert_eq!(account.header.capital.get(), 0);
+        // IDEMPOTENT: re-closing the now-extinguished account pays nothing more
+        // (realization has no surviving claim/face to act on a second time).
+        let outcome2 = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("re-close of an extinguished account must not revert");
+        if let ResolvedCloseOutcomeV16::Closed { payout } = outcome2 {
+            prop_assert_eq!(payout, 0);
+        }
+        prop_assert_eq!(market.header.vault.get(), backing - paid);
     }
 }
 
