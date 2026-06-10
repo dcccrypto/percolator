@@ -3635,6 +3635,7 @@ pub struct StockReconciliationProofV16 {
     pub senior_capital_total: u128,
     pub insurance_capital: u128,
     pub backing_provider_earnings: u128,
+    pub counterparty_backing_principal: u128,
     pub settlement_rounding_residue_total: u128,
     pub unallocated_protocol_surplus: u128,
 }
@@ -3646,6 +3647,7 @@ impl StockReconciliationProofV16 {
             .senior_capital_total
             .checked_add(self.insurance_capital)
             .and_then(|v| v.checked_add(self.backing_provider_earnings))
+            .and_then(|v| v.checked_add(self.counterparty_backing_principal))
             .and_then(|v| v.checked_add(self.settlement_rounding_residue_total))
             .and_then(|v| v.checked_add(self.unallocated_protocol_surplus))
             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -4689,6 +4691,7 @@ pub struct MarketGroupV16HeaderAccount {
     pub pnl_matured_pos_tot: V16PodU128,
     pub backing_provider_earnings_total: V16PodU128,
     pub source_claim_bound_total_num: V16PodU128,
+    pub source_fresh_backing_total_num: V16PodU128,
     pub source_insurance_credit_reserved_total_atoms: V16PodU128,
     pub insurance_domain_budget_remaining_total: V16PodU128,
     pub resolved_payout_blocker_count: V16PodU64,
@@ -4828,6 +4831,7 @@ impl MarketGroupV16HeaderAccount {
             pnl_matured_pos_tot: V16PodU128::default(),
             backing_provider_earnings_total: V16PodU128::default(),
             source_claim_bound_total_num: V16PodU128::default(),
+            source_fresh_backing_total_num: V16PodU128::default(),
             source_insurance_credit_reserved_total_atoms: V16PodU128::default(),
             insurance_domain_budget_remaining_total: V16PodU128::default(),
             resolved_payout_blocker_count: V16PodU64::default(),
@@ -5184,6 +5188,7 @@ impl MarketGroupV16HeaderAccount {
 struct MarketAggregateTotalsV16 {
     backing_provider_earnings: u128,
     source_claim_bound_num: u128,
+    source_fresh_backing_num: u128,
     source_insurance_credit_reserved_atoms: u128,
     insurance_domain_budget_remaining_atoms: u128,
     resolved_payout_blocker_count: u64,
@@ -5269,6 +5274,18 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         if senior > self.header.vault.get() {
             return Err(V16Error::InvalidConfig);
         }
+        // Recoverable counterparty backing principal is also a vault claim:
+        // every deposit moves vault and backing in lockstep, every consume that
+        // re-credits c_tot debits backing first, so the strengthened stack must
+        // always be covered. A state violating it is double-promising atoms.
+        let senior_with_backing = senior
+            .checked_add(
+                self.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
+            )
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if senior_with_backing > self.header.vault.get() {
+            return Err(V16Error::InvalidConfig);
+        }
         if self
             .header
             .source_insurance_credit_reserved_total_atoms
@@ -5304,6 +5321,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         let totals = self.compute_aggregate_totals_and_validate_slots()?;
         if totals.backing_provider_earnings != self.header.backing_provider_earnings_total.get()
             || totals.source_claim_bound_num != self.header.source_claim_bound_total_num.get()
+            || totals.source_fresh_backing_num != self.header.source_fresh_backing_total_num.get()
             || totals.source_insurance_credit_reserved_atoms
                 != self
                     .header
@@ -5366,6 +5384,10 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 .source_claim_bound_num
                 .checked_add(source_credit_long.positive_claim_bound_num)
                 .ok_or(V16Error::ArithmeticOverflow)?;
+            totals.source_fresh_backing_num = totals
+                .source_fresh_backing_num
+                .checked_add(source_credit_long.fresh_reserved_backing_num)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             Self::validate_domain_shape_for_view(
                 asset.market_id,
                 source_credit_long,
@@ -5390,6 +5412,10 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             totals.source_claim_bound_num = totals
                 .source_claim_bound_num
                 .checked_add(source_credit_short.positive_claim_bound_num)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            totals.source_fresh_backing_num = totals
+                .source_fresh_backing_num
+                .checked_add(source_credit_short.fresh_reserved_backing_num)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             Self::validate_domain_shape_for_view(
                 asset.market_id,
@@ -5545,6 +5571,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.backing_provider_earnings_total =
             V16PodU128::new(totals.backing_provider_earnings);
         self.header.source_claim_bound_total_num = V16PodU128::new(totals.source_claim_bound_num);
+        self.header.source_fresh_backing_total_num =
+            V16PodU128::new(totals.source_fresh_backing_num);
         self.header.source_insurance_credit_reserved_total_atoms =
             V16PodU128::new(totals.source_insurance_credit_reserved_atoms);
         self.header.insurance_domain_budget_remaining_total =
@@ -5653,6 +5681,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             old.positive_claim_bound_num,
             new.positive_claim_bound_num,
         )?);
+        self.header.source_fresh_backing_total_num = V16PodU128::new(Self::apply_total_delta(
+            self.header.source_fresh_backing_total_num.get(),
+            old.fresh_reserved_backing_num,
+            new.fresh_reserved_backing_num,
+        )?);
         self.header.source_insurance_credit_reserved_total_atoms =
             V16PodU128::new(Self::apply_total_delta(
                 self.header
@@ -5692,17 +5725,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.backing_provider_earnings_total.get()
     }
 
+    // Recoverable counterparty backing principal (Fresh-bucket unliened+liened
+    // atoms across every domain): provider-withdrawable whenever the domain is
+    // fully backed, with no mode or payout-snapshot gate, so it is a senior-side
+    // claim on the vault — never junior surplus.
+    fn source_fresh_backing_total_atoms(&self) -> u128 {
+        self.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+    }
+
     // Junior (positive-PnL) payout pool = vault minus ALL senior claims: capital
-    // (c_tot), insurance, AND backing-provider earnings. Omitting earnings here
-    // over-states the pool and lets a haircut resolved-close over-pay, which the
-    // final validate_shape then rejects (permanent fund-stuck deadlock).
+    // (c_tot), insurance, backing-provider earnings, AND recoverable counterparty
+    // backing principal. Omitting a senior claim here over-states the pool and
+    // promises the same vault atoms to two parties: a haircut resolved-close
+    // over-pays winners out of value its owner can still withdraw (or, when the
+    // final validate_shape catches it, deadlocks the close permanently).
     fn residual(&self) -> u128 {
         self.header.vault.get().saturating_sub(
             self.header
                 .c_tot
                 .get()
                 .saturating_add(self.header.insurance.get())
-                .saturating_add(self.backing_provider_earnings_total()),
+                .saturating_add(self.backing_provider_earnings_total())
+                .saturating_add(self.source_fresh_backing_total_atoms()),
         )
     }
 
@@ -5871,6 +5915,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(kani)]
+    pub fn kani_validate_source_domain_ledger_current(&self, domain: usize) -> V16Result<()> {
+        self.validate_source_domain_ledger_current(domain)
+    }
+
     fn recompute_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
         let source = self.source_credit_for_domain_shape(domain)?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -5882,7 +5931,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
@@ -6102,7 +6150,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     pub fn expire_source_backing_bucket_not_atomic(
         &mut self,
         domain: usize,
@@ -6929,8 +6976,67 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source.source_lien_counterparty_backing_num = V16PodU128::new(0);
         source.source_lien_insurance_backing_num = V16PodU128::new(0);
         source.source_lien_fee_last_slot = V16PodU64::new(0);
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
         account.reset_source_domain_slot_if_empty(slot);
         Ok(())
+    }
+
+    fn burn_impaired_account_source_claim_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        if burn_num == 0 {
+            return Ok((0, 0));
+        }
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::InvalidLeg);
+        }
+        let source = account.header.source_domains[slot];
+        let impaired_burn = source.source_claim_impaired_num.get().min(burn_num);
+        if impaired_burn == 0 {
+            return Ok((0, 0));
+        }
+        let next_impaired = source
+            .source_claim_impaired_num
+            .get()
+            .checked_sub(impaired_burn)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let source = &mut account.header.source_domains[slot];
+        source.source_claim_bound_num = V16PodU128::new(
+            source
+                .source_claim_bound_num
+                .get()
+                .checked_sub(impaired_burn)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_claim_impaired_num = V16PodU128::new(next_impaired);
+        let impaired_effective_burn = if next_impaired == 0 {
+            source.source_lien_impaired_effective_reserved.get()
+        } else {
+            V16Core::amount_from_bound_num(impaired_burn)?
+                .min(source.source_lien_impaired_effective_reserved.get())
+        };
+        source.source_lien_impaired_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_sub(impaired_effective_burn)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        if next_impaired == 0 {
+            source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(0);
+        }
+        Ok((impaired_burn, impaired_effective_burn))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_burn_impaired_account_source_claim_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        Self::burn_impaired_account_source_claim_fields(account, slot, burn_num)
     }
 
     fn burn_account_source_claim_bound_num(
@@ -7001,41 +7107,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.recompute_source_credit_domain_after_mutation(d)?;
             }
             if burn_num != 0 {
-                let source = account.header.source_domains[slot];
-                let impaired_burn = source.source_claim_impaired_num.get().min(burn_num);
+                let (impaired_burn, impaired_effective_burn) =
+                    Self::burn_impaired_account_source_claim_fields(account, slot, burn_num)?;
                 if impaired_burn != 0 {
-                    let old_impaired = source.source_claim_impaired_num.get();
-                    let next_impaired = old_impaired
-                        .checked_sub(impaired_burn)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    account.header.source_domains[slot].source_claim_bound_num = V16PodU128::new(
-                        account.header.source_domains[slot]
-                            .source_claim_bound_num
-                            .get()
-                            .checked_sub(impaired_burn)
-                            .ok_or(V16Error::CounterUnderflow)?,
-                    );
-                    account.header.source_domains[slot].source_claim_impaired_num =
-                        V16PodU128::new(next_impaired);
-                    let impaired_effective_burn = if next_impaired == 0 {
-                        account.header.source_domains[slot]
-                            .source_lien_impaired_effective_reserved
-                            .get()
-                    } else {
-                        V16Core::amount_from_bound_num(impaired_burn)?.min(
-                            account.header.source_domains[slot]
-                                .source_lien_impaired_effective_reserved
-                                .get(),
-                        )
-                    };
-                    account.header.source_domains[slot].source_lien_impaired_effective_reserved =
-                        V16PodU128::new(
-                            account.header.source_domains[slot]
-                                .source_lien_impaired_effective_reserved
-                                .get()
-                                .checked_sub(impaired_effective_burn)
-                                .ok_or(V16Error::CounterUnderflow)?,
-                        );
                     if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
                         && impaired_effective_burn != 0
                     {
@@ -13883,6 +13957,98 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Terminal realization for a source-backed winner: realize the account's
+    /// outstanding source-credit claims against their domain backing at the
+    /// current credit rate (lien consumption -> capital credit) BEFORE the claim
+    /// face enters the junior receipt pool. A settlement-quality claim is
+    /// realizable at rate in Live (convert_released_pnl_to_capital); resolution
+    /// must not strip that entitlement -- without this step the wind-down
+    /// RELEASES the backing to the provider while the winner is haircut from a
+    /// residual pool that (correctly) excludes the very backing underwriting the
+    /// claim. Residual-neutral: capital/c_tot grow by exactly the consumed
+    /// backing atoms, so the payout snapshot does not depend on realization
+    /// order.
+    fn realize_source_backed_claims_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        if decode_bool(account.header.resolved_payout_receipt.present)? {
+            // The face is already frozen into the receipt pool.
+            return Ok(0);
+        }
+        if !Self::account_has_source_claims(&account.as_view())? {
+            return Ok(0);
+        }
+        let pos = account.header.pnl.get().max(0) as u128;
+        if pos == 0 {
+            return Ok(0);
+        }
+        // Release the account's persisted liens first (the terminal burn would do
+        // this anyway): the conversion consumes only UNLIENED claims, so a still-
+        // liened claim would make the realizable estimate exceed what consumption
+        // can deliver and dead-lock the close with LockActive. In the same sweep,
+        // expire any domain whose backing bucket has lapsed (status Fresh but
+        // expiry_slot <= current_slot): realization is best-effort, and querying
+        // realizable support against a past-expiry bucket would otherwise return
+        // Stale and strand the winner's close. Expiry forfeits the lapsed
+        // principal to the junior pool (the documented expiry semantics), drops
+        // the domain's credit rate to zero, and lets this step fall through to
+        // the junior receipt path instead of reverting.
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let d = source.domain.get() as usize;
+                if source.source_claim_liened_num.get() != 0 {
+                    self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+                }
+                let bucket = self.backing_bucket_for_domain(d)?;
+                if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= current_slot
+                {
+                    self.expire_source_backing_bucket_not_atomic(d, current_slot)?;
+                }
+            }
+            slot += 1;
+        }
+        if self.account_source_realizable_support(&account.as_view(), pos)? == 0 {
+            return Ok(0);
+        }
+        // Terminal: PnL reservations no longer gate realization.
+        account.header.reserved_pnl = V16PodU128::new(0);
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        // If the payout snapshot was captured before this account realized (another
+        // winner closed first), the realized face is still counted in the ledger's
+        // unreceipted bound. Refine it out, or the stale bound dilutes the payout
+        // rate forever and blocks every remaining receipt from reaching the
+        // terminal rate (never finalized, never clearable).
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            let pos_after = account.header.pnl.get().max(0) as u128;
+            let face_burned = pos
+                .checked_sub(pos_after)
+                .ok_or(V16Error::CounterUnderflow)?;
+            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+            let decrease_num = V16Core::bound_num_from_amount(face_burned)?
+                .min(ledger.terminal_claim_bound_unreceipted_num);
+            if decrease_num != 0 {
+                self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
+            }
+        }
+        Ok(converted)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_realize_source_backed_claims_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+    }
+
     fn claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -14015,6 +14181,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?
