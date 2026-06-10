@@ -4794,6 +4794,190 @@ fn proof_v16_public_account_backing_fee_split_preserves_senior_stock() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_fee_charges_only_selected_domain() {
+    let provider_fee_raw: u8 = kani::any();
+    let insurance_fee_raw: u8 = kani::any();
+    let margin_slack_raw: u8 = kani::any();
+    let unrelated_budget_raw: u8 = kani::any();
+    let unrelated_backing_raw: u8 = kani::any();
+    kani::assume(provider_fee_raw <= 4);
+    kani::assume(insurance_fee_raw <= 4);
+    kani::assume(provider_fee_raw > 0 || insurance_fee_raw > 0);
+    kani::assume((1..=8).contains(&margin_slack_raw));
+    kani::assume((1..=8).contains(&unrelated_budget_raw));
+    kani::assume((1..=4).contains(&unrelated_backing_raw));
+    let provider_fee = provider_fee_raw as u128;
+    let insurance_fee = insurance_fee_raw as u128;
+    let total_fee = provider_fee + insurance_fee;
+    let capital = total_fee + margin_slack_raw as u128;
+    let selected_backing_num = BOUND_SCALE;
+    let unrelated_backing_num = unrelated_backing_raw as u128 * BOUND_SCALE;
+    let unrelated_budget = unrelated_budget_raw as u128;
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(capital + unrelated_budget + 1 + unrelated_backing_raw as u128);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(unrelated_budget);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(unrelated_budget);
+    header.source_fresh_backing_total_num = V16PodU128::new(
+        selected_backing_num
+            .checked_add(unrelated_backing_num)
+            .unwrap(),
+    );
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut asset0 = AssetStateV16::default();
+    asset0.market_id = 1;
+    asset0.lifecycle = AssetLifecycleV16::Active;
+    asset0.raw_oracle_target_price = 100;
+    asset0.effective_price = 100;
+    asset0.fund_px_last = 100;
+    asset0.slot_last = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: selected_backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: selected_backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut asset1 = AssetStateV16::default();
+    asset1.market_id = 2;
+    asset1.lifecycle = AssetLifecycleV16::Active;
+    asset1.raw_oracle_target_price = 100;
+    asset1.effective_price = 100;
+    asset1.fund_px_last = 100;
+    asset1.slot_last = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(unrelated_budget);
+    markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 2,
+        fresh_unliened_backing_num: unrelated_backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: unrelated_backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let mut account_header = empty_account_fixture(market_group_id, 4);
+    account_header.capital = V16PodU128::new(capital);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: margin_slack_raw as u128,
+        certified_maintenance_req: margin_slack_raw as u128,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    let unrelated_budget_before = market.markets[1].engine.insurance_domain_budget_long;
+    let unrelated_spent_before = market.markets[1].engine.insurance_domain_spent_long;
+    let unrelated_bucket_before = market.markets[1]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let unrelated_source_before = market.markets[1]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let earnings_before = market.header.backing_provider_earnings_total.get();
+    let budget_total_before = market.header.insurance_domain_budget_remaining_total.get();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let charged = market
+        .charge_account_backing_fee_not_atomic(&mut account, 0, provider_fee, 0, insurance_fee)
+        .unwrap();
+    let selected_bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let unrelated_bucket_after = market.markets[1]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let unrelated_source_after = market.markets[1]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        provider_fee > 0 && insurance_fee > 0 && unrelated_budget > 0,
+        "selected backing fee covers mixed routing with unrelated funded domain"
+    );
+    assert_eq!(charged, total_fee);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before - total_fee);
+    assert_eq!(
+        market.header.insurance.get(),
+        insurance_before + insurance_fee
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before + provider_fee
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget_total_before + insurance_fee
+    );
+    assert_eq!(selected_bucket.utilization_fee_earnings, provider_fee);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        insurance_fee
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long,
+        unrelated_budget_before
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_long,
+        unrelated_spent_before
+    );
+    assert_eq!(unrelated_bucket_after, unrelated_bucket_before);
+    assert_eq!(unrelated_source_after, unrelated_source_before);
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get(),
+        c_tot_before + insurance_before + earnings_before
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
