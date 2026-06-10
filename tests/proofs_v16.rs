@@ -11637,142 +11637,26 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
-// Terminal realization of a source-backed claim (Issue-2 class): at resolved
-// close the winner's claim is realized against its domain backing at the
-// current credit rate BEFORE the face enters the junior receipt pool. The
-// realization must pay exactly the Live conversion entitlement, be funded by
-// consuming the backing exactly once (provider keeps only the remainder), and
-// be residual-neutral (capital/c_tot grow by exactly the consumed atoms while
-// the vault does not move), so the payout snapshot cannot depend on
-// realization order. See the TRACTABILITY NOTE below the assert helper for
-// what is provable within the solver budget and where the rest is covered.
-fn terminal_realization_fixture(
-    pnl: u128,
-    backing: u128,
-    rate: u128,
-) -> (
-    MarketGroupV16HeaderAccount,
-    [Market<u64>; 1],
-    PortfolioAccountV16Account,
-) {
-    let claim_num = pnl * BOUND_SCALE;
-    let backing_num = backing * BOUND_SCALE;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    let market_id = markets[0].engine.asset.market_id.get();
-    header.mode = 1; // Resolved
-    header.resolved_slot = V16PodU64::new(1);
-    header.vault = V16PodU128::new(backing);
-    header.pnl_pos_tot = V16PodU128::new(pnl);
-    header.pnl_matured_pos_tot = V16PodU128::new(pnl);
-    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
-    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
-    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
-    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
-    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
-        market_id,
-        fresh_unliened_backing_num: backing_num,
-        expiry_slot: 100,
-        status: BackingBucketStatusV16::Fresh,
-        ..BackingBucketV16::EMPTY
-    });
-    markets[0].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-            positive_claim_bound_num: claim_num,
-            exact_positive_claim_num: claim_num,
-            fresh_reserved_backing_num: backing_num,
-            credit_rate_num: rate,
-            ..SourceCreditStateV16::EMPTY
-        });
-    account_header.pnl = V16PodI128::new(pnl as i128);
-    account_header.source_domains[0].domain = V16PodU32::new(0);
-    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
-    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
-    (header, markets, account_header)
-}
-
-fn assert_terminal_realization_exact(
-    market: &mut MarketGroupV16ViewMut<'_, u64>,
-    account: &mut PortfolioV16ViewMut<'_>,
-    backing: u128,
-    expected: u128,
-) {
-    let backing_num = backing * BOUND_SCALE;
-    let converted = market
-        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(account)
-        .unwrap();
-    let source = market.markets[0]
-        .engine
-        .source_credit_long
-        .try_to_runtime()
-        .unwrap();
-    // Pays exactly the Live entitlement...
-    assert_eq!(converted, expected);
-    // ...credited to the winner's capital, funded by consuming the backing once...
-    assert_eq!(account.header.capital.get(), expected);
-    assert_eq!(market.header.c_tot.get(), expected);
-    assert_eq!(
-        market.header.source_fresh_backing_total_num.get(),
-        backing_num - expected * BOUND_SCALE
-    );
-    assert_eq!(
-        source.fresh_reserved_backing_num,
-        backing_num - expected * BOUND_SCALE
-    );
-    assert_eq!(source.spent_backing_num, expected * BOUND_SCALE);
-    assert_eq!(source.provider_receivable_num, expected * BOUND_SCALE);
-    // ...with no vault or insurance movement (residual-neutral)...
-    assert_eq!(market.header.vault.get(), backing);
-    assert_eq!(market.header.insurance.get(), 0);
-    // ...and the strengthened senior stack still reconciles, asserted loop-free
-    // (the field deltas above already pin the audit-scan aggregates; the full
-    // validate_shape/validate_with_market sweep is what blows the solver
-    // budget here and is asserted post-close by backing_double_claim_fuzz).
-    assert!(
-        market.header.c_tot.get()
-            + market.header.insurance.get()
-            + market.header.backing_provider_earnings_total.get()
-            + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
-            <= market.header.vault.get()
-    );
-}
-
-// TRACTABILITY NOTE (flagged): only the floored-rate witness below fits the
-// 900s solver budget. Harnesses that enter create_and_consume (the paying
-// realization cases and the counterparty-cure counted-once cases) time out
-// even fully concrete — the in-path account validation forces unwind 40 and
-// the lien create/consume + claim-burn machinery blows up the formula. Their
-// Kani coverage decomposes into already-passing proofs — consume-delta
-// exactness (proof_v16_public_counterparty_lien_consume_creates_receivable_
-// without_value_movement, proof_v16_counterparty_lien_consume_delta_is_
-// receivable_exact_and_fail_closed, proof_v16_counterparty_credit_consumption_
-// reports_atoms_not_scaled_backing), support caps (proof_v16_unliened_source_
-// support_is_capped_by_realizable_backing, proof_v16_cross_account_source_
-// support_sum_capped_by_shared_backing), and the close-ledger partition
-// equality (proof_v16_close_progress_ledger_residual_equation_is_enforced,
-// which subtracts a SINGLE support_consumed term: counterparty cures are
-// counted exactly once by construction) — while the end-to-end glue (exact
-// payout values, counted-once cure, receipt lifecycle) is asserted at runtime
-// by tests/backing_double_claim_fuzz.rs and the spec tests.
-#[kani::proof]
-#[kani::unwind(40)]
-#[kani::solver(cadical)]
-fn proof_v16_terminal_realization_floored_rate_pays_zero_and_moves_nothing() {
-    // CONCRETE WITNESS: face 3, backing 1, rate = floor(CRS/3) -> floored
-    // entitlement is zero; realization must be a value-neutral no-op (nothing
-    // consumed, nothing credited, the provider keeps the backing, the face
-    // stays junior).
-    let pnl = 3u128;
-    let backing = 1u128;
-    let rate = backing * BOUND_SCALE * CREDIT_RATE_SCALE / (pnl * BOUND_SCALE);
-    let (mut header, mut markets, mut account_header) =
-        terminal_realization_fixture(pnl, backing, rate);
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
-
-    kani::cover!(true, "floored-rate realization witness reached");
-    assert_terminal_realization_exact(&mut market, &mut account, backing, 0);
-    assert_eq!(account.header.pnl.get(), pnl as i128);
-}
+// Terminal realization of a source-backed claim (Issue-2 class) — KANI
+// TRACTABILITY NOTE (flagged): every harness that enters the realize/convert
+// path times out at the 900s solver budget, even fully concrete (the in-path
+// account validation forces unwind 40 and the per-domain U256 credit math
+// blows up the formula; a single concrete witness passed once at 658s and
+// timed out on three re-runs — permanently on the budget line). The realize
+// primitive therefore has NO direct Kani harness. Its coverage decomposes
+// into already-passing proofs — consume-delta exactness
+// (proof_v16_public_counterparty_lien_consume_creates_receivable_without_
+// value_movement, proof_v16_counterparty_lien_consume_delta_is_receivable_
+// exact_and_fail_closed, proof_v16_counterparty_credit_consumption_reports_
+// atoms_not_scaled_backing), support caps (proof_v16_unliened_source_support_
+// is_capped_by_realizable_backing, proof_v16_cross_account_source_support_
+// sum_capped_by_shared_backing), the close-ledger partition equality
+// (proof_v16_close_progress_ledger_residual_equation_is_enforced), and the
+// expired-backing liveness witness (proof_v16_expired_backing_yields_zero_
+// realizable_support_after_expiry) — while the end-to-end realize semantics
+// (exact payout values, no-double-pay, idempotence, ordering, expiry
+// liveness) are asserted at runtime by tests/backing_double_claim_fuzz.rs
+// (5 randomized properties, 300 cases each) and the spec tests.
 
 
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
