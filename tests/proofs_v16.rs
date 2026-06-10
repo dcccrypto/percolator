@@ -19,7 +19,8 @@ use percolator::v16::{
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -27,6 +28,7 @@ use percolator::v16::{
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
+    TradeRequestV16,
     TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
@@ -12383,3 +12385,41 @@ fn proof_v16_cure_and_cancel_close_rejects_without_active_close() {
     assert_eq!(account.header.capital.get(), 0);
     assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
 }
+
+// ============ INTRACTABLE-TIER GRIND: realize-body verdict ============
+// CONCLUSIVELY INTRACTABLE (full elimination, 2026-06-10): the terminal-
+// realization full-backing witness exceeds the 900s budget under EVERY
+// reduction, separately and combined:
+//   (a) fully concrete inputs                              -> TIMEOUT 900s
+//   (b) + in-path account validation stubbed via
+//       #[kani::stub] (mechanism works; generic impl
+//       methods need an early-bound `'a: 'a` replacement)  -> TIMEOUT 900s
+//   (c) + SAT-solver swap                                  -> kissat 4.x
+//       rejects CBMC's CNF dialect (tooling dead-end)
+//   (d) BOUND_SCALE/CREDIT_RATE_SCALE shrunk to 8 under
+//       cfg(kani) (arithmetic-width hypothesis)            -> >600s
+//   (e) (b) and (d) combined                               -> >500s
+// Conclusion: the bulk is the lien create/consume + claim-burn +
+// encumbrance-proof machinery itself — the very subject of the proof — not
+// the validators, not the 1e12 arithmetic width, not the solver. A
+// kani::any() inductive-state formulation does not escape this either: the
+// audit-scan loops are sized by the fixed 16-slot account structs, not by
+// harness cardinality. The realize/cure/convert bodies stay covered by the
+// component proofs (consume-delta exactness, support caps, partition
+// equality) and the runtime suites (backing_double_claim_fuzz, spec tests).
+
+// ============ INTRACTABLE-TIER GRIND: trade-seam verdict ============
+// The pure-execute trade step (apply_trade_after_refresh — the batch
+// refactor's settle-free fill: preflight, fee, position deltas, OI) ALSO
+// exceeds the 900s budget fully concrete on two flat accounts (zero fee, no
+// recertify). Combined with the realize-body elimination above, the verdict
+// is uniform: every transition that mutates an account pair or source-claim
+// state through the real 16-slot engine structs is beyond the budget; the
+// tractable frontier is single-account ops without claim machinery plus all
+// gate/rejection paths. A kani wrapper for the seam
+// (kani_apply_trade_after_refresh_not_atomic) is kept in src/v16.rs for
+// future attempts (e.g. if the account struct ever gains a cfg(kani)
+// reduced-leg profile). Trade-fill semantics remain covered by the spec
+// tests (v16_risk_increasing_trade_*, batch tests) and component proofs
+// (trade_preflight_risk_gate, checked_trade_fee, position-delta and OI
+// proofs).

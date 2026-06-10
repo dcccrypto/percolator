@@ -12440,6 +12440,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    #[cfg(kani)]
+    pub fn kani_apply_trade_after_refresh_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        request: TradeRequestV16,
+        recertify_after_fill: bool,
+    ) -> V16Result<(u128, u128, u128, bool)> {
+        let out = self.apply_trade_after_refresh_not_atomic(
+            long_account,
+            short_account,
+            request,
+            recertify_after_fill,
+        )?;
+        Ok((out.fee_a, out.fee_b, out.notional, out.risk_increasing))
+    }
+
     fn accumulate_batch_trade_apply(
         outcome: &mut BatchTradeOutcomeV16,
         risk_increasing: &mut bool,
