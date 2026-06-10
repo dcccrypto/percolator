@@ -242,6 +242,7 @@ fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
         SideV16::Short
     };
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let result = market.finalize_side_reset_not_atomic(0, side);
     let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
@@ -263,6 +264,9 @@ fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
     } else {
         assert_eq!(after.mode_short, SideModeV16::Normal);
     }
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -1708,6 +1712,7 @@ fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>
         .get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     market
         .restart_empty_asset_preserving_insurance_budget_not_atomic(
             selected_index,
@@ -1818,6 +1823,9 @@ fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>
     assert_eq!(market.header.risk_epoch.get(), old_risk_epoch + 1);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.last_asset_activation_slot.get(), now_slot);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -8087,6 +8095,7 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     let oracle_epoch_before = header.oracle_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let outcome = market
         .accrue_asset_to_not_atomic(0, now_slot, price, 0, true)
         .unwrap();
@@ -8117,6 +8126,9 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -11852,6 +11864,7 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
             finalized: false,
         });
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let paid_out = market
@@ -11873,6 +11886,9 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
     assert!(!receipt.present);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    // The terminal clear pays nothing (claimable is zero), so the junior
+    // pool is untouched by receipt dematerialization.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 // Recoverable counterparty backing principal is a senior-side claim: the
