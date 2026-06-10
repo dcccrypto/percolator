@@ -456,3 +456,52 @@ fn terminal_close_with_expired_backing_does_not_strand() {
         .is_err());
     assert_eq!(market.validate_shape(), Ok(()));
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(400))]
+
+    /// Converged from toly v16.8.11 (ce073dc), finding-3 conservation coverage.
+    /// The non-monotone payout in backing / dust-grief is a DISTRIBUTION question,
+    /// not a solvency one. This pins the security invariants across the FULL backing
+    /// range including the dust regime (backing from 0 up to the full face) with a
+    /// non-empty junior pool: the close always completes (no DoS), value is conserved
+    /// (no mint/burn, no strand, no LoF), the winner is never paid more than its face
+    /// plus capital, and the shape reconciles. Whatever the realize-vs-pool split,
+    /// none of these can be violated by funding (or not funding) the domain.
+    #[test]
+    fn backed_winner_close_conserves_across_all_backing_levels(
+        pnl in 2u128..=1_000_000u128,
+        backing_frac in 0u128..=1000u128,
+        pool in 0u128..=1_000_000u128,
+    ) {
+        // backing spans 0 (zero-backed source claim) .. full face.
+        let backing = pnl.saturating_mul(backing_frac) / 1000;
+        let (mut header, mut markets, mut account_header) =
+            resolved_market_with_backed_winner(pnl, backing, pool);
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        prop_assume!(market.validate_shape() == Ok(()));
+        prop_assume!(account.validate_with_market(&market.as_view()) == Ok(()));
+
+        let vault_before = market.header.vault.get();
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("backed winner close must not revert at any backing level (no DoS)");
+        // No DoS: the close fully settles rather than stalling.
+        let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
+        prop_assert!(closed, "close did not finalize at backing={}", backing);
+        let paid = vault_before - market.header.vault.get();
+
+        // No LoF: value conserved (paid out of the vault, nothing minted),
+        // winner never paid above its face (capital is 0 here), vault never
+        // over-drained, and the shape still reconciles.
+        prop_assert!(paid <= vault_before);
+        prop_assert!(paid <= pnl);
+        prop_assert_eq!(account.header.pnl.get(), 0);
+        prop_assert_eq!(account.header.capital.get(), 0);
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+        // The unclaimed remainder (if any) stays in the vault as junior pool for
+        // other claimants — it is neither stranded-unreconcilable nor lost.
+        prop_assert!(market.header.vault.get() <= vault_before);
+    }
+}
