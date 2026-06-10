@@ -13568,6 +13568,82 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Terminal realization for a source-backed winner: realize the account's
+    /// outstanding source-credit claims against their domain backing at the
+    /// current credit rate (lien consumption -> capital credit) BEFORE the claim
+    /// face enters the junior receipt pool. A settlement-quality claim is
+    /// realizable at rate in Live (convert_released_pnl_to_capital); resolution
+    /// must not strip that entitlement -- without this step the wind-down
+    /// RELEASES the backing to the provider while the winner is haircut from a
+    /// residual pool that (correctly) excludes the very backing underwriting the
+    /// claim. Residual-neutral: capital/c_tot grow by exactly the consumed
+    /// backing atoms, so the payout snapshot does not depend on realization
+    /// order.
+    fn realize_source_backed_claims_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        if decode_bool(account.header.resolved_payout_receipt.present)? {
+            // The face is already frozen into the receipt pool.
+            return Ok(0);
+        }
+        if !Self::account_has_source_claims(&account.as_view())? {
+            return Ok(0);
+        }
+        let pos = account.header.pnl.get().max(0) as u128;
+        if pos == 0 {
+            return Ok(0);
+        }
+        // Release the account's persisted liens first (the terminal burn would do
+        // this anyway): the conversion consumes only UNLIENED claims, so a still-
+        // liened claim would make the realizable estimate exceed what consumption
+        // can deliver and dead-lock the close with LockActive.
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_liened_num.get() != 0 {
+                let d = source.domain.get() as usize;
+                self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+            }
+            slot += 1;
+        }
+        if self.account_source_realizable_support(&account.as_view(), pos)? == 0 {
+            return Ok(0);
+        }
+        // Terminal: PnL reservations no longer gate realization.
+        account.header.reserved_pnl = V16PodU128::new(0);
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        // If the payout snapshot was captured before this account realized (another
+        // winner closed first), the realized face is still counted in the ledger's
+        // unreceipted bound. Refine it out, or the stale bound dilutes the payout
+        // rate forever and blocks every remaining receipt from reaching the
+        // terminal rate (never finalized, never clearable).
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            let pos_after = account.header.pnl.get().max(0) as u128;
+            let face_burned = pos
+                .checked_sub(pos_after)
+                .ok_or(V16Error::CounterUnderflow)?;
+            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+            let decrease_num = V16Core::bound_num_from_amount(face_burned)?
+                .min(ledger.terminal_claim_bound_unreceipted_num);
+            if decrease_num != 0 {
+                self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
+            }
+        }
+        Ok(converted)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_realize_source_backed_claims_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+    }
+
     fn claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13700,6 +13776,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?

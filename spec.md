@@ -1,10 +1,10 @@
-# Risk Engine Spec (Source of Truth) — v16.8.6 Realizable Full Shared Cross-Margin
+# Risk Engine Spec (Source of Truth) — v16.8.7 Realizable Full Shared Cross-Margin
 
 **Design:** protected principal + full instance-local cross-margin + source-domain realizable PnL credit + source-credit liens + insurance-credit reservations + exact counterparty/insurance lien lifecycle + single-category residual-cure accounting + quote-value flow proof + reservation encumbrance proof + stock reconciliation + explicit rounding-residue sink + bounded recovery fallback envelope + expiry-reconciled backing buckets + non-double-counted insurance capacity + single-sided margin penalties + strict close priority + local market-side bankruptcy domains + mutable asset lifecycle + preemptible bankrupt close + durable close-progress ledger + pending-loss obligations + instance isolation.  
 **Scope:** one Percolator market-group instance for one quote-token vault, with up to `N` configured asset slots per `PortfolioAccount` and unbounded global account count. A UI MAY aggregate multiple instances, but each instance is an independent vault, solvency, credit, insurance, B, PnL, payout, and recovery domain.  
 **Status:** normative source of truth. Terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
 
-This revision supersedes v16.8.5: recoverable counterparty backing principal (Fresh-bucket `fresh_reserved_backing_num` atoms) is classified as senior-side vault stock — covered by `C_tot + I + backing_provider_earnings + counterparty_backing_principal <= V` and excluded from the junior residual pool used for haircut support and the resolved payout snapshot — and configured stock-class sets MUST include the internal close transit classes their close paths credit (§5.1.1). v16.8.5 superseded v16.8.4 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
+This revision supersedes v16.8.6 with two corrections. (1) The residual partition no longer lists `consumed_counterparty_credit_lien_backing` as a separate subtrahend: ALL source-credit lien consumption used for residual cure (counterparty- or insurance-backed) is recorded exactly once as `support_consumed`, `insurance_spent` records direct insurance allocation only, and partition categories are pairwise disjoint — the prior text put counterparty-backed liens inside `SupportPool` while also requiring a standalone counterparty subtrahend, so one conforming reading subtracted the same cure twice and finalized closes with uncovered loss. (2) The v16.8.6 senior classification of recoverable counterparty backing principal is completed with a terminal-realization rule: at resolved close, an account's outstanding source-credit claims MUST be realized against their domain backing at the current credit rate before the claim face enters the resolved payout receipt pool; otherwise resolution would strip claims that were realizable in Live (the wind-down releases the backing to the provider while the winner is haircut from a pool that excludes it). v16.8.6 classified recoverable counterparty backing principal as senior-side vault stock (`C_tot + I + backing_provider_earnings + counterparty_backing_principal <= V`, excluded from the junior residual pool and the resolved payout snapshot); v16.8.5 superseded v16.8.4 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
 
 ```text
 Inside one trusted instance:
@@ -42,7 +42,7 @@ Every top-level instruction is atomic. Any failed precondition, checked arithmet
 9. **Credit liens for durable use:** withdrawals, conversions, fee payment from PnL, residual curing, and risk-increasing trades that depend on positive PnL MUST reserve or consume a source-domain credit lien. Maintenance-only credit MAY be soft but must revalidate on every favorable action.
 10. **No double use of credit or insurance:** the same source-domain claim, backing, or insurance atom cannot support two accounts, two domains, two instances, or two risk increases at once. Face claim, backing reservation, and insurance reservation are tracked by a single canonical ledger and released only by deterministic rules.
 11. **Insurance-backed lien lifecycle is explicit:** creating, consuming, releasing, impairing, or recovering an insurance-backed source-credit lien MUST update `valid_liened_insurance_num`, `impaired_liened_insurance_num`, `insurance_credit_reserved_num`, insurance spend/reservation counters, and vault/insurance balances exactly once.
-12. **Insurance-backed credit is insurance in close accounting:** an insurance-backed source-credit lien consumed for residual cure MUST be recorded exactly once as `insurance_spent` or an explicitly equivalent insurance-lien-cure term. It MUST NOT also count as `consumed_counterparty_credit_lien_backing`, `support_consumed`, or generic source-credit support.
+12. **Source-credit lien cures are counted once:** a source-credit lien consumed for residual cure — counterparty-backed or insurance-backed — MUST reduce the residual partition through exactly one category (`support_consumed`); no second partition category may subtract the same cure. An insurance-backed lien cure MUST additionally debit the insurance stock and the domain insurance budget exactly once through a balanced `TokenValueFlowProof` (`CloseInsuranceSpent`); that funding debit is stock accounting, not a residual-partition subtraction, and MUST NOT also be booked as direct `insurance_spent`.
 13. **Quote-value conservation is mandatory:** every instruction that moves quote-token value internally or externally MUST produce a balanced `TokenValueFlowProof` over quote atoms only. Encumbrances, source-credit reservations, backing buckets, and liens are not value classes and MUST be proven by a separate `ReservationEncumbranceProof`.
 14. **Rounding residue has an explicit sink:** every quote-atom settlement/allocation residue caused by conservative rounding MUST be credited to `SettlementRoundingResidue` or `UnallocatedProtocolSurplus` in the same `TokenValueFlowProof`. Rounding residue MUST NOT create account health, source-credit backing, insurance credit, payout entitlement, or senior capital unless later moved through an explicit balanced transition.
 15. **No open unbacked loss curing:** open positive PnL may support health, but it MUST NOT cure a bankruptcy residual unless a source-domain backing lien is consumed and the supporting face claim is locked/burned.
@@ -527,11 +527,13 @@ consume_lien_from_insurance(reservation, amount):
         record external_insurance_payout in the TokenValueFlowProof
     else:
         record exactly one internal quote-value credit in the TokenValueFlowProof and close/payout state:
-            - CloseProgressLedger.insurance_spent for residual cure; or
+            - CloseProgressLedger.support_consumed for source-credit-lien residual cure
+              (the insurance funding side is the I/insurance-budget debit recorded
+              by the CloseInsuranceSpent flow class); or
             - staged_domain_insurance_debit for staged close insurance; or
             - ResolvedPayoutLedger.paid_effective for resolved/recovery payout.
-        The same consume MUST NOT increment consumed_counterparty_credit_lien_backing,
-        support_consumed, or any generic source-credit-support term.
+        The same consume MUST NOT increment more than one residual-partition
+        category, and MUST NOT also be booked as direct insurance_spent.
 
     reduce or finalize the locked source-domain claim in the same atomic step
     require all senior and quote-value and reservation-conservation invariants hold after the debit
@@ -645,8 +647,9 @@ Close/support classification for source-credit liens:
 ```text
 if backing_source == CounterpartyBucket and purpose == ResidualCure:
     consumed scaled backing amount is converted to cure_atoms = amount / BOUND_SCALE
-    cure_atoms is recorded as consumed_counterparty_credit_lien_backing
-    and MUST NOT be recorded as insurance_spent.
+    cure_atoms is recorded EXACTLY ONCE as source-credit support (support_consumed)
+    and MUST NOT be recorded as insurance_spent or as any additional
+    counterparty-specific partition subtrahend.
 
 if backing_source == CounterpartyBucket and purpose in {Withdrawal, Conversion, Fee, Payout}:
     consumed scaled backing amount is converted to support_atoms = amount / BOUND_SCALE
@@ -663,9 +666,10 @@ if backing_source == CounterpartyBucket and purpose in {Withdrawal, Conversion, 
     alone never sends quote tokens out of the vault.
 
 if backing_source == InsuranceReservation and purpose == ResidualCure:
-    consumed value is recorded as insurance_spent
-    and MUST NOT be recorded as consumed_counterparty_credit_lien_backing,
-    support_consumed, or generic source-credit support.
+    cure_atoms is recorded EXACTLY ONCE as source-credit support (support_consumed);
+    the insurance funding is debited from I and the domain insurance budget through
+    the CloseInsuranceSpent flow class and MUST NOT also be booked as direct
+    insurance_spent or any second partition category.
 
 if backing_source == InsuranceReservation and purpose in {Withdrawal, Conversion, Fee, Payout}:
     consumed value is recorded as external insurance-backed payout/spend
@@ -1028,10 +1032,9 @@ remaining_residual =
   - b_loss_booked
   - explicit_loss_assigned
   - pending_obligation_credits
-  - consumed_counterparty_credit_lien_backing
 ```
 
-`insurance_spent` includes direct insurance allocation and insurance-backed source-credit lien consumption used for residual cure. `consumed_counterparty_credit_lien_backing` includes only counterparty-backed source-credit lien consumption. These two categories are disjoint. A residual-cure instruction that increments both or neither for the same consumed lien MUST revert.
+Every cured quote atom appears in exactly one partition category. `support_consumed` includes ALL source-credit lien consumption used for residual cure — counterparty-backed and insurance-backed alike — each consumed lien recorded exactly once; there is no separate `consumed_counterparty_credit_lien_backing` subtrahend (a partition listing one would double-subtract every counterparty-lien cure that also flows through the support pool). `insurance_spent` records direct insurance allocation only. The categories are pairwise disjoint: a residual-cure instruction that books one consumed lien into two partition categories, or into none, MUST revert. The insurance-funding side of an insurance-backed lien cure is recorded exactly once by the insurance stock debit, the domain insurance budget ledger, and the `CloseInsuranceSpent` value-flow class — never as a second residual-partition subtraction. Structurally, the total residual reduction across categories MUST equal the value the close's `TokenValueFlowProof`s actually moved or recognized; subtracting more from residual than the flow proofs account for is an invariant failure.
 
 Accrual and mark updates that only change unrealized PnL, K/F indexes, effective prices, claim bounds, or credit rates normally move no quote-token value. They MUST provide the relevant reservation/bound proofs and may have an empty zero-value `TokenValueFlowProof`.
 
@@ -1053,7 +1056,7 @@ V =
   + unallocated_protocol_surplus
 ```
 
-The exact classes included in stock reconciliation are implementation-configured but immutable after initialization. Every quote atom in `V` MUST appear in exactly one stock class. A configuration whose close paths credit internal transit value (`CloseSupportConsumed`, `CloseInsuranceSpent`, `CloseCounterpartyCreditConsumed`, `BResidualBooked`) MUST include those transit classes in its configured set (or prove them zero at every reconciliation point); the example equation above lists only the persistent classes. Recoverable counterparty backing principal (Fresh-bucket `fresh_reserved_backing_num` atoms) is provider-recoverable senior-side value and a vault claim: it MUST be covered by `V` together with the senior stack (`C_tot + I + backing_provider_earnings + counterparty_backing_principal <= V`) and MUST NOT be counted in the junior residual pool used for haircut support or the resolved payout snapshot. `settlement_rounding_residue_total` and `unallocated_protocol_surplus` are protocol-owned, non-user-claim value and MUST NOT be used as proof of account health, source-credit backing, insurance credit, hedge collateral, or payout entitlement unless explicitly moved through a balanced `TokenValueFlowProof` and all senior invariants remain true.
+The exact classes included in stock reconciliation are implementation-configured but immutable after initialization. Every quote atom in `V` MUST appear in exactly one stock class. A configuration whose close paths credit internal transit value (`CloseSupportConsumed`, `CloseInsuranceSpent`, `CloseCounterpartyCreditConsumed`, `BResidualBooked`) MUST include those transit classes in its configured set (or prove them zero at every reconciliation point); the example equation above lists only the persistent classes. Recoverable counterparty backing principal (Fresh-bucket `fresh_reserved_backing_num` atoms) is provider-recoverable senior-side value and a vault claim: it MUST be covered by `V` together with the senior stack (`C_tot + I + backing_provider_earnings + counterparty_backing_principal <= V`) and MUST NOT be counted in the junior residual pool used for haircut support or the resolved payout snapshot. The exclusion is sound only because outstanding source-credit claims realize against their backing at terminal: at resolved close, BEFORE an account's positive claim face enters the resolved payout receipt pool, the engine MUST realize the account's source-credit claims against their domain backing at the current credit rate (terminal lien release followed by atomic lien consumption credited to account capital). The realization is residual-neutral (`C_tot` grows by exactly the consumed backing atoms while `V` is unchanged), so the payout snapshot does not depend on realization order, and only backing net of realizable claims is provider-recoverable. Stripping a claim that was realizable in Live by resolving the market is forbidden. `settlement_rounding_residue_total` and `unallocated_protocol_surplus` are protocol-owned, non-user-claim value and MUST NOT be used as proof of account health, source-credit backing, insurance credit, hedge collateral, or payout entitlement unless explicitly moved through a balanced `TokenValueFlowProof` and all senior invariants remain true.
 
 Public instructions that do not touch quote-token stock classes MAY rely on a valid prior stock reconciliation plus a balanced zero-value flow proof. Recovery MUST perform direct stock reconciliation before clearing recovery state. A balanced flow proof alone is insufficient if stock classes are not already reconciled.
 
@@ -1349,11 +1352,11 @@ CanceledIfCured
 `SupportPool` for residual curing may include only:
 - senior capital;
 - durable realized nonjunior gains;
-- settlement-quality counterparty-backed source-credit liens whose backing is consumed atomically;
+- settlement-quality source-credit liens (counterparty- or insurance-backed) whose backing is consumed atomically;
 - legs being closed/finalized with matching source-domain loss recognition;
 - finalized pending-obligation surplus.
 
-Insurance-backed source-credit liens are excluded from SupportPool and are handled only by `InsuranceAllocated`, `insurance_spent`, or resolved/recovery payout accounting.
+Every source-credit lien consumed through SupportPool reduces the residual partition exactly once, as `support_consumed`. An insurance-backed lien consumed this way additionally debits I and the domain insurance budget exactly once (`CloseInsuranceSpent`); direct insurance allocation (`InsuranceAllocated`) is the separate `insurance_spent` partition category and never overlaps with lien-funded support.
 
 Open non-candidate positive PnL and soft maintenance credit are excluded from residual curing.
 
@@ -1377,7 +1380,6 @@ remaining_residual =
   - b_loss_booked
   - explicit_loss_assigned
   - pending_obligation_credits
-  - consumed_counterparty_credit_lien_backing
 ```
 
 Every continuation first checks owner cure-and-cancel after any cancel escrow. New deposits intended for cancel MUST NOT be consumed as support before this check. Continuation must strictly reduce close progress after worst-case drift; otherwise route to recovery.

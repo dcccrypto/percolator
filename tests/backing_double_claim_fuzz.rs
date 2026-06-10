@@ -16,7 +16,7 @@ use percolator::{
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
     ResolvedCloseOutcomeV16, SourceCreditStateV16, SourceCreditStateV16Account, V16Config,
-    V16PodI128, V16PodU128, V16PodU64, CREDIT_RATE_SCALE,
+    V16PodI128, V16PodU128, V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
 };
 use proptest::prelude::*;
 
@@ -159,4 +159,246 @@ proptest! {
         prop_assert_eq!(vault_after, 0);
         prop_assert_eq!(vault_first, 0);
     }
+}
+
+/// Resolved single-winner market where the winner's positive PnL is a
+/// SOURCE-BACKED claim: claim_bound == pnl, backed by `backing` atoms of
+/// counterparty backing on domain 0 (credit rate = backing/pnl). The vault
+/// holds ONLY the backing plus `extra_residual` of ordinary junior funds.
+fn resolved_market_with_backed_winner(
+    pnl: u128,
+    backing: u128,
+    extra_residual: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = resolved_market_with_backing(0, pnl, extra_residual, backing);
+    header.source_claim_bound_total_num = V16PodU128::new(pnl * BOUND_SCALE);
+    if backing != 0 {
+        // The claim leans on this domain's backing: rate = backing/claim.
+        let claim_num = pnl * BOUND_SCALE;
+        let backing_num = backing * BOUND_SCALE;
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: claim_num,
+                exact_positive_claim_num: claim_num,
+                fresh_reserved_backing_num: backing_num,
+                credit_rate_num: (backing_num * CREDIT_RATE_SCALE / claim_num)
+                    .min(CREDIT_RATE_SCALE),
+                ..SourceCreditStateV16::EMPTY
+            });
+    }
+    let mut account_header = winner_account(0, pnl);
+    let market_id_engine = markets[0].engine.asset.market_id.get();
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id_engine);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(pnl * BOUND_SCALE);
+    (header, markets, account_header)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// A source-backed winner's claim is realizable against its domain backing at
+    /// the current credit rate in Live (convert_released_pnl_to_capital). Resolution
+    /// must not strip that entitlement: at resolved close the winner must be paid
+    /// exactly the Live-realizable portion — funded by consuming the backing —
+    /// instead of being haircut from a pool that excludes the very backing
+    /// underwriting the claim while the provider exits whole.
+    #[test]
+    fn terminal_close_realizes_backed_source_claim(
+        pnl in 1u128..=1_000_000u128,
+        backing_frac in 1u128..=1000u128,
+    ) {
+        let backing = (pnl.saturating_mul(backing_frac) / 1000).max(1).min(pnl);
+        // The engine's Live entitlement, mirrored exactly (floored credit rate,
+        // floored support): rate = floor(backing_num * CRS / claim_num),
+        // realizable = floor(claim_num * rate / CRS / BOUND_SCALE), backing-capped.
+        let claim_num = pnl * BOUND_SCALE;
+        let backing_num = backing * BOUND_SCALE;
+        let rate = (backing_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
+        let realizable =
+            ((claim_num * rate / CREDIT_RATE_SCALE) / BOUND_SCALE).min(backing).min(pnl);
+
+        let (mut header, mut markets, mut account_header) =
+            resolved_market_with_backed_winner(pnl, backing, 0);
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+        prop_assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+        let vault_before = market.header.vault.get();
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("backed winner close must not revert");
+        let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
+        prop_assert!(closed, "backed winner did not fully close");
+        let paid = vault_before - market.header.vault.get();
+
+        // The Live-realizable portion of the claim must reach the winner...
+        prop_assert_eq!(paid, realizable);
+        // ...a fully-backed claim realizes in full...
+        if backing >= pnl {
+            prop_assert_eq!(paid, pnl);
+        }
+        // ...and the provider keeps exactly the unconsumed remainder.
+        prop_assert_eq!(market.header.vault.get(), backing - paid);
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// Same realization property when part of the winner's claim is still LIENED
+    /// at terminal (e.g. a Live lock that never completed). The close must first
+    /// release the account's liens (Finding-A wind-down semantics) and then
+    /// realize the full claim — a liened claim must neither dead-lock the close
+    /// (realizable-vs-consumable mismatch -> LockActive) nor strip the winner.
+    #[test]
+    fn terminal_close_realizes_liened_backed_source_claim(
+        pnl in 1u128..=1_000_000u128,
+        lien_frac in 1u128..=1000u128,
+    ) {
+        let backing = pnl; // fully backed
+        let liened = (pnl.saturating_mul(lien_frac) / 1000).max(1).min(pnl);
+        let claim_num = pnl * BOUND_SCALE;
+        let backing_num = backing * BOUND_SCALE;
+        let liened_num = liened * BOUND_SCALE;
+
+        let (mut header, mut markets, mut account_header) =
+            resolved_market_with_backed_winner(pnl, backing, 0);
+        // Move `liened` of the backing under an account-held counterparty lien.
+        let engine_market_id = markets[0].engine.asset.market_id.get();
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: engine_market_id,
+            fresh_unliened_backing_num: backing_num - liened_num,
+            valid_liened_backing_num: liened_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        // Stored rate covers only un-liened backing for new credit.
+        let available_num = backing_num - liened_num;
+        let stored_rate =
+            (available_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: claim_num,
+                exact_positive_claim_num: claim_num,
+                fresh_reserved_backing_num: backing_num,
+                valid_liened_backing_num: liened_num,
+                credit_rate_num: stored_rate,
+                ..SourceCreditStateV16::EMPTY
+            });
+        account_header.source_domains[0].source_claim_liened_num = V16PodU128::new(liened_num);
+        account_header.source_domains[0].source_claim_counterparty_liened_num =
+            V16PodU128::new(liened_num);
+        account_header.source_domains[0].source_lien_effective_reserved =
+            V16PodU128::new(liened);
+        account_header.source_domains[0].source_lien_counterparty_backing_num =
+            V16PodU128::new(liened_num);
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        prop_assume!(market.validate_shape() == Ok(()));
+        prop_assume!(account.validate_with_market(&market.as_view()) == Ok(()));
+
+        let vault_before = market.header.vault.get();
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("liened backed winner close must not revert");
+        let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
+        prop_assert!(closed, "liened backed winner did not fully close");
+        let paid = vault_before - market.header.vault.get();
+
+        // Fully backed claim realizes in full after the terminal lien release.
+        prop_assert_eq!(paid, pnl);
+        prop_assert_eq!(market.header.vault.get(), 0);
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+    }
+}
+
+/// Ordering regression: winner A (plain junior claim) closes FIRST and captures
+/// the payout snapshot while winner B's source-backed face is still outstanding.
+/// B then realizes against its backing at terminal. B's realized face must be
+/// refined OUT of the ledger's unreceipted bound — otherwise the stale bound
+/// dilutes the payout rate forever and A's receipt can never reach the terminal
+/// rate (never finalized, never clearable: stranded market).
+#[test]
+fn realization_after_snapshot_refines_unreceipted_bound() {
+    let pnl_a = 1_000u128; // plain junior winner
+    let pnl_b = 500u128; // source-backed winner
+    let backing = pnl_b; // fully backed
+    let residual = pnl_a; // honest junior pool exactly covers A
+
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(residual + backing);
+    header.pnl_pos_tot = V16PodU128::new(pnl_a + pnl_b);
+    header.pnl_matured_pos_tot = V16PodU128::new(pnl_a + pnl_b);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl_a + pnl_b);
+    header.pnl_pos_bound_tot_num = V16PodU128::new((pnl_a + pnl_b) * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(pnl_b * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing * BOUND_SCALE);
+    let engine_market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: engine_market_id,
+        fresh_unliened_backing_num: backing * BOUND_SCALE,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: pnl_b * BOUND_SCALE,
+            exact_positive_claim_num: pnl_b * BOUND_SCALE,
+            fresh_reserved_backing_num: backing * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let mut a_header = winner_account(0, pnl_a);
+    let mut b_header = winner_account(0, pnl_b);
+
+    b_header.source_domains[0].domain = V16PodU32::new(0);
+    b_header.source_domains[0].source_claim_market_id = V16PodU64::new(engine_market_id);
+    b_header.source_domains[0].source_claim_bound_num = V16PodU128::new(pnl_b * BOUND_SCALE);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_header);
+    let mut b = PortfolioV16ViewMut::new(&mut b_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(a.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(b.validate_with_market(&market.as_view()), Ok(()));
+
+    // A closes first: captures the snapshot while B's face is unreceipted.
+    market.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+    let a_receipt = a.header.resolved_payout_receipt.try_to_runtime().unwrap();
+    assert!(a_receipt.present && !a_receipt.finalized); // diluted by B's face
+
+    // B realizes against its backing at terminal close.
+    let vault_before_b = market.header.vault.get();
+    market.close_resolved_account_not_atomic(&mut b, 0).unwrap();
+    assert_eq!(vault_before_b - market.header.vault.get(), pnl_b);
+    assert_eq!(b.header.pnl.get(), 0);
+    assert_eq!(b.header.capital.get(), 0);
+
+    // The refined bound lets A top up to its full honest entitlement and FINALIZE.
+    let topped = market.claim_resolved_payout_topup_not_atomic(&mut a).unwrap();
+    let a_receipt = a.header.resolved_payout_receipt.try_to_runtime().unwrap();
+    assert_eq!(a_receipt.paid_effective, pnl_a);
+    assert!(a_receipt.finalized, "stale unreceipted bound left A unfinalizable");
+    assert!(topped > 0);
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
 }
