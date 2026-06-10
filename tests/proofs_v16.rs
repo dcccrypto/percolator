@@ -12353,3 +12353,33 @@ fn proof_v16_claim_resolved_payout_topup_preflight_rejects_unready() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(account.header.capital.get(), 0);
 }
+
+// cure_and_cancel_close preflight: curing a forced close is allowed ONLY for
+// an ACTIVE close ledger with no irreversible progress. An account with no
+// close in progress (the overwhelmingly common state) must reject with
+// LockActive before the heavy refresh path runs — and before any mutation —
+// so the cure entrypoint cannot be used as a free refresh/settle or touch
+// value on accounts that have nothing to cure. (The cure body itself routes
+// through full_account_refresh, which is Kani-intractable; its value
+// semantics are covered by the wrapper's runtime suite.)
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_cure_and_cancel_close_rejects_without_active_close() {
+    let deposit_raw: u8 = kani::any();
+    let deposit = deposit_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let vault_before = header.vault.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.cure_and_cancel_close_not_atomic(&mut account, deposit);
+
+    kani::cover!(deposit > 0, "cure preflight covers nonzero optional deposit");
+    kani::cover!(deposit == 0, "cure preflight covers zero deposit");
+    assert_eq!(result, Err(V16Error::LockActive));
+    // Rejected before mutation: no value or account state moved.
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
+}
