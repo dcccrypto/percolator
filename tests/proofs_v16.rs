@@ -9125,6 +9125,21 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
     assert_eq!(result.is_ok(), expected_ok);
     if expected_ok {
         let (next_bucket, next_source) = result.unwrap();
+        let c_tot: u128 = kani::any::<u8>() as u128;
+        let insurance: u128 = kani::any::<u8>() as u128;
+        let backing_provider_earnings: u128 = kani::any::<u8>() as u128;
+        let junior_residual_before: u128 = kani::any::<u8>() as u128;
+        let senior_backing_before = source_fresh / BOUND_SCALE;
+        let senior_backing_after = next_source.fresh_reserved_backing_num / BOUND_SCALE;
+        let vault = c_tot
+            + insurance
+            + backing_provider_earnings
+            + senior_backing_before
+            + junior_residual_before;
+        let residual_before = vault
+            .saturating_sub(c_tot + insurance + backing_provider_earnings + senior_backing_before);
+        let residual_after = vault
+            .saturating_sub(c_tot + insurance + backing_provider_earnings + senior_backing_after);
         let expected_status =
             if amount != 0 && bucket_fresh == 0 && bucket_valid == amount && bucket_impaired == 0 {
                 BackingBucketStatusV16::Expired
@@ -9148,6 +9163,15 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
         assert_eq!(
             next_source.provider_receivable_num,
             source_receivable + amount
+        );
+        assert_eq!(
+            senior_backing_after + amount / BOUND_SCALE,
+            senior_backing_before
+        );
+        assert_eq!(residual_after, residual_before + amount / BOUND_SCALE);
+        kani::cover!(
+            amount > 0 && junior_residual_before > 0 && senior_backing_after > 0,
+            "counterparty lien consume reclassifies part of senior backing into junior residual"
         );
     } else {
         assert_eq!(result, Err(V16Error::CounterUnderflow));
