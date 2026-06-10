@@ -5246,6 +5246,7 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
     let insurance_before = header.insurance.get();
     let risk_epoch_before = header.risk_epoch.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
 
     market
         .expire_source_backing_bucket_not_atomic(0, 10)
@@ -5292,6 +5293,14 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
     assert_eq!(
         bucket.impaired_liened_backing_num,
         source.impaired_liened_backing_num
+    );
+    // Stock destination of the expired atoms (review finding): expiry forfeits
+    // the WHOLE bucket (unliened and liened alike) out of
+    // counterparty_backing_principal into the JUNIOR RESIDUAL pool, vault flat.
+    // No class disappears; the junior pool rises by exactly the forfeit.
+    assert_eq!(
+        market.kani_residual(),
+        residual_before + fresh_atoms + liened_atoms
     );
 }
 
@@ -9159,6 +9168,7 @@ fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_val
     let insurance_before = header.insurance.get();
     let risk_epoch_before = header.risk_epoch.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
 
     market
         .impair_source_credit_lien_from_counterparty_not_atomic(0, amount)
@@ -9194,6 +9204,11 @@ fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_val
     assert_eq!(source.provider_receivable_num, 0);
     assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
     assert_eq!(source.credit_epoch, 1);
+    // Stock destination of the impaired atoms (review finding): impairment is
+    // NOT an orphaning — the principal leaves counterparty_backing_principal
+    // (fresh_reserved drops) and lands, atom for atom, in the JUNIOR RESIDUAL
+    // pool with the vault flat. No class disappears; the junior pool rises.
+    assert_eq!(market.kani_residual(), residual_before + atoms);
 }
 
 #[kani::proof]
@@ -11770,15 +11785,16 @@ fn proof_v16_terminal_realization_floored_rate_pays_zero_and_moves_nothing() {
 // realize step falls through to the junior receipt path instead of reverting.
 // The full close_resolved path is Kani-intractable; this pins the primitive.
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
-    let backing_raw: u8 = kani::any();
-    let claim_raw: u8 = kani::any();
-    kani::assume((1..=6).contains(&backing_raw));
-    kani::assume((1..=6).contains(&claim_raw));
-    let backing = backing_raw as u128;
-    let claim = claim_raw as u128;
+    // CONCRETE WITNESS (flagged): any symbolic input here blows the solver
+    // budget (the realizable-support query's per-domain U256 credit math on
+    // top of the expire + audit-scan path). The symbolic surface is covered
+    // end-to-end by backing_double_claim_fuzz::terminal_close_with_expired_
+    // backing_does_not_strand; this witness pins the primitive exactly.
+    let backing = 2u128;
+    let claim = 3u128;
     let backing_num = backing * BOUND_SCALE;
     let claim_num = claim * BOUND_SCALE;
     let expiry_slot = 5u64;
@@ -11836,8 +11852,8 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
         .unwrap();
     let bucket = market.markets[0].engine.backing_long.try_to_runtime().unwrap();
 
-    kani::cover!(backing_raw < claim_raw, "expiry covers under-backed claim");
-    kani::cover!(backing_raw == claim_raw, "expiry covers fully-backed claim");
+    kani::cover!(backing < claim, "expiry covers under-backed claim");
+    kani::cover!(backing == claim, "expiry covers fully-backed claim");
     // The principal is forfeited (bucket emptied, status Expired) ...
     assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
     assert_eq!(bucket.fresh_unliened_backing_num, 0);

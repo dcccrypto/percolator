@@ -2,7 +2,7 @@
 
 **EDUCATIONAL RESEARCH PROJECT — NOT PRODUCTION READY. NOT AUDITED. Do NOT use with real funds.**
 
-Current normative spec: [`spec.md`](spec.md), **v16.8.8**.
+Current normative spec: [`spec.md`](spec.md), **v16.8.9**.
 
 Percolator is a perpetual-futures risk-engine library for account-local,
 permissionless risk progress. v16 keeps the slab-free account model and adds
