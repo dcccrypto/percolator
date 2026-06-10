@@ -1049,6 +1049,7 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
     account_header.capital = V16PodU128::new(start_capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.kani_residual();
 
     market.deposit_not_atomic(&mut account, amount).unwrap();
 
@@ -1068,6 +1069,9 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
         market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
         surplus
     );
+    // Junior-pool isolation (toly ce073dc): deposits move vault and c_tot in
+    // lockstep, so a user can never inflate the junior residual pool by depositing.
+    assert_eq!(market.kani_residual(), residual_before);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
@@ -2368,6 +2372,7 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
     account_header.capital = V16PodU128::new(start_capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.kani_residual();
 
     market.withdraw_not_atomic(&mut account, amount).unwrap();
 
@@ -2391,6 +2396,9 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
         market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
         surplus
     );
+    // Junior-pool isolation (toly ce073dc): withdrawals exit only the user's own
+    // senior capital; the junior residual pool cannot be drained through withdraw.
+    assert_eq!(market.kani_residual(), residual_before);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
