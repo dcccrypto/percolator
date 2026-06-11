@@ -16802,3 +16802,85 @@ fn closure_ledger_inv_prepare_insurance_lien_consume_delta() {
     }
 }
 
+// ============ P4: BUCKET STATUS-MACHINE CLOSURE ============
+// validate_backing_bucket_static encodes the spec's bucket lifecycle diagram
+// as per-status amount-shape rules (Empty must be value-free, Fresh must be
+// funded and unexpired-shaped, Expired/Impaired must hold only their
+// respective residue classes). Closure: ANY bucket passing the validator,
+// under ANY delta that succeeds, still passes — no delta can produce an
+// undiagrammed status/shape combination.
+//
+// SCOPE (finding, 2026-06-11): delta-level status closure holds for create,
+// release, terminal-release, and impair. It does NOT hold per-delta for
+// consume / backing-withdraw / backing-add: those normalize bucket status at
+// the PUBLIC-OP boundary (validate_shape), not after each internal delta —
+// e.g. consuming the last valid lien off a bucket that still carries impaired
+// liens leaves a transient Fresh-with-zero-active shape that the surrounding
+// op rejects or normalizes before returning. Evidence it is boundary-enforced
+// and not a reachable bug: the 400-case full-close conservation fuzz passes
+// validate_shape across entire realize sequences. The per-op invariant for
+// these three is covered by the suite's validate_shape post-assertions.
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_bucket_status_machine_prepare_counterparty_lien_create_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
+    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount) {
+        assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_bucket_status_machine_prepare_counterparty_lien_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
+    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount) {
+        assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_bucket_status_machine_prepare_counterparty_lien_terminal_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
+    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_terminal_release_delta(b, s, amount) {
+        assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
+    }
+}
+
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_bucket_status_machine_prepare_counterparty_lien_impair_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
+    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_impair_delta(b, s, amount) {
+        assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
+    }
+}
+
+
+
