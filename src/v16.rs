@@ -706,6 +706,19 @@ impl V16Core {
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
+    // Contract layer: granting a claim raises the bound and exact trackers by
+    // exactly the granted faces (bound >= exact enforced at entry) and touches
+    // nothing else in the domain ledger.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(exact_claim_num <= claim_bound_num))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<SourceCreditStateV16>| match result {
+        Ok(s) => s.positive_claim_bound_num == source.positive_claim_bound_num + claim_bound_num
+            && s.exact_positive_claim_num == source.exact_positive_claim_num + exact_claim_num
+            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
+            && s.valid_liened_backing_num == source.valid_liened_backing_num
+            && s.spent_backing_num == source.spent_backing_num
+            && s.credit_rate_num == source.credit_rate_num,
+        Err(_) => true,
+    }))]
     fn prepare_source_positive_claim_bound_delta(
         mut source: SourceCreditStateV16,
         claim_bound_num: u128,
@@ -5685,6 +5698,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         v16_domain_count_for_market_slots(self.header.config.max_market_slots.get())
     }
 
+    // Contract layer: aggregate maintenance is exact — the returned total
+    // shifts by precisely (new - old), in either direction, or errors.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(t) => (*t as i128).wrapping_sub(total as i128)
+            == (new as i128).wrapping_sub(old as i128),
+        Err(_) => true,
+    }))]
     fn apply_total_delta(total: u128, old: u128, new: u128) -> V16Result<u128> {
         if new >= old {
             total
@@ -7658,6 +7678,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Pays an account from unbudgeted insurance surplus, e.g. a crank reward.
     ///
     /// Budgeted domain insurance remains isolated and cannot be consumed by this path.
+    // Contract layer: the insurance->account credit moves exactly X from
+    // insurance into BOTH the account capital and the senior capital stock
+    // (vault flat at the caller), and never leaves insurance below the
+    // remaining domain budget claims.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
+        Ok((i, c, cap)) => *i == insurance - amount
+            && *c == c_tot + amount
+            && *cap == capital + amount
+            && *i >= budget_remaining,
+        Err(_) => true,
+    }))]
     fn credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,
@@ -15907,5 +15938,58 @@ fn contract_check_prepare_insurance_lien_terminal_release_delta() {
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     let _ = V16Core::prepare_insurance_lien_terminal_release_delta(reservation, source, amount);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::credit_account_from_insurance_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_credit_account_from_insurance_delta() {
+    let insurance: u128 = kani::any();
+    let budget_remaining: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::credit_account_from_insurance_delta(
+        insurance, budget_remaining, c_tot, capital, amount,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_source_positive_claim_bound_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_source_positive_claim_bound_delta() {
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let claim_bound_num: u128 = kani::any();
+    let exact_claim_num: u128 = kani::any();
+    kani::assume(exact_claim_num <= claim_bound_num);
+    let _ = V16Core::prepare_source_positive_claim_bound_delta(
+        source, claim_bound_num, exact_claim_num,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::apply_total_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_apply_total_delta() {
+    let total: u128 = kani::any();
+    let old: u128 = kani::any();
+    let new: u128 = kani::any();
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::apply_total_delta(total, old, new);
 }
 
