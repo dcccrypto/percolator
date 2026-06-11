@@ -6737,6 +6737,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// This does not debit an account or increase the vault; callers must have already
     /// moved value into vault slack. The method rejects if the resulting senior
     /// backing-provider claim would exceed vault coverage.
+    // Contract layer: crediting provider earnings raises the global and
+    // bucket earnings ledgers in exact lockstep and only succeeds when the
+    // resulting senior stack (c_tot + insurance + earnings) stays vault-
+    // covered — earnings can never be minted beyond vault backing.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((et, be)) => *et == earnings_total + amount
+            && *be == bucket_earnings + amount
+            && c_tot + insurance + *et <= vault,
+        Err(_) => true,
+    }))]
     fn credit_backing_provider_earnings_delta(
         vault: u128,
         c_tot: u128,
@@ -7416,6 +7426,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    // Contract layer: re-pointing a domain's spent counter shifts the global
+    // remaining-budget total by exactly the remaining delta and keeps the
+    // total covered by insurance.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(old_spent <= budget && new_spent <= budget))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(t) => {
+            let old_remaining = budget - old_spent;
+            let new_remaining = budget - new_spent;
+            (if new_remaining >= old_remaining {
+                *t == total_remaining + (new_remaining - old_remaining)
+            } else {
+                *t == total_remaining - (old_remaining - new_remaining)
+            }) && *t <= insurance
+        },
+        Err(_) => true,
+    }))]
     fn set_domain_insurance_spent_delta(
         total_remaining: u128,
         insurance: u128,
@@ -7500,6 +7526,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    // Contract layer: re-pointing a domain's budget shifts the global
+    // remaining total by exactly the remaining delta, capped by the
+    // insurance limit.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(spent <= old_budget && spent <= new_budget))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(t) => {
+            let old_remaining = old_budget - spent;
+            let new_remaining = new_budget - spent;
+            (if new_remaining >= old_remaining {
+                *t == total_remaining + (new_remaining - old_remaining)
+            } else {
+                *t == total_remaining - (old_remaining - new_remaining)
+            }) && *t <= insurance_limit
+        },
+        Err(_) => true,
+    }))]
     fn set_domain_insurance_budget_delta(
         total_remaining: u128,
         insurance_limit: u128,
@@ -7588,6 +7630,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    // Contract layer: a domain-insurance withdrawal debits vault, insurance,
+    // and the domain budget in exact lockstep, and is gated by BOTH the
+    // globally-unreserved insurance and the domain's unreserved budget
+    // remainder — reserved credit can never be withdrawn.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
+        Ok((v, i, b)) => *v == vault - amount
+            && *i == insurance - amount
+            && *b == budget - amount
+            && amount <= insurance.saturating_sub(source_reserved_atoms)
+            && amount <= budget.saturating_sub(spent).saturating_sub(domain_reserved_atoms),
+        Err(_) => true,
+    }))]
     fn withdraw_domain_insurance_delta(
         vault: u128,
         insurance: u128,
@@ -16372,5 +16426,57 @@ fn contract_check_flow_capital_and_resolved_payout_to_external_out() {
         // vault falls by exactly that total: nothing else can leave.
         assert_eq!(p.validate(), Ok(()));
     }
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::withdraw_domain_insurance_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_withdraw_domain_insurance_delta() {
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::withdraw_domain_insurance_delta(
+        kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::credit_backing_provider_earnings_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_credit_backing_provider_earnings_delta() {
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::credit_backing_provider_earnings_delta(
+        kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::set_domain_insurance_spent_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_set_domain_insurance_spent_delta() {
+    let total_remaining: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let budget: u128 = kani::any();
+    let old_spent: u128 = kani::any();
+    let new_spent: u128 = kani::any();
+    kani::assume(old_spent <= budget && new_spent <= budget);
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::set_domain_insurance_spent_delta(
+        total_remaining, insurance, budget, old_spent, new_spent,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::set_domain_insurance_budget_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_set_domain_insurance_budget_delta() {
+    let total_remaining: u128 = kani::any();
+    let insurance_limit: u128 = kani::any();
+    let old_budget: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let new_budget: u128 = kani::any();
+    kani::assume(spent <= old_budget && spent <= new_budget);
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::set_domain_insurance_budget_delta(
+        total_remaining, insurance_limit, old_budget, spent, new_budget,
+    );
 }
 
