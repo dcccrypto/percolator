@@ -29,19 +29,19 @@ Generated 2026-06-11 (engine @ spec v16.8.11). Artifact classes:
 | 16 | Stale backing fails closed | STRONG | suite expiry proofs + expiry-liveness regression | — |
 | 17 | Claim bounds never understate | STRONG | suite bound-refine proofs; contract claim-bound grant | — |
 | 18 | Deterministic credit rates | PARTIAL | suite recompute proofs (epoch); rate core div-bearing (excluded) → concrete witnesses + fuzz | accept |
-| 19 | Pending obligations survive exit | PARTIAL | suite close-ledger validation; cancel/cure gates | P2 sequence witness: exit-with-pending rejected |
+| 19 | Pending obligations survive exit | STRONG | suite withdraw-rejects-while-close-active witness; close-ledger validation; cancel/cure gates | — |
 | 20 | Single-sided penalty accounting | PARTIAL | contract lag-penalty (uniform add); suite health proofs | per-check audit item |
-| 21 | Preemptible close total order | **GAP (Kani)** | runtime tests only | small state-machine closure over ownership/priority fields (P4) |
+| 21 | Preemptible close total order | STRONG (mechanism) + SPEC-DIVERGENCE | suite close-exclusion proofs: occupied-domain begin rejects pre-mutation, one close per account, monotone close_id identity, bounded lifetime. FINDING: the spec's ClosePriority preemption tuple is NOT implemented — the engine uses exclusive per-domain barriers + bounded lifetime, which forecloses hold-and-wait and livelock by construction (each close holds exactly one domain; contention rejects, never compares). Spec text needs reconciling. | spec edit (user decision) |
 | 22 | Immutable close lifecycle | STRONG | suite residual-equation + ledger validation proofs | — |
-| 23 | Bounded close drift | PARTIAL | drift fields in ledger proofs; reserve sizing mul/div | P3 fuzz drift-bound |
-| 24 | Residual durability before clear | PARTIAL | close gates; terminal realization proofs | P2 sequence: clear-before-book rejected |
+| 23 | Bounded close drift | SPEC-AHEAD-OF-ENGINE | drift_consumed is a validated partition category with NO writer — the drift-reserve mechanism is not implemented; close lifetime is bounded via max_close_slot (proven in the close-identity proof) | spec/engine reconciliation (user decision) |
+| 24 | Residual durability before clear | STRONG | suite dropped-residual cancel-shape rejection; residual-equation proof; close gates; terminal realization proofs | — |
 | 25 | ADL/finalization atomicity | **GAP (Kani)** | structural single-instruction paths; runtime tests | integration-level only |
 | 26 | No fee seniority | STRONG | suite inductive fee proof (never debits insurance); fee contracts | — |
 | 27 | Deterministic residual attribution | STRONG | close_order_does_not_redistribute fuzz (full backing range); per-op determinism structural | — |
 | 28 | No arbitrary correlation trust | N/A | hedge credit not implemented | — |
 | 29 | Asset lifecycle fail-closed | STRONG | suite activation/retire/restart/reactivation proofs | — |
 | 30 | Dead-leg exit | STRONG | suite forfeit proofs (typed flow, v16.8.10) | — |
-| 31 | Recovery fallback numeric envelope | PARTIAL | recovery-crank accounting-neutral proofs; fallback formula mul/div | P3 fuzz deviation-cap |
+| 31 | Recovery fallback numeric envelope | SPEC-AHEAD-OF-ENGINE | config knobs (deviation bps, enable flags) exist and are bound-validated, but NO fallback price computation uses them — the mechanism is not implemented; recovery-crank accounting-neutrality is proven | spec/engine reconciliation (user decision) |
 | 32 | Hints discovery-only | STRONG | suite account-validation proofs (full-bitmap equality) | — |
 | 33 | Refresh bounded by N | STRUCTURAL | loop bounds are struct constants | — |
 | 34 | No full-market atomic work | STRUCTURAL | per-account instruction shape | code-review item |
@@ -49,10 +49,13 @@ Generated 2026-06-11 (engine @ spec v16.8.11). Artifact classes:
 | 36 | Canonical per-asset leg | STRONG | suite duplicate-asset/domain rejections | — |
 | 37 | Maker exemption bounded | PARTIAL | trade-cert component proofs; full path intractable tier | gates + runtime; accept with note |
 
-## Gap queue (ordered)
-2. **#21 preemption total order** — P4 state-machine closure.
-3. **#19/#24 close-lifecycle sequences** — P2 two-op rejection witnesses.
-4. **#23/#31 numeric envelopes** — P3 fuzz (drift bound, fallback deviation cap).
+## Outstanding items
+- **#25 ADL/finalization atomicity** — not Kani-expressible; integration/runtime only (permanent).
+- **Spec/engine reconciliation (user decision)**: #21 ClosePriority preemption, #23 drift
+  reserve, #31 recovery fallback price — all three are spec-described mechanisms with no
+  engine implementation; the engine's simpler designs (exclusive barriers + bounded
+  lifetime; no drift writer; no fallback pricing) are proven where they exist.
 
-Bottom line: 23 STRONG, 8 PARTIAL (each with a named accept-reason or queue item),
-2 GAP (queued: #21 preemption order, #25 ADL atomicity), 3 STRUCTURAL (argued), 1 N/A.
+Bottom line: 26 STRONG (incl. #21 mechanism-as-built), 5 PARTIAL (named accept-reasons),
+1 GAP (#25, permanent integration-level), 3 SPEC-AHEAD-OF-ENGINE findings flagged,
+3 STRUCTURAL, 1 N/A.

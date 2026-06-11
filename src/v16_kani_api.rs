@@ -872,6 +872,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.claim_resolved_payout_topup_core_not_atomic(account)
     }
 
+
+    pub fn kani_begin_close_progress_ledger(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        domain_side: SideV16,
+        gross_loss: u128,
+    ) -> V16Result<()> {
+        self.begin_close_progress_ledger(account, asset_index, domain_side, gross_loss)
+    }
 }
 
 impl PortfolioSourceDomainV16Account {

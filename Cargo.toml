@@ -54,3 +54,8 @@ path = "tests/v16_spec_tests.rs"
 name = "v16_fuzzing"
 path = "tests/v16_fuzzing.rs"
 required-features = ["fuzz"]
+
+[[test]]
+name = "rounding_residue_fuzz"
+path = "tests/rounding_residue_fuzz.rs"
+required-features = ["fuzz"]

@@ -12622,3 +12622,197 @@ fn proof_v16_seq_budget_credit_then_withdraw_caps_compose() {
     assert_eq!(market.kani_residual(), residual_before);
     assert_eq!(market.validate_shape(), Ok(()));
 }
+
+// ============ SPEC #21: CLOSE-OWNERSHIP EXCLUSION (the engine's mechanism) ============
+// The spec text describes priority-based preemption (ClosePriority tuple); the
+// ENGINE implements a simpler, stronger discipline: exclusive per-domain
+// barriers (a second close beginning in an occupied domain rejects with
+// LockActive before mutation), one active close per account, monotone
+// close_id identity, and bounded lifetime via max_close_slot. Hold-and-wait
+// is impossible (each close holds exactly one domain barrier) and livelock is
+// impossible (exclusion, not comparison). These proofs pin that mechanism.
+
+// A second close beginning in an OCCUPIED domain rejects before any mutation:
+// the barrier is exclusive, so cross-close contention cannot interleave.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_close_begin_rejects_occupied_domain_before_mutation() {
+    let gross_raw: u8 = kani::any();
+    kani::assume(gross_raw >= 1 && gross_raw <= 8);
+    let gross = gross_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result =
+        market.kani_begin_close_progress_ledger(&mut account, 0, SideV16::Long, gross);
+
+    kani::cover!(true, "occupied-domain begin rejection reached");
+    assert_eq!(result, Err(V16Error::LockActive));
+    // No mutation: ledger still empty, barrier unchanged.
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert!(!ledger.active);
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long.get(),
+        1
+    );
+}
+
+// A successful begin takes the barrier 0 -> 1 and stamps the IMMUTABLE close
+// identity exactly: close_id monotone (old+1, min 1), residual == gross,
+// drift reference == current slot, lifetime == current + configured max.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_close_begin_takes_barrier_and_stamps_immutable_identity() {
+    let gross_raw: u8 = kani::any();
+    let prior_id_raw: u8 = kani::any();
+    kani::assume(gross_raw >= 1 && gross_raw <= 8);
+    let gross = gross_raw as u128;
+    let prior_id = (prior_id_raw as u64).max(1);
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    // prior INERT (canceled) ledger carries the close_id watermark; the inert
+    // shape requires canceled + zero progress (validate_close_progress rules).
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            canceled: true,
+            close_id: prior_id,
+            asset_index: 0,
+            market_id: markets[0].engine.asset.market_id.get(),
+            domain_side: SideV16::Long,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    let current_slot = header.current_slot.get();
+    let max_life = header.config.max_bankrupt_close_lifetime_slots.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market
+        .kani_begin_close_progress_ledger(&mut account, 0, SideV16::Long, gross)
+        .unwrap();
+
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    kani::cover!(prior_id > 0, "begin covers nonzero prior close_id");
+    assert!(ledger.active && !ledger.finalized && !ledger.canceled);
+    // close identity is strictly monotone: a new close NEVER reuses an id.
+    assert_eq!(ledger.close_id, prior_id + 1);
+    assert!(ledger.close_id > prior_id);
+    assert_eq!(ledger.gross_loss_at_close_start, gross);
+    assert_eq!(ledger.residual_remaining, gross);
+    assert_eq!(ledger.drift_reference_slot, current_slot);
+    assert_eq!(ledger.max_close_slot, current_slot + max_life);
+    // the domain barrier is now held exclusively
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long.get(),
+        1
+    );
+}
+
+// An account with an ACTIVE close cannot begin another (one close per
+// account): rejects with LockActive before mutation.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_close_begin_rejects_account_with_active_close() {
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let mut active = CloseProgressLedgerV16::EMPTY;
+    active.active = true;
+    active.close_id = 1;
+    active.gross_loss_at_close_start = 3;
+    active.residual_remaining = 3;
+    active.market_id = markets[0].engine.asset.market_id.get();
+    active.max_close_slot = 100;
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&active);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.kani_begin_close_progress_ledger(&mut account, 0, SideV16::Long, 5);
+
+    kani::cover!(true, "active-close begin rejection reached");
+    assert_eq!(result, Err(V16Error::LockActive));
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.close_id, 1);
+    assert_eq!(ledger.gross_loss_at_close_start, 3);
+}
+
+// ============ SPEC #19/#24: CLOSE-LIFECYCLE EXIT REJECTIONS ============
+
+// #19 (pending obligations survive exit): an account with an ACTIVE close
+// ledger cannot withdraw — the pending residual obligation pins the
+// account's value until cured, finalized, or safely canceled.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_rejects_while_close_active() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(5);
+    header.c_tot = V16PodU128::new(5);
+    account_header.capital = V16PodU128::new(5);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let mut active = CloseProgressLedgerV16::EMPTY;
+    active.active = true;
+    active.close_id = 1;
+    active.asset_index = 0;
+    active.domain_side = SideV16::Long;
+    active.market_id = markets[0].engine.asset.market_id.get();
+    active.gross_loss_at_close_start = 3;
+    active.residual_remaining = 3;
+    active.drift_reference_slot = 1;
+    active.max_close_slot = 100;
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&active);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.withdraw_not_atomic(&mut account, amount);
+
+    kani::cover!(true, "active-close withdraw rejection reached");
+    assert!(result.is_err());
+    // No value moved.
+    assert_eq!(market.header.vault.get(), 5);
+    assert_eq!(market.header.c_tot.get(), 5);
+    assert_eq!(account.header.capital.get(), 5);
+}
+
+// #24 (residual durability before clear): a close ledger with residual still
+// outstanding cannot pass the canceled/inert validation shape — cancel
+// requires no irreversible progress AND a fully intact (un-booked) residual,
+// so exposure can never be cleared with residual silently dropped.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_close_cancel_shape_rejects_dropped_residual() {
+    let booked_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&booked_raw));
+    let booked = booked_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    // A "canceled" ledger that pretends to drop a partially-booked residual:
+    // irreversible progress (b_loss_booked > 0) with canceled status must be
+    // rejected by the ledger validator.
+    let mut bad = CloseProgressLedgerV16::EMPTY;
+    bad.canceled = true;
+    bad.close_id = 1;
+    bad.asset_index = 0;
+    bad.market_id = markets[0].engine.asset.market_id.get();
+    bad.gross_loss_at_close_start = 4;
+    bad.b_loss_booked = booked;
+    bad.residual_remaining = 4 - booked;
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&bad);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = account.validate_with_market(&market.as_view());
+
+    kani::cover!(true, "dropped-residual cancel shape reached");
+    assert!(result.is_err());
+    let _ = &mut market;
+}
