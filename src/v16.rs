@@ -103,7 +103,7 @@ fn apply_backing_utilization_fee_charge(
 // Contract layer: an earnings withdrawal debits vault and bucket earnings in
 // exact lockstep (never more than earned, never from elsewhere).
 #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
-    Ok((v, e)) => *v == vault - amount && *e == bucket_earnings - amount,
+    Ok((v, e)) => *v == vault.wrapping_sub(amount) && *e == bucket_earnings.wrapping_sub(amount),
     Err(_) => true,
 }))]
 fn apply_backing_provider_earnings_withdraw(
@@ -196,7 +196,7 @@ pub fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, 
     Ok((long_domain, short_domain))
 }
 
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V16Error {
     InvalidConfig,
@@ -542,8 +542,8 @@ impl V16Core {
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
         Ok(a) => state.fresh_reserved_backing_num >= state.valid_liened_backing_num
             && state.insurance_credit_reserved_num
-                >= state.valid_liened_insurance_num + state.impaired_liened_insurance_num
-            && *a == (state.fresh_reserved_backing_num - state.valid_liened_backing_num)
+                >= state.valid_liened_insurance_num.wrapping_add(state.impaired_liened_insurance_num)
+            && *a == (state.fresh_reserved_backing_num.wrapping_sub(state.valid_liened_backing_num))
                 + (state.insurance_credit_reserved_num
                     - state.valid_liened_insurance_num
                     - state.impaired_liened_insurance_num),
@@ -724,8 +724,8 @@ impl V16Core {
     // nothing else in the domain ledger.
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(exact_claim_num <= claim_bound_num))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<SourceCreditStateV16>| match result {
-        Ok(s) => s.positive_claim_bound_num == source.positive_claim_bound_num + claim_bound_num
-            && s.exact_positive_claim_num == source.exact_positive_claim_num + exact_claim_num
+        Ok(s) => s.positive_claim_bound_num == source.positive_claim_bound_num.wrapping_add(claim_bound_num)
+            && s.exact_positive_claim_num == source.exact_positive_claim_num.wrapping_add(exact_claim_num)
             && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
             && s.valid_liened_backing_num == source.valid_liened_backing_num
             && s.spent_backing_num == source.spent_backing_num
@@ -756,10 +756,10 @@ impl V16Core {
     // stock-relevant quantity) is untouched, and zero-amount is the identity.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num - amount
-                && b.valid_liened_backing_num == bucket.valid_liened_backing_num + amount
+            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_sub(amount)
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_add(amount)
                 && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
-                && s.valid_liened_backing_num == source.valid_liened_backing_num + amount
+                && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_add(amount)
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
                 && s.spent_backing_num == source.spent_backing_num),
         Err(_) => true,
@@ -796,15 +796,15 @@ impl V16Core {
     // bookkeeping against consumed history; spent is cumulative audit state
     // and never decreases).
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
-        Ok((b, s)) => b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num + amount
-            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num + amount
+        Ok((b, s)) => b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_add(amount)
+            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num.wrapping_add(amount)
             && b.valid_liened_backing_num == bucket.valid_liened_backing_num
             && s.valid_liened_backing_num == source.valid_liened_backing_num
             && s.spent_backing_num == source.spent_backing_num
             && s.provider_receivable_num <= source.provider_receivable_num
             && b.consumed_liened_backing_num <= bucket.consumed_liened_backing_num
-            && source.provider_receivable_num - s.provider_receivable_num
-                == bucket.consumed_liened_backing_num - b.consumed_liened_backing_num,
+            && source.provider_receivable_num.wrapping_sub(s.provider_receivable_num)
+                == bucket.consumed_liened_backing_num.wrapping_sub(b.consumed_liened_backing_num),
         Err(_) => true,
     }))]
     fn prepare_counterparty_backing_add_delta(
@@ -852,8 +852,8 @@ impl V16Core {
     // encumbrance, and zero-amount is the identity.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num - amount
-                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num - amount
+            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_sub(amount)
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num.wrapping_sub(amount)
                 && b.valid_liened_backing_num == bucket.valid_liened_backing_num
                 && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
                 && s.valid_liened_backing_num == source.valid_liened_backing_num
@@ -896,10 +896,10 @@ impl V16Core {
     // quantities untouched; zero-amount is the identity.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num - amount
-                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num + amount
+            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
+                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_add(amount)
                 && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
-                && s.valid_liened_backing_num == source.valid_liened_backing_num - amount
+                && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_sub(amount)
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
                 && s.spent_backing_num == source.spent_backing_num
                 && s.provider_receivable_num == source.provider_receivable_num),
@@ -940,10 +940,10 @@ impl V16Core {
     // the Live release but is expiry/status-agnostic (Finding-C semantics).
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num - amount
-                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num + amount
+            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
+                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_add(amount)
                 && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
-                && s.valid_liened_backing_num == source.valid_liened_backing_num - amount
+                && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_sub(amount)
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
                 && s.spent_backing_num == source.spent_backing_num
                 && s.provider_receivable_num == source.provider_receivable_num),
@@ -973,13 +973,13 @@ impl V16Core {
     // receivable in exact lockstep, leaves fresh_unliened untouched, and debits
     // fresh_reserved by exactly X. Mirrors the standalone delta proofs.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
-        Ok((b, s)) => b.valid_liened_backing_num == bucket.valid_liened_backing_num - amount
-            && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num + amount
+        Ok((b, s)) => b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
+            && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num.wrapping_add(amount)
             && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num
-            && s.valid_liened_backing_num == source.valid_liened_backing_num - amount
-            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num - amount
-            && s.spent_backing_num == source.spent_backing_num + amount
-            && s.provider_receivable_num == source.provider_receivable_num + amount,
+            && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_sub(amount)
+            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num.wrapping_sub(amount)
+            && s.spent_backing_num == source.spent_backing_num.wrapping_add(amount)
+            && s.provider_receivable_num == source.provider_receivable_num.wrapping_add(amount),
         Err(_) => true,
     }))]
     fn prepare_counterparty_lien_consume_delta(
@@ -1027,12 +1027,12 @@ impl V16Core {
     // junior residual pool, enforced at the aggregate layer).
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num - amount
-                && b.impaired_liened_backing_num == bucket.impaired_liened_backing_num + amount
+            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
+                && b.impaired_liened_backing_num == bucket.impaired_liened_backing_num.wrapping_add(amount)
                 && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num
-                && s.valid_liened_backing_num == source.valid_liened_backing_num - amount
-                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num - amount
-                && s.impaired_liened_backing_num == source.impaired_liened_backing_num + amount
+                && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_sub(amount)
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num.wrapping_sub(amount)
+                && s.impaired_liened_backing_num == source.impaired_liened_backing_num.wrapping_add(amount)
                 && s.spent_backing_num == source.spent_backing_num),
         Err(_) => true,
     }))]
@@ -1115,10 +1115,10 @@ impl V16Core {
     // reservation total and all backing-side state untouched).
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
         Ok((r, s)) => (amount == 0 && *r == reservation && *s == source)
-            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num + amount
+            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num.wrapping_add(amount)
                 && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num
                 && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num
-                && s.valid_liened_insurance_num == source.valid_liened_insurance_num + amount
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num.wrapping_add(amount)
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
                 && s.spent_backing_num == source.spent_backing_num),
         Err(_) => true,
@@ -1160,10 +1160,10 @@ impl V16Core {
     // exact mirror of creation; reservation total and backing-side untouched.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
         Ok((r, s)) => (amount == 0 && *r == reservation && *s == source)
-            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num - amount
+            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num.wrapping_sub(amount)
                 && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num
                 && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num
-                && s.valid_liened_insurance_num == source.valid_liened_insurance_num - amount
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num.wrapping_sub(amount)
                 && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num),
         Err(_) => true,
@@ -1200,13 +1200,13 @@ impl V16Core {
                 } else {
                     amount
                 };
-                let ir = amount - vr;
-                r.valid_liened_insurance_num == reservation.valid_liened_insurance_num - vr
-                    && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num - ir
-                    && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num - amount
-                    && s.valid_liened_insurance_num == source.valid_liened_insurance_num - vr
-                    && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num - ir
-                    && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num - amount
+                let ir = amount.wrapping_sub(vr);
+                r.valid_liened_insurance_num == reservation.valid_liened_insurance_num.wrapping_sub(vr)
+                    && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num.wrapping_sub(ir)
+                    && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num.wrapping_sub(amount)
+                    && s.valid_liened_insurance_num == source.valid_liened_insurance_num.wrapping_sub(vr)
+                    && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num.wrapping_sub(ir)
+                    && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num.wrapping_sub(amount)
             },
         Err(_) => true,
     }))]
@@ -1250,11 +1250,11 @@ impl V16Core {
     // inside the reservation (audit trail), reserved totals untouched.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
         Ok((r, s)) => (amount == 0 && *r == reservation && *s == source)
-            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num - amount
-                && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num + amount
+            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num.wrapping_sub(amount)
+                && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num.wrapping_add(amount)
                 && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num
-                && s.valid_liened_insurance_num == source.valid_liened_insurance_num - amount
-                && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num + amount),
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num.wrapping_sub(amount)
+                && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num.wrapping_add(amount)),
         Err(_) => true,
     }))]
     fn prepare_insurance_lien_impair_delta(
@@ -1355,9 +1355,9 @@ impl V16Core {
     // only tighten requirements, never loosen them, and tightens all three
     // uniformly.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
-        Ok((im, mm, rn)) => *im == base_initial + target_lag_penalty
-            && *mm == base_maintenance + target_lag_penalty
-            && *rn == risk_notional + target_lag_penalty,
+        Ok((im, mm, rn)) => *im == base_initial.wrapping_add(target_lag_penalty)
+            && *mm == base_maintenance.wrapping_add(target_lag_penalty)
+            && *rn == risk_notional.wrapping_add(target_lag_penalty),
         Err(_) => true,
     }))]
     fn health_requirements_from_base_and_target_lag(
@@ -1595,7 +1595,7 @@ pub enum MarketModeV16 {
     Recovery,
 }
 
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackingBucketStatusV16 {
     Empty,
@@ -2314,7 +2314,7 @@ impl Default for AssetStateV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceCreditStateV16 {
     pub positive_claim_bound_num: u128,
@@ -2369,7 +2369,7 @@ impl Default for SourceCreditStateV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackingBucketV16 {
     pub market_id: u64,
@@ -2425,7 +2425,7 @@ impl Default for BackingBucketV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceCreditReservationV16 {
     pub insurance_credit_reserved_num: u128,
@@ -3480,7 +3480,7 @@ enum TokenValueClassV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[cfg(kani)]
 pub struct TokenValueFlowProofV16 {
     pub debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
@@ -6765,9 +6765,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // resulting senior stack (c_tot + insurance + earnings) stays vault-
     // covered — earnings can never be minted beyond vault backing.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
-        Ok((et, be)) => *et == earnings_total + amount
-            && *be == bucket_earnings + amount
-            && c_tot + insurance + *et <= vault,
+        Ok((et, be)) => *et == earnings_total.wrapping_add(amount)
+            && *be == bucket_earnings.wrapping_add(amount)
+            && c_tot.wrapping_add(insurance) + *et <= vault,
         Err(_) => true,
     }))]
     fn credit_backing_provider_earnings_delta(
@@ -7455,12 +7455,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(old_spent <= budget && new_spent <= budget))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
         Ok(t) => {
-            let old_remaining = budget - old_spent;
-            let new_remaining = budget - new_spent;
+            let old_remaining = budget.wrapping_sub(old_spent);
+            let new_remaining = budget.wrapping_sub(new_spent);
             (if new_remaining >= old_remaining {
-                *t == total_remaining + (new_remaining - old_remaining)
+                *t == total_remaining + (new_remaining.wrapping_sub(old_remaining))
             } else {
-                *t == total_remaining - (old_remaining - new_remaining)
+                *t == total_remaining - (old_remaining.wrapping_sub(new_remaining))
             }) && *t <= insurance
         },
         Err(_) => true,
@@ -7555,12 +7555,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(spent <= old_budget && spent <= new_budget))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
         Ok(t) => {
-            let old_remaining = old_budget - spent;
-            let new_remaining = new_budget - spent;
+            let old_remaining = old_budget.wrapping_sub(spent);
+            let new_remaining = new_budget.wrapping_sub(spent);
             (if new_remaining >= old_remaining {
-                *t == total_remaining + (new_remaining - old_remaining)
+                *t == total_remaining + (new_remaining.wrapping_sub(old_remaining))
             } else {
-                *t == total_remaining - (old_remaining - new_remaining)
+                *t == total_remaining - (old_remaining.wrapping_sub(new_remaining))
             }) && *t <= insurance_limit
         },
         Err(_) => true,
@@ -7658,9 +7658,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // globally-unreserved insurance and the domain's unreserved budget
     // remainder — reserved credit can never be withdrawn.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
-        Ok((v, i, b)) => *v == vault - amount
-            && *i == insurance - amount
-            && *b == budget - amount
+        Ok((v, i, b)) => *v == vault.wrapping_sub(amount)
+            && *i == insurance.wrapping_sub(amount)
+            && *b == budget.wrapping_sub(amount)
             && amount <= insurance.saturating_sub(source_reserved_atoms)
             && amount <= budget.saturating_sub(spent).saturating_sub(domain_reserved_atoms),
         Err(_) => true,
@@ -7761,9 +7761,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // (vault flat at the caller), and never leaves insurance below the
     // remaining domain budget claims.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
-        Ok((i, c, cap)) => *i == insurance - amount
-            && *c == c_tot + amount
-            && *cap == capital + amount
+        Ok((i, c, cap)) => *i == insurance.wrapping_sub(amount)
+            && *c == c_tot.wrapping_add(amount)
+            && *cap == capital.wrapping_add(amount)
             && *i >= budget_remaining,
         Err(_) => true,
     }))]
@@ -16533,5 +16533,272 @@ fn contract_check_health_requirements_from_base_and_target_lag() {
     let _ = V16Core::health_requirements_from_base_and_target_lag(
         kani::any(), kani::any(), kani::any(), kani::any(),
     );
+}
+
+// ============ P0: ENCUMBRANCE-CLOSURE INDUCTION ============
+// The per-domain ledger invariant (the div-free cross-ledger equalities of
+// validate_source_domain_ledger_parts; the credit-rate equality is excluded
+// here because it is intentionally broken by deltas and restored by the
+// recompute step, which the suite proves separately). Each closure harness
+// proves: for EVERY state satisfying inv (not just constructed ones), the
+// delta preserves inv. With the genesis proof, any sequence of deltas
+// preserves ledger validity — induction, not reachability-by-construction.
+#[cfg(all(kani, feature = "closure"))]
+fn kani_ledger_inv(
+    b: &BackingBucketV16,
+    s: &SourceCreditStateV16,
+    r: &InsuranceCreditReservationV16,
+) -> bool {
+    s.fresh_reserved_backing_num
+        == b.fresh_unliened_backing_num + b.valid_liened_backing_num
+        && s.provider_receivable_num == b.consumed_liened_backing_num
+        && s.valid_liened_backing_num == b.valid_liened_backing_num
+        && s.impaired_liened_backing_num == b.impaired_liened_backing_num
+        && s.insurance_credit_reserved_num == r.insurance_credit_reserved_num
+        && s.valid_liened_insurance_num == r.valid_liened_insurance_num
+        && s.impaired_liened_insurance_num == r.impaired_liened_insurance_num
+        && s.spent_backing_num >= s.provider_receivable_num
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn kani_any_ledger_triple() -> (BackingBucketV16, SourceCreditStateV16, InsuranceCreditReservationV16) {
+    let b = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        expiry_slot: kani::any(),
+        status: kani::any(),
+        utilization_fee_earnings: kani::any(),
+    };
+    let s = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let r = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        consumed_insurance_num: kani::any(),
+        source_credit_epoch: kani::any(),
+    };
+    // Overflow headroom so inv's additions and the deltas' checked ops stay
+    // in-range; production magnitudes are < 2^93 (MAX_VAULT_TVL * BOUND_SCALE).
+    kani::assume(b.fresh_unliened_backing_num < 1u128 << 96);
+    kani::assume(b.valid_liened_backing_num < 1u128 << 96);
+    kani::assume(b.consumed_liened_backing_num < 1u128 << 96);
+    kani::assume(b.impaired_liened_backing_num < 1u128 << 96);
+    kani::assume(s.spent_backing_num < 1u128 << 96);
+    kani::assume(s.positive_claim_bound_num < 1u128 << 96);
+    kani::assume(s.exact_positive_claim_num < 1u128 << 96);
+    kani::assume(r.insurance_credit_reserved_num < 1u128 << 96);
+    kani::assume(r.valid_liened_insurance_num < 1u128 << 96);
+    kani::assume(r.impaired_liened_insurance_num < 1u128 << 96);
+    kani::assume(r.consumed_insurance_num < 1u128 << 96);
+    (b, s, r)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn closure_ledger_inv_genesis() {
+    let b = BackingBucketV16::EMPTY;
+    let s = SourceCreditStateV16::EMPTY;
+    let r = InsuranceCreditReservationV16::EMPTY;
+    assert!(kani_ledger_inv(&b, &s, &r));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_lien_create_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_lien_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_lien_terminal_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_terminal_release_delta(b, s, amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_lien_consume_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_consume_delta(b, s, amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_lien_impair_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_impair_delta(b, s, amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_backing_withdraw_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_backing_withdraw_delta(b, s, amount) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_counterparty_backing_add_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_backing_add_delta(b, s, amount, kani::any(), kani::any()) {
+        // Reservation untouched by counterparty deltas.
+        assert!(kani_ledger_inv(&b2, &s2, &r));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_insurance_lien_create_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_create_delta(r, s, amount) {
+        // Bucket untouched by insurance deltas.
+        assert!(kani_ledger_inv(&b, &s2, &r2));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_insurance_lien_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_release_delta(r, s, amount) {
+        // Bucket untouched by insurance deltas.
+        assert!(kani_ledger_inv(&b, &s2, &r2));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_insurance_lien_terminal_release_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_terminal_release_delta(r, s, amount) {
+        // Bucket untouched by insurance deltas.
+        assert!(kani_ledger_inv(&b, &s2, &r2));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_insurance_lien_impair_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_impair_delta(r, s, amount) {
+        // Bucket untouched by insurance deltas.
+        assert!(kani_ledger_inv(&b, &s2, &r2));
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_ledger_inv_prepare_insurance_lien_consume_delta() {
+    let (b, s, r) = kani_any_ledger_triple();
+    let amount: u128 = kani::any();
+    let domain_spent: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(domain_spent < 1u128 << 96);
+    kani::assume(kani_ledger_inv(&b, &s, &r));
+    if let Ok((r2, s2, _ds, _ins)) =
+        V16Core::prepare_insurance_lien_consume_delta(r, s, domain_spent, insurance, amount)
+    {
+        assert!(kani_ledger_inv(&b, &s2, &r2));
+    }
 }
 

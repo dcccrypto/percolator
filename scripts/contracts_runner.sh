@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# Kani function-contract layer runner — ISOLATED from the main proof suite.
+# Isolated lib-mode Kani verification runner (contract + closure layers).
 #
-# Why isolated: -Z function-contracts slows kani-compiler ~5x crate-wide, so
-# it must never touch the per-proof suite budget. This script uses (a) the
-# `contracts` cargo feature to gate the contract attrs/harnesses, (b) the CLI
-# -Z flag (NOT Cargo.toml, so plain `cargo kani` never sees it), and (c) a
-# separate CARGO_TARGET_DIR so the contracts build cache never thrashes the
-# suite's. Compile is bounded (~15-25 min); each leaf check then solves in
-# seconds. Budget is compile-inclusive.
+# Layers (select via env):
+#   contracts (default): FEATURES=fuzz,contracts KANI_Z="-Z function-contracts"
+#       LOG_DIR=kani_contracts CARGO_TARGET_DIR=target/contracts
+#   closure:             FEATURES=fuzz,closure   KANI_Z=""
+#       LOG_DIR=kani_closure   CARGO_TARGET_DIR=target/closure
 #
-# Usage: bash scripts/contracts_runner.sh [BUDGET_S]   (reads contracts/proofs.txt)
+# Why isolated: -Z function-contracts slows kani-compiler ~5x crate-wide and
+# must never touch the main per-proof suite budget; the closure layer skips
+# the flag entirely (plain proofs). Each layer keeps its own target dir so
+# caches never thrash. The cache is warmed un-timed (--only-codegen) because
+# a cold compile alone can exceed any per-check budget.
+#
+# Usage: [env overrides] bash scripts/contracts_runner.sh [BUDGET_S]
+#        (reads $LOG_DIR/proofs.txt; results appended to $LOG_DIR/results.tsv)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/contracts}"
+FEATURES="${FEATURES:-fuzz,contracts}"
+KANI_Z="${KANI_Z--Z function-contracts}"
 LOG_DIR="${LOG_DIR:-kani_contracts}"
 BUDGET_S="${1:-1800}"
 mkdir -p "$LOG_DIR"
 RESULT="$LOG_DIR/results.tsv"
-[ -f "$RESULT" ] || echo -e "contract_harness\twall_s\tstatus" > "$RESULT"
+[ -f "$RESULT" ] || echo -e "harness\twall_s\tstatus" > "$RESULT"
 
 cleanup() {
-    pkill -9 -f 'cargo-kani'  2>/dev/null
-    pkill -9 -f 'kani-driver' 2>/dev/null
-    pkill -9 -x cbmc          2>/dev/null
+    pkill -9 -x cbmc 2>/dev/null
+    pkill -9 -x kani-driver 2>/dev/null
 }
+
+echo "[$(date +%H:%M:%S)] warming $CARGO_TARGET_DIR cache (un-timed)..."
+# shellcheck disable=SC2086
+cargo kani $KANI_Z --features "$FEATURES" --only-codegen \
+    > "$LOG_DIR/warmup.log" 2>&1 || true
+echo "[$(date +%H:%M:%S)] cache warm."
 
 mapfile -t HARNESSES < "$LOG_DIR/proofs.txt"
 for h in "${HARNESSES[@]}"; do
@@ -35,8 +47,9 @@ for h in "${HARNESSES[@]}"; do
     cleanup; sleep 1
     logf="$LOG_DIR/${h}.log"
     start=$(date +%s)
-    if timeout --kill-after=30 "$BUDGET_S" cargo kani -Z function-contracts \
-        --features fuzz,contracts --harness "$h" --output-format terse \
+    # shellcheck disable=SC2086
+    if timeout --kill-after=30 "$BUDGET_S" cargo kani $KANI_Z \
+        --features "$FEATURES" --harness "$h" --output-format terse \
         > "$logf" 2>&1; then
         status="PASS"
     else
@@ -44,7 +57,6 @@ for h in "${HARNESSES[@]}"; do
         if [ $ec -eq 124 ] || [ $ec -eq 137 ]; then status="TIMEOUT"; else status="FAIL($ec)"; fi
     fi
     wall=$(( $(date +%s) - start ))
-    grep -qE "Complete - .* 0 failures" "$logf" || [ "$status" = PASS ] || true
     printf "%s\t%s\t%s\n" "$h" "$wall" "$status" >> "$RESULT"
     printf "[%s] %s -> %s (%ss)\n" "$(date +%H:%M:%S)" "$h" "$status" "$wall"
     cleanup
