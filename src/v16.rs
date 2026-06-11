@@ -11059,6 +11059,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(size_q)
     }
 
+    // Contract layer: the fill sign convention — long receives the signed
+    // size, short receives its exact negation, abs matches, zero rejected.
+    // Every trade leg delta in the engine flows through this convention.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, i128, i128)>| match result {
+        Ok((abs, long_d, short_d)) => *abs == size_q.unsigned_abs()
+            && *abs <= MAX_TRADE_SIZE_Q
+            && *long_d == size_q
+            && *short_d == -size_q
+            && *long_d + *short_d == 0
+            && size_q != 0,
+        Err(_) => true,
+    }))]
     fn trade_signed_size_deltas(size_q: i128) -> V16Result<(u128, i128, i128)> {
         if size_q == 0 {
             return Err(V16Error::InvalidConfig);
@@ -15991,5 +16003,14 @@ fn contract_check_apply_total_delta() {
     let old: u128 = kani::any();
     let new: u128 = kani::any();
     let _ = MarketGroupV16ViewMut::<Market<u64>>::apply_total_delta(total, old, new);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::trade_signed_size_deltas)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_trade_signed_size_deltas() {
+    let size_q: i128 = kani::any();
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::trade_signed_size_deltas(size_q);
 }
 
