@@ -536,6 +536,19 @@ impl V16Core {
             || after.certified_liq_deficit < before.certified_liq_deficit
     }
 
+    // Contract layer: the support availability for a domain is EXACTLY the
+    // unliened counterparty backing plus the unencumbered insurance
+    // reservation — the quantity that caps every realize/cure consumption.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(a) => state.fresh_reserved_backing_num >= state.valid_liened_backing_num
+            && state.insurance_credit_reserved_num
+                >= state.valid_liened_insurance_num + state.impaired_liened_insurance_num
+            && *a == (state.fresh_reserved_backing_num - state.valid_liened_backing_num)
+                + (state.insurance_credit_reserved_num
+                    - state.valid_liened_insurance_num
+                    - state.impaired_liened_insurance_num),
+        Err(_) => true,
+    }))]
     fn available_backing_num_for_source_credit_state(
         state: SourceCreditStateV16,
     ) -> V16Result<u128> {
@@ -1337,6 +1350,16 @@ impl V16Core {
         )
     }
 
+    // Contract layer: the oracle-lag penalty raises initial margin,
+    // maintenance margin, and risk notional by EXACTLY the penalty — lag can
+    // only tighten requirements, never loosen them, and tightens all three
+    // uniformly.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
+        Ok((im, mm, rn)) => *im == base_initial + target_lag_penalty
+            && *mm == base_maintenance + target_lag_penalty
+            && *rn == risk_notional + target_lag_penalty,
+        Err(_) => true,
+    }))]
     fn health_requirements_from_base_and_target_lag(
         base_initial: u128,
         base_maintenance: u128,
@@ -16477,6 +16500,38 @@ fn contract_check_set_domain_insurance_budget_delta() {
     kani::assume(spent <= old_budget && spent <= new_budget);
     let _ = MarketGroupV16ViewMut::<Market<u64>>::set_domain_insurance_budget_delta(
         total_remaining, insurance_limit, old_budget, spent, new_budget,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::available_backing_num_for_source_credit_state)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_available_backing_num_for_source_credit_state() {
+    let state = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let _ = V16Core::available_backing_num_for_source_credit_state(state);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::health_requirements_from_base_and_target_lag)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_health_requirements_from_base_and_target_lag() {
+    let _ = V16Core::health_requirements_from_base_and_target_lag(
+        kani::any(), kani::any(), kani::any(), kani::any(),
     );
 }
 
