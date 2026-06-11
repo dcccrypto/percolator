@@ -765,6 +765,22 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    // Contract layer: adding fresh backing raises fresh unliened and
+    // fresh_reserved by the FULL amount (the refill only clears receivable
+    // bookkeeping against consumed history; spent is cumulative audit state
+    // and never decreases).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
+        Ok((b, s)) => b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num + amount
+            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num + amount
+            && b.valid_liened_backing_num == bucket.valid_liened_backing_num
+            && s.valid_liened_backing_num == source.valid_liened_backing_num
+            && s.spent_backing_num == source.spent_backing_num
+            && s.provider_receivable_num <= source.provider_receivable_num
+            && b.consumed_liened_backing_num <= bucket.consumed_liened_backing_num
+            && source.provider_receivable_num - s.provider_receivable_num
+                == bucket.consumed_liened_backing_num - b.consumed_liened_backing_num,
+        Err(_) => true,
+    }))]
     fn prepare_counterparty_backing_add_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -1068,6 +1084,19 @@ impl V16Core {
         ))
     }
 
+    // Contract layer: insurance lien creation encumbers reserved credit only
+    // (valid liened rises in reservation and source in lockstep; the
+    // reservation total and all backing-side state untouched).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
+        Ok((r, s)) => (amount == 0 && *r == reservation && *s == source)
+            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num + amount
+                && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num
+                && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num + amount
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
+                && s.spent_backing_num == source.spent_backing_num),
+        Err(_) => true,
+    }))]
     fn prepare_insurance_lien_create_delta(
         mut reservation: InsuranceCreditReservationV16,
         mut source: SourceCreditStateV16,
@@ -2314,6 +2343,7 @@ impl Default for BackingBucketV16 {
 }
 
 #[repr(C)]
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceCreditReservationV16 {
     pub insurance_credit_reserved_num: u128,
@@ -15659,4 +15689,77 @@ fn contract_check_prepare_counterparty_lien_impair_delta() {
     kani::assume(bucket.impaired_liened_backing_num < 1u128 << 96);
     kani::assume(source.impaired_liened_backing_num < 1u128 << 96);
     let _ = V16Core::prepare_counterparty_lien_impair_delta(bucket, source, amount);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_counterparty_backing_add_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_counterparty_backing_add_delta() {
+    let bucket = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        expiry_slot: kani::any(),
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: kani::any(),
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let amount: u128 = kani::any();
+    let current_slot: u64 = kani::any();
+    let expiry_slot: u64 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(bucket.fresh_unliened_backing_num < 1u128 << 96);
+    kani::assume(source.fresh_reserved_backing_num < 1u128 << 96);
+    let _ = V16Core::prepare_counterparty_backing_add_delta(
+        bucket, source, amount, current_slot, expiry_slot,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_insurance_lien_create_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_insurance_lien_create_delta() {
+    let reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        consumed_insurance_num: kani::any(),
+        source_credit_epoch: kani::any(),
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(reservation.valid_liened_insurance_num < 1u128 << 96);
+    kani::assume(source.valid_liened_insurance_num < 1u128 << 96);
+    let _ = V16Core::prepare_insurance_lien_create_delta(reservation, source, amount);
 }
