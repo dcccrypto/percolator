@@ -3457,6 +3457,7 @@ enum TokenValueClassV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[cfg(kani)]
 pub struct TokenValueFlowProofV16 {
     pub debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
@@ -16012,5 +16013,364 @@ fn contract_check_apply_total_delta() {
 fn contract_check_trade_signed_size_deltas() {
     let size_q: i128 = kani::any();
     let _ = MarketGroupV16ViewMut::<Market<u64>>::trade_signed_size_deltas(size_q);
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_external_in_to_account_capital() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before.wrapping_add(amount);
+    kani::assume(vault_after >= vault_before);
+    if let Ok(p) = TokenValueFlowProofV16::external_in_to_account_capital(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::AccountCapital as usize] = amount;
+        ec[TokenValueClassV16::ExternalQuote as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, amount);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_account_capital_to_external_out() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    kani::assume(vault_before >= amount);
+    let vault_after = vault_before - amount;
+    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_external_out(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::AccountCapital as usize] = amount;
+        ec[TokenValueClassV16::ExternalQuote as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, amount);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_account_capital_to_insurance() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before; // internal relabel: vault flat
+    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_insurance(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::AccountCapital as usize] = amount;
+        ec[TokenValueClassV16::InsuranceCapital as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_external_in_to_insurance_capital() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before.wrapping_add(amount);
+    kani::assume(vault_after >= vault_before);
+    if let Ok(p) = TokenValueFlowProofV16::external_in_to_insurance_capital(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
+        ec[TokenValueClassV16::ExternalQuote as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, amount);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_insurance_capital_to_external_out() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    kani::assume(vault_before >= amount);
+    let vault_after = vault_before - amount;
+    if let Ok(p) = TokenValueFlowProofV16::insurance_capital_to_external_out(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
+        ec[TokenValueClassV16::ExternalQuote as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, amount);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_insurance_capital_to_account_capital() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before; // internal relabel: vault flat
+    if let Ok(p) = TokenValueFlowProofV16::insurance_capital_to_account_capital(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
+        ec[TokenValueClassV16::AccountCapital as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_account_capital_to_realized_loss() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before; // internal relabel: vault flat
+    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_realized_loss(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::AccountCapital as usize] = amount;
+        ec[TokenValueClassV16::ExplicitBackedLoss as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// Flow-typing witness (plain proof: proof_for_contract cannot handle the
+// array-bearing return type — unbounded write-set havoc loop; same
+// postconditions asserted directly over the full input domain).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_insurance_to_close_insurance_spent() {
+    let amount: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after = vault_before; // internal relabel: vault flat
+    if let Ok(p) = TokenValueFlowProofV16::insurance_to_close_insurance_spent(amount, vault_before, vault_after) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
+        ec[TokenValueClassV16::CloseInsuranceSpent as usize] = amount;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, 0);
+        assert_eq!(p.vault_before, vault_before);
+        assert_eq!(p.vault_after, vault_after);
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+// The multi-leg flow transits are the VALUE SKELETONS of the Kani-intractable
+// public bodies: close_cure_to_account_capital is the cure path's only value
+// move, support_to_account_capital the resolved-close support conversion's,
+// capital_and_resolved_payout_to_external_out the resolved withdrawal's. The
+// engine constructs and validate()s one of these on every execution of those
+// bodies, so full-domain witnesses here + the per-leaf delta contracts close
+// the conservation argument for the intractable tier.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_close_cure_to_account_capital() {
+    let deposit: u128 = kani::any();
+    let escrow: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let capital_credit = match deposit.checked_add(escrow) {
+        Some(v) => v,
+        None => return,
+    };
+    let vault_after = vault_before.wrapping_add(deposit);
+    kani::assume(vault_after >= vault_before);
+    if let Ok(p) = TokenValueFlowProofV16::close_cure_to_account_capital(
+        deposit, escrow, capital_credit, vault_before, vault_after,
+    ) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ec[TokenValueClassV16::ExternalQuote as usize] = deposit;
+        ec[TokenValueClassV16::CancelDepositEscrow as usize] = escrow;
+        ed[TokenValueClassV16::AccountCapital as usize] = capital_credit;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, deposit);
+        assert_eq!(p.external_quote_out, 0);
+        // The cure credits the account with exactly deposit + escrow and the
+        // vault rises by exactly the external deposit: no value minted.
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_support_to_account_capital() {
+    let cp: u128 = kani::any();
+    let ins: u128 = kani::any();
+    let surplus: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let credit = match cp.checked_add(ins).and_then(|v| v.checked_add(surplus)) {
+        Some(v) => v,
+        None => return,
+    };
+    if let Ok(p) = TokenValueFlowProofV16::support_to_account_capital(
+        credit, cp, ins, surplus, vault_before, vault_before,
+    ) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ec[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize] = cp;
+        ec[TokenValueClassV16::CloseInsuranceSpent as usize] = ins;
+        ec[TokenValueClassV16::UnallocatedProtocolSurplus as usize] = surplus;
+        ed[TokenValueClassV16::AccountCapital as usize] = credit;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, 0);
+        // Support conversion is internally funded (vault flat): the winner's
+        // capital credit is exactly the sum of the three consumed sources.
+        assert_eq!(p.validate(), Ok(()));
+    }
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_check_flow_capital_and_resolved_payout_to_external_out() {
+    let capital_paid: u128 = kani::any();
+    let payout_paid: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let total = match capital_paid.checked_add(payout_paid) {
+        Some(v) => v,
+        None => return,
+    };
+    kani::assume(vault_before >= total);
+    let vault_after = vault_before - total;
+    if let Ok(p) = TokenValueFlowProofV16::capital_and_resolved_payout_to_external_out(
+        capital_paid, payout_paid, total, vault_before, vault_after,
+    ) {
+        let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+        ed[TokenValueClassV16::AccountCapital as usize] = capital_paid;
+        ed[TokenValueClassV16::ResolvedPayoutPaid as usize] = payout_paid;
+        ec[TokenValueClassV16::ExternalQuote as usize] = total;
+        let mut i = 0;
+        while i < V16_TOKEN_VALUE_CLASS_COUNT {
+            assert!(p.debits[i] == ed[i]);
+            assert!(p.credits[i] == ec[i]);
+            i += 1;
+        }
+        assert_eq!(p.external_quote_in, 0);
+        assert_eq!(p.external_quote_out, total);
+        // A resolved exit pays out exactly capital + receipt claim and the
+        // vault falls by exactly that total: nothing else can leave.
+        assert_eq!(p.validate(), Ok(()));
+    }
 }
 
