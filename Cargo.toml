@@ -19,6 +19,7 @@ default = []
 stress = []  # Reserved for stress/audit harnesses
 fuzz = []  # Enable fuzzing tests over the production zero-copy view path.
 audit-scan = []  # Enable full account-table invariant scans on public exits
+contracts = []  # Kani function-contract layer; build with: cargo kani -Z function-contracts --features fuzz,contracts (see scripts/contracts_runner.sh)
 
 [profile.release]
 lto = "fat"

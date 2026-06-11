@@ -100,6 +100,12 @@ fn apply_backing_utilization_fee_charge(
     ))
 }
 
+// Contract layer: an earnings withdrawal debits vault and bucket earnings in
+// exact lockstep (never more than earned, never from elsewhere).
+#[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+    Ok((v, e)) => *v == vault - amount && *e == bucket_earnings - amount,
+    Err(_) => true,
+}))]
 fn apply_backing_provider_earnings_withdraw(
     vault: u128,
     bucket_earnings: u128,
@@ -190,6 +196,7 @@ pub fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, 
     Ok((long_domain, short_domain))
 }
 
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V16Error {
     InvalidConfig,
@@ -718,6 +725,19 @@ impl V16Core {
         Ok(source)
     }
 
+    // Contract layer: lien creation is a pure encumbrance relabel — fresh
+    // unliened moves to valid liened atom-for-atom, fresh_reserved (and every
+    // stock-relevant quantity) is untouched, and zero-amount is the identity.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
+        Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
+            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num - amount
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num + amount
+                && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
+                && s.valid_liened_backing_num == source.valid_liened_backing_num + amount
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
+                && s.spent_backing_num == source.spent_backing_num),
+        Err(_) => true,
+    }))]
     fn prepare_counterparty_lien_create_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -785,6 +805,20 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    // Contract layer: principal withdrawal debits fresh_unliened and
+    // fresh_reserved in exact lockstep, never touches liened/consumed
+    // encumbrance, and zero-amount is the identity.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
+        Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
+            || (b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num - amount
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num - amount
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num
+                && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
+                && s.valid_liened_backing_num == source.valid_liened_backing_num
+                && s.spent_backing_num == source.spent_backing_num
+                && s.provider_receivable_num == source.provider_receivable_num),
+        Err(_) => true,
+    }))]
     fn prepare_counterparty_backing_withdraw_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -866,6 +900,19 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    // Contract layer: consuming X of a valid lien moves it to consumed/spent/
+    // receivable in exact lockstep, leaves fresh_unliened untouched, and debits
+    // fresh_reserved by exactly X. Mirrors the standalone delta proofs.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
+        Ok((b, s)) => b.valid_liened_backing_num == bucket.valid_liened_backing_num - amount
+            && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num + amount
+            && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num
+            && s.valid_liened_backing_num == source.valid_liened_backing_num - amount
+            && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num - amount
+            && s.spent_backing_num == source.spent_backing_num + amount
+            && s.provider_receivable_num == source.provider_receivable_num + amount,
+        Err(_) => true,
+    }))]
     fn prepare_counterparty_lien_consume_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -1395,6 +1442,7 @@ pub enum MarketModeV16 {
     Recovery,
 }
 
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackingBucketStatusV16 {
     Empty,
@@ -2113,6 +2161,7 @@ impl Default for AssetStateV16 {
 }
 
 #[repr(C)]
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceCreditStateV16 {
     pub positive_claim_bound_num: u128,
@@ -2167,6 +2216,7 @@ impl Default for SourceCreditStateV16 {
 }
 
 #[repr(C)]
+#[cfg_attr(all(kani, feature = "contracts"), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackingBucketV16 {
     pub market_id: u64,
@@ -15327,4 +15377,137 @@ pub fn kani_scaled_adl_delta_fast(
     now: i128,
 ) -> Option<i128> {
     scaled_adl_delta_fast(abs_basis_q, a_basis, then, now)
+}
+
+// ===================== KANI FUNCTION-CONTRACT LAYER =====================
+// Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
+// CLI -Z function-contracts + a separate CARGO_TARGET_DIR). The main proof
+// suite never compiles this layer: the function-contracts pass slows
+// kani-compiler ~5x crate-wide, and stub_verified composition havocs returns
+// into ensures-constrained symbolic values (see the elimination table in
+// tests/proofs_v16.rs, row (g)). The layer therefore holds LEAF contract
+// checks only — machine-checked interface documentation that future kani
+// versions may compose. NOTE: a contract on source_credit_lien_amounts_for_
+// effective was dropped — combining proof_for_contract with a kani::stub of
+// its U256 division helper is pathologically slow at the solver level (1800s+
+// warm) while sibling checks take seconds; its full-rate property is covered
+// by the standalone suite proofs.
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_counterparty_lien_consume_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_counterparty_lien_consume_delta() {
+    let bucket = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        expiry_slot: kani::any(),
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: kani::any(),
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(bucket.valid_liened_backing_num < 1u128 << 96);
+    kani::assume(bucket.consumed_liened_backing_num < 1u128 << 96);
+    kani::assume(source.spent_backing_num < 1u128 << 96);
+    kani::assume(source.provider_receivable_num < 1u128 << 96);
+    let _ = V16Core::prepare_counterparty_lien_consume_delta(bucket, source, amount);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_counterparty_lien_create_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_counterparty_lien_create_delta() {
+    let bucket = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        expiry_slot: kani::any(),
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: kani::any(),
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let current_slot: u64 = kani::any();
+    let amount: u128 = kani::any();
+    kani::assume(amount < 1u128 << 96);
+    kani::assume(bucket.valid_liened_backing_num < 1u128 << 96);
+    kani::assume(source.valid_liened_backing_num < 1u128 << 96);
+    let _ = V16Core::prepare_counterparty_lien_create_delta(bucket, source, current_slot, amount);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_counterparty_backing_withdraw_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_counterparty_backing_withdraw_delta() {
+    let bucket = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        consumed_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        expiry_slot: kani::any(),
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: kani::any(),
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let amount: u128 = kani::any();
+    let _ = V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(apply_backing_provider_earnings_withdraw)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_apply_backing_provider_earnings_withdraw() {
+    let vault: u128 = kani::any();
+    let earnings: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let _ = apply_backing_provider_earnings_withdraw(vault, earnings, amount);
 }
