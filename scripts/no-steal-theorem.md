@@ -5,6 +5,28 @@ artifacts (suite proof / contract / closure proof / flow witness / fuzz
 property / runtime check), all certified 250/250 + frame-wave additions
 (scripts/proof-strength-audit-results.md, kani_audit_certified.tsv).
 
+## Lemma 0 — The committed-state invariant (boundary theorem)
+
+ASSUMPTION (execution boundary, named and required): a failed call commits
+nothing — the caller aborts on Err and the runtime discards all mutations.
+This is the actual semantics of the intended execution environment.
+
+Under that assumption: **every committed engine state satisfies the global
+validity predicate** — `validate_shape`'s content (senior cover
+`c_tot + insurance + earnings + counterparty_backing_principal <= vault`,
+exact O(1) aggregate totals == per-domain sums, per-domain ledger closure,
+per-status bucket shapes) plus, on value-moving paths, a balanced typed
+`TokenValueFlowProofV16`.
+
+Machine check: `scripts/boundary_audit.py` verifies that ALL 55 public
+`*_not_atomic` entrypoints terminate their Ok path in (or transitively
+delegate to) one of the engine's state validators — so an Ok return cannot
+exist without the validators having passed, and an Err return commits
+nothing. `GlobalValidState` is therefore not a per-op proof obligation: it
+holds at every commit by construction, and the validators' SEMANTICS are
+themselves Kani-proven (aggregate-scan proofs, ledger-parts closure layer,
+senior-cover gate contracts).
+
 ## Theorem (engine no-steal)
 
 > For every reachable engine state and every public transition: quote value
@@ -82,13 +104,17 @@ Failed transitions mutate nothing:
 
 ## What this composition does NOT cover (explicit boundary)
 1. The intractable bodies (trade fill, realize, cure, close monoliths) carry
-   Lemmas 1/2/3/5/6 via their gates, value skeletons, components, fuzz, and
-   runtime checks — but have no monolithic frame proof (elimination table,
-   src/v16_proofs.rs). Their runtime flow-proof validation is the enforced
-   backstop on every execution.
-2. Wrapper/Solana concerns (account loading, signers, CPI, oracle auth,
-   serialization round-trips) — outside this repo.
-3. #25 ADL/finalization atomicity — integration-level.
-4. Spec-ahead-of-engine items (#21 preemption tuple, #23 drift reserve,
-   #31 fallback price) — mechanisms not implemented; implemented
-   alternatives proven (scripts/spec-coverage.md).
+   Lemmas 0/1/2/3/5/6 via their Ok-exit validators, gates, value skeletons,
+   components, and fuzz — but have no monolithic frame proof (elimination
+   table, src/v16_proofs.rs). The residual unproven risk class is a
+   cross-account frame violation INSIDE a transition that still satisfies
+   every validator and flow proof — bounded by the order-independence /
+   extraction-bound / double-claim fuzz, not frame-proven.
+2. #37 maker exemption: gates + components proven; full path intractable.
+3. No-DoS as a universal constructive theorem (every actionable state has a
+   SUCCESSFUL continuation): the cheap classes are witnessed (stale →
+   refresh succeeds; same-slot crank no-op; expired close → recovery route;
+   empty-market clock progress) and close lifetime is bounded; the success
+   theorems THROUGH liquidation/close bodies are intractable-tier. The
+   engine's liveness claim is class-conditional, as documented.
+4. Anything outside the pure engine (out of scope by project decision).

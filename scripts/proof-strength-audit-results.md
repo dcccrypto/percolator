@@ -27,11 +27,12 @@ Complementary non-Kani layers (all green at certification):
   every execution of every intractable body).
 
 ## Spec coverage
-See scripts/spec-coverage.md: 26 STRONG, 5 PARTIAL (named accept-reasons),
-1 permanent GAP (#25 ADL atomicity -- integration-level), 3 SPEC-AHEAD-OF-ENGINE
-findings awaiting user decision (#21 ClosePriority preemption, #23 drift
-reserve, #31 recovery fallback price -- mechanisms specified but not
-implemented; the engine's implemented alternatives are proven).
+See scripts/spec-coverage.md (current): 35 STRONG, 1 PARTIAL-accepted (#37),
+1 STRUCTURAL (#3), 1 N/A, 0 GAP rows at the engine boundary. Spec v16.9.0
+reconciled all former spec-ahead-of-engine items. The boundary theorem
+(scripts/boundary_audit.py: all 55 public entrypoints terminate Ok paths in
+state validators) makes the global validity predicate hold at every committed
+state under the Err-non-commit execution assumption.
 
 ## Boundary (proven, not assumed)
 The intractable tier (trade/realize/cure/close monolithic bodies) was
