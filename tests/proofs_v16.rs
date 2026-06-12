@@ -13270,3 +13270,65 @@ fn proof_v16_frame_fee_charge_touches_only_declared_state() {
     ea.capital = V16PodU128::new(cap - fee);
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
 }
+
+// oracle-target-update frame: exactly {asset.raw_oracle_target_price} — one
+// field in the whole state.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_oracle_target_update_touches_only_declared_state() {
+    let target_raw: u8 = kani::any();
+    kani::assume(target_raw >= 1);
+    let target = target_raw as u64;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.set_asset_raw_oracle_target_not_atomic(0, target).unwrap();
+    }
+    kani::cover!(true, "oracle target frame reached");
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    let mut es = s0;
+    let mut asset = s0.asset.try_to_runtime().unwrap();
+    asset.raw_oracle_target_price = target;
+    es.asset = AssetStateV16Account::from_runtime(&asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// insurance->account credit frame: exactly {insurance, c_tot} on the header
+// and {capital} on the account; vault frozen (internal relabel + credit).
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_insurance_account_credit_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    let ins_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(ins_raw >= amt_raw && ins_raw <= 8);
+    let amt = amt_raw as u128;
+    let ins = ins_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(ins);
+    header.insurance = V16PodU128::new(ins);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .credit_account_from_insurance_not_atomic(&mut account, amt)
+            .unwrap();
+    }
+    kani::cover!(amt < ins, "insurance credit frame covers partial");
+    let mut eh = h0;
+    eh.insurance = V16PodU128::new(ins - amt);
+    eh.c_tot = V16PodU128::new(amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    let mut ea = a0;
+    ea.capital = V16PodU128::new(amt);
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
