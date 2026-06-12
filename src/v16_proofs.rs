@@ -1303,3 +1303,4 @@ fn contract_check_flow_proof_debit_modifies() {
     kani::assume(amount < 1u128 << 96);
     let _ = p.debit(class, amount);
 }
+

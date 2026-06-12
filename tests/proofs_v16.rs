@@ -39,6 +39,11 @@ use percolator::{
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
+use percolator::v16::{
+    kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
+    kani_eq_portfolio_account_v16_account,
+};
+
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
@@ -12815,4 +12820,116 @@ fn proof_v16_close_cancel_shape_rejects_dropped_residual() {
     kani::cover!(true, "dropped-residual cancel shape reached");
     assert!(result.is_err());
     let _ = &mut market;
+}
+
+// ============ E2E EXACT-FRAME LATTICE ============
+// The end-to-end strengthening: per public op, the ENTIRE post-state equals
+// the pre-state EXCEPT the op's declared deltas — proven by whole-struct
+// equality (kani_eq_* index-loop helpers; never derived PartialEq/memcmp).
+// This upgrades "the declared deltas move correctly" (the conservation
+// lattice) to "and NOTHING else moves anywhere in the state" — the frame
+// half of the no-steal theorem.
+
+// deposit: exactly {vault, c_tot} on the header, {capital} on the account;
+// every other header field, the whole market slot, and every other account
+// field (all 16 legs, all 4 source domains, bitmap, certs, ledgers) frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_deposit_touches_only_declared_state() {
+    let cap_raw: u8 = kani::any();
+    let amt_raw: u8 = kani::any();
+    kani::assume(cap_raw <= 8);
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    let cap = cap_raw as u128;
+    let amt = amt_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(cap);
+    header.c_tot = V16PodU128::new(cap);
+    account_header.capital = V16PodU128::new(cap);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, amt).unwrap();
+    }
+    kani::cover!(true, "deposit frame witness reached");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(cap + amt);
+    eh.c_tot = V16PodU128::new(cap + amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    let mut ea = a0;
+    ea.capital = V16PodU128::new(cap + amt);
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
+
+// withdraw: the exact inverse frame.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_withdraw_touches_only_declared_state() {
+    let cap_raw: u8 = kani::any();
+    let amt_raw: u8 = kani::any();
+    kani::assume(cap_raw >= 1 && cap_raw <= 8);
+    kani::assume(amt_raw >= 1 && amt_raw <= cap_raw);
+    let cap = cap_raw as u128;
+    let amt = amt_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(cap);
+    header.c_tot = V16PodU128::new(cap);
+    account_header.capital = V16PodU128::new(cap);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.withdraw_not_atomic(&mut account, amt).unwrap();
+    }
+    kani::cover!(amt < cap, "withdraw frame covers partial");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(cap - amt);
+    eh.c_tot = V16PodU128::new(cap - amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    let mut ea = a0;
+    ea.capital = V16PodU128::new(cap - amt);
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
+
+// REJECTION frame (the atomicity half): a withdraw that fails the capital
+// gate leaves EVERY byte of meaningful state untouched — Err => unchanged,
+// over the whole structs, not just headline fields.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
+    let cap_raw: u8 = kani::any();
+    let amt_raw: u8 = kani::any();
+    kani::assume(cap_raw <= 8);
+    kani::assume(amt_raw > cap_raw && amt_raw <= 16);
+    let cap = cap_raw as u128;
+    let amt = amt_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(cap);
+    header.c_tot = V16PodU128::new(cap);
+    account_header.capital = V16PodU128::new(cap);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.withdraw_not_atomic(&mut account, amt)
+    };
+    kani::cover!(true, "overwithdraw frame witness reached");
+    assert!(result.is_err());
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
 }
