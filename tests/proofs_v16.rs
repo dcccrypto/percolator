@@ -13332,3 +13332,95 @@ fn proof_v16_frame_insurance_account_credit_touches_only_declared_state() {
     ea.capital = V16PodU128::new(amt);
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
 }
+
+// side-reset frame: exactly {header.risk_epoch, asset.mode_long} — the
+// finalization flips one side mode and bumps one epoch, nothing else.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_side_reset_touches_only_declared_state() {
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    {
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.mode_long = SideModeV16::ResetPending;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.finalize_side_reset_not_atomic(0, SideV16::Long).unwrap();
+    }
+    kani::cover!(true, "side reset frame reached");
+    let mut eh = h0;
+    eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    let mut asset = s0.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::Normal;
+    es.asset = AssetStateV16Account::from_runtime(&asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// same-slot crank frame: a refresh may touch ONLY the five clock/observation
+// fields (current_slot, slot_last, loss_stale_active, oracle_epoch,
+// funding_epoch — exact semantics pinned by the dedicated crank proofs);
+// every other header field, the slot, and the account are frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let effective_price = markets[0].engine.asset.try_to_runtime().unwrap().effective_price;
+    let current = header.current_slot.get();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .permissionless_crank_not_atomic(
+                &mut account,
+                PermissionlessCrankRequestV16 {
+                    now_slot: current,
+                    asset_index: 0,
+                    effective_price,
+                    funding_rate_e9: 0,
+                    action: PermissionlessCrankActionV16::Refresh,
+                },
+            )
+            .unwrap();
+    }
+    kani::cover!(true, "same-slot crank frame reached");
+    let mut eh = h0;
+    eh.current_slot = header.current_slot;
+    eh.slot_last = header.slot_last;
+    eh.loss_stale_active = header.loss_stale_active;
+    eh.oracle_epoch = header.oracle_epoch;
+    eh.funding_epoch = header.funding_epoch;
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    // slot clock fields may advance; freeze everything else on the slot too
+    let mut es = s0;
+    let mut a_after = markets[0].engine.asset.try_to_runtime().unwrap();
+    let a_before = s0.asset.try_to_runtime().unwrap();
+    // copy the volatile asset clock/observation fields from post-state
+    let mut a_expect = a_before;
+    a_expect.slot_last = a_after.slot_last;
+    a_expect.effective_price = a_after.effective_price;
+    a_expect.fund_px_last = a_after.fund_px_last;
+    a_expect.raw_oracle_target_price = a_after.raw_oracle_target_price;
+    es.asset = AssetStateV16Account::from_runtime(&a_expect);
+    let _ = &mut a_after;
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+    // the refresh recertifies the hint account: health_cert and the staleness
+    // flags are the only account-side volatiles; value, legs, domains,
+    // escrow, ledgers all frozen.
+    let mut ea = a0;
+    ea.health_cert = account_header.health_cert;
+    ea.stale_state = account_header.stale_state;
+    ea.b_stale_state = account_header.b_stale_state;
+    ea.last_fee_slot = account_header.last_fee_slot;
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
