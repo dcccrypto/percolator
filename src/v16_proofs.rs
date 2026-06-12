@@ -1381,3 +1381,59 @@ fn contract_check_kernel_resize_leg_same_side() {
     );
 }
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_attach_leg)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_attach_leg() {
+    let assetstatev16 = AssetStateV16 {
+        market_id: kani::any(),
+        retired_slot: kani::any(),
+        lifecycle: AssetLifecycleV16::Active,
+        raw_oracle_target_price: kani::any(),
+        effective_price: kani::any(),
+        fund_px_last: kani::any(),
+        slot_last: kani::any(),
+        a_long: kani::any(),
+        a_short: kani::any(),
+        k_long: kani::any(),
+        k_short: kani::any(),
+        f_long_num: kani::any(),
+        f_short_num: kani::any(),
+        k_epoch_start_long: kani::any(),
+        k_epoch_start_short: kani::any(),
+        f_epoch_start_long_num: kani::any(),
+        f_epoch_start_short_num: kani::any(),
+        b_long_num: kani::any(),
+        b_short_num: kani::any(),
+        b_epoch_start_long_num: kani::any(),
+        b_epoch_start_short_num: kani::any(),
+        oi_eff_long_q: kani::any(),
+        oi_eff_short_q: kani::any(),
+        stored_pos_count_long: kani::any(),
+        stored_pos_count_short: kani::any(),
+        stale_account_count_long: kani::any(),
+        stale_account_count_short: kani::any(),
+        pending_obligation_count_long: kani::any(),
+        pending_obligation_count_short: kani::any(),
+        loss_weight_sum_long: kani::any(),
+        loss_weight_sum_short: kani::any(),
+        social_loss_remainder_long_num: kani::any(),
+        social_loss_remainder_short_num: kani::any(),
+        social_loss_dust_long_num: kani::any(),
+        social_loss_dust_short_num: kani::any(),
+        explicit_unallocated_loss_long: kani::any(),
+        explicit_unallocated_loss_short: kani::any(),
+        epoch_long: kani::any(),
+        epoch_short: kani::any(),
+        mode_long: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
+        mode_short: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
+    };
+    let side = if kani::any() { SideV16::Long } else { SideV16::Short };
+    let basis_pos_q: i128 = kani::any();
+    let loss_weight: u128 = kani::any();
+    let asset_index_u32: u32 = kani::any();
+    kani::assume(basis_pos_q != 0 && basis_pos_q > i128::MIN);
+    let _ = V16Core::kernel_attach_leg(assetstatev16, side, basis_pos_q, loss_weight, asset_index_u32);
+}
+

@@ -1,1 +1,1 @@
-contract_check_kernel_resize_leg_same_side
+contract_check_kernel_attach_leg

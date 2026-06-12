@@ -792,6 +792,129 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
+    /// anchors, gate the a-basis range, add open interest, and construct the
+    /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
+    /// exactly this. loss_weight is caller-supplied (division-bearing).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(basis_pos_q != 0 && basis_pos_q > i128::MIN))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(AssetStateV16, PortfolioLegV16)>| match result {
+        Ok((a, l)) => {
+            let abs_q = basis_pos_q.unsigned_abs();
+            // the new leg is constructed EXACTLY from the declared sources
+            l.active && l.asset_index == asset_index_u32 && l.market_id == asset.market_id
+                && l.side == side && l.basis_pos_q == basis_pos_q && l.loss_weight == loss_weight
+                && l.b_rem == 0 && !l.b_stale && !l.stale
+                && (match side {
+                    SideV16::Long => l.a_basis == asset.a_long && l.k_snap == asset.k_long
+                        && l.f_snap == asset.f_long_num && l.b_snap == asset.b_long_num
+                        && l.epoch_snap == asset.epoch_long && l.b_epoch_snap == asset.epoch_long
+                        && a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_add(abs_q)
+                        && a.loss_weight_sum_long == asset.loss_weight_sum_long.wrapping_add(loss_weight)
+                        && a.stored_pos_count_long == asset.stored_pos_count_long.wrapping_add(1)
+                                && a.oi_eff_short_q == asset.oi_eff_short_q
+                        && a.loss_weight_sum_short == asset.loss_weight_sum_short,
+                    SideV16::Short => l.a_basis == asset.a_short && l.k_snap == asset.k_short
+                        && l.f_snap == asset.f_short_num && l.b_snap == asset.b_short_num
+                        && l.epoch_snap == asset.epoch_short && l.b_epoch_snap == asset.epoch_short
+                        && a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_add(abs_q)
+                        && a.loss_weight_sum_short == asset.loss_weight_sum_short.wrapping_add(loss_weight)
+                        && a.stored_pos_count_short == asset.stored_pos_count_short.wrapping_add(1)
+                                && a.oi_eff_long_q == asset.oi_eff_long_q
+                        && a.loss_weight_sum_long == asset.loss_weight_sum_long,
+                })
+                && a.market_id == asset.market_id
+                && a.retired_slot == asset.retired_slot
+                && a.lifecycle == asset.lifecycle
+                && a.raw_oracle_target_price == asset.raw_oracle_target_price
+                && a.effective_price == asset.effective_price
+                && a.fund_px_last == asset.fund_px_last
+                && a.slot_last == asset.slot_last
+                && a.a_long == asset.a_long
+                && a.a_short == asset.a_short
+                && a.k_long == asset.k_long
+                && a.k_short == asset.k_short
+                && a.f_long_num == asset.f_long_num
+                && a.f_short_num == asset.f_short_num
+                && a.k_epoch_start_long == asset.k_epoch_start_long
+                && a.k_epoch_start_short == asset.k_epoch_start_short
+                && a.f_epoch_start_long_num == asset.f_epoch_start_long_num
+                && a.f_epoch_start_short_num == asset.f_epoch_start_short_num
+                && a.b_long_num == asset.b_long_num
+                && a.b_short_num == asset.b_short_num
+                && a.b_epoch_start_long_num == asset.b_epoch_start_long_num
+                && a.b_epoch_start_short_num == asset.b_epoch_start_short_num
+                && a.stale_account_count_long == asset.stale_account_count_long
+                && a.stale_account_count_short == asset.stale_account_count_short
+                && a.pending_obligation_count_long == asset.pending_obligation_count_long
+                && a.pending_obligation_count_short == asset.pending_obligation_count_short
+                && a.social_loss_remainder_long_num == asset.social_loss_remainder_long_num
+                && a.social_loss_remainder_short_num == asset.social_loss_remainder_short_num
+                && a.social_loss_dust_long_num == asset.social_loss_dust_long_num
+                && a.social_loss_dust_short_num == asset.social_loss_dust_short_num
+                && a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long
+                && a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short
+                && a.epoch_long == asset.epoch_long
+                && a.epoch_short == asset.epoch_short
+                && a.mode_long == asset.mode_long
+                && a.mode_short == asset.mode_short
+        },
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_attach_leg(
+        mut asset: AssetStateV16,
+        side: SideV16,
+        basis_pos_q: i128,
+        loss_weight: u128,
+        asset_index_u32: u32,
+    ) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
+        let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
+            SideV16::Long => (
+                asset.a_long,
+                asset.k_long,
+                asset.f_long_num,
+                asset.b_long_num,
+                asset.epoch_long,
+            ),
+            SideV16::Short => (
+                asset.a_short,
+                asset.k_short,
+                asset.f_short_num,
+                asset.b_short_num,
+                asset.epoch_short,
+            ),
+        };
+        if !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis) {
+            return Err(V16Error::InvalidLeg);
+        }
+        if loss_weight == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        add_open_interest_for_new_position(
+            &mut asset,
+            side,
+            basis_pos_q.unsigned_abs(),
+            loss_weight,
+        )?;
+        let leg = PortfolioLegV16 {
+            active: true,
+            asset_index: asset_index_u32,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q,
+            a_basis,
+            k_snap,
+            f_snap,
+            epoch_snap,
+            loss_weight,
+            b_snap,
+            b_rem: 0,
+            b_epoch_snap: epoch_snap,
+            b_stale: false,
+            stale: false,
+        };
+        Ok((asset, leg))
+    }
+
     // Contract layer: lien creation is a pure encumbrance relabel — fresh
     // unliened moves to valid liened atom-for-atom, fresh_reserved (and every
     // stock-relevant quantity) is untouched, and zero-amount is the identity.
@@ -805,10 +928,6 @@ impl V16Core {
                 && s.spent_backing_num == source.spent_backing_num),
         Err(_) => true,
     }))]
-    /// PRODUCTION KERNEL (kernel-proofs restructure): the same-side leg
-    /// resize state transform. Pure on small Copy structs so the contract
-    /// layer can verify it over its full input domain; the position-delta
-    /// glue in MarketGroupV16ViewMut calls exactly this.
     fn prepare_counterparty_lien_create_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -10693,54 +10812,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         validate_basis(basis_pos_q)?;
-        let mut asset = self.asset_state(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
         self.require_asset_active_for_risk_increase(asset_index)?;
-        let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
-            SideV16::Long => (
-                asset.a_long,
-                asset.k_long,
-                asset.f_long_num,
-                asset.b_long_num,
-                asset.epoch_long,
-            ),
-            SideV16::Short => (
-                asset.a_short,
-                asset.k_short,
-                asset.f_short_num,
-                asset.b_short_num,
-                asset.epoch_short,
-            ),
+        let a_basis = match side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
         };
-        if !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis) {
-            return Err(V16Error::InvalidLeg);
-        }
         let loss_weight = loss_weight_for_basis(basis_pos_q.unsigned_abs(), a_basis)?;
-        if loss_weight == 0 {
-            return Err(V16Error::InvalidLeg);
-        }
-        add_open_interest_for_new_position(
-            &mut asset,
-            side,
-            basis_pos_q.unsigned_abs(),
-            loss_weight,
-        )?;
-        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
-            active: true,
-            asset_index: asset_index as u32,
-            market_id: asset.market_id,
+        let (asset, new_leg) = V16Core::kernel_attach_leg(
+            asset,
             side,
             basis_pos_q,
-            a_basis,
-            k_snap,
-            f_snap,
-            epoch_snap,
             loss_weight,
-            b_snap,
-            b_rem: 0,
-            b_epoch_snap: epoch_snap,
-            b_stale: false,
-            stale: false,
-        });
+            asset_index as u32,
+        )?;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
