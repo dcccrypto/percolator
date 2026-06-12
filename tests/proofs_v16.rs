@@ -12933,3 +12933,112 @@ fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
     assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
     assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
 }
+
+// domain-insurance deposit frame: exactly {vault, insurance,
+// insurance_domain_budget_remaining_total} on the header and
+// {insurance_domain_budget_long} on the slot.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_domain_insurance_deposit_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    let amt = amt_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(0, amt).unwrap();
+    }
+    kani::cover!(true, "domain-insurance deposit frame reached");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(h0.vault.get() + amt);
+    eh.insurance = V16PodU128::new(h0.insurance.get() + amt);
+    eh.insurance_domain_budget_remaining_total =
+        V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() + amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.insurance_domain_budget_long =
+        V16PodU128::new(s0.insurance_domain_budget_long.get() + amt);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// domain-insurance withdraw frame: the exact inverse set, plus nothing else.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_domain_insurance_withdraw_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    let fund_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(fund_raw >= amt_raw && fund_raw <= 8);
+    let amt = amt_raw as u128;
+    let fund = fund_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(fund);
+    header.insurance = V16PodU128::new(fund);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(fund);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(fund);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.withdraw_domain_insurance_not_atomic(0, amt).unwrap();
+    }
+    kani::cover!(amt < fund, "domain-insurance withdraw frame covers partial");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(fund - amt);
+    eh.insurance = V16PodU128::new(fund - amt);
+    eh.insurance_domain_budget_remaining_total = V16PodU128::new(fund - amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.insurance_domain_budget_long = V16PodU128::new(fund - amt);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// provider-earnings withdraw frame: exactly {vault,
+// backing_provider_earnings_total} on the header and the bucket's
+// utilization_fee_earnings on the slot.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_earnings_withdraw_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    let earn_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(earn_raw >= amt_raw && earn_raw <= 8);
+    let amt = amt_raw as u128;
+    let earn = earn_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(earn);
+    header.backing_provider_earnings_total = V16PodU128::new(earn);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        utilization_fee_earnings: earn,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .withdraw_backing_provider_earnings_not_atomic(0, amt)
+            .unwrap();
+    }
+    kani::cover!(amt < earn, "earnings withdraw frame covers partial");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(earn - amt);
+    eh.backing_provider_earnings_total = V16PodU128::new(earn - amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        utilization_fee_earnings: earn - amt,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
