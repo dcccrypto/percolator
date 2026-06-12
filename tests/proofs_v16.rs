@@ -13123,3 +13123,150 @@ fn proof_v16_frame_budget_credit_touches_only_declared_state() {
         V16PodU128::new(s0.insurance_domain_budget_long.get() + amt);
     assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
 }
+
+// backing-deposit frame: exactly {vault, source_fresh_backing_total_num} on
+// the header, {backing_long bucket, source_credit_long fresh_reserved} on
+// the slot — nothing else anywhere.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_backing_deposit_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 4);
+    let amt = amt_raw as u128;
+    let amt_num = amt * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, amt, 10)
+            .unwrap();
+    }
+    kani::cover!(true, "backing deposit frame reached");
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(h0.vault.get() + amt);
+    eh.source_fresh_backing_total_num =
+        V16PodU128::new(h0.source_fresh_backing_total_num.get() + amt_num);
+    // the deposit refreshes the domain: risk epoch and credit epoch advance.
+    eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: amt_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut src = s0.source_credit_long.try_to_runtime().unwrap();
+    src.fresh_reserved_backing_num += amt_num;
+    src.credit_epoch += 1;
+    src.credit_rate_num = CREDIT_RATE_SCALE;
+    es.source_credit_long = SourceCreditStateV16Account::from_runtime(&src);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// backing-withdraw frame: the exact inverse set.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_backing_withdraw_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    let fund_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 4);
+    kani::assume(fund_raw >= amt_raw && fund_raw <= 4);
+    let amt = amt_raw as u128;
+    let fund = fund_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(fund);
+    header.source_fresh_backing_total_num = V16PodU128::new(fund * BOUND_SCALE);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: fund * BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: fund * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .withdraw_fresh_counterparty_backing_not_atomic(0, amt)
+            .unwrap();
+    }
+    kani::cover!(amt < fund, "backing withdraw frame covers partial");
+    let rem = fund - amt;
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(rem);
+    eh.source_fresh_backing_total_num = V16PodU128::new(rem * BOUND_SCALE);
+    eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: rem * BOUND_SCALE,
+        expiry_slot: if rem == 0 { 0 } else { 10 },
+        status: if rem == 0 {
+            BackingBucketStatusV16::Empty
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
+        ..BackingBucketV16::EMPTY
+    });
+    es.source_credit_long = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        fresh_reserved_backing_num: rem * BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 1,
+        ..SourceCreditStateV16::EMPTY
+    });
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// fee-charge frame: exactly {insurance, c_tot} on the header and {capital}
+// on the account; vault and everything else frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_fee_charge_touches_only_declared_state() {
+    let cap_raw: u8 = kani::any();
+    let fee_raw: u8 = kani::any();
+    kani::assume(cap_raw <= 8);
+    kani::assume(fee_raw <= cap_raw);
+    let cap = cap_raw as u128;
+    let fee = fee_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(cap);
+    header.c_tot = V16PodU128::new(cap);
+    account_header.capital = V16PodU128::new(cap);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        let charged = market
+            .kani_charge_account_fee_current_not_atomic(&mut account, fee)
+            .unwrap();
+        assert_eq!(charged, fee);
+    }
+    kani::cover!(fee > 0, "fee frame covers nonzero fee");
+    let mut eh = h0;
+    eh.insurance = V16PodU128::new(fee);
+    eh.c_tot = V16PodU128::new(cap - fee);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    let mut ea = a0;
+    ea.capital = V16PodU128::new(cap - fee);
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}

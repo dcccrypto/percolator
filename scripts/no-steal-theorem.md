@@ -53,8 +53,13 @@ For each tractable public op, the ENTIRE post-state equals the pre-state
 except the declared deltas — whole-struct equality over the full header
 (39 fields), the engine slot (13 incl. nested ledgers), and the whole
 account (21 incl. all legs/domains):
-* suite: proof_v16_frame_* (deposit, withdraw, domain-insurance pair,
-  earnings withdraw, resolve, drain-only, budget credit, ...).
+* suite: proof_v16_frame_* — 12 ops verified: deposit, withdraw, fee charge,
+  domain-insurance deposit/withdraw, budget credit, provider-earnings
+  withdraw, counterparty-backing deposit/withdraw (incl. the discovered
+  risk_epoch/credit_epoch recompute deltas, now part of the declared
+  contract), resolve_market, mark-drain-only, plus the Err-frame template.
+  Remaining tractable ops (oracle updates, side reset, restart, crank,
+  insurance->account credit) extend by the same mechanical template.
 * Cross-asset corollary: an op naming asset/domain S cannot change any field
   of any other asset's slot — the frame proofs compare the untouched slot
   byte-for-byte.
