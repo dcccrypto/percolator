@@ -13042,3 +13042,84 @@ fn proof_v16_frame_earnings_withdraw_touches_only_declared_state() {
     });
     assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
 }
+
+// resolve_market frame: exactly {mode, resolved_slot, current_slot,
+// loss_stale_active} on the header; the slot and all value fields frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_resolve_market_touches_only_declared_state() {
+    let delta_raw: u8 = kani::any();
+    kani::assume(delta_raw >= 1 && delta_raw <= 8);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let resolved_slot = header.current_slot.get() + delta_raw as u64;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(resolved_slot).unwrap();
+    }
+    kani::cover!(true, "resolve frame reached");
+    let mut eh = h0;
+    eh.mode = 1;
+    eh.resolved_slot = V16PodU64::new(resolved_slot);
+    eh.current_slot = V16PodU64::new(resolved_slot);
+    eh.loss_stale_active = 0;
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+}
+
+// mark_asset_drain_only frame: exactly {asset_set_epoch, risk_epoch} on the
+// header and {asset.lifecycle} on the slot.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_mark_drain_only_touches_only_declared_state() {
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.mark_asset_drain_only_not_atomic(0).unwrap();
+    }
+    kani::cover!(true, "drain-only frame reached");
+    let mut eh = h0;
+    eh.asset_set_epoch = V16PodU64::new(h0.asset_set_epoch.get() + 1);
+    eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    let mut asset = s0.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::DrainOnly;
+    es.asset = AssetStateV16Account::from_runtime(&asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
+
+// budget-credit frame: exactly {insurance_domain_budget_remaining_total} on
+// the header and {insurance_domain_budget_long} on the slot — pure capacity
+// relabel, every value field frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_budget_credit_touches_only_declared_state() {
+    let amt_raw: u8 = kani::any();
+    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    let amt = amt_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(amt);
+    header.insurance = V16PodU128::new(amt);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.credit_domain_insurance_budget_not_atomic(0, amt).unwrap();
+    }
+    kani::cover!(true, "budget-credit frame reached");
+    let mut eh = h0;
+    eh.insurance_domain_budget_remaining_total =
+        V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() + amt);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.insurance_domain_budget_long =
+        V16PodU128::new(s0.insurance_domain_budget_long.get() + amt);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+}
