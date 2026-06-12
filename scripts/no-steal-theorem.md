@@ -113,8 +113,21 @@ Failed transitions mutate nothing:
 2. #37 maker exemption: gates + components proven; full path intractable.
 3. No-DoS as a universal constructive theorem (every actionable state has a
    SUCCESSFUL continuation): the cheap classes are witnessed (stale →
-   refresh succeeds; same-slot crank no-op; expired close → recovery route;
-   empty-market clock progress) and close lifetime is bounded; the success
-   theorems THROUGH liquidation/close bodies are intractable-tier. The
-   engine's liveness claim is class-conditional, as documented.
+   refresh succeeds; same-slot crank frame; empty-market clock progress) and
+   close lifetime is bounded; the success theorems THROUGH liquidation/close
+   bodies are intractable-tier. The engine's liveness claim is
+   class-conditional, NOW WITH MACHINE-PROVEN RANK COMPONENTS (the
+   kernel-proofs branch):
+
+   | progress class | rank artifact (production kernel, full-domain proven) |
+   |---|---|
+   | B settlement | kernel_advance_leg_b_snap: b_snap advances by exactly delta_b — distance-to-target strictly decreases per successful chunk |
+   | close progress | kernel_advance_close_ledger: residual_remaining decreases by exactly the booked total; finalization == residual exhaustion; immutables frozen |
+   | trade finalization | kernel_initial_margin_gate (EXACT total decision: Ok <=> valid cert + equity >= IM) and kernel_locked_margin_gate (positive credit can never satisfy IM under h-lock) |
+   | leg mutations | kernel_resize_leg_same_side / kernel_attach_leg / kernel_clear_leg: the complete leg stage family of trade/liquidation/rebalance, exact deltas + complete frames |
+
+   Each rank kernel is real production code (the monoliths call them), so a
+   successful body execution NECESSARILY decreases its class's rank by the
+   proven amount — the composed liveness argument needs only the (gate-proven)
+   reachability of a successful call per class.
 4. Anything outside the pure engine (out of scope by project decision).

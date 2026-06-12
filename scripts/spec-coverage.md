@@ -47,7 +47,7 @@ Generated 2026-06-11 (engine @ spec v16.8.11). Artifact classes:
 | 34 | No full-market atomic work | STRONG | the 16 exact-frame proofs prove public ops change ONLY the named header fields, the named asset slot, and the hint account — no other account or slot is touched, machine-checked byte-for-byte | — |
 | 35 | Crank-forward markets | STRONG | suite permissionless-crank proofs | — |
 | 36 | Canonical per-asset leg | STRONG | suite duplicate-asset/domain rejections | — |
-| 37 | Maker exemption bounded | PARTIAL | trade-cert component proofs; full path intractable tier | gates + runtime; accept with note |
+| 37 | Maker exemption bounded | STRONG (decision core) | kernel_initial_margin_gate: EXACT total decision contract (Ok <=> valid cert + certified equity covers IM); kernel_locked_margin_gate: positive credit never satisfies IM under h-lock (full domain); both are production code called by trade finalization. The monolithic path composition stays with the documented elimination + flow/frame/validator backstops | — |
 
 ## Outstanding items (engine boundary)
 Spec v16.9.0 reconciled all former spec-ahead-of-engine items; the matrix has no open
