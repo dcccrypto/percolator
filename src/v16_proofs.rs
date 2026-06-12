@@ -1506,3 +1506,31 @@ fn contract_check_kernel_clear_leg() {
     let _ = V16Core::kernel_clear_leg(leg, asset);
 }
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_advance_leg_b_snap)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_advance_leg_b_snap() {
+    let leg = PortfolioLegV16 {
+        active: kani::any(),
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        basis_pos_q: kani::any(),
+        a_basis: kani::any(),
+        k_snap: kani::any(),
+        f_snap: kani::any(),
+        epoch_snap: kani::any(),
+        loss_weight: kani::any(),
+        b_snap: kani::any(),
+        b_rem: kani::any(),
+        b_epoch_snap: kani::any(),
+        b_stale: kani::any(),
+        stale: kani::any(),
+    };
+    let delta_b: u128 = kani::any();
+    let new_remainder: u128 = kani::any();
+    let remaining_after: u128 = kani::any();
+    let _ = V16Core::kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after);
+}
+

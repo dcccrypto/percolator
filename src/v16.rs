@@ -792,6 +792,44 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL (liveness rank): the B-settlement leg advance.
+    /// b_snap moves FORWARD by exactly delta_b — the well-founded rank
+    /// component for the B-settlement progress theorem: each successful
+    /// chunk strictly decreases the leg's distance to its B target.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<PortfolioLegV16>| match result {
+        Ok(l) => l.b_snap == leg.b_snap.wrapping_add(delta_b)
+            && l.b_snap >= leg.b_snap
+            && l.b_rem == new_remainder
+            && l.b_stale == (remaining_after != 0)
+            && l.active == leg.active
+                && l.asset_index == leg.asset_index
+                && l.market_id == leg.market_id
+                && l.side == leg.side
+                && l.basis_pos_q == leg.basis_pos_q
+                && l.a_basis == leg.a_basis
+                && l.k_snap == leg.k_snap
+                && l.f_snap == leg.f_snap
+                && l.epoch_snap == leg.epoch_snap
+                && l.loss_weight == leg.loss_weight
+                && l.b_epoch_snap == leg.b_epoch_snap
+                && l.stale == leg.stale,
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_advance_leg_b_snap(
+        mut leg: PortfolioLegV16,
+        delta_b: u128,
+        new_remainder: u128,
+        remaining_after: u128,
+    ) -> V16Result<PortfolioLegV16> {
+        leg.b_snap = leg
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        leg.b_rem = new_remainder;
+        leg.b_stale = remaining_after != 0;
+        Ok(leg)
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -9735,13 +9773,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_sub(loss_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
-        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        leg.b_snap = leg
-            .b_snap
-            .checked_add(chunk.delta_b)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        leg.b_rem = chunk.new_remainder;
-        leg.b_stale = chunk.remaining_after != 0;
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let leg = V16Core::kernel_advance_leg_b_snap(
+            leg,
+            chunk.delta_b,
+            chunk.new_remainder,
+            chunk.remaining_after,
+        )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         self.set_account_pnl(account, new_pnl)?;
         if chunk.remaining_after != 0 {
