@@ -1,87 +1,47 @@
 # Kani Proof Strength Audit Results
 
-Generated: 2026-06-10
+Generated: 2026-06-12 (full certification re-run; supersedes the 2026-06-10
+193/193 audit). Every artifact verified IN ISOLATION (one harness per kani
+invocation, pkill-clean between runs, 900s suite budget / 1800s
+compile-inclusive layer budget).
 
-Source prompt: `scripts/audit-proof-strength.md`.
+## Certified inventory: 250/250 PASS, zero failures
 
-## Current Inventory
+| layer | artifacts | result | notes |
+|---|---|---|---|
+| suite (tests/proofs_v16.rs) | 199 | 199/199 PASS | constructed-state Kani proofs over the public surface: junior-pool conservation lattice (pool-isolated or exact-delta for every public op), gates/rejections-before-mutation, two-op sequence witnesses, close-ownership exclusion, spec #19/#24 witnesses |
+| contracts (src/v16_proofs.rs, -Z function-contracts) | 34 | 34/34 PASS | full-input-domain leaf contracts: complete counterparty lien lifecycle, insurance lien family, domain-insurance moves, aggregate maintenance, flow-typing transit witnesses (all 11 incl. the cure/support/resolved-exit skeletons of the intractable bodies), &mut-self debit (modifies/old) |
+| closure (src/v16_proofs.rs, plain) | 17 | 17/17 PASS | inductive: genesis + encumbrance-ledger closure under all 12 deltas (any state satisfying inv), bucket status-machine closure (4 delta-level) |
 
-Static inventory from the current `master` tree (post v16.8.9):
+Suite solver-time stats: median 54s, max 785s
+(budget 900s), 170/199 within the 300s ideal.
 
-| File | Kani proofs |
-|---|---:|
-| `tests/proofs_v16.rs` | 182 |
-| `tests/proofs_v16_arithmetic.rs` | 11 |
-| Total | 193 |
+Complementary non-Kani layers (all green at certification):
+- 12 proptest properties (backing double-claim, close order-independence,
+  re-close idempotence, random-sequence extraction bound, rounding-residue
+  direction suite) at 300-2000 cases each;
+- 8 runtime test suites;
+- runtime fail-closed validation (validate_shape / flow-proof validate() on
+  every execution of every intractable body).
 
-## Full Audit
+## Spec coverage
+See scripts/spec-coverage.md: 26 STRONG, 5 PARTIAL (named accept-reasons),
+1 permanent GAP (#25 ADL atomicity -- integration-level), 3 SPEC-AHEAD-OF-ENGINE
+findings awaiting user decision (#21 ClosePriority preemption, #23 drift
+reserve, #31 recovery fallback price -- mechanisms specified but not
+implemented; the engine's implemented alternatives are proven).
 
-Commands:
+## Boundary (proven, not assumed)
+The intractable tier (trade/realize/cure/close monolithic bodies) was
+eliminated under seven reduction strategies (concrete, stubbed validators,
+solver swap, scale shrink, combinations, reduced-leg profile, function-
+contract composition) -- documented in src/v16_proofs.rs. Public-op contracts
+over arbitrary symbolic states closed by the deposit probe. Division- and
+multiplication-bearing leaves are not contract-checkable in this kani
+generation; their semantics are covered by exact suite proofs with concrete
+operands plus the direction fuzz.
 
-```text
-cargo test --tests --features fuzz
-LOG_DIR=kani_full_audit_v3 BUDGET_S=900 bash scripts/isolated_runner.sh
-```
-
-Results:
-
-| Check | Result |
-|---|---:|
-| Rust tests (8 suites incl. proptest fuzz) | 106 passed, 0 failed |
-| Kani harnesses | 193 passed, 0 failed |
-| Kani timeouts | 0 |
-| Total per-harness wall time | 20499s |
-
-Timing artifact: `kani_audit_final.tsv` (one row per harness, isolated runs,
-900s budget, orphaned-cbmc cleanup between proofs).
-
-## Static Strength Classification (per audit prompt criteria 1-6)
-
-- **0 unit tests masquerading as proofs.** Every harness takes symbolic input
-  except documented CONCRETE WITNESSES, each flagged in-code with the
-  tractability rationale and a pointer to the randomized runtime coverage:
-  `proof_v16_expired_backing_yields_zero_realizable_support_after_expiry`
-  (any symbolic input exceeds the budget; the symbolic surface is fuzzed in
-  `tests/backing_double_claim_fuzz.rs`).
-- **0 vacuous proofs.** `kani::cover!` discipline is universal; every
-  assume-constrained path carries a reachability cover. High-assume harnesses
-  (up to 11 assumes) all prove their interesting branches reachable.
-- **0 weak-invariant substitutions.** Conservation proofs assert either full
-  `validate_shape` (which under cfg(kani) includes the full audit scan and
-  aggregate reconciliation) or exact loop-free field deltas. Rejection proofs
-  assert the specific error variant plus state-unchanged, and pair with
-  accepting twins.
-- **Known intractable region (documented in-code):** harnesses entering the
-  realize/convert path (`realize_source_backed_claims` value semantics) and
-  the full `close_resolved_account_not_atomic` path exceed the 900s budget
-  even fully concrete (in-path account validation forces unwind 40; per-domain
-  U256 credit math). Coverage decomposes into passing component proofs
-  (consume-delta exactness, support caps, close-ledger partition equality,
-  expiry-liveness primitive) plus 5 randomized end-to-end properties
-  (300 cases each) in `tests/backing_double_claim_fuzz.rs` and 2 in
-  `tests/resolved_insolvent_fuzz.rs`.
-
-## Slowest Harnesses
-
-| Harness | Time | Status |
-|---|---:|---|
-| `proof_v16_residual_excludes_recoverable_counterparty_backing_principal` | 672s | PASS |
-| `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault` | 605s | PASS |
-| `proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_bucket` | 511s | PASS |
-| `proof_v16_expired_backing_yields_zero_realizable_support_after_expiry` | 496s | PASS |
-| `proof_v16_public_insurance_lien_consume_debits_only_domain_insurance` | 471s | PASS |
-| `proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_state` | 460s | PASS |
-| `proof_v16_public_insurance_lien_release_restores_reserved_credit_without_value_movement` | 452s | PASS |
-| `proof_v16_public_account_backing_fee_split_preserves_senior_stock` | 424s | PASS |
-| `proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_value_movement` | 414s | PASS |
-| `proof_v16_withdraw_settles_flat_negative_pnl_before_value_exit` | 404s | PASS |
-
-## Method Notes
-
-- One-at-a-time isolated runs with `pkill` cleanup between proofs remain
-  mandatory: a concurrent second runner's cleanup killed an in-flight cbmc and
-  produced a phantom 39s "TIMEOUT" (re-run in isolation: 42s PASS).
-- Solver-variance fragility: a witness that passed once at 658s timed out on
-  three re-runs at 900s. Harnesses sitting above ~70% of budget should be
-  reduced or dropped; one such witness was dropped with its coverage
-  re-documented (see the tractability note in `tests/proofs_v16.rs`).
+## Reproduction
+- suite:    LOG_DIR=<dir> BUDGET_S=900 bash scripts/isolated_runner.sh  (roster: grep proof_v16_ tests/proofs_v16.rs)
+- contracts: FEATURES=fuzz,contracts bash scripts/contracts_runner.sh
+- closure:  LOG_DIR=kani_closure FEATURES=fuzz,closure KANI_Z= bash scripts/contracts_runner.sh
