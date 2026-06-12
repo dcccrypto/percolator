@@ -1608,3 +1608,37 @@ fn closure_kernel_advance_close_ledger_rank_witness() {
     }
 }
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_initial_margin_gate)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_initial_margin_gate() {
+    let cert = HealthCertV16 {
+        certified_equity: kani::any(),
+        certified_initial_req: kani::any(),
+        certified_maintenance_req: kani::any(),
+        certified_liq_deficit: kani::any(),
+        certified_worst_case_loss: kani::any(),
+        cert_oracle_epoch: kani::any(),
+        cert_funding_epoch: kani::any(),
+        cert_risk_epoch: kani::any(),
+        cert_asset_set_epoch: kani::any(),
+        active_bitmap_at_cert: kani::any(),
+        valid: kani::any(),
+    };
+    let _ = V16Core::kernel_initial_margin_gate(cert);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_locked_margin_gate)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_locked_margin_gate() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_credits: i128 = kani::any();
+    let req: u128 = kani::any();
+    kani::assume(pnl > i128::MIN && fee_credits > i128::MIN && capital < 1u128 << 100);
+    let _ = V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, req);
+}
+

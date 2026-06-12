@@ -792,6 +792,68 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL (spec #37 gate): the trade-finalization initial-
+    /// margin decision — an EXACT total decision contract: the gate admits
+    /// precisely the states with a VALID certificate whose certified equity
+    /// is nonnegative and covers the certified initial requirement, and
+    /// rejects everything else. This is the verified-certificate gate the
+    /// maker-exemption rule rides on.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| {
+        let admit = cert.valid
+            && cert.certified_equity >= 0
+            && (cert.certified_equity as u128) >= cert.certified_initial_req;
+        match result {
+            Ok(()) => admit,
+            Err(_) => !admit,
+        }
+    }))]
+    pub(crate) fn kernel_initial_margin_gate(cert: HealthCertV16) -> V16Result<()> {
+        if !cert.valid {
+            return Err(V16Error::Stale);
+        }
+        let equity = cert.certified_equity;
+        if equity < 0 || (equity as u128) < cert.certified_initial_req {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(())
+    }
+
+    /// PRODUCTION KERNEL (spec #37 locked lane): the no-positive-credit
+    /// margin decision — exact total decision over the locked-lane equity
+    /// (capital + min(pnl,0) - |fee debt|) against the certified initial
+    /// requirement: positive PnL credit can never satisfy IM under h-lock.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
+        pnl > i128::MIN && fee_credits > i128::MIN && capital < 1u128 << 100
+    ))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| match result {
+        Ok(()) => {
+            let equity = (capital as i128)
+                .wrapping_add(if pnl < 0 { pnl } else { 0 })
+                .wrapping_sub(fee_credits.unsigned_abs() as i128);
+            equity >= 0 && (equity as u128) >= certified_initial_req
+        },
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_locked_margin_gate(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+        certified_initial_req: u128,
+    ) -> V16Result<()> {
+        let capital_i = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt = i128::try_from(fee_credits.unsigned_abs())
+            .map_err(|_| V16Error::ArithmeticOverflow)?;
+        let equity = capital_i
+            .checked_add(pnl.min(0))
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .checked_sub(fee_debt)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if equity < 0 || (equity as u128) < certified_initial_req {
+            return Err(V16Error::LockActive);
+        }
+        Ok(())
+    }
+
     /// PRODUCTION KERNEL (liveness rank): the close-progress ledger advance.
     /// Each partition category grows by exactly its delta; residual_remaining
     /// is recomputed to the exact partition identity and STRICTLY DECREASES by
@@ -12087,14 +12149,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn ensure_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
         let cert = account.header.health_cert.try_to_runtime()?;
-        if !cert.valid {
-            return Err(V16Error::Stale);
-        }
-        let equity = cert.certified_equity;
-        if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::InvalidConfig);
-        }
-        Ok(())
+        V16Core::kernel_initial_margin_gate(cert)
     }
 
     fn account_no_positive_credit_equity(account: &PortfolioV16View<'_>) -> V16Result<i128> {
@@ -12111,12 +12166,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn ensure_no_positive_credit_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
-        let equity = Self::account_no_positive_credit_equity(account)?;
+        validate_non_min_i128(account.header.pnl.get())?;
+        validate_fee_credits(account.header.fee_credits.get())?;
         let cert = account.header.health_cert.try_to_runtime()?;
-        if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::LockActive);
-        }
-        Ok(())
+        V16Core::kernel_locked_margin_gate(
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            account.header.fee_credits.get(),
+            cert.certified_initial_req,
+        )
     }
 
     fn recertify_account_after_source_lien_change(

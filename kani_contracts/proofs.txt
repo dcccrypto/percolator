@@ -1,1 +1,2 @@
-closure_kernel_advance_close_ledger_rank_witness
+contract_check_kernel_initial_margin_gate
+contract_check_kernel_locked_margin_gate
