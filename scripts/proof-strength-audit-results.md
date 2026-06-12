@@ -7,7 +7,7 @@ compile-inclusive layer budget).
 
 ## Certified inventory: 266/266 PASS, zero failures
 
-(250 base certified 2026-06-12 at 8da7343; +16 exact-frame suite proofs verified in isolation across waves F1-F6 with retained PASS logs, commits 7ac57f6..bfd29a5; src/v16.rs unchanged since the base certification — frame waves touched only tests/ and the cfg(kani) helper modules.)
+(250 base certified 2026-06-12 at 8da7343; +16 exact-frame suite proofs verified in isolation across waves F1-F6, commits 7ac57f6..bfd29a5. BRANCH NOTE (kernel-proofs): production src/v16.rs HAS changed since that base — 7 kernels extracted from the monolithic bodies with production now calling them — so this inventory is inherited evidence pending the fresh full-branch re-certification, which is being run; the kernel harnesses' own PASS results are recorded in scripts/kernel_results.tsv.)
 
 | layer | artifacts | result | notes |
 |---|---|---|---|

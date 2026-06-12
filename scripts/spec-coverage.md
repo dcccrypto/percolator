@@ -60,6 +60,6 @@ The remaining floor, all documented-by-experiment rather than open:
 - Exact frames for the intractable bodies: backstopped by gates + value skeletons +
   runtime flow validation on every execution.
 
-Bottom line: 35 STRONG, 1 PARTIAL-accepted (#37), 1 STRUCTURAL (#3), 1 N/A (#28).
+Bottom line: 36 STRONG (incl. #37 decision core via the kernel-proofs gates), 1 STRUCTURAL (#3), 1 N/A (#28).
 Exact-frame lattice: 16 ops (scripts/no-steal-theorem.md Lemma 4). Differential rate
 fuzz + constant-weight witness close #18/#1.

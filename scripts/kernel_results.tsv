@@ -1,0 +1,8 @@
+harness	solver_s	status
+closure_kernel_advance_close_ledger_rank_witness	425.08926	PASS
+contract_check_kernel_advance_leg_b_snap	0.8972364	PASS
+contract_check_kernel_attach_leg	13.996017	PASS
+contract_check_kernel_clear_leg	12.637642	PASS
+contract_check_kernel_initial_margin_gate	0.6769722	PASS
+contract_check_kernel_locked_margin_gate	3.5134895	PASS
+contract_check_kernel_resize_leg_same_side	24.739662	PASS
