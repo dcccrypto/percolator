@@ -5,6 +5,19 @@ artifacts (suite proof / contract / closure proof / flow witness / fuzz
 property / runtime check), all certified 250/250 + frame-wave additions
 (scripts/proof-strength-audit-results.md, kani_audit_certified.tsv).
 
+## GlobalValidState — the named predicate
+
+`GlobalValidState(market, account) :=`
+  `market.validate_shape()` (senior cover
+  `c_tot + insurance + earnings + counterparty_backing_principal <= vault`,
+  exact O(1) aggregate totals == per-domain sums, per-domain ledger closure,
+  per-status bucket shapes) `AND`, for every account a transition touches,
+  `a.validate_with_market(market)` (provenance/identity binding, active-bitmap
+  /leg canonicality, per-account shape). The validators' SEMANTICS are
+  Kani-proven (aggregate-scan proofs, ledger-parts closure layer, senior-cover
+  contracts); identity-independence of the binding is machine-checked
+  (scripts/identity_independence_audit.py).
+
 ## Lemma 0 — The committed-state invariant (boundary theorem)
 
 ASSUMPTION (execution boundary, named and required): a failed call commits
@@ -131,3 +144,21 @@ Failed transitions mutate nothing:
    proven amount — the composed liveness argument needs only the (gate-proven)
    reachability of a successful call per class.
 4. Anything outside the pure engine (out of scope by project decision).
+
+## Companion documents (same branch, same boundary)
+- scripts/kernel-branch-certification.md — 273/273 fresh branch certification.
+- scripts/no-dos-liveness.md — ActionableState -> bounded successful
+  continuation, with the machine-proven rank steps and the named scheduler
+  assumption.
+- scripts/spec-coverage.md — 37 STRONG / 1 N/A; the two static audits
+  (boundary_audit.py 55/55, identity_independence_audit.py) cited inline.
+- scripts/boundary_audit.py, scripts/identity_independence_audit.py —
+  executable static checks for Lemma 0 (Ok-exit GlobalValidState) and #3
+  (identity independence).
+
+All four describe one boundary: machine-proven safety lemmas + GlobalValidState
+at every committed state (under Err-full-revert) + the leg/B/close/margin
+production kernels; the genuinely-open frontier is identical everywhere —
+the single composed transition theorem and exact frames over the intractable
+monolithic bodies, which are seven-way-eliminated and validator+fuzz
+backstopped, not pretended closed.
