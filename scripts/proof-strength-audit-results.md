@@ -7,7 +7,7 @@ compile-inclusive layer budget).
 
 ## Certified inventory: 266/266 PASS, zero failures
 
-(250 base certified 2026-06-12 at 8da7343; +16 exact-frame suite proofs verified in isolation across waves F1-F6, commits 7ac57f6..bfd29a5. BRANCH NOTE (kernel-proofs): production src/v16.rs HAS changed since that base — 7 kernels extracted from the monolithic bodies with production now calling them — so this inventory is inherited evidence pending the fresh full-branch re-certification, which is being run; the kernel harnesses' own PASS results are recorded in scripts/kernel_results.tsv.)
+(250 base certified 2026-06-12 at 8da7343; +16 exact-frame suite proofs verified in isolation across waves F1-F6, commits 7ac57f6..bfd29a5. BRANCH NOTE (kernel-proofs): production src/v16.rs HAS changed since that base — 7 kernels extracted from the monolithic bodies with production now calling them — so for the kernel-proofs branch the authoritative record is scripts/kernel-branch-certification.md (273/273 PASS at be04233, every artifact re-verified against the kernel-calling production code); scripts/kernel_results.tsv lists the 7 kernel verdicts. This master-side doc describes the pre-kernel 266-artifact state.)
 
 | layer | artifacts | result | notes |
 |---|---|---|---|

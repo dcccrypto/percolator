@@ -13,7 +13,7 @@ Generated 2026-06-11 (engine @ spec v16.8.11). Artifact classes:
 |---|---|---|---|---|
 | 1 | Full shared solvency | STRONG | suite margin/health proofs; contract lag-penalty; support weight 1.0 pinned as a compile-time constant (support_weight_is_constant_one) — cross-leg support is unconditional by construction | — |
 | 2 | Source-domain realizability cap | STRONG | contract availability-cap (exact formula); suite realize gates; full-range fuzz | — |
-| 3 | No identity assumptions | STRUCTURAL | no code path reads identity | code-review item |
+| 3 | No identity assumptions | STRONG | scripts/identity_independence_audit.py (machine check): all 6 `.owner` reads are self-consistency binding or serialization plumbing; NO cross-account identity comparison; no economic decision branches on owner | — |
 | 4 | Instance boundary absolute | STRONG | suite provenance/market-group-id rejections; runtime validate_with_market | — |
 | 5 | No global B pool | STRONG | STRUCTURALLY EXACT: the market header carries NO global B value field (B residual exists only as per-asset-slot b_long_num/b_short_num); suite residual-booking proofs (bounded+exact to the loss-bearing side); bankruptcy-capacity proof | — |
 | 6 | Protected principal senior | STRONG | runtime aggregate-totals check (c_tot+I+earnings+cbp ≤ vault); junior-pool lattice (every public op); contract earnings senior-coverage gate | — |
@@ -60,6 +60,6 @@ The remaining floor, all documented-by-experiment rather than open:
 - Exact frames for the intractable bodies: backstopped by gates + value skeletons +
   runtime flow validation on every execution.
 
-Bottom line: 36 STRONG (incl. #37 decision core via the kernel-proofs gates), 1 STRUCTURAL (#3), 1 N/A (#28).
+Bottom line: 37 STRONG (incl. #3 via identity-independence machine check and #37 decision core via the kernel-proofs gates), 1 N/A (#28). Machine-checked static audits: scripts/boundary_audit.py (55/55 Ok-exit validators) and scripts/identity_independence_audit.py.
 Exact-frame lattice: 16 ops (scripts/no-steal-theorem.md Lemma 4). Differential rate
 fuzz + constant-weight witness close #18/#1.
