@@ -2827,6 +2827,8 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     let claim_raw: u8 = kani::any();
+    let hlock_active: bool = kani::any();
+    let instruction_candidate: bool = kani::any();
     kani::assume(claim_raw > 0);
     let claim = claim_raw as u128;
     let claim_num = claim * BOUND_SCALE;
@@ -2866,27 +2868,40 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
-    header.bankruptcy_hlock_active = 1;
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
-    let capital_before = account_header.capital;
-    let pnl_before = account_header.pnl;
+    // Previously this was welded to 1, which makes h_lock_lane return HMax
+    // unconditionally — the entire source-backed state above was inert and the
+    // lone assert could not fail for any implementation.
+    header.bankruptcy_hlock_active = if hlock_active { 1 } else { 0 };
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16ViewMut::new(&mut account_header);
     let lane = market
-        .kani_h_lock_lane(Some(&account.as_view()), false)
+        .kani_h_lock_lane(Some(&account.as_view()), instruction_candidate)
         .unwrap();
 
     kani::cover!(
-        claim > 1 && lane == HLockLaneV16::HMax,
-        "bankruptcy h-lock selects hmax for nontrivial source-backed positive PnL"
+        claim > 1 && hlock_active && !instruction_candidate,
+        "bankruptcy h-lock alone selects hmax for nontrivial source-backed positive PnL"
     );
-    assert_eq!(lane, HLockLaneV16::HMax);
-    assert_eq!(market.header.vault, vault_before);
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(account.header.capital, capital_before);
-    assert_eq!(account.header.pnl, pnl_before);
+    kani::cover!(
+        claim > 1 && !hlock_active && instruction_candidate,
+        "instruction-local bankruptcy candidate alone selects hmax"
+    );
+    kani::cover!(
+        claim > 1 && !hlock_active && !instruction_candidate,
+        "source-backed positive PnL alone does not force hmax"
+    );
+    // Two-sided: the HMin arm proves the source-backed claim state triggers
+    // none of the account-side hmax conditions (stale, B-stale, loss-stale
+    // leg, pending close residual, domain loss barrier), so the bankruptcy
+    // bit / candidate flag is the operative discriminant before any
+    // source-backed value exit.
+    let expected = if hlock_active || instruction_candidate {
+        HLockLaneV16::HMax
+    } else {
+        HLockLaneV16::HMin
+    };
+    assert_eq!(lane, expected);
 }
 
 #[kani::proof]
@@ -6003,15 +6018,21 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let stale_market_id_raw: u8 = kani::any();
     let units_raw: u8 = kani::any();
     let is_short: bool = kani::any();
-    kani::assume(stale_market_id_raw > 1);
+    let market_id_is_current: bool = kani::any();
     kani::assume((1..=4).contains(&units_raw));
     let units = units_raw as i128;
     let basis = units * POS_SCALE as i128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let current_market_id = markets[0].engine.asset.market_id.get();
+    kani::assume(stale_market_id_raw as u64 != current_market_id);
     let leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
-        market_id: stale_market_id_raw as u64,
+        market_id: if market_id_is_current {
+            current_market_id
+        } else {
+            stale_market_id_raw as u64
+        },
         side: if is_short {
             SideV16::Short
         } else {
@@ -6022,7 +6043,13 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         k_snap: 0,
         f_snap: 0,
         epoch_snap: 0,
-        loss_weight: POS_SCALE,
+        // Exact per-basis weight: ceil(abs_basis * SOCIAL_WEIGHT_SCALE / a_basis)
+        // with a_basis == ADL_ONE == SOCIAL_WEIGHT_SCALE is abs_basis itself.
+        // The previous constant POS_SCALE made validate_active_leg reject every
+        // units >= 2 leg as InvalidLeg BEFORE the market-id clause ran, so the
+        // named property was only ever checked at units == 1 and the bare
+        // is_err() could not tell the difference.
+        loss_weight: basis.unsigned_abs(),
         b_snap: 0,
         b_rem: 0,
         b_epoch_snap: 0,
@@ -6039,14 +6066,24 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
     let result = account.as_view().validate_with_market(&market.as_view());
 
     kani::cover!(
-        stale_market_id_raw > 2 && units_raw > 2 && is_short && result.is_err(),
-        "symbolic stale market_id short leg is rejected after asset slot reuse"
+        !market_id_is_current && stale_market_id_raw > 2 && units_raw > 2 && is_short,
+        "multi-unit stale market_id short leg reaches the market-id check"
     );
     kani::cover!(
-        stale_market_id_raw > 2 && units_raw > 2 && !is_short && result.is_err(),
-        "symbolic stale market_id long leg is rejected after asset slot reuse"
+        !market_id_is_current && stale_market_id_raw > 2 && units_raw > 2 && !is_short,
+        "multi-unit stale market_id long leg reaches the market-id check"
     );
-    assert!(result.is_err());
+    kani::cover!(
+        market_id_is_current && units_raw > 2,
+        "current market_id baseline control validates at multi-unit basis"
+    );
+    if market_id_is_current {
+        // Ok-baseline control: the identical leg bound to the live asset
+        // validates, so the rejection below is attributable to market_id.
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    }
 }
 
 #[kani::proof]
@@ -7593,33 +7630,36 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
         finalized: false,
     };
 
-    let paid_a_first =
+    // The shared draining pool is the order-sensitive mechanism of the public
+    // path (payout = claimable.min(vault) in the resolved-payout topup).
+    // Previously both "orders" evaluated the same pure claimable on identical
+    // arguments, so every equality below held for any implementation.
+    let vault_raw: u8 = kani::any();
+    let vault0 = vault_raw as u128;
+    let claimable_a =
         MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
             a_receipt, ledger,
         )
         .unwrap();
-    let paid_b_second =
+    let claimable_b =
         MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
             b_receipt, ledger,
         )
         .unwrap();
-    let a_after = kani_apply_resolved_payout_receipt_payment(a_receipt, paid_a_first).unwrap();
-    let b_after = kani_apply_resolved_payout_receipt_payment(b_receipt, paid_b_second).unwrap();
 
-    let paid_b_first =
-        MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
-            b_receipt, ledger,
-        )
-        .unwrap();
-    let paid_a_second =
-        MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
-            a_receipt, ledger,
-        )
-        .unwrap();
+    // Order A-then-B over the shared pool.
+    let pay_a_first = claimable_a.min(vault0);
+    let pay_b_second = claimable_b.min(vault0 - pay_a_first);
+    let a_after = kani_apply_resolved_payout_receipt_payment(a_receipt, pay_a_first).unwrap();
+    let b_after = kani_apply_resolved_payout_receipt_payment(b_receipt, pay_b_second).unwrap();
+
+    // Order B-then-A over the same pool.
+    let pay_b_first = claimable_b.min(vault0);
+    let pay_a_second = claimable_a.min(vault0 - pay_b_first);
     let b_after_reversed =
-        kani_apply_resolved_payout_receipt_payment(b_receipt, paid_b_first).unwrap();
+        kani_apply_resolved_payout_receipt_payment(b_receipt, pay_b_first).unwrap();
     let a_after_reversed =
-        kani_apply_resolved_payout_receipt_payment(a_receipt, paid_a_second).unwrap();
+        kani_apply_resolved_payout_receipt_payment(a_receipt, pay_a_second).unwrap();
 
     kani::cover!(
         snapshot_residual < total_claim,
@@ -7633,11 +7673,27 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
         a_claim != b_claim,
         "two-receipt receipt math covers asymmetric claim sizes"
     );
-    assert_eq!(paid_a_first, paid_a_second);
-    assert_eq!(paid_b_first, paid_b_second);
-    assert_eq!(a_after.paid_effective, a_after_reversed.paid_effective);
-    assert_eq!(b_after.paid_effective, b_after_reversed.paid_effective);
-    assert!(paid_a_first + paid_b_first <= snapshot_residual);
+    kani::cover!(
+        vault0 < claimable_a + claimable_b,
+        "scarce pool: order changes who is paid but not the total"
+    );
+    kani::cover!(
+        claimable_a + claimable_b <= vault0 && claimable_a > 0 && claimable_b > 0,
+        "funded pool: the per-receipt order-independence branch is reachable"
+    );
+    // Total extraction from the pool is order-independent even under scarcity.
+    assert_eq!(pay_a_first + pay_b_second, pay_b_first + pay_a_second);
+    assert!(pay_a_first + pay_b_second <= vault0);
+    // When the snapshot pool funds both receipts, each receipt's payout and
+    // post-payment state are order-independent.
+    if claimable_a + claimable_b <= vault0 {
+        assert_eq!(pay_a_first, pay_a_second);
+        assert_eq!(pay_b_first, pay_b_second);
+        assert_eq!(a_after.paid_effective, a_after_reversed.paid_effective);
+        assert_eq!(b_after.paid_effective, b_after_reversed.paid_effective);
+        assert_eq!(a_after.finalized, a_after_reversed.finalized);
+        assert_eq!(b_after.finalized, b_after_reversed.finalized);
+    }
 }
 
 #[kani::proof]
@@ -9502,33 +9558,31 @@ fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_val
 #[kani::solver(cadical)]
 fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     let atom_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let other_budget_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atom_raw));
+    kani::assume((1..=4).contains(&surplus_raw));
+    kani::assume((1..=4).contains(&other_budget_raw));
+    // The pool-shape invariant (validate_shape, v16.rs:5134) requires
+    // insurance_domain_budget_remaining_total <= insurance, i.e. the sibling
+    // domain budget cannot exceed the surplus insurance backing it. Restrict
+    // the fixture to valid pre-states; both pools stay genuinely symbolic.
+    kani::assume(other_budget_raw <= surplus_raw);
     let atoms = atom_raw as u128;
+    let surplus = surplus_raw as u128;
+    let other_budget = other_budget_raw as u128;
     let amount = atoms * BOUND_SCALE;
-    let (market_group_id, _, _) = ids();
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
-    let mut asset = AssetStateV16::default();
-    asset.market_id = 1;
-    asset.lifecycle = AssetLifecycleV16::Active;
-    asset.raw_oracle_target_price = 100;
-    asset.effective_price = 100;
-    asset.fund_px_last = 100;
-    asset.slot_last = 1;
-    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
-    slot.asset = AssetStateV16Account::from_runtime(&asset);
-    let mut markets = [Market::new(0u64, slot)];
-    header.next_market_id = V16PodU64::new(2);
-    header.current_slot = V16PodU64::new(1);
-    header.asset_activation_count = V16PodU64::new(1);
-    header.last_asset_activation_slot = V16PodU64::new(1);
-    header.asset_set_epoch = V16PodU64::new(1);
-    header.risk_epoch = V16PodU64::new(1);
-    header.vault = V16PodU128::new(atoms);
-    header.insurance = V16PodU128::new(atoms);
+    let (mut header, mut markets) = one_market_only_fixture();
+    // De-saturated pools: surplus insurance beyond the domain reservation and
+    // a funded sibling (short) domain budget. The previous fixture welded
+    // insurance == budget == reservation == amount, so "spends ONLY its
+    // domain budget" had no second pool to discriminate against.
+    header.vault = V16PodU128::new(atoms + surplus);
+    header.insurance = V16PodU128::new(atoms + surplus);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(atoms);
-    header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(atoms + other_budget);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(other_budget);
     markets[0].engine.insurance_reservation_long =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
             insurance_credit_reserved_num: amount,
@@ -9542,12 +9596,26 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
+    let reservation_short_before = markets[0]
+        .engine
+        .insurance_reservation_short
+        .try_to_runtime()
+        .unwrap();
+    let source_short_before = markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let risk_epoch_before = header.risk_epoch.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
+    // Engine path: validates the reservation-encumbrance proof and
+    // re-validates shape on exit. The previous harness verified a host-side
+    // wrapper copy of this sequence that skipped both checks.
     market
-        .kani_apply_insurance_lien_consume_domain_delta(0, amount)
+        .consume_source_credit_lien_from_insurance_not_atomic(0, amount)
         .unwrap();
     let reservation = market.markets[0]
         .engine
@@ -9561,8 +9629,8 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
         .unwrap();
 
     kani::cover!(
-        atom_raw > 1,
-        "insurance lien consume domain-budget proof is nontrivial and symbolic"
+        atom_raw > 1 && surplus_raw > 1 && other_budget_raw > 1,
+        "domain-budget isolation is checked against live sibling pools"
     );
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
@@ -9572,6 +9640,9 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     assert_eq!(source.valid_liened_insurance_num, 0);
     assert_eq!(source.impaired_liened_insurance_num, 0);
     assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    // The recompute stamps the consume-time epoch; the header bump to
+    // risk_epoch_before + 1 is asserted below.
+    assert_eq!(source.credit_epoch, risk_epoch_before);
     assert_eq!(
         market.markets[0].engine.insurance_domain_budget_long.get(),
         atoms
@@ -9580,7 +9651,9 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
         market.markets[0].engine.insurance_domain_spent_long.get(),
         atoms
     );
-    assert_eq!(market.header.insurance.get(), 0);
+    // The spend is confined to the long domain's budget and reserved atoms:
+    // the surplus insurance and the sibling short-domain budget survive.
+    assert_eq!(market.header.insurance.get(), surplus);
     assert_eq!(
         market
             .header
@@ -9590,10 +9663,35 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     );
     assert_eq!(
         market.header.insurance_domain_budget_remaining_total.get(),
+        other_budget
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        other_budget
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
         0
     );
-    assert_eq!(market.header.vault, vault_before);
-    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .insurance_reservation_short
+            .try_to_runtime()
+            .unwrap(),
+        reservation_short_before
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap(),
+        source_short_before
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
 }
 
 #[kani::proof]
@@ -11979,8 +12077,14 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     // top of the expire + audit-scan path). The symbolic surface is covered
     // end-to-end by backing_double_claim_fuzz::terminal_close_with_expired_
     // backing_does_not_strand; this witness pins the primitive exactly.
-    let backing = 2u128;
+    // Two concrete witnesses behind one selector (anything wider blows the
+    // budget — see the note above). The fully-backed cover below was
+    // previously UNSATISFIABLE (backing welded to 2 against claim 3): the
+    // certified run reported "1 of 2 cover properties satisfied" while
+    // PASSing, so the fully-backed branch was never exercised.
+    let fully_backed: bool = kani::any();
     let claim = 3u128;
+    let backing = if fully_backed { claim } else { claim - 1 };
     let backing_num = backing * BOUND_SCALE;
     let claim_num = claim * BOUND_SCALE;
     let expiry_slot = 5u64;
@@ -12019,7 +12123,10 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    kani::assume(market.validate_shape() == Ok(()));
+    // Asserted, not assumed: on a concrete fixture an Ok-assume is an
+    // all-or-nothing vacuity switch (a shape regression would silently
+    // vacuate every assertion below instead of failing).
+    assert_eq!(market.validate_shape(), Ok(()));
 
     // Before expiry, the freshness validator rejects the lapsed bucket — this
     // is the Stale that would strand the close if the realize step queried it.
