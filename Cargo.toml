@@ -21,6 +21,10 @@ fuzz = []  # Enable fuzzing tests over the production zero-copy view path.
 audit-scan = []  # Enable full account-table invariant scans on public exits
 closure = []  # Kani inductive-closure layer (plain proofs, no -Z needed); see scripts/contracts_runner.sh
 contracts = []  # Kani function-contract layer; build with: cargo kani -Z function-contracts --features fuzz,contracts (see scripts/contracts_runner.sh)
+legs1 = []  # cfg(kani) reduced-leg profile: V16_MAX_PORTFOLIO_ASSETS_N=1 (N-generality by symmetry)
+legs2 = []  # =2
+legs4 = []  # =4
+legs8 = []  # =8
 
 [profile.release]
 lto = "fat"

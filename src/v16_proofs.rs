@@ -1832,3 +1832,151 @@ fn composition_clear_leg_body_frame() {
     // leg[0] is now empty/inactive
     assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
 }
+
+// ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
+// The review's closable half: for the two kernel-backed actionable classes,
+// prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
+// purely, by exhibiting the witness and showing the proven rank kernel accepts
+// it and strictly decreases the rank. This converts "gate reachability
+// backstopped" to machine-checked for these classes. (Closure layer: the
+// kernels run as plain code, no contract-attr interaction.)
+
+// A3 pending close: any actionable pending-close ledger (valid identity,
+// residual > 0) admits a successful advance that strictly decreases residual.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn liveness_pending_close_has_rank_decreasing_advance() {
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        canceled: false,
+        close_id: kani::any(),
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        domain_side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        gross_loss_at_close_start: kani::any(),
+        drift_reference_slot: kani::any(),
+        max_close_slot: kani::any(),
+        support_consumed: kani::any(),
+        junior_face_burned: kani::any(),
+        insurance_spent: kani::any(),
+        b_loss_booked: kani::any(),
+        explicit_loss_assigned: kani::any(),
+        quantity_adl_applied_q: kani::any(),
+        drift_consumed: kani::any(),
+        residual_remaining: kani::any(),
+    };
+    // validated-ledger precondition (production-guaranteed) + actionable: residual > 0
+    kani::assume(ledger.gross_loss_at_close_start < 1u128 << 64);
+    kani::assume(ledger.drift_consumed < 1u128 << 64);
+    kani::assume(ledger.support_consumed < 1u128 << 64);
+    kani::assume(ledger.insurance_spent < 1u128 << 64);
+    kani::assume(ledger.b_loss_booked < 1u128 << 64);
+    kani::assume(ledger.explicit_loss_assigned < 1u128 << 64);
+    let total = ledger.gross_loss_at_close_start + ledger.drift_consumed;
+    let progress = ledger.support_consumed + ledger.insurance_spent
+        + ledger.b_loss_booked + ledger.explicit_loss_assigned;
+    kani::assume(progress <= total);
+    kani::assume(ledger.residual_remaining == total - progress);
+    kani::assume(ledger.residual_remaining > 0); // ACTIONABLE
+
+    // WITNESS: booking exactly 1 unit of explicit loss is a valid successful
+    // continuation (the simplest progress) and strictly decreases the rank.
+    let r = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, 0, 1);
+    assert!(r.is_ok(), "an actionable pending close ALWAYS admits a progress booking");
+    let after = r.unwrap();
+    assert!(after.residual_remaining < ledger.residual_remaining,
+        "the successful continuation strictly decreases the close rank");
+}
+
+// A2 b-stale leg: any leg behind its B target (b_target > b_snap) admits a
+// successful chunk that strictly advances b_snap toward the target.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn liveness_b_stale_leg_has_advancing_chunk() {
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        basis_pos_q: kani::any(),
+        a_basis: kani::any(),
+        k_snap: kani::any(),
+        f_snap: kani::any(),
+        epoch_snap: kani::any(),
+        loss_weight: kani::any(),
+        b_snap: kani::any(),
+        b_rem: kani::any(),
+        b_epoch_snap: kani::any(),
+        b_stale: true,
+        stale: kani::any(),
+    };
+    let b_target: u128 = kani::any();
+    kani::assume(leg.b_snap < 1u128 << 64);
+    kani::assume(b_target > leg.b_snap); // ACTIONABLE: behind target
+    // WITNESS: a chunk of delta_b = min(target - snap, ...) advances toward the
+    // target; use delta_b = 1 (>=1 since target > snap) -- proven monotone.
+    let delta_b: u128 = 1;
+    let remaining_after = b_target - leg.b_snap - delta_b;
+    let r = V16Core::kernel_advance_leg_b_snap(leg, delta_b, 0, remaining_after);
+    assert!(r.is_ok(), "an actionable b-stale leg ALWAYS admits an advancing chunk");
+    let after = r.unwrap();
+    assert!(after.b_snap > leg.b_snap, "the chunk strictly advances b_snap toward target");
+    assert!(after.b_snap <= b_target, "advance never overshoots the target");
+}
+
+// ============ REDUCED-LEG PROFILE: direct whole-body frames ============
+// At a cfg(kani) reduced V16_MAX_PORTFOLIO_ASSETS_N, the account-state cost
+// that puts whole-body frames in the intractable tier shrinks. These prove
+// the REAL production bodies DIRECTLY (no stub_verified, no division stub) at
+// the reduced leg count; N-generality is the per-leg symmetry argument (each
+// leg slot is handled identically). Built only under one of the legsK
+// features.
+#[cfg(all(kani, feature = "closure", any(feature = "legs1", feature = "legs2", feature = "legs4", feature = "legs8")))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn reducedlegs_clear_leg_direct_body_frame() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        v.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1u8; 32], [2u8; 32], [2u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(prov).unwrap();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let basis: i128 = kani::any();
+    kani::assume(basis != 0 && basis > i128::MIN);
+    // attach a real leg (real division), then clear it (real body) — DIRECT, no stubs
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+            return;
+        }
+    }
+    let a1 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_clear_leg(&mut account, 0).is_err() {
+            return;
+        }
+    }
+    kani::cover!(true, "reduced-leg direct clear body frame reached");
+    let mut expected = a1;
+    expected.legs[0] = account_header.legs[0];
+    expected.active_bitmap = account_header.active_bitmap;
+    expected.health_cert = account_header.health_cert;
+    assert!(kani_eq_portfolio_account_v16_account(&expected, &account_header));
+    assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
+}

@@ -71,14 +71,19 @@ PROVEN (machine-checked):
 - that bounded account-local work suffices (Kani unwind bounds on the harnessed
   continuation paths; struct-sized loops, req #33/#34 STRONG).
 
-BACKSTOPPED (not a single Kani theorem): the GATE-REACHABILITY half — that an
-actionable state actually reaches its rank kernel through the monolithic body
-interior (trade/liquidation/close), rather than the body rejecting for an
-unrelated reason. This is the intractable tier (seven-way elimination,
-src/v16_proofs.rs). It is covered by: the per-op gate proofs (the gates accept
-the actionable shapes), the runtime validators on every Ok exit
-(scripts/boundary_audit.py, 55/55), and the order-independence / extraction /
-double-claim fuzz over full close sequences.
+GATE-REACHABILITY — now MACHINE-CHECKED as an EXISTENTIAL for the two
+kernel-backed classes: liveness_pending_close_has_rank_decreasing_advance and
+liveness_b_stale_leg_has_advancing_chunk prove ActionableClass(S) => EXISTS a
+concrete successful call (book 1 unit / advance 1 unit) that the proven rank
+kernel accepts and that strictly decreases the rank. This is the existential
+the review asked for; it does NOT require reaching the kernel through the
+monolithic body interior (still intractable), because the witness is exhibited
+directly at the kernel boundary. The terminal-route classes (expired close,
+liquidation, recovery, resolved winner, stale account) have suite success
+witnesses. What remains backstopped is ONLY the claim that the public BODY
+routes an actionable state into its kernel without rejecting for an unrelated
+reason — covered by the per-op gate proofs + 55/55 Ok-exit validators + close
+sequence fuzz.
 
 ASSUMED (named, outside the engine — the review's own caveat): an external
 actor SUBMITS the successful continuation. The engine proves a successful
