@@ -145,6 +145,33 @@ Failed transitions mutate nothing:
    reachability of a successful call per class.
 4. Anything outside the pure engine (out of scope by project decision).
 
+## Composition-proof experiment (whole-body frame lift) — verdict
+
+Attempted: lift a kernel's proven frame to its enclosing PRODUCTION body
+(attach_leg_at_slot, which calls kernel_attach_leg) so the monolithic-body
+frame gap closes by composition. BOTH routes exhausted the 1800s budget:
+
+1. `#[kani::stub_verified(kernel_attach_leg)]` + body frame: TIMEOUT. The
+   stub havocs the kernel return and adds contract instrumentation that costs
+   MORE than the small post-extraction arithmetic it replaces — composition
+   by stubbing is a net loss here (consistent with the earlier realize-body
+   stub_verified finding).
+2. Direct body frame (real kernel): TIMEOUT. The body still COMPUTES
+   `loss_weight_for_basis` (the division the kernel takes as an input,
+   precisely to exclude it) before calling the kernel, so a body-level proof
+   re-includes the division-bearing arithmetic that defines the intractable
+   tier.
+
+CONCLUSION: whole-body frame lifting does not close the monolithic-body gap
+at this kani generation. The kernels factor the arithmetic OUT of the proof
+obligation, but a body-level frame puts it back IN (either as havoc cost or
+as the real division). The kernels remain the proven floor; the whole-body
+frame for account-bearing, division-bearing bodies stays in the documented
+intractable tier (seven-way-eliminated), validator + fuzz backstopped. A
+genuine close would need a kani generation that propagates exact-equality
+ensures as constants through stub_verified, or a cfg(kani) reduced-account
+struct profile (a soundness-affecting engine change, separately documented).
+
 ## Companion documents (same branch, same boundary)
 - scripts/kernel-branch-certification.md — 273/273 fresh branch certification.
 - scripts/no-dos-liveness.md — ActionableState -> bounded successful
