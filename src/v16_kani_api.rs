@@ -311,6 +311,17 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+
+    pub fn kani_attach_leg_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        side: SideV16,
+        basis_pos_q: i128,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        self.attach_leg_at_slot(account, asset_index, side, basis_pos_q, leg_slot)
+    }
         pub fn kani_residual(&self) -> u128 {
         self.residual()
     }

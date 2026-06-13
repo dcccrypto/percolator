@@ -2003,12 +2003,14 @@ pub enum HLockLaneV16 {
     HMax,
 }
 
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideV16 {
     Long,
     Short,
 }
 
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideModeV16 {
     Normal,
@@ -2016,6 +2018,7 @@ pub enum SideModeV16 {
     ResetPending,
 }
 
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetLifecycleV16 {
     Disabled,
@@ -2633,6 +2636,7 @@ impl V16Config {
 }
 
 #[repr(C)]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV16 {
     pub market_id: u64,
@@ -3447,6 +3451,7 @@ impl<'a> PortfolioV16ViewMut<'a> {
 }
 
 #[repr(C)]
+#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioLegV16 {
     pub active: bool,

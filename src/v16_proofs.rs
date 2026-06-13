@@ -1712,3 +1712,66 @@ fn closure_restarted_slot_preserves_budget_witness() {
     assert_eq!(s.insurance_domain_spent_short.get(), 0);
 }
 
+
+// ============ COMPOSITION via division-stub (kernel-proofs) ============
+// Whole-body frame for attach_leg_at_slot, made tractable by stubbing ONLY
+// the documented-intractable division primitive loss_weight_for_basis to an
+// arbitrary value. This is SOUND for a frame property: the frame asserts WHERE
+// the weight is written (leg.loss_weight, the side weight sum), not its value;
+// the value's exactness is the separately-proven kernel_attach_leg contract.
+// With the division gone, the body is gates + the cheap real kernel + slot
+// placement — the composition the direct/stub_verified routes could not reach.
+#[cfg(all(kani, feature = "contracts"))]
+fn kani_any_loss_weight(_abs_basis_q: u128, _a_basis: u128) -> V16Result<u128> {
+    let w: u128 = kani::any();
+    kani::assume(w != 0);
+    Ok(w)
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
+#[kani::stub_verified(V16Core::kernel_attach_leg)]
+fn composition_attach_body_frame_division_stubbed() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        v.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1u8; 32], [2u8; 32], [2u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(prov).unwrap();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let basis: i128 = kani::any();
+    kani::assume(basis != 0 && basis > i128::MIN);
+    let side = if kani::any() { SideV16::Long } else { SideV16::Short };
+
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_attach_leg_at_slot(&mut account, 0, side, basis, 0).is_err() {
+            return;
+        }
+    }
+    kani::cover!(true, "division-stubbed attach body frame reached");
+    // WHOLE-BODY FRAME: the body touches ONLY leg[0], the active bitmap, and
+    // the health cert in the account; every other account field is frozen.
+    let mut expected = a0;
+    expected.legs[0] = account_header.legs[0];
+    expected.active_bitmap = account_header.active_bitmap;
+    expected.health_cert = account_header.health_cert;
+    assert!(kani_eq_portfolio_account_v16_account(&expected, &account_header));
+    // and only slot 0 became active
+    let mut i = 1;
+    while i < V16_MAX_PORTFOLIO_ASSETS_N {
+        assert!(!account_header.legs[i].try_to_runtime().unwrap().active);
+        i += 1;
+    }
+}
