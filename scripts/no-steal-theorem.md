@@ -145,32 +145,38 @@ Failed transitions mutate nothing:
    reachability of a successful call per class.
 4. Anything outside the pure engine (out of scope by project decision).
 
-## Composition-proof experiment (whole-body frame lift) — verdict
+## Composition-proof experiment (whole-body frame lift) — SUCCEEDED with the two-lever recipe
 
-Attempted: lift a kernel's proven frame to its enclosing PRODUCTION body
-(attach_leg_at_slot, which calls kernel_attach_leg) so the monolithic-body
-frame gap closes by composition. BOTH routes exhausted the 1800s budget:
+Whole-body frames CAN be reached by composition. The working recipe, proven on
+attach_leg_at_slot (composition_attach_body_frame_division_stubbed, PASS 117s):
 
-1. `#[kani::stub_verified(kernel_attach_leg)]` + body frame: TIMEOUT. The
-   stub havocs the kernel return and adds contract instrumentation that costs
-   MORE than the small post-extraction arithmetic it replaces — composition
-   by stubbing is a net loss here (consistent with the earlier realize-body
-   stub_verified finding).
-2. Direct body frame (real kernel): TIMEOUT. The body still COMPUTES
-   `loss_weight_for_basis` (the division the kernel takes as an input,
-   precisely to exclude it) before calling the kernel, so a body-level proof
-   re-includes the division-bearing arithmetic that defines the intractable
-   tier.
+```
+#[kani::stub_verified(V16Core::kernel_attach_leg)]      // kernel -> its verified contract (no body)
+#[kani::stub(loss_weight_for_basis, kani_any_loss_weight)]  // the body's division -> arbitrary nonzero
+```
 
-CONCLUSION: whole-body frame lifting does not close the monolithic-body gap
-at this kani generation. The kernels factor the arithmetic OUT of the proof
-obligation, but a body-level frame puts it back IN (either as havoc cost or
-as the real division). The kernels remain the proven floor; the whole-body
-frame for account-bearing, division-bearing bodies stays in the documented
-intractable tier (seven-way-eliminated), validator + fuzz backstopped. A
-genuine close would need a kani generation that propagates exact-equality
-ensures as constants through stub_verified, or a cfg(kani) reduced-account
-struct profile (a soundness-affecting engine change, separately documented).
+The whole-body frame VERIFIES: attach_leg_at_slot touches ONLY leg[0], the
+active bitmap, and the health cert — every other leg and account field frozen.
+
+The path to it (each step empirically established this session):
+- direct body frame: TIMEOUT — the body computes loss_weight_for_basis (division);
+- stub_verified(kernel) ALONE: TIMEOUT — the body STILL computes the division
+  BEFORE the kernel call, so stubbing the kernel alone leaves it in;
+- stub(division) ALONE: the contracted kernel called inside a plain proof has
+  its own ensures checked at the call and the interaction fails;
+- BOTH together: PASS. Stub the verified kernel AND the division primitive the
+  kernel was built to exclude. Soundness: the division stub returns an
+  arbitrary value, which is sound for a FRAME property (the frame asserts WHERE
+  the weight lands, not its value); the value-exact part is the separately
+  verified kernel contract. (NOT sound for a value/conservation claim — those
+  keep the real division or stay in the documented intractable tier.)
+
+Scope: this is one whole-body frame (attach). The recipe generalizes to any
+body that is gates + a contracted kernel + a division-bearing weight input;
+each target needs its own composition proof. Bodies with MULTIPLE interacting
+division sites or no clean kernel seam remain in the intractable tier. But the
+"monolithic-body frames are unreachable" claim is RETRACTED: they are reachable
+by stub_verified + division-stub composition where a kernel seam exists.
 
 ## Companion documents (same branch, same boundary)
 - scripts/kernel-branch-certification.md — 273/273 fresh branch certification.
