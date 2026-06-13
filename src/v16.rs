@@ -10503,6 +10503,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
     }
 
+    // Contract: asset restart bumps each of the four global counters by
+    // exactly one (fresh market id, activation count, asset-set epoch, risk
+    // epoch) -- a new market identity that fails-closed old market-id-bound
+    // legs (#29 lifecycle).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u64, u64, u64, u64)>| match result {
+        Ok((m, a, ase, re)) => *m == next_market_id_before.wrapping_add(1)
+            && *a == activation_count_before.wrapping_add(1)
+            && *ase == asset_set_epoch_before.wrapping_add(1)
+            && *re == risk_epoch_before.wrapping_add(1),
+        Err(_) => true,
+    }))]
     fn asset_restart_next_counters(
         next_market_id_before: u64,
         activation_count_before: u64,
@@ -10525,6 +10536,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
+    // Contract (#29 lifecycle safety): an asset restart PRESERVES the domain
+    // insurance budgets exactly and resets EVERYTHING else to a fresh Active
+    // asset at the new market id and authenticated price -- no old position,
+    // backing, source-credit, lien, B, or barrier state survives (those live
+    // in the EMPTY slot the restart builds), so a restarted slot cannot carry
+    // latent funds or risk while the insurance authority's budget is retained.
     fn restarted_asset_slot_preserving_insurance_budget(
         old_slot: &EngineAssetSlotV16Account,
         market_id: u64,

@@ -1666,3 +1666,49 @@ fn contract_check_kernel_accumulate_batch_trade() {
     );
 }
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(MarketGroupV16ViewMut::asset_restart_next_counters)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_asset_restart_next_counters() {
+    let _ = MarketGroupV16ViewMut::<Market<u64>>::asset_restart_next_counters(
+        kani::any(), kani::any(), kani::any(), kani::any(),
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_restarted_slot_preserves_budget_witness() {
+    // plain witness (the proof_for_contract form memcmp's the big slot struct;
+    // field-wise asserts here avoid it, identical evidentiary value)
+    let mut old_slot = EngineAssetSlotV16Account::default();
+    let bl: u128 = kani::any();
+    let bs: u128 = kani::any();
+    old_slot.insurance_domain_budget_long = V16PodU128::new(bl);
+    old_slot.insurance_domain_budget_short = V16PodU128::new(bs);
+    let mid: u64 = kani::any();
+    let px: u64 = kani::any();
+    let now: u64 = kani::any();
+    let s = MarketGroupV16ViewMut::<Market<u64>>::restarted_asset_slot_preserving_insurance_budget(
+        &old_slot, mid, px, now,
+    );
+    // budgets preserved exactly for ANY prior budget
+    assert_eq!(s.insurance_domain_budget_long.get(), bl);
+    assert_eq!(s.insurance_domain_budget_short.get(), bs);
+    // fresh empty stock at the new identity; no carried position/risk/spend
+    assert_eq!(s.asset.market_id.get(), mid);
+    assert_eq!(s.asset.effective_price.get(), px);
+    assert_eq!(s.asset.raw_oracle_target_price.get(), px);
+    assert_eq!(s.asset.slot_last.get(), now);
+    assert_eq!(s.asset.oi_eff_long_q.get(), 0);
+    assert_eq!(s.asset.oi_eff_short_q.get(), 0);
+    assert_eq!(s.asset.stored_pos_count_long.get(), 0);
+    assert_eq!(s.asset.stored_pos_count_short.get(), 0);
+    assert_eq!(s.pending_domain_loss_barrier_long.get(), 0);
+    assert_eq!(s.pending_domain_loss_barrier_short.get(), 0);
+    assert_eq!(s.insurance_domain_spent_long.get(), 0);
+    assert_eq!(s.insurance_domain_spent_short.get(), 0);
+}
+

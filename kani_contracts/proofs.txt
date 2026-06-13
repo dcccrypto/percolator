@@ -1,1 +1,1 @@
-contract_check_kernel_accumulate_batch_trade
+closure_restarted_slot_preserves_budget_witness
