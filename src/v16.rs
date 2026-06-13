@@ -17,15 +17,6 @@ use crate::{
     SOCIAL_LOSS_DEN, SOCIAL_WEIGHT_SCALE,
 };
 
-#[cfg(all(kani, feature = "legs1"))]
-pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 1;
-#[cfg(all(kani, feature = "legs2"))]
-pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 2;
-#[cfg(all(kani, feature = "legs4"))]
-pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 4;
-#[cfg(all(kani, feature = "legs8"))]
-pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 8;
-#[cfg(not(all(kani, any(feature = "legs1", feature = "legs2", feature = "legs4", feature = "legs8"))))]
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
 #[cfg(kani)]
 pub const PORTFOLIO_SOURCE_DOMAIN_CAP: usize = 4;

@@ -178,6 +178,42 @@ division sites or no clean kernel seam remain in the intractable tier. But the
 "monolithic-body frames are unreachable" claim is RETRACTED: they are reachable
 by stub_verified + division-stub composition where a kernel seam exists.
 
+## Division contracts and reduced-leg profiles — both conclusively negative
+
+Two levers tested this session to crack division-bearing intractable bodies;
+both fail, and the reasons are now precise.
+
+DIVISION FUNCTION CONTRACTS — cannot verify the leaf at all. CBMC has no axiom
+for division; it only has the bit-level long-division circuit. Verifying ANY
+contract about a wide-integer division forces a one-time symbolic execution of
+that circuit. Tested loss_weight_for_basis = ceil(abs*SOCIAL_WEIGHT_SCALE /
+a_basis) with a multiplication-form ensures (no division in the spec) and
+operands bounded to their REAL ranges (a_basis in [1e14, 1e15], abs <= 1e14):
+  - unwind 140: TIMEOUT 1800s
+  - unwind 40 (anti-inflation per the div_rem unwind lesson): TIMEOUT 1800s
+Plus the earlier full-width and U256-nested attempts. Conclusion: the one-time
+bit-blast of bit-precise wide division is SAT-hard even isolated and bounded —
+not a spec-expressibility problem (the mult-form bounded contract is the exact
+right artifact; it just doesn't fit the solver). So "verify the division leaf
+once, stub_verified everywhere" is NOT available. The rate/weight cores stay
+covered by differential fuzz (engine == independent reimplementation) and
+exact suite proofs with concrete operands.
+
+REDUCED-LEG PROFILES — don't help division-bearing bodies. cfg(kani)
+V16_MAX_PORTFOLIO_ASSETS_N = 2 makes the account-state cost tiny, but the
+direct attach+clear body frame still TIMEOUT 1800s at 2 legs, because the wall
+is the loss_weight_for_basis DIVISION in the attach path, which is independent
+of leg count. Reduced legs would only help an account-state-bound, DIVISION-
+FREE body — for which the 16-leg frames already pass (deposit/withdraw etc.).
+So the leg profile buys nothing for the intractable tier and was reverted.
+
+NET: the intractable tier is intractable because of WIDE SYMBOLIC DIVISION in
+the body, not account-state size and not contract coverage. The composition
+recipe (stub_verified kernel + stub the frame-irrelevant division) is the only
+lever that reaches these whole-body FRAMES, and only because a frame doesn't
+depend on the division's value. Value/conservation theorems over division-
+bearing bodies remain out, with differential fuzz as the documented substitute.
+
 ## Companion documents (same branch, same boundary)
 - scripts/kernel-branch-certification.md — 273/273 fresh branch certification.
 - scripts/no-dos-liveness.md — ActionableState -> bounded successful
