@@ -312,6 +312,14 @@ impl MarketGroupV16HeaderAccount {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
+    pub fn kani_clear_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.clear_leg(account, asset_index)
+    }
+
     pub fn kani_attach_leg_at_slot(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

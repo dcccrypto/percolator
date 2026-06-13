@@ -1775,3 +1775,60 @@ fn composition_attach_body_frame_division_stubbed() {
         i += 1;
     }
 }
+
+// Composition frame for clear_leg: stub_verified(kernel_clear_leg) abstracts
+// the asset transform (the body has NO division — it uses the leg's existing
+// weight), so only the kernel-contract-check interaction needs the stub. The
+// whole-body frame: clearing the leg at the active slot sets that leg EMPTY,
+// clears its bitmap bit, and invalidates the cert — every OTHER leg and
+// account field frozen.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
+#[kani::stub_verified(V16Core::kernel_clear_leg)]
+#[kani::stub_verified(V16Core::kernel_attach_leg)]
+fn composition_clear_leg_body_frame() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        v.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1u8; 32], [2u8; 32], [2u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(prov).unwrap();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    // attach a leg at slot 0 first (so there is something to clear), via the
+    // real path with division stubbed (frame-irrelevant weight)
+    let basis: i128 = kani::any();
+    kani::assume(basis != 0 && basis > i128::MIN);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+            return;
+        }
+    }
+    let a1 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_clear_leg(&mut account, 0).is_err() {
+            return;
+        }
+    }
+    kani::cover!(true, "clear_leg body frame reached");
+    // FRAME: clear touches only leg[0], the bitmap, and the cert
+    let mut expected = a1;
+    expected.legs[0] = account_header.legs[0];
+    expected.active_bitmap = account_header.active_bitmap;
+    expected.health_cert = account_header.health_cert;
+    assert!(kani_eq_portfolio_account_v16_account(&expected, &account_header));
+    // leg[0] is now empty/inactive
+    assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
+}

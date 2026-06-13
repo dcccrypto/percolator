@@ -1,1 +1,1 @@
-composition_attach_body_frame_division_stubbed
+composition_clear_leg_body_frame
