@@ -18,6 +18,8 @@ harness).
 | 6 | proof each actionable class reaches its rank kernel (gate-reachability) | INTRACTABLE | reaching the kernel through a monolithic body interior is the seven-way-eliminated tier; backstopped by per-op gate proofs + Ok-exit validators + sequence fuzz. Documented, not pretended closed. |
 | 7 | machine-checkable #3 identity independence | DONE | scripts/identity_independence_audit.py — all .owner reads self-binding/plumbing, no cross-account compare. Matrix #3 STRUCTURAL→STRONG. |
 | 8 | doc consistency across the four docs | DONE | proof-strength-audit-results / kernel-branch-certification / spec-coverage / no-steal-theorem reconciled to one boundary; this file is the index. |
+| 9 | no-LoF transition-class roster (public path -> proof source) | DONE (enforced) | scripts/lof_transition_class_roster.py partitions all 55 public `*_not_atomic` entrypoints into 10 transition classes, each with a present proof-source artifact (DIRECT_FRAME / WHOLE_BODY_COMPOSITION / KERNEL_VALUE / FLOW_VALIDATOR / CLOSURE) atop the universal GlobalValidState floor (boundary_audit 55/55). Fails the build on any unclassified/double-counted entrypoint or missing artifact. |
+| 10 | no-DoS witness-strength marking | DONE (enforced) | scripts/actionable_class_coverage.py classifies each of the 7 ActionableState classes by tier: 2 KERNEL_EXISTENTIAL, 3 PUBLIC_BODY_ROUTE (A4/A5/A6 drive the real production routing/preflight fn), 1 PROTECTIVE_SEGMENT, 1 TERMINAL_SUITE. Narrows the no-DoS backstop to reaching the route fn through the full monolith interior only. |
 
 ## The genuinely-open residue (tool limits, not missing work)
 
