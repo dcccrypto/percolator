@@ -7,3 +7,4 @@ contract_check_kernel_initial_margin_gate	0.6769722	PASS
 contract_check_kernel_locked_margin_gate	3.5134895	PASS
 contract_check_kernel_resize_leg_same_side	24.739662	PASS
 composition_attach_value_conservation_under_axiom	60	PASS
+composition_clear_leg_value_conservation	151	PASS

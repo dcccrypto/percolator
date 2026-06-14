@@ -2042,3 +2042,65 @@ fn composition_attach_value_conservation_under_axiom() {
     assert_eq!(ws1, ws0.wrapping_add(leg_weight));
     assert_eq!(leg_basis, basis);
 }
+
+// VALUE-CONSERVATION composition for the CLEAR body — the inverse of attach,
+// and a second instance of the helper-stub recipe (the review's named next
+// candidate). clear has NO division (it subtracts the leg's STORED weight), so
+// the only stub needed is for the attach setup. The conservation claim: clearing
+// the freshly-attached leg removes EXACTLY what attach added —
+// oi_eff_long -= the leg's stored abs basis and loss_weight_sum_long -= the leg's
+// stored weight — so attach;clear is an exact OI/weight round-trip on the asset.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, axiom_loss_weight_nonzero)]
+#[kani::stub_verified(V16Core::kernel_clear_leg)]
+#[kani::stub_verified(V16Core::kernel_attach_leg)]
+fn composition_clear_leg_value_conservation() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        v.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1u8; 32], [2u8; 32], [2u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(prov).unwrap();
+    account_header.last_fee_slot = V16PodU64::new(1);
+    let basis: i128 = kani::any();
+    kani::assume(basis > 0 && basis <= MAX_POSITION_ABS_Q as i128);
+    let oi0 = markets[0].engine.asset.try_to_runtime().unwrap().oi_eff_long_q;
+    let ws0 = markets[0].engine.asset.try_to_runtime().unwrap().loss_weight_sum_long;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+            return;
+        }
+    }
+    // post-attach asset/leg state, read RAW (the attach kernel havoc'd the POD)
+    let oi_mid = markets[0].engine.asset.oi_eff_long_q.get();
+    let ws_mid = markets[0].engine.asset.loss_weight_sum_long.get();
+    let leg_weight = account_header.legs[0].loss_weight.get();
+    let leg_abs = account_header.legs[0].basis_pos_q.get().unsigned_abs();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_clear_leg(&mut account, 0).is_err() {
+            return;
+        }
+    }
+    kani::cover!(true, "clear value-conservation reached");
+    let oi1 = markets[0].engine.asset.oi_eff_long_q.get();
+    let ws1 = markets[0].engine.asset.loss_weight_sum_long.get();
+    // CONSERVATION: clear removes EXACTLY the leg's stored basis/weight ...
+    assert_eq!(oi1, oi_mid.wrapping_sub(leg_abs));
+    assert_eq!(ws1, ws_mid.wrapping_sub(leg_weight));
+    // ... and attach;clear is an exact round-trip back to the pre-attach asset.
+    assert_eq!(oi1, oi0);
+    assert_eq!(ws1, ws0);
+}
