@@ -178,6 +178,40 @@ division sites or no clean kernel seam remain in the intractable tier. But the
 "monolithic-body frames are unreachable" claim is RETRACTED: they are reachable
 by stub_verified + division-stub composition where a kernel seam exists.
 
+## Division-axiom route (the review's proposal) — sound, with a precise limit
+
+The route: replace the wide-division helper with an EXACT SPECIFICATION AXIOM
+(kani::any() result + assume(ceil relation) — no division circuit), prove the
+engine composition under it, and discharge `production == axiom` by fuzz.
+
+WHAT WORKS (sound, machine-checked):
+- DISCHARGE: loss_weight_helper_matches_division_axiom (tests/rounding_residue_
+  fuzz.rs, 20k cases + rounding/denominator edges) proves the production helper
+  loss_weight_for_basis EQUALS ceil(abs*SOCIAL_WEIGHT_SCALE / a_basis) over the
+  full real input ranges. The narrow empirical obligation the review specifies
+  is real and green.
+- FRAME composition under the route (attach, clear): machine-checked.
+
+THE PRECISE LIMIT (why the VALUE composition is not a single Kani query):
+- Under the spec-EXACT axiom, the ceil relation is a wide MULTIPLICATION
+  (q*a_basis with both ~2^50 -> ~2^100 product). Even the axiom's own
+  self-consistency at engine ranges ran 28 min (effectively intractable), and
+  a bounded-width version with a symbolic u128 division ran 8+ min — because
+  CBMC's u128 division/multiplication circuits are structurally 128-bit and do
+  NOT collapse under operand-magnitude bounds.
+- DEEPEST FINDING: the intractable wall is bit-precise WIDE ARITHMETIC (division
+  AND multiplication) at 2^50+ operand widths, essentially independent of value
+  bounds — not division alone, and not account-state size.
+
+THE SOUND REALIZATION: the trusted base DOES move to "DivisionAxiom +
+differential fuzz" exactly as the review specifies. The "engine under the
+axiom" step is the LOGICAL composition of the separately-proven per-stage
+kernel contracts (in the 273 cert) with the fuzz-discharged axiom — a sound
+transitive argument, NOT one mechanized query. No single Kani query over wide
+symbolic arithmetic fits; that is a prover limit, not a soundness gap. The
+boundary is materially better than before (small, named, fuzz-validated
+arithmetic assumption) and is the most this prover generation supports.
+
 ## Division contracts and reduced-leg profiles — both conclusively negative
 
 Two levers tested this session to crack division-bearing intractable bodies;

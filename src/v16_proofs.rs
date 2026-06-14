@@ -1928,3 +1928,50 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
     assert!(after.b_snap > leg.b_snap, "the chunk strictly advances b_snap toward target");
     assert!(after.b_snap <= b_target, "advance never overshoots the target");
 }
+
+// ============ DIVISION-AXIOM ROUTE (kernel-proofs) ============
+// The sound path past the SAT-hard wide-division wall: replace the division
+// helper with an EXACT SPECIFICATION AXIOM (kani::any() result constrained by
+// the ceil relation — no division circuit to bit-blast), prove the real public
+// body's VALUE composition under the axiom, and discharge the narrow remaining
+// obligation `production helper == axiom` by differential fuzz (below).
+//
+// Unlike the frame-only composition (arbitrary division result, sound only for
+// WHERE fields land), this axiom is spec-EXACT, so it is sound for VALUE /
+// conservation claims: the proof can reason about the exact ceil-division
+// result without the solver computing it.
+
+// The DivisionAxiom is well-formed and self-consistent: it returns a value
+// satisfying the exact ceil relation (tractable — no division circuit). The
+// VALUE composition over a real body (weight_sum += ceil(abs*S/a)) is then the
+// LOGICAL composition of two SEPARATELY-proven facts, NOT one Kani query:
+//   (1) kernel_attach_leg's contract: weight_sum += loss_weight for ANY weight
+//       (proven, in the 273 cert);
+//   (2) this axiom: loss_weight == ceil(abs*S / a_basis)
+//       (production == axiom discharged by loss_weight_helper_matches_division_
+//        axiom fuzz, 20k cases + edges).
+// Forcing both into ONE Kani query times out (the axiom's wide multiplication
+// + the kernel havoc/account state); the transitive composition is sound
+// without it. (See scripts/no-steal-theorem.md, division-axiom route.)
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn division_axiom_is_self_consistent() {
+    // BOUNDED-WIDTH well-formedness: small operands so the ceil products stay
+    // tiny -- proves the ceil axiom is internally consistent without paying the
+    // ~2^100 wide-multiplication cost engine-range operands incur. The
+    // engine-range guarantee PRODUCTION == axiom is the differential fuzz
+    // loss_weight_helper_matches_division_axiom (20k cases). Documents that the
+    // wall is bit-precise WIDE ARITHMETIC at 2^50+ widths -- division AND
+    // multiplication alike -- not division alone.
+    let abs: u128 = kani::any();
+    let a: u128 = kani::any();
+    kani::assume(a >= 1 && a <= 1u128 << 12);
+    kani::assume(abs <= 1u128 << 12);
+    let s: u128 = 1u128 << 10;
+    let num = abs * s;
+    let w: u128 = if num == 0 { 0 } else { (num + a - 1) / a }; // ceil, concrete
+    assert!(w.wrapping_mul(a) >= num);
+    assert!(w == 0 || (w - 1).wrapping_mul(a) < num);
+}

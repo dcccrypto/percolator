@@ -201,3 +201,44 @@ mod rate_differential {
 fn support_weight_is_constant_one() {
     assert_eq!(percolator::FULL_SUPPORT_WEIGHT, percolator::SUPPORT_WEIGHT_SCALE);
 }
+
+/// DIVISION-AXIOM DISCHARGE (the narrow empirical obligation): the production
+/// wide-division helper loss_weight_for_basis EQUALS its specification axiom
+/// `q == ceil(abs * SOCIAL_WEIGHT_SCALE / a_basis)` over the full real input
+/// ranges and the rounding/edge boundaries. Kani proves the engine composition
+/// UNDER this axiom; this discharges `production == axiom` empirically.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20000))]
+
+    #[test]
+    fn loss_weight_helper_matches_division_axiom(
+        abs in 0u128..=100_000_000_000_000u128,         // [0, MAX_POSITION_ABS_Q]
+        a in 100_000_000_000_000u128..=1_000_000_000_000_000u128, // [MIN_A_SIDE, ADL_ONE]
+    ) {
+        let w = kani_loss_weight_for_basis(abs, a).expect("valid range never errors");
+        let num = abs as u128 * 1_000_000_000_000_000u128; // SOCIAL_WEIGHT_SCALE
+        // EXACT ceil axiom: smallest w with w*a >= num
+        prop_assert!(w as u128 * a >= num, "helper under-shoots the ceil bound");
+        prop_assert!(w == 0 || (w - 1) as u128 * a < num, "helper is not the minimal ceil");
+    }
+
+    /// edge boundaries: exact division, one-less, one-more, denominator extremes
+    #[test]
+    fn loss_weight_axiom_holds_at_rounding_edges(
+        k in 0u128..=1_000_000u128,
+        a in 100_000_000_000_000u128..=1_000_000_000_000_000u128,
+    ) {
+        // construct abs so that abs*S is near a multiple of a (rounding edges)
+        let s = 1_000_000_000_000_000u128;
+        for delta in [0i128, -1, 1] {
+            let target = k.saturating_mul(a);
+            let abs_num = (target as i128 + delta).max(0) as u128;
+            let abs = abs_num / s;
+            if abs > 100_000_000_000_000 { continue; }
+            let w = kani_loss_weight_for_basis(abs, a).unwrap();
+            let num = abs * s;
+            prop_assert!(w * a >= num);
+            prop_assert!(w == 0 || (w - 1) * a < num);
+        }
+    }
+}

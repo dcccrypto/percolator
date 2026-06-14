@@ -1227,3 +1227,7 @@ pub fn kani_eq_portfolio_account_v16_account(a: &PortfolioAccountV16Account, b: 
         && kani_eq_resolved_payout_receipt_v16_account(&a.resolved_payout_receipt, &b.resolved_payout_receipt)
 }
 
+pub fn kani_loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    loss_weight_for_basis(abs_basis_q, a_basis)
+}
+
