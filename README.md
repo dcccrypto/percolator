@@ -111,6 +111,60 @@ scripts/proof-strength-audit-results.md
 The old slab proof inventory was retired with the v16 cutover because it no
 longer applies to the architecture.
 
+### No-LoF / No-DoS: what is proven, and under what assumptions
+
+The engine carries a decomposed, machine-checked argument for two safety
+properties at the pure-engine boundary. It is a composed proof, not a single
+all-transitions theorem (that one query is intractable for this prover
+generation; see below).
+
+No loss of funds (no-LoF):
+
+- `GlobalValidState` — `validate_shape` plus per-touched-account
+  `validate_with_market` — is preserved at every committed `Ok` exit of all 55
+  public `*_not_atomic` entrypoints, checked transitively by
+  `scripts/boundary_audit.py` (55/55). `Err` paths fully revert at the execution
+  boundary, so they need no preservation.
+- Every public entrypoint is mapped to a stronger no-LoF proof source by an
+  enforced partition, `scripts/lof_transition_class_roster.py` (10 transition
+  classes; build fails on any unclassified entrypoint or missing artifact):
+  exact whole-state frames, whole-body frame+value composition (attach/clear),
+  production kernel-contract value deltas, typed `TokenValueFlowProofV16`
+  validation, and inductive encumbrance/lien closure proofs.
+- Value-moving arithmetic is proven via the arithmetic-axiom recipe: the wide
+  division helper is abstracted to an opaque spec value inside Kani, and its
+  exact form (`ceil(abs * SCALE / a_basis)`) is discharged by differential fuzz
+  against an independent reimplementation. Kani never executes wide arithmetic.
+
+No denial of service (no-DoS / liveness):
+
+- `ActionableState` is a 7-class disjunction; every class has a present, named
+  machine-checked witness, classified by strength and enforced by
+  `scripts/actionable_class_coverage.py`: 2 kernel-existential (a rank-decreasing
+  call the proven kernel accepts), 3 public-body-route (drive the real
+  production routing/preflight fn), 1 protective-segment, 1 terminal-suite.
+- A well-founded lexicographic rank decreases on each continuation; the B-advance
+  and close-advance rank steps are machine-proven production kernels.
+
+Assumptions and named boundaries (the trusted base):
+
+- `ArithmeticAxiom` + differential fuzz: the stubbed wide-division helper equals
+  its spec; only this narrow, helper-specific arithmetic is assumed, never a
+  global arithmetic operator.
+- Execution-boundary atomicity: a rejected (`Err`) public call fully reverts.
+- External scheduler / fairness: the engine proves a successful bounded
+  continuation *exists* for every actionable state; it does not prove an external
+  actor *submits* it. Permissionless cranks make every continuation callable by
+  any actor.
+- Tool-generation limits (not soundness gaps): a single Kani query over all
+  public transitions at once, and whole-body value composition for large-interior
+  bodies (resize / trade / batch — their value-exactness is proven at the kernel
+  contracts), are intractable due to bit-precise wide arithmetic and large-struct
+  symbolic state. The rosters above are the sound decomposition.
+
+Full detail: `scripts/no-steal-theorem.md` (no-LoF), `scripts/no-dos-liveness.md`
+(no-DoS), and `scripts/proof-frontier-closure.md` (the goal-by-goal index).
+
 ## Tests
 
 ```bash
