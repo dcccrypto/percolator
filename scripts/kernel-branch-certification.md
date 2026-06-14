@@ -14,7 +14,7 @@ Branch HEAD at certification: see git log (kernel-proofs).
 | closure (src/v16_proofs.rs, plain) | 17 | 17/17 PASS | inductive ledger/status closure |
 | close-rank witness | 1 | PASS (389s) | kernel_advance_close_ledger rank, plain-witness form |
 
-Total: 273/273 base + 4 added kernels (batch-projection, restart counters/slot) all PASS; the changed trade-batch/restart/leg production paths are re-verified by a targeted suite re-run: 47/47 PASS (kani_recert), so the batch + restart kernel extractions preserved suite-level semantics. Plus 2 whole-body composition frames (attach 117s, clear_leg 227s) reached via stub_verified(kernel)+stub(division), and 1 whole-body VALUE-conservation composition (composition_attach_value_conservation_under_axiom, 60s PASS — attach oi/weight deltas under the opaque-weight arithmetic axiom, exact ceil discharged by differential fuzz).
+Total: 273/273 base + 4 added kernels (batch-projection, restart counters/slot) all PASS; the changed trade-batch/restart/leg production paths are re-verified by a targeted suite re-run: 47/47 PASS (kani_recert), so the batch + restart kernel extractions preserved suite-level semantics. Plus 2 whole-body composition frames (attach 117s, clear_leg 227s) reached via stub_verified(kernel)+stub(division), and 2 whole-body VALUE-conservation compositions (composition_attach_value_conservation_under_axiom 60s, composition_clear_leg_value_conservation 151s — both PASS: attach oi/weight deltas under the opaque-weight arithmetic axiom with exact ceil discharged by differential fuzz, and the exact attach;clear OI/weight round-trip).
 
 ## The 11 production kernels (extracted from the intractable bodies, production calls them)
 | kernel | property proven | solver |
