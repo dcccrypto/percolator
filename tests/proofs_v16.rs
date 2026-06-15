@@ -9563,7 +9563,7 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     kani::assume((1..=8).contains(&atom_raw));
     kani::assume((1..=4).contains(&surplus_raw));
     kani::assume((1..=4).contains(&other_budget_raw));
-    // The pool-shape invariant (validate_shape, v16.rs:5134) requires
+    // The pool-shape invariant (validate_shape, v16.rs:5751) requires
     // insurance_domain_budget_remaining_total <= insurance, i.e. the sibling
     // domain budget cannot exceed the surplus insurance backing it. Restrict
     // the fixture to valid pre-states; both pools stay genuinely symbolic.
