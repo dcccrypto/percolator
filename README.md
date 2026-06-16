@@ -206,7 +206,7 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the full trust model, known deferred 
 
 ## Specification
 
-The normative spec for v12.17 is in [spec.md](spec.md). It covers the H haircut ratio, A/K coefficient mechanics, two-bucket warmup math, funding computation, and all state machine transitions.
+The normative spec is in [spec.md](spec.md). It covers the H haircut ratio, A/K coefficient mechanics, two-bucket warmup math, funding computation, and all state machine transitions.
 
 ## Open Source
 
