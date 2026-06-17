@@ -9021,7 +9021,8 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
     let effective = effective_raw as u128;
     let backing_num = effective * BOUND_SCALE;
     let face_num = backing_num;
-    let current_slot = 0;
+    let current_slot: u64 = kani::any();
+    kani::assume(current_slot < 100);
 
     let source_credit = SourceCreditStateV16 {
         positive_claim_bound_num: face_num,
@@ -9058,6 +9059,10 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
     .unwrap();
 
     kani::cover!(effective > 0, "source-credit IM lien branch is reachable");
+    kani::cover!(
+        current_slot > 0,
+        "fee clock initialized to a nonzero slot (fee-last-slot assertion is non-vacuous)"
+    );
     assert_eq!(backing_after.fresh_unliened_backing_num, 0);
     assert_eq!(backing_after.valid_liened_backing_num, backing_num);
     assert_eq!(source_credit_after.valid_liened_backing_num, backing_num);
