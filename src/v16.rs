@@ -10089,24 +10089,38 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let price_delta = effective_price as i128 - old.effective_price as i128;
-        let k_delta = checked_i128_mul(price_delta, ADL_ONE as i128)?;
-        let funding_delta = if activity.funding_active {
+        // FZS-1 fix (spec 5.3, spec.md:1070-1079): accrue K/F PER SIDE scaled by that
+        // side's live A (a_long/a_short), NOT a flat ADL_ONE to both legs. Settlement
+        // realizes each leg as basis*(K_now-K_snap)/(a_basis*POS_SCALE), so the per-side
+        // A factor cancels the leg's frozen a_basis divisor and matched legs realize
+        // equal-and-opposite magnitudes for ANY a in [MIN_A_SIDE, ADL_ONE]. On a balanced
+        // book (a_long == a_short == ADL_ONE) this is byte-identical to the old flat code.
+        // The old flat path minted value on an asymmetric-a book because the low-A side
+        // over-realized by ADL_ONE/a_side (see issue #114).
+        let a_long_i = i128::try_from(old.a_long).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let a_short_i = i128::try_from(old.a_short).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let k_delta_long = checked_i128_mul(price_delta, a_long_i)?;
+        let k_delta_short = checked_i128_mul(price_delta, a_short_i)?;
+        // Funding: floor at FUNDING_DEN ONCE (identical to before), THEN scale per side by A_side.
+        let (funding_delta_long, funding_delta_short) = if activity.funding_active {
             let n = funding_rate_e9
                 .checked_mul(segment_dt as i128)
                 .and_then(|v| v.checked_mul(effective_price as i128))
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            floor_div_signed_conservative_i128(n, FUNDING_DEN)
-                .checked_mul(ADL_ONE as i128)
-                .ok_or(V16Error::ArithmeticOverflow)?
+            let fund_num_total = floor_div_signed_conservative_i128(n, FUNDING_DEN);
+            (
+                checked_i128_mul(fund_num_total, a_long_i)?,
+                checked_i128_mul(fund_num_total, a_short_i)?,
+            )
         } else {
-            0
+            (0, 0)
         };
 
         let mut asset = old;
-        asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
-        asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
-        asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
-        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+        asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
+        asset.k_short = add_non_min_i128(asset.k_short, -k_delta_short)?;
+        asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta_long)?;
+        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
         asset.effective_price = effective_price;
         asset.fund_px_last = effective_price;
         asset.slot_last = asset
