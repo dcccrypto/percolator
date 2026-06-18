@@ -1286,3 +1286,114 @@ fn proof_v17_lp_non_drift_production_inequality_gate_sound() {
     kani::cover!(pnl_pos_bound_num == source_claim_num,
         "LP-NON-DRIFT: equality edge-case (boundary, must pass)");
 }
+
+// ============================================================================
+// LPVAULT-359 — redemption insurance-stub credit is conservation-safe.
+//
+// THE BUG (wrapper handle_execute_redemption): a full LP-vault redemption leaves
+// the insurance (1 − fee_share) slice `stub = gross_consumed − earnings_portion`
+// PHYSICALLY in the vault but credited to NO header counter — an un-owned residual
+// no withdrawal path could drain, permanently bricking CloseSlab.
+//
+// THE FIX adds two header writes to the redemption: `insurance += stub` (a direct
+// header field write) then `credit_domain_insurance_budget_not_atomic(domain, stub)`
+// (engine). The verification is decomposed three ways, each covering what it is
+// strongest at:
+//   • THIS Kani proof — the new ENGINE arithmetic the fix invokes: the
+//     budget-delta math `set_domain_insurance_budget_delta` (the EXACT core of
+//     `credit_domain_insurance_budget_not_atomic`), proved general over a SYMBOLIC
+//     pre-state. It pins (a) drift-freedom — a credit raises
+//     insurance_domain_budget_remaining_total by EXACTLY the credited amount — and
+//     (b) the guard: admitted IFF the new total fits within `insurance`, so the
+//     fix's "bump insurance FIRST" ordering is exactly admissible AND an
+//     under-bumped insurance fails CLOSED (no insurance_domain_budget_remaining_total
+//     > insurance state can ever be written).
+//   • The LiteSVM teardown test (tests/v16_fork_lp_vault_redeem.rs::lpvault359_*)
+//     — the FULL `group.validate_shape()` conservation invariant on the REAL
+//     post-redeem on-chain state (synthetic Kani views can't satisfy every
+//     cross-field invariant validate_shape checks; real state does), end-to-end
+//     through WithdrawInsuranceAsset → ResolveMarket → CloseSlab.
+//   • The hand-proof in the fix comment — whole-redemption residual-neutrality
+//     (Δresidual == 0), grounded in the senior_with_backing invariant.
+//
+// RED control: change the wrapper credit to `stub * 2` (drift) and the LiteSVM
+// exact-balance assertions FAIL; remove the `next_total > insurance_limit` guard
+// (v16.rs:7446) and this proof's `Err`-branch / cover!(is_err) becomes unsatisfiable.
+// ============================================================================
+
+/// LPVAULT-359: the shipped budget-delta arithmetic that backs
+/// `credit_domain_insurance_budget_not_atomic` raises the remaining-budget
+/// aggregate by EXACTLY the credited amount, and admits the credit IFF the new
+/// total fits within `insurance` (fail-closed otherwise). Symbolic pre-state.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v17_lpvault359_stub_credit_delta_exact_and_guarded() {
+    // Symbolic valid pre-state of ONE domain's insurance budget + the aggregate.
+    //   old_budget / spent : the domain's budget and the portion already spent.
+    //   total_remaining (T0): header.insurance_domain_budget_remaining_total.
+    //   ins0                : header.insurance BEFORE the fix's `insurance += stub`.
+    //   stub                : the insurance slice the fix credits (gross−earnings).
+    let old_budget: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let total_remaining: u128 = kani::any();
+    let ins0: u128 = kani::any();
+    let stub: u128 = kani::any();
+    // Bound under MAX_VAULT_TVL-scale so every checked_add stays in range.
+    let cap: u128 = 1_000_000_000_000_000;
+    kani::assume(old_budget <= cap && spent <= cap && total_remaining <= cap);
+    kani::assume(ins0 <= cap && stub <= cap);
+    // Engine pre-invariants the real header always satisfies:
+    //   spent <= old_budget  (a domain never spends past its budget), and
+    //   total_remaining <= ins0  (insurance_domain_budget_remaining_total <= insurance).
+    kani::assume(spent <= old_budget);
+    kani::assume(total_remaining <= ins0);
+
+    // The credit: new_budget = old_budget + stub. (checked_add cannot overflow: both <= cap.)
+    let new_budget = old_budget + stub;
+
+    // ── Path 1: the fix's correct ordering — insurance bumped by `stub` FIRST. ──
+    let limit_bumped = ins0 + stub;
+    let credited = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        total_remaining,
+        limit_bumped,
+        old_budget,
+        spent,
+        new_budget,
+    );
+    // ADMITTED (the bump guarantees headroom: T0 + stub <= ins0 + stub) AND
+    // EXACT-delta: the aggregate becomes precisely total_remaining + stub (no drift).
+    assert_eq!(credited, Ok(total_remaining + stub),
+        "fix ordering: credit admitted and aggregate rises by EXACTLY stub (no drift)");
+    // Invariant preserved: post-credit aggregate <= post-bump insurance.
+    if let Ok(next_total) = credited {
+        assert!(next_total <= limit_bumped,
+            "insurance_domain_budget_remaining_total <= insurance preserved");
+    }
+
+    // ── Path 2: guard soundness — if insurance is NOT bumped, the credit is
+    //    admitted IFF it still fits, and fails CLOSED when it would overflow the
+    //    budget-vs-insurance invariant. This is the load-bearing guard that makes
+    //    the un-bumped/mis-ordered case impossible to commit. ──
+    let unbumped = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        total_remaining,
+        ins0, // NOT bumped
+        old_budget,
+        spent,
+        new_budget,
+    );
+    if total_remaining + stub <= ins0 {
+        assert_eq!(unbumped, Ok(total_remaining + stub),
+            "fits within un-bumped insurance ⇒ Ok with exact delta");
+    } else {
+        assert!(unbumped.is_err(),
+            "exceeds un-bumped insurance ⇒ Err (fail-closed; no over-budget state written)");
+    }
+
+    // Both guard branches reachable (kills vacuity); boundary is the fix's exact case.
+    kani::cover!(unbumped.is_err() && total_remaining + stub > ins0,
+        "LPVAULT-359: fail-closed branch reachable (guard fires)");
+    kani::cover!(total_remaining + stub <= ins0,
+        "LPVAULT-359: in-headroom branch reachable");
+    kani::cover!(stub >= 1, "LPVAULT-359: non-trivial stub credit reachable");
+}
