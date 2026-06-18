@@ -861,15 +861,52 @@ impl V16Core {
         if amount == 0 {
             return Ok((bucket, source));
         }
-        if bucket.valid_liened_backing_num < amount || source.valid_liened_backing_num < amount {
+        // LIEN-1 fix (issue #116): split into a still-VALID portion (returned to the provider's
+        // unliened pool) and an already-IMPAIRED portion. The per-(asset,side) backing bucket +
+        // source-credit are SHARED across accounts; a bucket expiry (the shared bucket's expiry_slot
+        // lapsing while a co-tenant winner's resolved close runs) forfeits the WHOLE remaining
+        // valid_liened — including THIS account's live share — to impaired via
+        // expire_source_backing_bucket_not_atomic. Without the impaired arm below, this account's
+        // terminal release underflows the emptied valid counter and can never close. Mirrors the
+        // insurance twin prepare_insurance_lien_terminal_release_delta. The impaired drain ONLY
+        // clears the impaired counters — it must NOT re-credit fresh_unliened/fresh_reserved (expiry
+        // already removed that backing once; re-crediting would double-count the senior backing).
+        let valid_release = amount.min(bucket.valid_liened_backing_num);
+        if source.valid_liened_backing_num < valid_release {
             return Err(V16Error::CounterUnderflow);
         }
-        bucket.valid_liened_backing_num -= amount;
+        let impaired_release = amount
+            .checked_sub(valid_release)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if bucket.impaired_liened_backing_num < impaired_release
+            || source.impaired_liened_backing_num < impaired_release
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        bucket.valid_liened_backing_num -= valid_release;
         bucket.fresh_unliened_backing_num = bucket
             .fresh_unliened_backing_num
-            .checked_add(amount)
+            .checked_add(valid_release)
             .ok_or(V16Error::CounterOverflow)?;
-        source.valid_liened_backing_num -= amount;
+        source.valid_liened_backing_num -= valid_release;
+        bucket.impaired_liened_backing_num -= impaired_release;
+        source.impaired_liened_backing_num -= impaired_release;
+        // Status fix-up: validate_backing_bucket_static requires an Impaired bucket to keep
+        // impaired_liened > 0. If the impaired drain empties the bucket entirely, route it to Expired
+        // (residue remains in consumed/util) or Empty (fully bare, expiry_slot cleared), matching the
+        // empties-bucket transition in prepare_counterparty_lien_consume_delta.
+        if impaired_release != 0
+            && bucket.fresh_unliened_backing_num == 0
+            && bucket.valid_liened_backing_num == 0
+            && bucket.impaired_liened_backing_num == 0
+        {
+            if bucket.consumed_liened_backing_num != 0 || bucket.utilization_fee_earnings != 0 {
+                bucket.status = BackingBucketStatusV16::Expired;
+            } else {
+                bucket.status = BackingBucketStatusV16::Empty;
+                bucket.expiry_slot = 0;
+            }
+        }
         Ok((bucket, source))
     }
 
