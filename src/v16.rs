@@ -7521,6 +7521,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    /// Realises `amount` of vault value that is ALREADY present into the domain
+    /// insurance budget WITHOUT changing total vault.
+    ///
+    /// Unlike [`Self::deposit_domain_insurance_not_atomic`], no external quote
+    /// flows in: the corresponding tokens are already sitting in the vault, so
+    /// only the insurance *claim* (`header.insurance` + the per-domain budget)
+    /// is credited. The vault counter is left untouched. This is the reverse
+    /// of the "orphaned surplus" state — value that previously had no senior
+    /// claim (e.g. the non-LP "insurance stub" share of backing-bucket earnings
+    /// consumed during LP-vault redemption) becomes a withdrawable insurance
+    /// claim, keeping `vault - senior` constant.
+    pub fn realize_domain_insurance_from_vault_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        let next_insurance = self
+            .header
+            .insurance
+            .get()
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        // The tokens must already be covered by the vault — this primitive only
+        // reclassifies existing vault value, it never conjures new backing.
+        if next_insurance > self.header.vault.get() {
+            return Err(V16Error::LockActive);
+        }
+        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
+        let next_budget = budget
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.set_domain_insurance_budget_core(domain, next_budget, next_insurance)?;
+        self.header.insurance = V16PodU128::new(next_insurance);
+        self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
     fn withdraw_domain_insurance_delta(
         vault: u128,
         insurance: u128,
