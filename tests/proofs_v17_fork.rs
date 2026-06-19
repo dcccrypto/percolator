@@ -118,10 +118,11 @@ fn proof_v17_lp_vault_cooldown_enforcement() {
 // false→0, so the flag is checked as a raw u8 (codec fns are crate-private).
 // ============================================================================
 use percolator::v16::{
-    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, V16Error, V16PodU128, V16PodU64,
+    BackingBucketStatusV16, BackingBucketV16, EngineAssetSlotV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, SourceCreditStateV16,
+    V16Error, V16PodU128, V16PodU64,
 };
-use percolator::STRESS_ENVELOPE_TRIGGER_BPS_E9;
+use percolator::{CREDIT_RATE_SCALE, STRESS_ENVELOPE_TRIGGER_BPS_E9};
 
 fn env_header() -> MarketGroupV16HeaderAccount {
     let cfg = V16Config::public_user_fund(1, 0, 1);
@@ -1396,4 +1397,134 @@ fn proof_v17_lpvault359_stub_credit_delta_exact_and_guarded() {
     kani::cover!(total_remaining + stub <= ins0,
         "LPVAULT-359: in-headroom branch reachable");
     kani::cover!(stub >= 1, "LPVAULT-359: non-trivial stub credit reachable");
+}
+
+// ============================================================================
+// LIEN-1 (issue #116, PR #118) — counterparty lien TERMINAL release is
+// impaired-aware. The per-(asset,side) backing bucket + source-credit are SHARED
+// across accounts; a shared-bucket expiry (expire_source_backing_bucket_not_atomic)
+// forfeits the WHOLE remaining valid_liened — incl. a co-tenant winner's live share —
+// to `impaired` (valid_liened -> 0). Pre-fix, prepare_counterparty_lien_terminal_release_delta
+// decremented valid_liened by the full `amount`, so the co-tenant's later terminal
+// release UNDERFLOWED the emptied valid counter (CounterUnderflow) and that winner could
+// NEVER close — permanent strand + denied payout (issue #116, HIGH).
+//
+// The fix splits `amount` into valid_release = amount.min(bucket.valid_liened) (returned
+// to the provider's fresh_unliened pool) and impaired_release = amount - valid_release
+// (drained from the impaired counters ONLY — NOT re-credited to fresh, since expiry
+// already removed that backing; re-crediting would double-count senior backing). This
+// proof is the counterparty analog of the insurance twin's
+// proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_invalid
+// (proofs_v16.rs), which the counterparty side previously lacked.
+//
+// RED control: revert to the flat `valid_liened -= amount` and the IMPAIRED-ONLY /
+// MIXED cover arms become Err (the assert_eq!(is_ok, expected_ok) fails), and the
+// fresh-recredit/impaired-drain post-conditions diverge.
+// ============================================================================
+
+/// LIEN-1: per-side counterparty terminal release splits valid vs impaired, drains
+/// both counters on bucket+source, re-credits fresh by EXACTLY valid_release (never
+/// impaired), and rejects (CounterUnderflow) iff any side lacks the required lien.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v17_lien1_counterparty_terminal_release_impaired_aware() {
+    let amount_units: u8 = kani::any();
+    let bucket_valid_raw: u8 = kani::any();
+    let bucket_impaired_raw: u8 = kani::any();
+    let bucket_fresh_raw: u8 = kani::any();
+    let source_valid_raw: u8 = kani::any();
+    let source_impaired_raw: u8 = kani::any();
+    kani::assume(amount_units <= 8);
+    kani::assume(bucket_valid_raw <= 8);
+    kani::assume(bucket_impaired_raw <= 8);
+    kani::assume(bucket_fresh_raw <= 8);
+    kani::assume(source_valid_raw <= 8);
+    kani::assume(source_impaired_raw <= 8);
+
+    let amount = amount_units as u128 * percolator::BOUND_SCALE;
+    let bucket_valid = bucket_valid_raw as u128 * percolator::BOUND_SCALE;
+    let bucket_impaired = bucket_impaired_raw as u128 * percolator::BOUND_SCALE;
+    let bucket_fresh = bucket_fresh_raw as u128 * percolator::BOUND_SCALE;
+    let source_valid = source_valid_raw as u128 * percolator::BOUND_SCALE;
+    let source_impaired = source_impaired_raw as u128 * percolator::BOUND_SCALE;
+
+    let bucket = BackingBucketV16 {
+        valid_liened_backing_num: bucket_valid,
+        impaired_liened_backing_num: bucket_impaired,
+        fresh_unliened_backing_num: bucket_fresh,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        valid_liened_backing_num: source_valid,
+        impaired_liened_backing_num: source_impaired,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+            bucket, source, amount,
+        );
+
+    let valid_release = amount.min(bucket_valid);
+    let impaired_release = amount - valid_release;
+    // valid side: bucket.valid >= valid_release by construction (min); source.valid is the
+    // only valid guard. impaired side: both bucket and source impaired must cover the rest.
+    let expected_ok = amount == 0
+        || (source_valid >= valid_release
+            && bucket_impaired >= impaired_release
+            && source_impaired >= impaired_release);
+
+    kani::cover!(amount == 0, "LIEN-1: zero no-op");
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release == amount && impaired_release == 0,
+        "LIEN-1: valid-only release (non-expiry; byte-identical to pre-fix)"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release > 0 && impaired_release > 0,
+        "LIEN-1: MIXED valid+impaired release"
+    );
+    kani::cover!(
+        expected_ok && amount > 0 && valid_release == 0 && impaired_release > 0,
+        "LIEN-1: IMPAIRED-ONLY release — the stranded-co-tenant-winner case (#116)"
+    );
+    kani::cover!(
+        amount > 0 && source_valid < valid_release,
+        "LIEN-1: rejects insufficient source valid lien"
+    );
+    kani::cover!(
+        amount > 0 && valid_release < amount && bucket_impaired < impaired_release,
+        "LIEN-1: rejects insufficient bucket impaired lien"
+    );
+    kani::cover!(
+        amount > 0
+            && valid_release < amount
+            && bucket_impaired >= impaired_release
+            && source_impaired < impaired_release,
+        "LIEN-1: rejects insufficient source impaired lien"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        let (b, s) = result.unwrap();
+        // VALID portion is returned to the provider's unliened pool (re-credited to fresh).
+        assert_eq!(b.valid_liened_backing_num, bucket_valid - valid_release);
+        assert_eq!(b.fresh_unliened_backing_num, bucket_fresh + valid_release);
+        assert_eq!(s.valid_liened_backing_num, source_valid - valid_release);
+        // IMPAIRED portion drained from the impaired counters ONLY — NOT re-credited to
+        // fresh (no senior double-count; expiry already forfeited that backing).
+        assert_eq!(b.impaired_liened_backing_num, bucket_impaired - impaired_release);
+        assert_eq!(s.impaired_liened_backing_num, source_impaired - impaired_release);
+        // Encumbrance-invariant denominator conserved: the bucket's (fresh_unliened +
+        // valid_liened) sum is unchanged (-valid_release + valid_release == 0), so the
+        // valid release moves no value — it only re-labels liened -> unliened.
+        assert_eq!(
+            b.fresh_unliened_backing_num + b.valid_liened_backing_num,
+            bucket_fresh + bucket_valid
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    }
 }
