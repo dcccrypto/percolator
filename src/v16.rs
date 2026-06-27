@@ -211,6 +211,12 @@ pub enum V16Error {
     RecoveryRequired,
     CounterOverflow,
     CounterUnderflow,
+    /// Equity is below the initial-margin requirement for this action.
+    /// Distinct from `InvalidConfig` (configuration error) so callers can
+    /// surface a user-readable "insufficient margin" message rather than a
+    /// generic config-error bucket.  The wrapper maps this to
+    /// `PercolatorError::EngineInsufficientInitialMargin` (Custom 49).
+    InsufficientInitialMargin,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -12432,7 +12438,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let equity = cert.certified_equity;
         if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::InvalidConfig);
+            return Err(V16Error::InsufficientInitialMargin);
         }
         Ok(())
     }
@@ -13153,6 +13159,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         if residual == 0 {
             account.header.health_cert.valid = 0;
+            // Insurance fully covered the loss: negative_pnl_account_count may have
+            // reached zero — attempt to auto-clear the hlock.
+            self.try_clear_bankruptcy_hlock_if_healthy()?;
             return Ok(());
         }
 
@@ -13176,6 +13185,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.set_account_pnl(account, new_pnl)?;
         account.header.health_cert.valid = 0;
+        // Residual was booked into explicit/social loss: if this settled the last
+        // negative-PnL account, auto-clear the hlock now.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         Ok(())
     }
 
@@ -13229,6 +13241,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if new_pnl < 0 {
             self.header.bankruptcy_hlock_active = 1;
         }
+        // If settling this account's PnL brought the last negative-PnL account to
+        // zero (and all other health counters are already zero), auto-clear the hlock
+        // so LP/insurance withdrawals are unblocked.  The helper is O(1) and
+        // short-circuits immediately when the hlock is already clear.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             paid,
             vault_before,
@@ -13237,6 +13254,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         account.header.health_cert.valid = 0;
         Ok(paid)
+    }
+
+    // FIX-1: try to auto-clear `bankruptcy_hlock_active` once the market returns to a
+    // provably healthy state.  The hlock is SET on any deep-liquidation / insurance-
+    // consumption path (see every `self.header.bankruptcy_hlock_active = 1` site).
+    // It was NEVER cleared, permanently trapping LP/insurance backing withdrawals and
+    // oracle reconfig even after the bankruptcy was fully settled.
+    //
+    // Clear-condition (mirrors `group_has_position_or_loss_state_for_oracle_reset`):
+    //   negative_pnl_account_count == 0  — no accounts still in loss/bankruptcy
+    //   stale_certificate_count == 0     — all certificates processed
+    //   b_stale_account_count == 0       — no b-stale accounts outstanding
+    //   pnl_pos_tot == 0                 — no live positive-PnL positions
+    //   recovery_reason.is_none()        — not in recovery mode
+    //
+    // This is conservative: the hlock cannot be cleared while ANY outstanding
+    // loss/stale/position state remains, so clearing it is strictly safe —
+    // re-enabling insurance withdrawals only when the market is at rest.
+    //
+    // Called at the end of every principal-settlement and resolved-bankruptcy-
+    // settlement path; the early-return on `!hlock_active` keeps it O(1).
+    fn try_clear_bankruptcy_hlock_if_healthy(&mut self) -> V16Result<()> {
+        if !decode_bool(self.header.bankruptcy_hlock_active)? {
+            return Ok(());
+        }
+        if self.header.negative_pnl_account_count.get() == 0
+            && self.header.stale_certificate_count.get() == 0
+            && self.header.b_stale_account_count.get() == 0
+            && self.header.pnl_pos_tot.get() == 0
+            && self.header.recovery_reason.try_to_runtime()?.is_none()
+        {
+            self.header.bankruptcy_hlock_active = 0;
+        }
+        Ok(())
     }
 
     fn charge_account_fee_current_not_atomic(
