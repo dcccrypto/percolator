@@ -9576,6 +9576,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        // FIX-1b: the reserve path (reserve_new_capital_backed_loss_for_source_domain_not_atomic)
+        // can zero the PnL before settle_negative_pnl_from_principal_core_not_atomic sees it,
+        // causing the settle to return early and bypass the try_clear at line 13248.  Call
+        // try_clear here unconditionally so a FeeSweep/Refresh also clears the hlock when all
+        // five health conditions are satisfied.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if decode_bool(account.header.b_stale_state)? {
             return Err(V16Error::BStale);
@@ -12314,6 +12320,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        // FIX-1: consume_domain_insurance_for_negative_pnl sets hlock=1 at entry (line 7758)
+        // and then zeroes the account's negative PnL via set_account_pnl, which decrements
+        // negative_pnl_account_count.  When insurance covers the full loss, all five
+        // try_clear conditions are met at this point but the hlock was never cleared.
+        // Call try_clear here so a full-insurance liquidation unblocks LP/insurance
+        // withdrawals without requiring a separate FeeSweep transaction.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         let residual = if account.header.pnl.get() < 0 {
             account.header.pnl.get().unsigned_abs()
         } else {
