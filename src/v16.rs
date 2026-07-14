@@ -4953,7 +4953,10 @@ impl MarketGroupV16HeaderAccount {
     /// assert_public_invariants (the runtime-form mirror that did is dropped with runtime-vec; the
     /// candidate validate_public_user_fund is the sole guarantee, identical to grow_* and the fork).
     #[cfg(feature = "fork-facade")]
-    pub fn apply_fee_policy_update_not_atomic(&mut self, update: FeePolicyUpdateV16) -> V16Result<()> {
+    pub fn apply_fee_policy_update_not_atomic(
+        &mut self,
+        update: FeePolicyUpdateV16,
+    ) -> V16Result<()> {
         if decode_market_mode(self.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -5322,9 +5325,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         // re-credits c_tot debits backing first, so the strengthened stack must
         // always be covered. A state violating it is double-promising atoms.
         let senior_with_backing = senior
-            .checked_add(
-                self.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
-            )
+            .checked_add(self.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if senior_with_backing > self.header.vault.get() {
             return Err(V16Error::InvalidConfig);
@@ -7649,6 +7650,77 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         self.validate_source_domain_ledger(domain)?;
+        self.validate_shape()
+    }
+
+    fn withdraw_insurance_surplus_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget_remaining_total: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        let available_surplus = insurance
+            .saturating_sub(source_reserved_atoms)
+            .saturating_sub(budget_remaining_total);
+        if amount > available_surplus || amount > vault {
+            return Err(V16Error::LockActive);
+        }
+        let next_vault = vault
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let next_insurance = insurance
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((next_vault, next_insurance))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_withdraw_insurance_surplus_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget_remaining_total: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        Self::withdraw_insurance_surplus_delta(
+            vault,
+            insurance,
+            source_reserved_atoms,
+            budget_remaining_total,
+            amount,
+        )
+    }
+
+    /// Withdraws external quote out of the market's *unbudgeted* insurance
+    /// surplus — value that was charged into `header.insurance` but never
+    /// credited to any domain's `insurance_domain_budget_*`. Domain budgets
+    /// and source-credit reservations are untouched and cannot be reduced by
+    /// this call. Protocol-agnostic at the engine level: the caller (wrapper)
+    /// is responsible for tracking *who* is entitled to how much of the
+    /// surplus (e.g. an accrued/withdrawn ledger) — this primitive only
+    /// enforces "you cannot withdraw more than the surplus that isn't
+    /// backing any domain or reservation," mirroring
+    /// `withdraw_domain_insurance_not_atomic`'s bound style.
+    pub fn withdraw_insurance_surplus_not_atomic(&mut self, amount: u128) -> V16Result<()> {
+        let vault_before = self.header.vault.get();
+        let (next_vault, next_insurance) = Self::withdraw_insurance_surplus_delta(
+            vault_before,
+            self.header.insurance.get(),
+            self.header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            self.header.insurance_domain_budget_remaining_total.get(),
+            amount,
+        )?;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::insurance_capital_to_external_out(
+            amount,
+            vault_before,
+            self.header.vault.get(),
+        )?
+        .validate()?;
         self.validate_shape()
     }
 
@@ -10952,12 +11024,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // accumulator has reached it. `None` preserves toly baseline.
         #[cfg(feature = "fork-facade")]
         if let Some(threshold) = instruction_threshold_bps_opt {
-            if self
-                .header
-                .stress_consumption_bps_e9_since_envelope
-                .get()
-                >= threshold
-            {
+            if self.header.stress_consumption_bps_e9_since_envelope.get() >= threshold {
                 return Ok(HLockLaneV16::HMax);
             }
         }
@@ -12609,12 +12676,75 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(cert)
     }
 
+    /// Taker-only trade fee charge (design §1A), with the N1 maker-fallback
+    /// folded in. Only the side that initiated the trade
+    /// (`taker_is_long_account` selects `long_account` vs `short_account`)
+    /// pays `fee`; the passive maker/LP side pays nothing — *unless* the
+    /// taker's own charge attempt returns `0` specifically **because** the
+    /// taker's negative-PnL waiver fired inside
+    /// `charge_account_fee_current_not_atomic` (not because `fee == 0`), in
+    /// which case the solvent maker is charged `fee.min(maker.capital)`
+    /// instead, so an underwater taker cannot trade fee-free. This does NOT
+    /// strip the pnl<0 guard on the taker's own charge attempt — the guard
+    /// still fires first, exactly as before; only the *consequence* of it
+    /// firing changes (fallback to maker instead of collecting nothing).
+    ///
+    /// Returns `(fee_a, fee_b)` in the caller's original long/short axis
+    /// (`fee_a` = amount charged to `long_account`, `fee_b` = amount charged
+    /// to `short_account`) — independent of which side was the taker.
+    fn charge_trade_fee_taker_only_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        fee: u128,
+        taker_is_long_account: bool,
+    ) -> V16Result<(u128, u128)> {
+        if taker_is_long_account {
+            let taker_fee = self.charge_account_fee_current_not_atomic(long_account, fee)?;
+            if taker_fee == 0 && fee != 0 && long_account.header.pnl.get() < 0 {
+                Ok((
+                    0u128,
+                    self.charge_account_fee_current_not_atomic(short_account, fee)?,
+                ))
+            } else {
+                Ok((taker_fee, 0u128))
+            }
+        } else {
+            let taker_fee = self.charge_account_fee_current_not_atomic(short_account, fee)?;
+            if taker_fee == 0 && fee != 0 && short_account.header.pnl.get() < 0 {
+                Ok((
+                    self.charge_account_fee_current_not_atomic(long_account, fee)?,
+                    0u128,
+                ))
+            } else {
+                Ok((0u128, taker_fee))
+            }
+        }
+    }
+
+    #[cfg(kani)]
+    pub fn kani_charge_trade_fee_taker_only_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        fee: u128,
+        taker_is_long_account: bool,
+    ) -> V16Result<(u128, u128)> {
+        self.charge_trade_fee_taker_only_not_atomic(
+            long_account,
+            short_account,
+            fee,
+            taker_is_long_account,
+        )
+    }
+
     fn apply_trade_after_refresh_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
         recertify_after_fill: bool,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeApplyOutcomeV16> {
         let (abs_size_q, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
         let trade_preflight = self.validate_trade_position_preflight(
@@ -12628,8 +12758,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let notional = trade_notional_floor(abs_size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
-        let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
-        let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
+        let (fee_a, fee_b) = self.charge_trade_fee_taker_only_not_atomic(
+            long_account,
+            short_account,
+            fee,
+            taker_is_long_account,
+        )?;
         self.apply_current_position_delta_with_lookup(
             long_account,
             request.asset_index,
@@ -12767,11 +12901,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeOutcomeV16> {
         let outcome = self.execute_batch_with_fee_loss_stale_scoped_not_atomic(
             long_account,
             short_account,
             core::slice::from_ref(&request),
+            taker_is_long_account,
         )?;
         Ok(TradeOutcomeV16 {
             fee_a: outcome.fee_a,
@@ -12785,6 +12921,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
@@ -12811,6 +12948,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_account,
             short_account,
             requests,
+            taker_is_long_account,
         );
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = restore_loss_stale_active;
@@ -12840,12 +12978,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeOutcomeV16> {
         let outcome = self.fork_execute_batch_with_admit_threshold_not_atomic(
             long_account,
             short_account,
             core::slice::from_ref(&request),
             threshold_bps_opt,
+            taker_is_long_account,
         )?;
         Ok(TradeOutcomeV16 {
             fee_a: outcome.fee_a,
@@ -12863,6 +13003,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
@@ -12885,13 +13026,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
-        let result = self
-            .fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
-                long_account,
-                short_account,
-                requests,
-                threshold_bps_opt,
-            );
+        let result = self.fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            threshold_bps_opt,
+            taker_is_long_account,
+        );
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
@@ -12910,6 +13051,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -12929,16 +13071,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_account_for_position_action_and_refresh_not_atomic(long_account)?;
         self.settle_account_for_position_action_and_refresh_not_atomic(short_account)?;
         // A-1: threshold injected here (key difference from the toly baseline loop)
-        let locked = self.h_lock_lane(
-            Some(&long_account.as_view()),
-            false,
-            threshold_bps_opt,
-        )? == HLockLaneV16::HMax
-            || self.h_lock_lane(
-                Some(&short_account.as_view()),
-                false,
-                threshold_bps_opt,
-            )? == HLockLaneV16::HMax;
+        let locked = self.h_lock_lane(Some(&long_account.as_view()), false, threshold_bps_opt)?
+            == HLockLaneV16::HMax
+            || self.h_lock_lane(Some(&short_account.as_view()), false, threshold_bps_opt)?
+                == HLockLaneV16::HMax;
         let mut outcome = BatchTradeOutcomeV16 {
             fill_count: 0,
             fee_a: 0,
@@ -12956,6 +13092,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 short_account,
                 requests[i],
                 recertify_after_fill,
+                taker_is_long_account,
             )?;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
@@ -12986,6 +13123,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -13034,6 +13172,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 short_account,
                 requests[i],
                 recertify_after_fill,
+                taker_is_long_account,
             )?;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
@@ -15986,8 +16125,8 @@ pub mod lp_vault {
 #[cfg(feature = "fork-facade")]
 pub mod fork_facade {
     use super::{
-        account_equity_from_parts, validate_fee_credits, validate_non_min_i128,
-        PortfolioV16View, V16Error, V16Result,
+        account_equity_from_parts, validate_fee_credits, validate_non_min_i128, PortfolioV16View,
+        V16Error, V16Result,
     };
 
     // -----------------------------------------------------------------------

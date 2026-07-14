@@ -164,6 +164,7 @@ fn apply_fuzz_action(
                         exec_price: 1,
                         fee_bps: (amount_seed as u64) % 11,
                     },
+                    amount_seed % 2 == 0,
                 )
                 .map(|_| ())
         }

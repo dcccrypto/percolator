@@ -72,6 +72,29 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
+/// Like `one_market_view_fixture`, but with two independent portfolio
+/// accounts (long/short axis) sharing the same market group — used by the
+/// taker-only trade-fee-charge proofs, which need a long-side and a
+/// short-side account simultaneously.
+fn two_account_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let long_header = empty_account_fixture(market_id, 5);
+    let short_header = empty_account_fixture(market_id, 6);
+    (header, markets, long_header, short_header)
+}
+
 fn one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -12182,4 +12205,334 @@ fn proof_v16_public_backing_fee_charges_only_selected_domain() {
         c_tot_before + insurance_before + earnings_before
     );
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-fee design §1.5: withdraw_insurance_surplus_not_atomic.
+// ---------------------------------------------------------------------------
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_insurance_surplus_never_dips_below_budget_remaining_total() {
+    let vault: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let source_reserved: u128 = kani::any();
+    let budget_remaining_total: u128 = kani::any();
+    let amount: u128 = kani::any();
+    // Genuine precondition, not vacuity-inducing: mirrors the real
+    // production invariant enforced by `validate_header_aggregate_totals`
+    // (v16.rs `validate_shape` -> per-term bound), which checks EACH term
+    // individually against `header.insurance`, not their sum (the N2
+    // finding). Both `source_reserved` and `budget_remaining_total` can
+    // still each range over the *full* `0..=insurance` interval
+    // independently (including both == insurance simultaneously), so the
+    // adversarial "reservations exceed available surplus" case is still
+    // fully explored below.
+    kani::assume(source_reserved <= insurance);
+    kani::assume(budget_remaining_total <= insurance);
+
+    let available_surplus = insurance
+        .saturating_sub(source_reserved)
+        .saturating_sub(budget_remaining_total);
+    let expected_ok = amount <= available_surplus && amount <= vault;
+
+    kani::cover!(
+        expected_ok && amount > 0,
+        "surplus withdraw covers a nontrivial success"
+    );
+    kani::cover!(
+        amount > available_surplus && amount <= vault,
+        "surplus withdraw covers rejection by insufficient unbudgeted surplus"
+    );
+    kani::cover!(
+        amount <= available_surplus && amount > vault,
+        "surplus withdraw covers rejection by insufficient vault liquidity"
+    );
+    kani::cover!(
+        source_reserved.saturating_add(budget_remaining_total) > insurance,
+        "surplus withdraw covers the reservations-exceed-insurance saturating case"
+    );
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_withdraw_insurance_surplus_delta(
+        vault,
+        insurance,
+        source_reserved,
+        budget_remaining_total,
+        amount,
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_vault, next_insurance)) = result {
+        assert_eq!(next_vault, vault - amount);
+        assert_eq!(next_insurance, insurance - amount);
+        // No-theft-of-domain-claim obligation: this withdrawal can never
+        // dip insurance below what's already earmarked for a domain budget
+        // or a source-credit reservation.
+        assert!(next_insurance >= budget_remaining_total);
+        assert!(next_insurance >= source_reserved);
+    } else {
+        assert!(amount > available_surplus || amount > vault);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_insurance_surplus_conserves_vault_insurance_lockstep() {
+    let vault_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let vault = vault_raw as u128;
+    let insurance = insurance_raw as u128;
+    let amount = amount_raw as u128;
+    // Genuine precondition: the vault must actually back the insurance
+    // ledger it's paired with, matching the real solvency invariant
+    // (`c_tot + insurance <= vault`, simplified here to `insurance <=
+    // vault` since c_tot is irrelevant to this primitive and is held at 0
+    // in this fixture) -- not narrowing the amount/surplus space at all.
+    kani::assume(insurance <= vault);
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(vault);
+    header.insurance = V16PodU128::new(insurance);
+    // Leave domain budgets / source reservations at their fixture default
+    // (0) so the full `insurance` amount is unbudgeted surplus -- this
+    // isolates the primitive's vault<->insurance lockstep property from the
+    // budget-bound rejection already covered by the sibling harness above.
+    let c_tot_before = header.c_tot;
+    let backing_before = header.backing_provider_earnings_total;
+    let domain_long_before = markets[0].engine.insurance_domain_budget_long;
+    let domain_short_before = markets[0].engine.insurance_domain_budget_short;
+    let source_reserved_before = header.source_insurance_credit_reserved_total_atoms;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let insurance_before = market.header.insurance.get();
+
+    kani::cover!(amount > 0 && amount <= insurance, "nontrivial surplus withdraw succeeds");
+    kani::cover!(amount > insurance, "surplus withdraw rejects overdraw");
+
+    let result = market.withdraw_insurance_surplus_not_atomic(amount);
+
+    if amount <= insurance {
+        assert!(result.is_ok());
+        assert_eq!(vault_before - market.header.vault.get(), amount);
+        assert_eq!(insurance_before - market.header.insurance.get(), amount);
+        assert_eq!(
+            vault_before - market.header.vault.get(),
+            insurance_before - market.header.insurance.get()
+        );
+        // No side effects outside vault/insurance: c_tot, domain budgets,
+        // backing earnings, and the source-reservation total are all
+        // byte-identical.
+        assert_eq!(market.header.c_tot, c_tot_before);
+        assert_eq!(
+            market.header.backing_provider_earnings_total,
+            backing_before
+        );
+        assert_eq!(
+            market.markets[0].engine.insurance_domain_budget_long,
+            domain_long_before
+        );
+        assert_eq!(
+            market.markets[0].engine.insurance_domain_budget_short,
+            domain_short_before
+        );
+        assert_eq!(
+            market.header.source_insurance_credit_reserved_total_atoms,
+            source_reserved_before
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.insurance.get(), insurance_before);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-fee design §1A + N1: taker-only trade fee charge.
+// ---------------------------------------------------------------------------
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_taker_only_charges_exactly_one_side() {
+    let taker_is_long_account: bool = kani::any();
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let long_pnl_neg: bool = kani::any();
+    let short_pnl_neg: bool = kani::any();
+    let fee_raw: u8 = kani::any();
+
+    let long_capital = long_capital_raw as u128;
+    let short_capital = short_capital_raw as u128;
+    let fee = fee_raw as u128;
+
+    let (mut header, mut markets, mut long_header, mut short_header) = two_account_view_fixture();
+    long_header.capital = V16PodU128::new(long_capital);
+    short_header.capital = V16PodU128::new(short_capital);
+    // pnl sign is the only thing the waiver reads; magnitude is irrelevant,
+    // so -1 is a fully general representative of "negative" here (no
+    // narrowing of the adversarial space -- charge_account_fee_current_not_atomic
+    // only ever tests `pnl.get() < 0`, never a magnitude).
+    long_header.pnl = V16PodI128::new(if long_pnl_neg { -1 } else { 0 });
+    short_header.pnl = V16PodI128::new(if short_pnl_neg { -1 } else { 0 });
+    // Genuine precondition, not narrowing amount/capital space: c_tot/vault
+    // must be large enough to back both accounts' capital simultaneously
+    // (the real invariant), so the internal `checked_sub`/`checked_add`
+    // calls inside `charge_account_fee_current_not_atomic` cannot spuriously
+    // overflow/underflow for reasons unrelated to the taker-only logic
+    // under proof.
+    header.c_tot = V16PodU128::new(long_capital + short_capital);
+    header.vault = V16PodU128::new(long_capital + short_capital);
+
+    let long_capital_before = long_header.capital.get();
+    let short_capital_before = short_header.capital.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    let (fee_a, fee_b) = market
+        .kani_charge_trade_fee_taker_only_not_atomic(
+            &mut long,
+            &mut short,
+            fee,
+            taker_is_long_account,
+        )
+        .unwrap();
+
+    kani::cover!(fee_a > 0 && fee_b == 0, "taker-is-long branch collects a nonzero fee");
+    kani::cover!(fee_b > 0 && fee_a == 0, "taker-is-short branch (or its N1 fallback) collects a nonzero fee");
+    kani::cover!(
+        fee_a == 0 && fee_b == 0 && fee > 0,
+        "fee-bearing fill where every reachable payer is insolvent/waived (documented, not a theft/solvency bug)"
+    );
+    kani::cover!(
+        long_pnl_neg && short_pnl_neg && fee > 0,
+        "both taker and maker are pnl<0 simultaneously -- both genuinely waived, not an evasion path"
+    );
+    kani::cover!(
+        taker_is_long_account && long_pnl_neg && !short_pnl_neg && short_capital > 0 && fee > 0 && fee_b > 0,
+        "N1 fallback fires: long taker waived by pnl<0, solvent short maker charged instead"
+    );
+    kani::cover!(
+        !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0 && fee > 0 && fee_a > 0,
+        "N1 fallback fires: short taker waived by pnl<0, solvent long maker charged instead"
+    );
+
+    // Mutual exclusivity: taker-only charging never collects from both
+    // sides on the same fill (this is the formal "taker-only" statement).
+    assert!(fee_a == 0 || fee_b == 0, "both sides charged simultaneously -- taker-only violated");
+
+    // N1 no-evasion obligation: a fee-bearing fill with at least one
+    // reachable solvent, non-waived payer must collect something nonzero --
+    // an underwater taker cannot make the whole fill fee-free while a
+    // solvent maker exists to fall back to.
+    if fee > 0 {
+        let taker_pnl_neg = if taker_is_long_account {
+            long_pnl_neg
+        } else {
+            short_pnl_neg
+        };
+        let taker_capital = if taker_is_long_account {
+            long_capital
+        } else {
+            short_capital
+        };
+        let maker_capital = if taker_is_long_account {
+            short_capital
+        } else {
+            long_capital
+        };
+        // The maker must ALSO be non-negative-pnl for the fallback to
+        // collect anything: `charge_account_fee_current_not_atomic`'s
+        // pnl<0 waiver is NOT stripped for the fallback target either (by
+        // design -- see the N1 doc comment on
+        // `charge_trade_fee_taker_only_not_atomic`), so a maker who is
+        // ALSO underwater is genuinely, correctly waived too. This is the
+        // "both sides insolvent/waived" case already covered separately
+        // above, not a fallback-evasion bug.
+        let maker_pnl_neg = if taker_is_long_account {
+            short_pnl_neg
+        } else {
+            long_pnl_neg
+        };
+        if !taker_pnl_neg && taker_capital > 0 {
+            assert!(fee_a > 0 || fee_b > 0, "solvent, non-negative-pnl taker must be charged");
+        } else if taker_pnl_neg && maker_capital > 0 && !maker_pnl_neg {
+            assert!(
+                fee_a > 0 || fee_b > 0,
+                "N1: pnl<0-waived taker must fall back to a solvent, non-negative-pnl maker"
+            );
+        }
+    }
+
+    // Whichever side receives a zero charge is byte-identical in capital
+    // before/after (the "maker balance unchanged by the fee" property).
+    if fee_a == 0 {
+        assert_eq!(long.header.capital.get(), long_capital_before);
+    }
+    if fee_b == 0 {
+        assert_eq!(short.header.capital.get(), short_capital_before);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_taker_only_conserves_notional_unaffected() {
+    let taker_is_long_account: bool = kani::any();
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let fee_raw: u8 = kani::any();
+
+    let long_capital = long_capital_raw as u128;
+    let short_capital = short_capital_raw as u128;
+    let fee = fee_raw as u128;
+
+    let (mut header, mut markets, mut long_header, mut short_header) = two_account_view_fixture();
+    long_header.capital = V16PodU128::new(long_capital);
+    short_header.capital = V16PodU128::new(short_capital);
+    header.c_tot = V16PodU128::new(long_capital + short_capital);
+    header.vault = V16PodU128::new(long_capital + short_capital);
+
+    let long_legs_before = long_header.legs;
+    let short_legs_before = short_header.legs;
+    let long_bitmap_before = long_header.active_bitmap;
+    let short_bitmap_before = short_header.active_bitmap;
+    let long_pnl_before = long_header.pnl;
+    let short_pnl_before = short_header.pnl;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    kani::cover!(fee > 0 && taker_is_long_account, "nontrivial fee, long taker");
+    kani::cover!(fee > 0 && !taker_is_long_account, "nontrivial fee, short taker");
+
+    let _ = market
+        .kani_charge_trade_fee_taker_only_not_atomic(
+            &mut long,
+            &mut short,
+            fee,
+            taker_is_long_account,
+        )
+        .unwrap();
+
+    // The fee-charge decision (`taker_is_long_account`) only ever gates
+    // which side's *capital* moves. It structurally cannot touch either
+    // account's position legs, active-bitmap, or pnl: the position-delta
+    // application (`apply_current_position_delta_with_lookup`) is a
+    // wholly separate call in `apply_trade_after_refresh_not_atomic`,
+    // downstream of the fee charge, that never receives
+    // `taker_is_long_account`. This guards against a future refactor
+    // accidentally coupling fee-side selection to position-side selection.
+    assert_eq!(long.header.legs, long_legs_before);
+    assert_eq!(short.header.legs, short_legs_before);
+    assert_eq!(long.header.active_bitmap, long_bitmap_before);
+    assert_eq!(short.header.active_bitmap, short_bitmap_before);
+    assert_eq!(long.header.pnl, long_pnl_before);
+    assert_eq!(short.header.pnl, short_pnl_before);
 }
