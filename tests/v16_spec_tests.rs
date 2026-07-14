@@ -1140,7 +1140,7 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     market
-        .credit_account_from_insurance_not_atomic(&mut account, 3)
+        .credit_account_from_insurance_not_atomic(&mut account, 3, 0)
         .unwrap();
     assert_eq!(market.header.vault.get(), 10);
     assert_eq!(market.header.insurance.get(), 7);
@@ -1152,12 +1152,58 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     market
         .credit_domain_insurance_budget_not_atomic(0, 7)
         .unwrap();
-    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1);
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1, 0);
     assert_eq!(
         err,
         Err(V16Error::LockActive),
         "budgeted domain insurance must not be paid as a cranker reward"
     );
+}
+
+#[test]
+fn v16_credit_account_from_insurance_respects_additional_reserved() {
+    // Starvation-attack regression (protocol-fee RESERVE amendment,
+    // ~/v17/DECISIONS-LEDGER.md): a crank-reward-style credit must never dip
+    // `header.insurance` below the caller-declared `additional_reserved`
+    // floor (e.g. the protocol's accrued-but-unwithdrawn fee claim), even
+    // when the naive unbudgeted-surplus check (pre-amendment: `budget_remaining
+    // > next_insurance`) would have allowed it.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let mut account_header = account_fixture(1, 9);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // No domain budget allocated (budget_remaining == 0), so the pre-amendment
+    // check would allow draining the full 10 atoms of unbudgeted surplus as a
+    // "cranker reward". With a 6-atom protocol reservation in place, only 4
+    // atoms are actually free.
+    let protocol_owed: u128 = 6;
+
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 5, protocol_owed);
+    assert_eq!(
+        err,
+        Err(V16Error::LockActive),
+        "cranker reward must not be able to dip insurance below the protocol's reserved claim"
+    );
+    // Insurance/vault/capital must be untouched by the rejected attempt.
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(account.header.capital.get(), 0);
+
+    // Exactly the free amount (10 - 6 = 4) still succeeds.
+    market
+        .credit_account_from_insurance_not_atomic(&mut account, 4, protocol_owed)
+        .unwrap();
+    assert_eq!(market.header.insurance.get(), 6);
+    assert_eq!(account.header.capital.get(), 4);
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    // The reserved floor (6) is now exactly `header.insurance` -- any further
+    // draw, however small, must fail.
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1, protocol_owed);
+    assert_eq!(err, Err(V16Error::LockActive));
+    assert_eq!(market.header.insurance.get(), 6, "reserve floor is exact");
 }
 
 #[test]

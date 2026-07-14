@@ -8494,6 +8494,12 @@ fn proof_v16_new_unfunded_domain_cannot_consume_shared_insurance() {
 fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     let insurance: u128 = kani::any();
     let budgeted: u128 = kani::any();
+    // Protocol-fee RESERVE amendment (~/v17/DECISIONS-LEDGER.md): the
+    // wrapper-supplied floor (e.g. `protocol_fee_accrued_atoms -
+    // protocol_fee_withdrawn_atoms`) that this credit must never dip
+    // `next_insurance` below, on top of `budgeted`. `additional_reserved ==
+    // 0` recovers the pre-amendment behavior exactly.
+    let additional_reserved: u128 = kani::any();
     let c_tot: u128 = kani::any();
     let capital: u128 = kani::any();
     let amount: u128 = kani::any();
@@ -8501,12 +8507,18 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     kani::assume(c_tot <= u128::MAX - insurance);
 
     let result = MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
-        insurance, budgeted, c_tot, capital, amount,
+        insurance,
+        budgeted,
+        additional_reserved,
+        c_tot,
+        capital,
+        amount,
     );
     let next_c_tot_expected = c_tot.checked_add(amount);
     let next_capital_expected = capital.checked_add(amount);
+    let reserved_floor = budgeted.saturating_add(additional_reserved);
     let expected_ok = amount <= insurance
-        && budgeted <= insurance - amount
+        && reserved_floor <= insurance - amount
         && next_c_tot_expected.is_some()
         && next_capital_expected.is_some();
 
@@ -8522,12 +8534,29 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         amount > 0 && !expected_ok && budgeted == insurance,
         "credit-account-from-insurance delta covers rejecting fully budgeted insurance"
     );
+    kani::cover!(
+        amount > 0 && additional_reserved > 0 && expected_ok,
+        "credit-account-from-insurance delta covers a nonzero protocol reservation that still leaves free surplus"
+    );
+    kani::cover!(
+        amount > 0
+            && amount <= insurance
+            && additional_reserved > 0
+            && budgeted <= insurance - amount
+            && !expected_ok,
+        "credit-account-from-insurance delta covers the reserve blocking a draw the pre-amendment (budgeted-only) check would have allowed"
+    );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_insurance, next_c_tot, next_capital)) = result {
         assert_eq!(next_insurance, insurance - amount);
         assert_eq!(next_c_tot, next_c_tot_expected.unwrap());
         assert_eq!(next_capital, next_capital_expected.unwrap());
         assert!(budgeted <= next_insurance);
+        assert!(
+            additional_reserved <= next_insurance,
+            "the reserve amendment's core guarantee: a crank-reward-style credit can never dip insurance below the caller-declared reservation"
+        );
+        assert!(reserved_floor <= next_insurance);
         assert_eq!(next_insurance - budgeted, insurance - budgeted - amount);
         assert_eq!(
             next_insurance.checked_add(next_c_tot).unwrap(),
@@ -8536,7 +8565,7 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         );
     } else if amount > insurance {
         assert_eq!(result, Err(V16Error::CounterUnderflow));
-    } else if budgeted > insurance - amount {
+    } else if reserved_floor > insurance - amount {
         assert_eq!(result, Err(V16Error::LockActive));
     } else {
         assert_eq!(result, Err(V16Error::ArithmeticOverflow));
@@ -11871,19 +11900,29 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
     let c_tot_raw: u8 = kani::any();
     let capital_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
+    // Protocol-fee RESERVE amendment: a nonzero reservation carved out of the
+    // same unbudgeted-surplus pool, on top of `budget_remaining`, that must
+    // remain untouched by this credit.
+    let reserved_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&amount_raw));
     kani::assume(budget_raw <= 4);
     kani::assume(unbudgeted_raw <= 4);
     kani::assume(c_tot_raw <= 8);
     kani::assume(capital_raw <= 8);
     kani::assume(surplus_raw <= 4);
+    kani::assume(reserved_raw <= 4);
     let amount = amount_raw as u128;
     let budget_remaining = budget_raw as u128;
     let unbudgeted_surplus = unbudgeted_raw as u128;
     let c_tot = c_tot_raw as u128;
     let capital = capital_raw as u128;
     let surplus = surplus_raw as u128;
-    let insurance = budget_remaining + unbudgeted_surplus + amount;
+    let additional_reserved = reserved_raw as u128;
+    // `insurance` is sized so that after the credit, exactly
+    // `budget_remaining + additional_reserved + unbudgeted_surplus` remains --
+    // i.e. `unbudgeted_surplus` is the truly-free residual left over even
+    // after both the domain-budget floor AND the protocol reservation.
+    let insurance = budget_remaining + additional_reserved + unbudgeted_surplus + amount;
     let vault = c_tot + insurance + surplus;
     let senior_before = c_tot + insurance;
     let residual_before = vault - senior_before;
@@ -11892,11 +11931,26 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
         MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
             insurance,
             budget_remaining,
+            additional_reserved,
             c_tot,
             capital,
             amount,
         )
         .unwrap();
+
+    kani::cover!(
+        additional_reserved > 0,
+        "value-neutral credit covers a nonzero protocol reservation"
+    );
+    assert!(
+        next_insurance >= budget_remaining + additional_reserved,
+        "reserve amendment: credit never dips insurance below budget + protocol reservation"
+    );
+    assert_eq!(
+        next_insurance - (budget_remaining + additional_reserved),
+        unbudgeted_surplus,
+        "residual free surplus after reserve is exactly conserved"
+    );
 
     let mut flow = TokenValueFlowProofV16::empty(vault, vault);
     flow.debit(TokenValueClassV16::InsuranceCapital, amount)
@@ -12487,6 +12541,18 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
     let long_capital_raw: u8 = kani::any();
     let short_capital_raw: u8 = kani::any();
     let fee_raw: u8 = kani::any();
+    // Blocker #4 fix (VERIFICATION-RESULTS.md item 4): without these, the N1
+    // maker-fallback arm inside `charge_trade_fee_taker_only_not_atomic`
+    // (fires when the taker's own charge attempt returns 0 *because*
+    // `pnl < 0`, not because `fee == 0`) is structurally unreachable in this
+    // harness -- confirmed by mutation, a pnl-corrupting mutation inside the
+    // fallback arm went uncaught (0/3249 checks failed). Mirrors the nondet
+    // pnl bools already used by the sibling harness
+    // `proof_v16_taker_only_charges_exactly_one_side` -- sign is the only
+    // thing the waiver reads, so `-1` is a fully general representative of
+    // "negative" (no narrowing of the adversarial space).
+    let long_pnl_neg: bool = kani::any();
+    let short_pnl_neg: bool = kani::any();
 
     let long_capital = long_capital_raw as u128;
     let short_capital = short_capital_raw as u128;
@@ -12495,6 +12561,8 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
     let (mut header, mut markets, mut long_header, mut short_header) = two_account_view_fixture();
     long_header.capital = V16PodU128::new(long_capital);
     short_header.capital = V16PodU128::new(short_capital);
+    long_header.pnl = V16PodI128::new(if long_pnl_neg { -1 } else { 0 });
+    short_header.pnl = V16PodI128::new(if short_pnl_neg { -1 } else { 0 });
     header.c_tot = V16PodU128::new(long_capital + short_capital);
     header.vault = V16PodU128::new(long_capital + short_capital);
 
@@ -12511,6 +12579,14 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
 
     kani::cover!(fee > 0 && taker_is_long_account, "nontrivial fee, long taker");
     kani::cover!(fee > 0 && !taker_is_long_account, "nontrivial fee, short taker");
+    kani::cover!(
+        fee > 0 && taker_is_long_account && long_pnl_neg && !short_pnl_neg && short_capital > 0,
+        "N1 fallback branch reachable: long taker pnl<0-waived, solvent short maker falls back"
+    );
+    kani::cover!(
+        fee > 0 && !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0,
+        "N1 fallback branch reachable: short taker pnl<0-waived, solvent long maker falls back"
+    );
 
     let _ = market
         .kani_charge_trade_fee_taker_only_not_atomic(
@@ -12522,7 +12598,8 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
         .unwrap();
 
     // The fee-charge decision (`taker_is_long_account`) only ever gates
-    // which side's *capital* moves. It structurally cannot touch either
+    // which side's *capital* moves -- including along the N1 maker-fallback
+    // arm, now exercised above. It structurally cannot touch either
     // account's position legs, active-bitmap, or pnl: the position-delta
     // application (`apply_current_position_delta_with_lookup`) is a
     // wholly separate call in `apply_trade_after_refresh_not_atomic`,

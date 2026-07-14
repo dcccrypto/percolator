@@ -7727,9 +7727,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Pays an account from unbudgeted insurance surplus, e.g. a crank reward.
     ///
     /// Budgeted domain insurance remains isolated and cannot be consumed by this path.
+    ///
+    /// `additional_reserved` (protocol-fee RESERVE amendment,
+    /// ~/v17/DECISIONS-LEDGER.md) is a caller-supplied floor -- on top of
+    /// `budget_remaining` -- that this credit must never dip `next_insurance`
+    /// below. The engine has no concept of "who" the reservation belongs to
+    /// (that ledger lives in the wrapper's `WrapperConfigV16`, e.g.
+    /// `protocol_fee_accrued_atoms - protocol_fee_withdrawn_atoms`); it only
+    /// enforces that whatever the caller declares reserved cannot be consumed
+    /// by this crank-reward-style credit. Pass `0` to recover the prior
+    /// (pre-reserve) behavior exactly.
     fn credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,
+        additional_reserved: u128,
         c_tot: u128,
         capital: u128,
         amount: u128,
@@ -7737,7 +7748,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let next_insurance = insurance
             .checked_sub(amount)
             .ok_or(V16Error::CounterUnderflow)?;
-        if budget_remaining > next_insurance {
+        let reserved_floor = budget_remaining.saturating_add(additional_reserved);
+        if reserved_floor > next_insurance {
             return Err(V16Error::LockActive);
         }
         let next_c_tot = c_tot
@@ -7753,6 +7765,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,
+        additional_reserved: u128,
         c_tot: u128,
         capital: u128,
         amount: u128,
@@ -7760,16 +7773,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::credit_account_from_insurance_delta(
             insurance,
             budget_remaining,
+            additional_reserved,
             c_tot,
             capital,
             amount,
         )
     }
 
+    /// `additional_reserved` -- see `credit_account_from_insurance_delta` doc
+    /// -- lets the caller (wrapper) carve out atoms (e.g. the protocol's
+    /// accrued-but-unwithdrawn fee claim) that this crank-reward-style credit
+    /// must never touch, on top of the pre-existing domain-budget isolation.
+    /// Pass `0` for pre-reserve-amendment behavior.
     pub fn credit_account_from_insurance_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         amount: u128,
+        additional_reserved: u128,
     ) -> V16Result<()> {
         if amount == 0 {
             return Ok(());
@@ -7778,6 +7798,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (next_insurance, next_c_tot, next_capital) = Self::credit_account_from_insurance_delta(
             self.header.insurance.get(),
             self.header.insurance_domain_budget_remaining_total.get(),
+            additional_reserved,
             self.header.c_tot.get(),
             account.header.capital.get(),
             amount,
