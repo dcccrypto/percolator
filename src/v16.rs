@@ -12701,14 +12701,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// folded in. Only the side that initiated the trade
     /// (`taker_is_long_account` selects `long_account` vs `short_account`)
     /// pays `fee`; the passive maker/LP side pays nothing — *unless* the
-    /// taker's own charge attempt returns `0` specifically **because** the
-    /// taker's negative-PnL waiver fired inside
-    /// `charge_account_fee_current_not_atomic` (not because `fee == 0`), in
-    /// which case the solvent maker is charged `fee.min(maker.capital)`
-    /// instead, so an underwater taker cannot trade fee-free. This does NOT
+    /// taker's own charge attempt returns `0` while `fee != 0` (i.e. the fee
+    /// was genuinely owed but the taker paid nothing), in which case the
+    /// solvent maker is charged `fee.min(maker.capital)` instead.
+    /// `charge_account_fee_current_not_atomic` returns `0` for **two**
+    /// structurally distinct reasons and the fallback fires on *either*:
+    /// the taker's negative-PnL waiver (`pnl < 0`), or the taker's capital
+    /// being exhausted (`fee.min(capital) == 0` while `pnl >= 0`, e.g. an
+    /// earlier leg of a multi-leg batch already drew capital to zero). A
+    /// version of this fallback gated on the pnl<0 waiver alone left the
+    /// capital-exhausted-but-not-underwater case fee-free — closed
+    /// 2026-07-15 (security review, MEDIUM: fee evasion). This does NOT
     /// strip the pnl<0 guard on the taker's own charge attempt — the guard
     /// still fires first, exactly as before; only the *consequence* of it
-    /// firing changes (fallback to maker instead of collecting nothing).
+    /// (or of capital exhaustion) firing changes: fallback to maker instead
+    /// of collecting nothing.
     ///
     /// Returns `(fee_a, fee_b)` in the caller's original long/short axis
     /// (`fee_a` = amount charged to `long_account`, `fee_b` = amount charged
@@ -12720,9 +12727,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         fee: u128,
         taker_is_long_account: bool,
     ) -> V16Result<(u128, u128)> {
+        // Maker-fallback (N1): when the taker's fee resolves to 0 on a
+        // fee-bearing fill, charge the maker instead of losing the fee. The
+        // trigger is `taker_fee == 0 && fee != 0` WITHOUT a `pnl < 0` qualifier
+        // on purpose: charge_account_fee_current_not_atomic returns 0 for TWO
+        // structurally distinct reasons — the pnl<0 waiver AND capital == 0
+        // (fee.min(capital) == 0). Gating the fallback on pnl<0 alone let a
+        // capital-depleted-but-not-underwater taker (e.g. an early batch leg
+        // sized to exhaust capital, so every later leg pays nothing) evade the
+        // fee entirely — protocol/LP/creator/insurance all get 0. Widening to
+        // "taker paid nothing for any reason" closes that revenue leak
+        // (security review 2026-07-15, MEDIUM).
         if taker_is_long_account {
             let taker_fee = self.charge_account_fee_current_not_atomic(long_account, fee)?;
-            if taker_fee == 0 && fee != 0 && long_account.header.pnl.get() < 0 {
+            if taker_fee == 0 && fee != 0 {
                 Ok((
                     0u128,
                     self.charge_account_fee_current_not_atomic(short_account, fee)?,
@@ -12732,7 +12750,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         } else {
             let taker_fee = self.charge_account_fee_current_not_atomic(short_account, fee)?;
-            if taker_fee == 0 && fee != 0 && short_account.header.pnl.get() < 0 {
+            if taker_fee == 0 && fee != 0 {
                 Ok((
                     self.charge_account_fee_current_not_atomic(long_account, fee)?,
                     0u128,

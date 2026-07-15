@@ -12459,9 +12459,28 @@ fn proof_v16_taker_only_charges_exactly_one_side() {
 
     kani::cover!(fee_a > 0 && fee_b == 0, "taker-is-long branch collects a nonzero fee");
     kani::cover!(fee_b > 0 && fee_a == 0, "taker-is-short branch (or its N1 fallback) collects a nonzero fee");
+
+    // "Insolvent" for a side means `charge_account_fee_current_not_atomic`
+    // hands back 0 for a genuinely nonzero fee on that side, for either of
+    // its two structurally distinct reasons: the pnl<0 waiver, or capital
+    // == 0 (`fee.min(capital) == 0` when capital is 0, independent of pnl
+    // sign). Both reasons must feed the SAME "insolvent" predicate for the
+    // no-evasion obligation below, because both are the ways
+    // `charge_trade_fee_taker_only_not_atomic`'s widened trigger
+    // (`taker_fee == 0 && fee != 0`, no pnl qualifier -- fix, security
+    // review 2026-07-15, MEDIUM) can see `taker_fee == 0`.
+    let taker_capital = if taker_is_long_account { long_capital } else { short_capital };
+    let maker_capital = if taker_is_long_account { short_capital } else { long_capital };
+    let taker_pnl_neg = if taker_is_long_account { long_pnl_neg } else { short_pnl_neg };
+    let maker_pnl_neg = if taker_is_long_account { short_pnl_neg } else { long_pnl_neg };
+    let taker_insolvent = taker_pnl_neg || taker_capital == 0;
+    let maker_insolvent = maker_pnl_neg || maker_capital == 0;
+
     kani::cover!(
-        fee_a == 0 && fee_b == 0 && fee > 0,
-        "fee-bearing fill where every reachable payer is insolvent/waived (documented, not a theft/solvency bug)"
+        fee_a == 0 && fee_b == 0 && fee > 0 && taker_insolvent && maker_insolvent,
+        "fee-bearing fill where BOTH sides are insolvent (pnl<0 OR capital==0, independently \
+         per side) -- post-fix, this is the ONLY state in which the fee is legitimately \
+         uncollected (documented, not a theft/evasion bug)"
     );
     kani::cover!(
         long_pnl_neg && short_pnl_neg && fee > 0,
@@ -12475,52 +12494,44 @@ fn proof_v16_taker_only_charges_exactly_one_side() {
         !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0 && fee > 0 && fee_a > 0,
         "N1 fallback fires: short taker waived by pnl<0, solvent long maker charged instead"
     );
+    // Fix regression covers (2026-07-15, MEDIUM): the taker is drawn to
+    // capital == 0 while NOT underwater (pnl >= 0) -- e.g. an earlier leg
+    // of a multi-leg batch already exhausted it. Pre-fix, the pnl<0-only
+    // trigger meant this state collected fee_a == fee_b == 0 (evasion).
+    // Post-fix the fallback must fire and charge the solvent maker.
+    kani::cover!(
+        taker_is_long_account && !long_pnl_neg && long_capital == 0 && short_capital > 0 && !short_pnl_neg && fee > 0 && fee_b > 0,
+        "fix: N1 fallback fires on capital-exhaustion alone (long taker, pnl>=0, capital==0) -- solvent short maker charged"
+    );
+    kani::cover!(
+        !taker_is_long_account && !short_pnl_neg && short_capital == 0 && long_capital > 0 && !long_pnl_neg && fee > 0 && fee_a > 0,
+        "fix: N1 fallback fires on capital-exhaustion alone (short taker, pnl>=0, capital==0) -- solvent long maker charged"
+    );
 
     // Mutual exclusivity: taker-only charging never collects from both
     // sides on the same fill (this is the formal "taker-only" statement).
     assert!(fee_a == 0 || fee_b == 0, "both sides charged simultaneously -- taker-only violated");
 
-    // N1 no-evasion obligation: a fee-bearing fill with at least one
-    // reachable solvent, non-waived payer must collect something nonzero --
-    // an underwater taker cannot make the whole fill fee-free while a
-    // solvent maker exists to fall back to.
+    // N1 no-evasion obligation (WIDENED 2026-07-15 alongside the fix): a
+    // fee-bearing fill with at least one reachable solvent payer -- taker OR
+    // maker, "solvent" meaning NOT insolvent by EITHER reason above -- must
+    // collect something nonzero. Before the fix this block only guarded
+    // `taker_capital > 0`, leaving the `taker_capital == 0 && !taker_pnl_neg`
+    // cell of the space entirely unconstrained -- exactly the gap the
+    // evasion exploited, and exactly why the old proof passed against the
+    // vulnerable code. `taker_insolvent`/`maker_insolvent` now fold BOTH
+    // waiver reasons (pnl<0 OR capital==0) into one predicate so that gap
+    // cannot reopen silently.
     if fee > 0 {
-        let taker_pnl_neg = if taker_is_long_account {
-            long_pnl_neg
-        } else {
-            short_pnl_neg
-        };
-        let taker_capital = if taker_is_long_account {
-            long_capital
-        } else {
-            short_capital
-        };
-        let maker_capital = if taker_is_long_account {
-            short_capital
-        } else {
-            long_capital
-        };
-        // The maker must ALSO be non-negative-pnl for the fallback to
-        // collect anything: `charge_account_fee_current_not_atomic`'s
-        // pnl<0 waiver is NOT stripped for the fallback target either (by
-        // design -- see the N1 doc comment on
-        // `charge_trade_fee_taker_only_not_atomic`), so a maker who is
-        // ALSO underwater is genuinely, correctly waived too. This is the
-        // "both sides insolvent/waived" case already covered separately
-        // above, not a fallback-evasion bug.
-        let maker_pnl_neg = if taker_is_long_account {
-            short_pnl_neg
-        } else {
-            long_pnl_neg
-        };
-        if !taker_pnl_neg && taker_capital > 0 {
-            assert!(fee_a > 0 || fee_b > 0, "solvent, non-negative-pnl taker must be charged");
-        } else if taker_pnl_neg && maker_capital > 0 && !maker_pnl_neg {
+        if !taker_insolvent {
+            assert!(fee_a > 0 || fee_b > 0, "solvent taker (pnl>=0, capital>0) must be charged");
+        } else if !maker_insolvent {
             assert!(
                 fee_a > 0 || fee_b > 0,
-                "N1: pnl<0-waived taker must fall back to a solvent, non-negative-pnl maker"
+                "N1: insolvent taker (pnl<0 OR capital==0) must fall back to a solvent maker"
             );
         }
+        // else: both insolvent -- fee legitimately uncollected (covered above).
     }
 
     // Whichever side receives a zero charge is byte-identical in capital
@@ -12586,6 +12597,18 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
     kani::cover!(
         fee > 0 && !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0,
         "N1 fallback branch reachable: short taker pnl<0-waived, solvent long maker falls back"
+    );
+    // Fix regression covers (2026-07-15, MEDIUM): the capital-exhaustion
+    // fallback arm (taker pnl >= 0 but capital == 0) is reachable through
+    // this harness too, and -- the actual property this harness proves --
+    // still leaves legs/active_bitmap/pnl on both accounts untouched.
+    kani::cover!(
+        fee > 0 && taker_is_long_account && !long_pnl_neg && long_capital == 0 && short_capital > 0 && !short_pnl_neg,
+        "fix: N1 fallback branch reachable via capital-exhaustion alone (long taker, pnl>=0, capital==0)"
+    );
+    kani::cover!(
+        fee > 0 && !taker_is_long_account && !short_pnl_neg && short_capital == 0 && long_capital > 0 && !long_pnl_neg,
+        "fix: N1 fallback branch reachable via capital-exhaustion alone (short taker, pnl>=0, capital==0)"
     );
 
     let _ = market

@@ -2508,6 +2508,96 @@ fn v16_taker_only_n1_no_fallback_when_fee_is_genuinely_zero() {
     assert_eq!(short.header.capital.get(), short_capital_before);
 }
 
+#[test]
+fn v16_taker_only_n1_maker_fallback_when_taker_capital_zero_pnl_nonnegative() {
+    // Fee-evasion regression (security review 2026-07-15, MEDIUM). Before the
+    // fix, the maker-fallback trigger was
+    // `taker_fee == 0 && fee != 0 && taker.pnl < 0`. A taker whose capital is
+    // drawn to exactly 0 WITHOUT being underwater (pnl >= 0) also makes
+    // `charge_account_fee_current_not_atomic` return 0 -- via
+    // `fee.min(capital) == 0`, a structurally different reason than the
+    // pnl<0 waiver -- but the old pnl<0 qualifier didn't fire for this case,
+    // so the fallback never charged the maker either: the fee vanished
+    // entirely (protocol/LP/creator/insurance all got 0).
+    //
+    // This reproduces the exact scenario the security review flagged: a
+    // multi-leg batch where an EARLY leg drains the taker's capital to
+    // exactly 0 (paying its own fee in full, so it is NOT underwater -- pnl
+    // stays 0), and a LATER leg in the SAME batch then owes a nonzero fee
+    // with nothing left to pay it. Leg 2 closes the position leg 1 opened
+    // (net batch position == 0) so the batch-final initial-margin check
+    // (`finish_trade_checks_not_atomic` certifies once, after all legs, for
+    // multi-leg batches) sees a flat book and a trivial (zero) margin
+    // requirement regardless of the taker's zero capital.
+    let (mut header, mut markets) = market_fixture_with_trade_fee(2, 100, 1_000);
+    let mut long_header = account_fixture(2, 51);
+    let mut short_header = account_fixture(2, 52);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        // Taker (long) is funded with exactly one leg's fee (10) -- enough to
+        // pay leg 1 in full and land at capital == 0, pnl == 0 (NOT
+        // negative) before leg 2 is even evaluated.
+        market.deposit_not_atomic(&mut long, 10).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    let requests = [
+        // Leg 1: taker opens long POS_SCALE @ 100, fee 10 -- fully solvent,
+        // pays in full, capital drops 10 -> 0.
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+        // Leg 2: taker closes the same position back to flat, notional 100,
+        // fee 10 -- taker capital is now 0, so the taker's own charge
+        // attempt collects 0 even though pnl is still 0 (not negative).
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: -signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+    ];
+
+    let outcome = market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            &requests,
+            true, // long_account is the taker on every leg
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(
+        outcome.fee_a, 10,
+        "taker pays leg 1 in full (solvent), then owes 0 on leg 2 (capital \
+         exhausted) -- total taker-side charge is just leg 1's fee"
+    );
+    assert_eq!(
+        outcome.fee_b, 10,
+        "fix: leg 2's fee is NOT lost -- the maker-fallback fires because \
+         the taker's own charge returned 0, even though the taker's pnl is \
+         NOT negative (capital exhaustion, not the pnl<0 waiver)"
+    );
+    assert_eq!(long.header.capital.get(), 0, "taker fully drained by leg 1");
+    assert_eq!(long.header.pnl.get(), 0, "taker was never underwater");
+    assert_eq!(
+        short.header.capital.get(),
+        1_000 - 10,
+        "maker pays leg 2's fee via the fallback"
+    );
+    market.validate_shape().unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // New engine primitive: withdraw_insurance_surplus_not_atomic (design §1.5).
 // ---------------------------------------------------------------------------
