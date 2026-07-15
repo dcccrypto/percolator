@@ -16064,6 +16064,32 @@ pub mod lp_vault {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// BUG-2 / N7 anti-inflation design note: percolator-stake's N7 hardening
+    /// (`percolator-stake/src/math.rs`, `percolator-stake/src/state.rs`) pairs
+    /// TWO defenses: a `VIRTUAL_SHARES`/`VIRTUAL_ASSETS` offset in the pure
+    /// pro-rata math AND a `MINIMUM_LIQUIDITY` dead-share lock applied by the
+    /// caller at genesis. This module intentionally carries ONLY the second
+    /// one (`percolator-prog::v16_program::handle_deposit_to_lp_vault`
+    /// applies `LP_VAULT_MINIMUM_LIQUIDITY` against the genesis deposit) —
+    /// stake's own doc calls that the PRIMARY defense, with the virtual-offset
+    /// merely defense-in-depth. A virtual-offset variant of
+    /// `lp_shares_for_deposit`/`lp_atoms_for_redemption` was prototyped and
+    /// REJECTED here: `handle_execute_redemption` (v16_program.rs) computes
+    /// `principal_portion` as a SEPARATE, un-offset
+    /// `wide_mul_div_floor_u128(shares, available_principal, total_shares)`
+    /// call (not routed through `lp_atoms_for_redemption`) so it can split
+    /// `atoms` into principal-vs-earnings; offsetting `lp_atoms_for_redemption`
+    /// alone desynchronizes the two computations and can make
+    /// `principal_portion > atoms_out`, underflowing `earnings_portion =
+    /// atoms_out - principal_portion` (a redemption-DoS regression, confirmed
+    /// with concrete inputs: shares=500, total_shares=1_000_000, nav=
+    /// available_principal=2_000_000 -> atoms_out=999 vs principal_portion=
+    /// 1_000). Fixing that would require re-deriving the principal/earnings
+    /// split under the offset too, which is out of scope for this fix and
+    /// not required — the dead-share lock alone makes genesis-donation
+    /// inflation unprofitable. Do not add a virtual-offset here without also
+    /// re-deriving `handle_execute_redemption`'s split.
+    ///
     /// LP shares to mint for a deposit of `amount` atoms against a vault
     /// with `total_shares` outstanding and `nav_atoms` net asset value
     /// (computed BEFORE this deposit). Round DOWN — the vault keeps any
