@@ -12657,3 +12657,94 @@ fn proof_v16_taker_only_conserves_notional_unaffected() {
     assert_eq!(long.header.pnl, long_pnl_before);
     assert_eq!(short.header.pnl, short_pnl_before);
 }
+
+// E2 (upstream engine #108, fixes #97): the persisted risk-change gate must
+// admit a risk-increasing trade iff the asset lifecycle is Active AND both
+// side modes are Normal, and must admit every risk-*reducing* trade
+// unconditionally regardless of lifecycle/side-mode. Exhaustive over the
+// full symbolic (lifecycle x mode_long x mode_short x risk_increasing)
+// space via bounded integer selectors, following this file's established
+// pattern for symbolic enum construction (see
+// proof_v16_public_finalize_side_reset_success_is_value_neutral above).
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes() {
+    let lifecycle_sel: u8 = kani::any();
+    let mode_long_sel: u8 = kani::any();
+    let mode_short_sel: u8 = kani::any();
+    let risk_increasing: bool = kani::any();
+    kani::assume(lifecycle_sel <= 5);
+    kani::assume(mode_long_sel <= 2);
+    kani::assume(mode_short_sel <= 2);
+
+    let lifecycle = match lifecycle_sel {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let mode_long = match mode_long_sel {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let mode_short = match mode_short_sel {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    asset.mode_long = mode_long;
+    asset.mode_short = mode_short;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.kani_require_asset_risk_change_allowed(0, risk_increasing);
+
+    let expected_ok = !risk_increasing
+        || (lifecycle == AssetLifecycleV16::Active
+            && mode_long == SideModeV16::Normal
+            && mode_short == SideModeV16::Normal);
+
+    // Branch-reachability covers -- proves the harness genuinely walks every
+    // arm of the spec rather than being vacuously satisfied by a narrow
+    // symbolic range.
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_long == SideModeV16::Normal
+            && mode_short == SideModeV16::Normal,
+        "risk-increasing trade admitted: Active lifecycle, both sides Normal"
+    );
+    kani::cover!(
+        !risk_increasing,
+        "risk-reducing trade admitted regardless of lifecycle/side-mode"
+    );
+    kani::cover!(
+        risk_increasing && lifecycle != AssetLifecycleV16::Active,
+        "risk-increasing trade blocked by non-Active asset lifecycle"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_long != SideModeV16::Normal,
+        "risk-increasing trade blocked by long-side recovery mode alone"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_short != SideModeV16::Normal,
+        "risk-increasing trade blocked by short-side recovery mode alone"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if !expected_ok {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}

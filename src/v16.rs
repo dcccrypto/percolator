@@ -10495,12 +10495,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn require_asset_active_for_risk_increase(&self, asset_index: usize) -> V16Result<()> {
-        let asset = self.asset_state(asset_index)?;
-        if asset.lifecycle != AssetLifecycleV16::Active {
-            return Err(V16Error::LockActive);
+    fn require_asset_risk_change_allowed(
+        &self,
+        asset_index: usize,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        if !risk_increasing {
+            return Ok(());
         }
-        Ok(())
+        let asset = self.asset_state(asset_index)?;
+        asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_require_asset_risk_change_allowed(
+        &self,
+        asset_index: usize,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        self.require_asset_risk_change_allowed(asset_index, risk_increasing)
     }
 
     fn validate_configured_asset_index(&self, asset_index: usize) -> V16Result<()> {
@@ -11337,7 +11350,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         validate_basis(basis_pos_q)?;
         let mut asset = self.asset_state(asset_index)?;
-        self.require_asset_active_for_risk_increase(asset_index)?;
+        self.require_asset_risk_change_allowed(asset_index, true)?;
         let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
             SideV16::Long => (
                 asset.a_long,
@@ -11636,7 +11649,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.clear_leg(account, asset_index);
         }
         if current.signum() != new.signum() {
-            self.require_asset_active_for_risk_increase(asset_index)?;
+            self.require_asset_risk_change_allowed(asset_index, true)?;
             self.clear_leg(account, asset_index)?;
             let side = if new > 0 {
                 SideV16::Long
@@ -11646,7 +11659,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.attach_leg(account, asset_index, side, new);
         }
         if new.unsigned_abs() > current.unsigned_abs() {
-            self.require_asset_active_for_risk_increase(asset_index)?;
+            self.require_asset_risk_change_allowed(asset_index, true)?;
         }
         let mut old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
@@ -12807,9 +12820,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             request,
         )?;
         let risk_increasing = trade_preflight.risk_increasing;
-        if risk_increasing {
-            self.require_asset_active_for_risk_increase(request.asset_index)?;
-        }
+        self.require_asset_risk_change_allowed(request.asset_index, risk_increasing)?;
         let notional = trade_notional_floor(abs_size_q, request.exec_price)?;
         let fee = checked_fee_bps(notional, request.fee_bps)?;
         let (fee_a, fee_b) = self.charge_trade_fee_taker_only_not_atomic(
@@ -15586,6 +15597,20 @@ fn trade_preflight_risk_gate(
 ) -> V16Result<()> {
     if touches_pending_domain_barrier
         || (risk_increasing && (asset_loss_stale || target_effective_lag))
+    {
+        return Err(V16Error::LockActive);
+    }
+    Ok(())
+}
+
+fn asset_risk_increase_gate(
+    lifecycle: AssetLifecycleV16,
+    mode_long: SideModeV16,
+    mode_short: SideModeV16,
+) -> V16Result<()> {
+    if lifecycle != AssetLifecycleV16::Active
+        || mode_long != SideModeV16::Normal
+        || mode_short != SideModeV16::Normal
     {
         return Err(V16Error::LockActive);
     }

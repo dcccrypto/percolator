@@ -2736,3 +2736,132 @@ fn v16_withdraw_insurance_surplus_exact_boundary_succeeds() {
     );
     market.validate_shape().unwrap();
 }
+
+// --- E2 (upstream engine #108, fixes #97): fresh risk must be blocked while
+// either side of an asset is mid side-recovery (ResetPending/DrainOnly), not
+// just while the asset's overall lifecycle is non-Active. Risk-REDUCING
+// trades must remain admitted throughout recovery.
+
+#[test]
+fn v16_trade_rejects_fresh_risk_when_either_side_is_recovering() {
+    let cases = [
+        (SideModeV16::ResetPending, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::ResetPending),
+        (SideModeV16::DrainOnly, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::DrainOnly),
+    ];
+    for (mode_long, mode_short) in cases {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut long_header = account_fixture(1, 60);
+        let mut short_header = account_fixture(1, 61);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut long = PortfolioV16ViewMut::new(&mut long_header);
+            let mut short = PortfolioV16ViewMut::new(&mut short_header);
+            market.deposit_not_atomic(&mut long, 1_000).unwrap();
+            market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        }
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.mode_long = mode_long;
+        asset.mode_short = mode_short;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+        let vault_before = header.vault.get();
+        let c_tot_before = header.c_tot.get();
+        let insurance_before = header.insurance.get();
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let long_capital_before = long.header.capital.get();
+        let short_capital_before = short.header.capital.get();
+
+        let res = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        );
+
+        assert_eq!(
+            res,
+            Err(V16Error::LockActive),
+            "fresh risk admitted with mode_long={mode_long:?} mode_short={mode_short:?}"
+        );
+        // Rollback-clean rejection: no partial state mutation, no fee leakage.
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.c_tot.get(), c_tot_before);
+        assert_eq!(market.header.insurance.get(), insurance_before);
+        assert_eq!(long.header.capital.get(), long_capital_before);
+        assert_eq!(short.header.capital.get(), short_capital_before);
+        market.validate_shape().unwrap();
+    }
+}
+
+#[test]
+fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 62);
+    let mut short_header = account_fixture(1, 63);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        // Open long +2*POS_SCALE / short -2*POS_SCALE while both side modes
+        // are still Normal.
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(2 * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+
+    // Now put the asset mid side-recovery on BOTH sides simultaneously (the
+    // gate is not side-specific by design).
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.mode_short = SideModeV16::DrainOnly;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    // A matched reduction (-POS_SCALE) shrinks both legs' magnitude
+    // (long: +2 -> +1, short: -2 -> -1) and must still be admitted.
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("risk-reducing trade must stay open during side recovery");
+
+    assert_eq!(outcome.notional, 100);
+    let long_leg = long.header.legs[0].try_to_runtime().unwrap();
+    let short_leg = short.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(long_leg.basis_pos_q, signed_q(POS_SCALE));
+    assert_eq!(short_leg.basis_pos_q, -signed_q(POS_SCALE));
+    market.validate_shape().unwrap();
+}
