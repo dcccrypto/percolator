@@ -11,7 +11,8 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_liquidation_fee_from_raw_fee, kani_loss_stale_trade_scope_allowed,
+    kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
@@ -3750,6 +3751,56 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
         uncovered && close_q < leg_abs_q
     );
     assert!(!covered_loss_with_other_risk);
+}
+
+// FIX E3 (upstream #92 / b97e1746): proves the "min-fee chunking" exploit is
+// closed -- a partial liquidation chunk whose proportional fee falls below
+// the configured absolute floor must be REJECTED (NonProgress), not silently
+// inflated up to the floor (which is what let a caller pick a tiny close_q
+// to under-pay the liquidation fee).
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_fee_rejects_subminimum_partial_chunks() {
+    let raw_fee_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
+    let cap_extra: u16 = kani::any();
+    kani::assume(min_liquidation_abs_raw > 0);
+    let raw_fee = raw_fee_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
+    let liquidation_fee_cap = min_liquidation_abs + cap_extra as u128;
+    kani::assume(raw_fee < min_liquidation_abs);
+    let result =
+        kani_liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, false);
+    kani::cover!(
+        raw_fee > 0 && cap_extra > 0,
+        "subminimum partial liquidation proof covers positive proportional fee and nontrivial cap"
+    );
+    assert_eq!(result, Err(V16Error::NonProgress));
+}
+
+// Companion to the proof above: a full-position close is exempt from the
+// sub-minimum rejection (dust closes must still be able to progress) and
+// instead has its fee clamped up to the floor, exactly as before the fix.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_fee_allows_subminimum_full_close() {
+    let raw_fee_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
+    let cap_extra: u16 = kani::any();
+    kani::assume(min_liquidation_abs_raw > 0);
+    let raw_fee = raw_fee_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
+    let liquidation_fee_cap = min_liquidation_abs + cap_extra as u128;
+    kani::assume(raw_fee < min_liquidation_abs);
+    let result =
+        kani_liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, true);
+    kani::cover!(
+        raw_fee > 0 && cap_extra > 0,
+        "subminimum full-close liquidation proof covers positive proportional fee and nontrivial cap"
+    );
+    assert_eq!(result, Ok(min_liquidation_abs));
 }
 
 #[kani::proof]

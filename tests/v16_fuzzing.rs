@@ -235,17 +235,12 @@ fn apply_fuzz_action(
         }
         8 => {
             let mut market = MarketGroupV16ViewMut::new(header, markets);
-            let close_q = 1 + (amount % 4);
             if target_a {
                 let mut account = PortfolioV16ViewMut::new(account_a);
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
-                        LiquidationRequestV16 {
-                            asset_index: 0,
-                            close_q,
-                            fee_bps: 0,
-                        },
+                        LiquidationRequestV16 { asset_index: 0 },
                     )
                     .map(|_| ())
             } else {
@@ -253,11 +248,7 @@ fn apply_fuzz_action(
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
-                        LiquidationRequestV16 {
-                            asset_index: 0,
-                            close_q,
-                            fee_bps: 0,
-                        },
+                        LiquidationRequestV16 { asset_index: 0 },
                     )
                     .map(|_| ())
             }

@@ -1618,14 +1618,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     let vault_before = market.header.vault.get();
 
     let out = market
-        .liquidate_account_not_atomic(
-            &mut account,
-            LiquidationRequestV16 {
-                asset_index: 0,
-                close_q: POS_SCALE,
-                fee_bps: 0,
-            },
-        )
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
         .expect("liquidation should progress by booking residual, not draining other domains");
 
     assert_eq!(out.insurance_used, 0);
@@ -1636,6 +1629,93 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         0
     );
     assert!(out.residual_booked > 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+// FIX E3 (upstream #92 / b97e1746): liquidation size + fee are now fully
+// engine-selected. This test proves the engine picks the MINIMAL healthy
+// partial close (981, not the full 10_000 position) and charges the
+// correspondingly smaller fee (79, not 800) -- the exact opposite of the
+// pre-fix "caller picks close_q" behavior this fix closes.
+#[test]
+fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
+    const PRICE: u64 = POS_SCALE as u64;
+    const POSITION_Q: u128 = 10_000;
+    const ACCOUNT_CAPITAL: u128 = 980;
+    const EXPECTED_CLOSE_Q: u128 = 981;
+    const EXPECTED_FEE: u128 = 79;
+
+    let (mut header, mut markets) = market_fixture(1, PRICE);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.min_nonzero_mm_req = V16PodU128::new(800);
+    header.config.min_nonzero_im_req = V16PodU128::new(801);
+    header.config.liquidation_fee_bps = V16PodU64::new(800);
+    header.config.min_liquidation_abs = V16PodU128::new(0);
+    header.config.liquidation_fee_cap = V16PodU128::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1);
+    header
+        .config
+        .try_to_runtime_shape()
+        .unwrap()
+        .validate_public_user_fund()
+        .unwrap();
+    header.vault = V16PodU128::new(ACCOUNT_CAPITAL * 2);
+    header.c_tot = V16PodU128::new(ACCOUNT_CAPITAL * 2);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.effective_price = PRICE;
+    asset.raw_oracle_target_price = PRICE;
+    asset.oi_eff_long_q = POSITION_Q * 2;
+    asset.oi_eff_short_q = POSITION_Q * 2;
+    asset.loss_weight_sum_long = POSITION_Q * 2;
+    asset.loss_weight_sum_short = POSITION_Q * 2;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    let mut account_header = account_fixture(1, 14);
+    account_header.capital = V16PodU128::new(ACCOUNT_CAPITAL);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: i128::try_from(POSITION_Q).unwrap(),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POSITION_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let out = market
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
+        .unwrap();
+
+    assert_eq!(out.closed_q, EXPECTED_CLOSE_Q); // 981, NOT 10_000 (full close)
+    assert_eq!(out.fee_charged, EXPECTED_FEE); // 79, NOT 800 (8% of full notional)
+    assert_eq!(account.header.capital.get(), ACCOUNT_CAPITAL - EXPECTED_FEE);
+    assert_eq!(account.header.active_bitmap[0].get(), 1); // leg stays open (partial)
+    let leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(
+        leg.basis_pos_q,
+        i128::try_from(POSITION_Q - EXPECTED_CLOSE_Q).unwrap()
+    );
+    let cert = account.header.health_cert.try_to_runtime().unwrap();
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(cert.certified_equity, 901);
+    assert_eq!(cert.certified_maintenance_req, 901);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
@@ -1702,11 +1782,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
                 effective_price: 100,
                 funding_rate_e9: 0,
                 action: percolator::PermissionlessCrankActionV16::Liquidate(
-                    LiquidationRequestV16 {
-                        asset_index: 0,
-                        close_q: POS_SCALE,
-                        fee_bps: 0,
-                    },
+                    LiquidationRequestV16 { asset_index: 0 },
                 ),
             },
         )
