@@ -1,9 +1,9 @@
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
+    LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
@@ -57,6 +57,31 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     let mut account = PortfolioAccountV16Account::default();
     account.init_empty_in_place(header).unwrap();
     account
+}
+
+// E6: a close ledger that finished paying out -- `finalized`, zero residual --
+// but is still `active` because the ledger stays active to preserve close
+// identity/history (close_id watermark, progress totals) for audit purposes.
+// `support_consumed == junior_face_burned == gross` and
+// `residual_remaining == 0` satisfy validate_close_progress_ledger_with_market's
+// progress/residual bookkeeping invariant for a finalized ledger.
+fn finalized_inert_close_progress(market_id: u64, close_id: u64, gross: u128) -> CloseProgressLedgerV16 {
+    CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        canceled: false,
+        close_id,
+        asset_index: 0,
+        market_id,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross,
+        drift_reference_slot: 0,
+        max_close_slot: 0,
+        support_consumed: gross,
+        junior_face_burned: gross,
+        residual_remaining: 0,
+        ..CloseProgressLedgerV16::EMPTY
+    }
 }
 
 fn signed_q(q: u128) -> i128 {
@@ -1134,6 +1159,78 @@ fn v16_view_rejects_overwithdraw() {
     let err = market_view.withdraw_not_atomic(&mut account_view, 4);
 
     assert_eq!(err, Err(V16Error::LockActive));
+}
+
+// E6 (port of upstream engine c8aab338): a finalized zero-residual close
+// ledger represents no outstanding obligation -- it must not permanently
+// freeze a flat, solvent user's withdrawal just because the ledger is still
+// `active` for history/identity. Companion to the already-carried Finding E
+// (canceled-ledger) exemption proven by `v16_view_rejects_overwithdraw`'s
+// sibling tests above.
+#[test]
+fn v16_finalized_zero_residual_close_does_not_block_withdraw() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 7);
+    let market_id = markets[0].engine.asset.market_id.get();
+
+    {
+        let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
+        market_view
+            .deposit_not_atomic(&mut account_view, 10)
+            .unwrap();
+    }
+
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&finalized_inert_close_progress(
+            market_id, 3, 5,
+        ));
+
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
+
+    market_view
+        .withdraw_not_atomic(&mut account_view, 4)
+        .unwrap();
+
+    assert_eq!(account_view.header.capital.get(), 6);
+    assert_eq!(market_view.header.c_tot.get(), 6);
+    assert_eq!(market_view.header.vault.get(), 6);
+    // Withdraw does not itself mutate the finalized ledger -- it only stops
+    // treating it as a blocker.
+    let after_close = account_view.header.close_progress.try_to_runtime().unwrap();
+    assert!(after_close.active && after_close.finalized && after_close.residual_remaining == 0);
+}
+
+// E6, second call site: a finalized zero-residual close ledger must also be
+// treated as inert by the empty-account dematerialization gate
+// (`is_empty_for_dematerialization`, reached via
+// register/deregister_empty_materialized_portfolio_not_atomic), so an
+// otherwise-empty account is not stranded from ordinary lifecycle bookkeeping
+// (materialized-portfolio rent accounting) after an insurance-covered
+// liquidation finishes paying out.
+#[test]
+fn v16_finalized_zero_residual_close_does_not_block_dematerialization() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 8);
+    let market_id = markets[0].engine.asset.market_id.get();
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&finalized_inert_close_progress(
+            market_id, 2, 5,
+        ));
+
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account_view = PortfolioV16ViewMut::new(&mut account_header);
+
+    market_view
+        .register_empty_materialized_portfolio_not_atomic(&account_view.as_view())
+        .unwrap();
+    assert_eq!(market_view.header.materialized_portfolio_count.get(), 1);
+
+    market_view
+        .deregister_empty_materialized_portfolio_not_atomic(&account_view.as_view())
+        .unwrap();
+    assert_eq!(market_view.header.materialized_portfolio_count.get(), 0);
 }
 
 #[cfg(feature = "fuzz")]

@@ -3118,7 +3118,10 @@ impl<'a> PortfolioV16View<'a> {
             && close_progress.close_id != 0
             && !close_progress.has_irreversible_progress()
             && close_progress.residual_remaining == close_progress.gross_loss_at_close_start;
-        if !close_progress.is_empty() && !inert_canceled_close {
+        if !close_progress.is_empty()
+            && !inert_canceled_close
+            && !close_progress.is_finalized_inert()
+        {
             return Ok(false);
         }
 
@@ -3281,6 +3284,17 @@ impl CloseProgressLedgerV16 {
             || self.explicit_loss_assigned != 0
             || self.quantity_adl_applied_q != 0
             || self.drift_consumed != 0
+    }
+
+    /// A close that finished paying out (finalized, no residual left) but is
+    /// still `active` -- the ledger stays active to preserve close identity /
+    /// history (close_id watermark, progress totals) for audit purposes.
+    /// Economically it is terminal: no obligation remains. Exempt from the
+    /// active-close gates below so it does not strand funds/rent (E6, port
+    /// of upstream engine c8aab338; companion to the canceled-ledger
+    /// exemption above / Finding E).
+    fn is_finalized_inert(self) -> bool {
+        self.active && self.finalized && !self.canceled && self.residual_remaining == 0
     }
 
     pub fn is_empty(self) -> bool {
@@ -11965,14 +11979,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if gross_loss == 0 {
             return Ok(());
         }
-        if account.header.close_progress.try_to_runtime()?.active {
+        let current = account.header.close_progress.try_to_runtime()?;
+        if current.active && !current.is_finalized_inert() {
             return Err(V16Error::LockActive);
         }
         let domain = self.insurance_domain_index(asset_index, domain_side)?;
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let current = account.header.close_progress.try_to_runtime()?;
         let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
         let ledger = CloseProgressLedgerV16 {
@@ -14403,9 +14417,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // irreversible progress and residual_remaining == gross_loss_at_close_start,
         // so it represents no obligation. Blocking withdraw on it permanently freezes a
         // flat, solvent user who cured a forced close. Only an active/in-progress close
-        // ledger must block withdrawal.
+        // ledger must block withdrawal. A finalized zero-residual close (E6) is likewise
+        // inert -- it paid out in full and only stays `active` to preserve close
+        // identity/history.
         let close_progress = account.header.close_progress.try_to_runtime()?;
-        if close_progress != CloseProgressLedgerV16::EMPTY && !close_progress.canceled {
+        if close_progress != CloseProgressLedgerV16::EMPTY
+            && !close_progress.canceled
+            && !close_progress.is_finalized_inert()
+        {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
@@ -16705,5 +16724,115 @@ pub mod fork_facade {
         }
         let equity = cert.certified_equity;
         equity >= 0 && (equity as u128) >= cert.certified_initial_req
+    }
+}
+
+// ============================================================================
+// E6 unit tests (finalized-inert close ledger; port of upstream engine c8aab338)
+// ============================================================================
+//
+// `begin_close_progress_ledger` is crate-private, so its non-vacuity coverage
+// lives here (in-crate, with access to private items) rather than in the
+// `tests/` integration suite, which only sees the public API. The other two
+// E6 call sites (the withdraw gate and the empty-account dematerialization
+// gate) are both public API and are covered in
+// `tests/v16_spec_tests.rs::v16_finalized_zero_residual_close_does_not_block_withdraw`
+// and `..._does_not_block_dematerialization`.
+#[cfg(test)]
+mod e6_finalized_close_inert_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn one_asset_market_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+        let market_group_id = [21u8; 32];
+        let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+        let mut header =
+            MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+        let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 0)
+            .unwrap();
+        {
+            let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            view.validate_shape().unwrap();
+        }
+        (header, markets)
+    }
+
+    fn empty_account_fixture(market_group_id: [u8; 32]) -> PortfolioAccountV16Account {
+        let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+            market_group_id,
+            [30u8; 32],
+            [31u8; 32],
+        ));
+        let mut account = PortfolioAccountV16Account::default();
+        account.init_empty_in_place(provenance).unwrap();
+        account
+    }
+
+    // Mirrors `finalized_inert_close_progress` in tests/v16_spec_tests.rs: a close
+    // that finished paying out (finalized, zero residual) but is still `active`
+    // because the ledger stays active to preserve close identity/history.
+    fn finalized_inert_ledger(
+        market_id: u64,
+        close_id: u64,
+        gross: u128,
+    ) -> CloseProgressLedgerV16 {
+        CloseProgressLedgerV16 {
+            active: true,
+            finalized: true,
+            canceled: false,
+            close_id,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: gross,
+            drift_reference_slot: 0,
+            max_close_slot: 0,
+            support_consumed: gross,
+            junior_face_burned: gross,
+            residual_remaining: 0,
+            ..CloseProgressLedgerV16::EMPTY
+        }
+    }
+
+    // E6, third call site: `begin_close_progress_ledger` (the close-progress-active
+    // gate hit while reserving a fresh bankruptcy-close on backing loss) must treat
+    // a finalized zero-residual close as inert and allow the *next* close to begin,
+    // strictly advancing close_id. Before the fix this unconditionally errored
+    // LockActive on any `active` ledger, permanently blocking a second bankruptcy
+    // event on an account whose prior close had already finished paying out in
+    // full -- stranding the account (and its rent) forever.
+    #[test]
+    fn finalized_inert_close_allows_next_close_to_begin() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        let market_group_id = header.market_group_id;
+        let mut account_header = empty_account_fixture(market_group_id);
+        let market_id = markets[0].engine.asset.market_id.get();
+
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&finalized_inert_ledger(market_id, 3, 5));
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        account.validate_with_market(&market.as_view()).unwrap();
+
+        market
+            .begin_close_progress_ledger(&mut account, 0, SideV16::Long, 7)
+            .unwrap();
+
+        let next = account.header.close_progress.try_to_runtime().unwrap();
+        assert!(next.active && !next.finalized && !next.canceled);
+        assert_eq!(next.close_id, 4);
+        assert_eq!(next.gross_loss_at_close_start, 7);
+        assert_eq!(next.residual_remaining, 7);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get(),
+            1
+        );
     }
 }
