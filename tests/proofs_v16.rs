@@ -11,7 +11,9 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_liquidation_fee_from_raw_fee, kani_loss_stale_trade_scope_allowed,
+    kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
+    kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
+    kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
@@ -3877,6 +3879,79 @@ fn proof_v16_liquidation_fee_rejects_subminimum_partial_chunks() {
         "subminimum partial liquidation proof covers positive proportional fee and nontrivial cap"
     );
     assert_eq!(result, Err(V16Error::NonProgress));
+}
+
+// Addendum proof (upstream b97e1746, ported verbatim per E3 review addendum):
+// the binary-search selector returns a value in [1, old_abs_q], and when it
+// selects a partial close (< old_abs_q) that close is a *locally minimal*
+// healthy close bounded by partial_hi -- one atom less is unhealthy.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
+    let equity_raw: u8 = kani::any();
+    let position_q = 1_000u128;
+    let maintenance = (position_q / 10).max(80);
+    let equity = equity_raw as u128;
+    kani::assume(equity > 0 && equity < maintenance);
+    let mut config = V16Config::public_user_fund(1, 0, 1);
+    config.maintenance_margin_bps = 1_000;
+    config.initial_margin_bps = 1_000;
+    config.min_nonzero_mm_req = 80;
+    config.min_nonzero_im_req = 81;
+    config.liquidation_fee_bps = 800;
+    config.liquidation_fee_cap = 1_000;
+    config.max_price_move_bps_per_slot = 1;
+    let cert = HealthCertV16 {
+        certified_equity: equity as i128,
+        certified_maintenance_req: maintenance,
+        certified_liq_deficit: maintenance - equity,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side: SideV16::Long,
+        basis_pos_q: position_q as i128,
+        ..PortfolioLegV16::EMPTY
+    };
+    let price = POS_SCALE as u64;
+    let selected = kani_liquidation_engine_close_request_q(
+        config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps,
+    )
+    .unwrap();
+    let partial_hi = kani_liquidation_partial_search_hi(config, position_q, price).unwrap();
+    assert!((1..=position_q).contains(&selected));
+    if selected < position_q {
+        assert!(selected <= partial_hi);
+        assert!(kani_liquidation_projected_healthy_after_close(
+            config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps, selected,
+        )
+        .unwrap());
+        if selected > 1 {
+            assert!(!kani_liquidation_projected_healthy_after_close(
+                config,
+                cert,
+                equity,
+                0,
+                leg,
+                price,
+                price,
+                config.liquidation_fee_bps,
+                selected - 1,
+            )
+            .unwrap());
+        }
+    } else {
+        assert!(
+            partial_hi == 0
+                || !kani_liquidation_projected_healthy_after_close(
+                    config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps,
+                    partial_hi,
+                )
+                .unwrap()
+        );
+    }
 }
 
 // Companion to the proof above: a full-position close is exempt from the
