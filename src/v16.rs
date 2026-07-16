@@ -13061,7 +13061,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let risk_increasing = trade_preflight.risk_increasing;
         self.require_asset_risk_change_allowed(request.asset_index, risk_increasing)?;
         let notional = trade_notional_floor(abs_size_q, request.exec_price)?;
-        let fee = checked_fee_bps(notional, request.fee_bps)?;
+        let fee_notional = trade_fee_notional_ceil(abs_size_q, request.exec_price)?;
+        let fee = checked_fee_bps(fee_notional, request.fee_bps)?;
         let (fee_a, fee_b) = self.charge_trade_fee_taker_only_not_atomic(
             long_account,
             short_account,
@@ -15905,6 +15906,30 @@ fn trade_notional_floor(size_q: u128, exec_price: u64) -> V16Result<u128> {
 #[cfg(kani)]
 pub fn kani_trade_notional_floor(size_q: u128, exec_price: u64) -> V16Result<u128> {
     trade_notional_floor(size_q, exec_price)
+}
+
+// E4 (upstream 8f25aa5d, "Charge sub-atom trade fees on ceil notional"): the fee
+// charged on a fill must be computed on the CEIL notional, not the floor notional
+// used for margin/PnL bookkeeping (`trade_notional_floor` above). A sub-atom fill
+// (size_q * exec_price / POS_SCALE < 1) floors to notional=0 and therefore fee=0
+// via `checked_fee_bps`'s notional==0 short-circuit, even though the fill opens
+// nonzero OI (free, fee-less risk). Reuses `risk_notional_ceil` (already used by
+// the liquidation-fee path at this same ceil-notional pattern) so a trade sized
+// to leave ANY nonzero remainder after the POS_SCALE division rounds up to at
+// least 1 atom of notional, and therefore charges at least 1 atom of fee whenever
+// fee_bps != 0. Deliberately kept as a SEPARATE value from `notional` above --
+// `notional` (floor) still drives `TradeApplyOutcomeV16.notional` / batch
+// aggregation / PnL-neutral accounting; only the fee calc uses the ceil.
+fn trade_fee_notional_ceil(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    if size_q == 0 || exec_price == 0 {
+        return Ok(0);
+    }
+    risk_notional_ceil(size_q, exec_price)
+}
+
+#[cfg(kani)]
+pub fn kani_trade_fee_notional_ceil(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    trade_fee_notional_ceil(size_q, exec_price)
 }
 
 fn checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {

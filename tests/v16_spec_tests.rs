@@ -2483,6 +2483,71 @@ fn v16_taker_only_charges_short_side_when_taker_is_short_account() {
     market.validate_shape().unwrap();
 }
 
+// E4 (upstream 8f25aa5d): a sub-atom fill (size_q * exec_price / POS_SCALE < 1,
+// i.e. floor-notional == 0) must still charge a nonzero fee via ceil-notional,
+// because it opens nonzero OI (free risk) despite the floored notional reading
+// zero. Adapted from upstream's `v16_subatom_trade_charges_fee_on_ceil_fee_notional`
+// for this fork's taker-only single-payer fee model (upstream charges both legs
+// independently; here exactly one side -- the taker -- pays the fee).
+#[test]
+fn v16_subatom_trade_charges_fee_on_ceil_fee_notional() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1);
+    let mut long_header = account_fixture(1, 213);
+    let mut short_header = account_fixture(1, 214);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    // sub_atom_size * exec_price / POS_SCALE floors to 0 (999_900 / 1_000_000),
+    // but ceils to 1 -- this is the exact boundary upstream's fix targets.
+    let sub_atom_size = POS_SCALE / 100 - 1;
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(sub_atom_size),
+                exec_price: 100,
+                fee_bps: 1,
+            },
+            true, // long_account is the taker
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome.notional, 0,
+        "floor-notional (margin/PnL basis) is unaffected by the fee fix"
+    );
+    assert_eq!(
+        outcome.fee_a, 1,
+        "ceil-notional fee: sub-atom fill must not charge a fee of 0"
+    );
+    assert_eq!(outcome.fee_b, 0, "maker (short) pays nothing under taker-only");
+    assert_eq!(long.header.capital.get(), 1_000 - 1);
+    assert_eq!(short.header.capital.get(), 1_000);
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_long_q.get(),
+        sub_atom_size,
+        "nonzero risk was opened despite the floored notional reading zero"
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_short_q.get(),
+        sub_atom_size
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
 #[test]
 fn v16_taker_only_batch_mixed_spread_charges_taker_on_every_leg() {
     let (mut header, mut markets) = market_fixture_with_trade_fee(2, 100, 1_000);
