@@ -3006,3 +3006,127 @@ fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
     assert_eq!(short_leg.basis_pos_q, -signed_q(POS_SCALE));
     market.validate_shape().unwrap();
 }
+
+// E5 (upstream engine #109 / 143e68c4, "Prevent same-trade OI masking"): a
+// single trade may reduce only OI that existed BEFORE that trade -- otherwise
+// one leg's same-call addition can be spent as if it were preexisting
+// reduction capacity on the other leg, making aggregate accounting depend on
+// mutation order within one apply_trade_after_refresh_not_atomic call.
+//
+// Scenario: `liquidated` flips short(-10) -> long(+1) in the same call that
+// `survivor` reduces long(+13) -> long(+2). In isolation, survivor's leg
+// alone appears to free up 11 units of long-side reduction capacity, but the
+// asset's PRE-TRADE ledger only records oi_eff_long_q = oi_eff_short_q =
+// MATCHED_Q = 10 units (the pre-fix bug: the ledger is authoritative, not
+// whatever a single leg's raw basis happens to show, and one leg cannot
+// "loan" the other leg's same-call delta as spendable reduction capacity).
+// The gate must reject with LockActive and mutate NOTHING -- not the asset
+// ledger, not vault/c_tot/insurance, not either leg -- proving this is a
+// preflight rejection, not a partial-apply rollback.
+#[test]
+fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+    const LIQUIDATED_SHORT_Q: u128 = 10 * POS_SCALE;
+    const SURVIVOR_LONG_Q: u128 = 13 * POS_SCALE;
+    const FLIP_SIZE_Q: u128 = 11 * POS_SCALE; // liquidated: -10 -> +1; survivor: +13 -> +2
+
+    let (mut header, mut markets) = market_fixture(1, 100);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.loss_weight_sum_long = MATCHED_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    // resolved_payout_blocker_count must reconcile with the asset's own
+    // stored_pos_count_long(1) + stored_pos_count_short(1) totals, or
+    // set_asset_state's delta-reconciliation throws CounterUnderflow before
+    // the trade path (and therefore the OI gate) is ever reached.
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    let mut liquidated_header = account_fixture(1, 217);
+    liquidated_header.capital = V16PodU128::new(1_000_000);
+    liquidated_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(LIQUIDATED_SHORT_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        epoch_snap: asset.epoch_short,
+        loss_weight: LIQUIDATED_SHORT_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    liquidated_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut survivor_header = account_fixture(1, 218);
+    survivor_header.capital = V16PodU128::new(1_000_000);
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_LONG_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_LONG_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+
+    let asset_before = market.markets[0].engine.asset;
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let liquidated_capital_before = liquidated.header.capital.get();
+    let survivor_capital_before = survivor.header.capital.get();
+
+    // `liquidated` is the long_account param (receives +FLIP_SIZE_Q, flipping
+    // short(-10) -> long(+1)); `survivor` is the short_account param
+    // (receives -FLIP_SIZE_Q, reducing long(+13) -> long(+2)).
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut liquidated,
+        &mut survivor,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(FLIP_SIZE_Q),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        true,
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        market.markets[0].engine.asset, asset_before,
+        "rejected trade must not mutate the asset ledger at all"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(liquidated.header.capital.get(), liquidated_capital_before);
+    assert_eq!(survivor.header.capital.get(), survivor_capital_before);
+    let liquidated_leg = liquidated.header.legs[0].try_to_runtime().unwrap();
+    let survivor_leg = survivor.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(liquidated_leg.basis_pos_q, -signed_q(LIQUIDATED_SHORT_Q));
+    assert_eq!(survivor_leg.basis_pos_q, signed_q(SURVIVOR_LONG_Q));
+    market.validate_shape().unwrap();
+}

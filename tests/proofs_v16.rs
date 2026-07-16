@@ -15,7 +15,8 @@ use percolator::v16::{
     kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
@@ -3140,6 +3141,105 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
         if increases {
             assert!(next != 0);
         }
+    }
+}
+
+// E5 (upstream engine #109 / 143e68c4, "Prevent same-trade OI masking"): a
+// trade may reduce only OI that existed BEFORE that trade -- this proves the
+// kernel gate's admission decision exactly matches an independently derived
+// reference computation of per-side reduction (not merely "some check fires
+// sometimes"), and separately exercises the exact same-call flip-and-crossed
+// -reduction shape that is the actual exploit this fix closes (one leg flips
+// sign, freeing up fresh same-call exposure on one side while the other leg
+// sheds preexisting exposure that must be funded from the PRE-trade ledger,
+// not from the flipping leg's own same-call addition).
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi() {
+    let oi_long_q: u128 = kani::any();
+    let oi_short_q: u128 = kani::any();
+    let account_a_current_q: i128 = kani::any();
+    let account_a_next_q: i128 = kani::any();
+    let account_b_current_q: i128 = kani::any();
+    let account_b_next_q: i128 = kani::any();
+
+    kani::assume(oi_long_q <= MAX_POSITION_ABS_Q);
+    kani::assume(oi_short_q <= MAX_POSITION_ABS_Q);
+    kani::assume(
+        account_a_current_q != i128::MIN && account_a_current_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_a_next_q != i128::MIN && account_a_next_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_b_current_q != i128::MIN && account_b_current_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_b_next_q != i128::MIN && account_b_next_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+
+    let on_side_long = |q: i128| if q > 0 { q as u128 } else { 0u128 };
+    let on_side_short = |q: i128| if q < 0 { q.unsigned_abs() } else { 0u128 };
+
+    let expected_long_reduction = on_side_long(account_a_current_q)
+        .saturating_sub(on_side_long(account_a_next_q))
+        + on_side_long(account_b_current_q).saturating_sub(on_side_long(account_b_next_q));
+    let expected_short_reduction = on_side_short(account_a_current_q)
+        .saturating_sub(on_side_short(account_a_next_q))
+        + on_side_short(account_b_current_q).saturating_sub(on_side_short(account_b_next_q));
+
+    let expected_ok = expected_long_reduction <= oi_long_q && expected_short_reduction <= oi_short_q;
+
+    let result = kani_trade_preexisting_oi_reduction_gate(
+        oi_long_q,
+        oi_short_q,
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
+    );
+
+    kani::cover!(
+        expected_ok && expected_long_reduction > 0,
+        "gate admits a trade that only spends already-existing long OI"
+    );
+    kani::cover!(
+        expected_ok && expected_short_reduction > 0,
+        "gate admits a trade that only spends already-existing short OI"
+    );
+    kani::cover!(
+        !expected_ok && expected_long_reduction > oi_long_q,
+        "gate rejects long-side reduction that exceeds the preexisting ledger"
+    );
+    kani::cover!(
+        !expected_ok && expected_short_reduction > oi_short_q,
+        "gate rejects short-side reduction that exceeds the preexisting ledger"
+    );
+    // The exact same-trade OI-masking exploit shape: account A flips sign
+    // (adds fresh same-call long exposure while shedding all of its
+    // preexisting short exposure) in the same call that account B purely
+    // reduces its preexisting long exposure -- account B's reduction must be
+    // funded strictly from the PRE-trade oi_long_q ledger, never from
+    // account A's same-call same-trade addition.
+    kani::cover!(
+        !expected_ok
+            && account_a_current_q < 0
+            && account_a_next_q > 0
+            && account_b_current_q > 0
+            && account_b_next_q > 0
+            && account_b_next_q < account_b_current_q,
+        "gate rejects the same-call flip-and-crossed-reduction masking shape"
+    );
+
+    assert_eq!(
+        result.is_ok(),
+        expected_ok,
+        "gate admission must match preexisting-OI-only funding"
+    );
+    if let Ok((long_reduction_q, short_reduction_q)) = result {
+        assert_eq!(long_reduction_q, expected_long_reduction);
+        assert_eq!(short_reduction_q, expected_short_reduction);
     }
 }
 
