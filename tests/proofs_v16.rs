@@ -692,6 +692,8 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
     let effective_before = markets[0].engine.asset.effective_price.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
+    let raw_target_before = markets[0].engine.asset.raw_oracle_target_price.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let res = market.set_asset_raw_oracle_target_not_atomic(0, target as u64);
@@ -699,6 +701,15 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     kani::cover!(
         target > 100 && c_tot > 255 && insurance > 255 && surplus > 255,
         "raw target update covers nontrivial target/effective lag over wide symbolic value state"
+    );
+    let target_changed = target as u64 != raw_target_before;
+    kani::cover!(
+        target_changed,
+        "raw target update covers a genuine target change (oracle_epoch must bump)"
+    );
+    kani::cover!(
+        !target_changed,
+        "raw target update covers an idempotent no-op target (oracle_epoch must NOT bump)"
     );
     assert_eq!(res, Ok(()));
     assert_eq!(
@@ -708,6 +719,16 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     assert_eq!(
         market.markets[0].engine.asset.effective_price.get(),
         effective_before
+    );
+    // Engine #107 / #93: a target-only push must bump oracle_epoch exactly
+    // when the target actually changes, so every health cert minted before
+    // this call becomes stale (cert_oracle_epoch mismatch) and cannot remain
+    // "current" across newly introduced target/effective lag. An idempotent
+    // re-push of the same target must NOT spuriously bump the epoch (would
+    // needlessly invalidate unrelated in-flight certs).
+    assert_eq!(
+        market.header.oracle_epoch.get(),
+        oracle_epoch_before + u64::from(target_changed)
     );
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);

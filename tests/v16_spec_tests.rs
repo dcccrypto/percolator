@@ -780,6 +780,7 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
@@ -789,10 +790,82 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 
     assert_eq!(asset.raw_oracle_target_price, 111);
     assert_eq!(asset.effective_price, 100);
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 111)
+        .unwrap();
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_raw_oracle_target_only_change_invalidates_a_cached_health_cert() {
+    // Regression for engine #107 / #93: a target-only push (no accrual, no
+    // effective_price move) must invalidate any health cert taken while the
+    // old target was in force, because target/effective lag -- and therefore
+    // risk -- has grown even though the cert's own numbers are stale-blind
+    // to it. We drive this through a real cert-gated not_atomic API
+    // (charge_account_backing_fee_not_atomic) rather than reading the epoch
+    // counter directly, so the test fails the way an exploit would: a stale
+    // cert being admitted to authorize a financial action.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 30);
+    header.vault = V16PodU128::new(100);
+    header.c_tot = V16PodU128::new(100);
+    account_header.capital = V16PodU128::new(100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 1, 10)
+        .unwrap();
+
+    // Cert taken while the target is still 100 (matches effective_price, no
+    // lag) and current against every header epoch at the moment it's minted.
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 100,
+        certified_initial_req: 50,
+        certified_maintenance_req: 40,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // Sanity: with the target unchanged, this exact cert is still admitted
+    // (proves the setup is correct and the rejection below is caused
+    // specifically by the target push, not some other staleness source).
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let capital_before = account.header.capital.get();
+
+    // Now push a target-only change: raw_oracle_target_price moves from 100
+    // to 111 while effective_price (100) does not -- new target/effective
+    // lag with zero accrual in between.
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 111)
+        .unwrap();
+
+    // The cert minted above is now stale: it was current for the pre-push
+    // oracle_epoch and must be rejected, not silently admitted under grown
+    // target/effective lag.
+    let err = market.charge_account_backing_fee_not_atomic(&mut account, 0, 6, 1, 4);
+    assert_eq!(
+        err,
+        Err(V16Error::Stale),
+        "cached cert must be invalidated by a target-only oracle push"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[test]
