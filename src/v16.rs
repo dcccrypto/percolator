@@ -8882,9 +8882,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if remaining_loss != 0 {
-            junior_face_burned = old_positive_face;
-        }
+        // PROPORTIONAL (candidate fix): burn only the support-matched face, not the
+        // whole positive face, on an under-supported loss.
         if junior_face_burned > old_positive_face {
             return Err(V16Error::ArithmeticOverflow);
         }
@@ -8993,7 +8992,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
             || remaining_loss != 0
         {
-            junior_face_burned = new_face_support;
+            // Burn only the part of the incoming gain that EXCEEDS the account's
+            // outstanding loss. That excess is what would become a NEW positive
+            // claim, and an unbacked new claim is correctly refused.
+            //
+            // The part that merely NETS against the outstanding loss is not a new
+            // claim at all — it is the counterparty's loss being realized against a
+            // debt the account already owes — so it requires no source backing and
+            // must not be burned. Burning it made an underwater account permanently
+            // unrecoverable: `source_credit_state_realizable_support_for_face`
+            // returns 0 whenever `positive_claim_bound_num == 0`, and an underwater
+            // account has no positive claims by definition, so support was
+            // structurally always 0 and the entire recovery was destroyed on every
+            // settlement regardless of how much backing existed.
+            junior_face_burned = new_face_support.saturating_sub(old_loss);
         }
         if junior_face_burned > new_face_support {
             return Err(V16Error::ArithmeticOverflow);
