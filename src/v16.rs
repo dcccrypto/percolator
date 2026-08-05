@@ -9218,9 +9218,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        if remaining_loss != 0 {
-            junior_face_burned = old_positive_face;
-        }
+        // PROPORTIONAL: burn only the support-matched face, not the whole positive
+        // face, on an under-supported loss. Burning it all double-charged the account
+        // (accumulated gain destroyed AND the loss still taken from capital).
         if junior_face_burned > old_positive_face {
             return Err(V16Error::ArithmeticOverflow);
         }
@@ -9329,7 +9329,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
             || remaining_loss != 0
         {
-            junior_face_burned = new_face_support;
+            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
+            // that merely NETS against the loss is the counterparty's loss being
+            // realized against a debt already owed, so it needs no source backing.
+            // Burning it made an underwater account permanently unrecoverable.
+            junior_face_burned = new_face_support.saturating_sub(old_loss);
         }
         if junior_face_burned > new_face_support {
             return Err(V16Error::ArithmeticOverflow);
