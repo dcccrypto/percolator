@@ -1845,3 +1845,446 @@ fn adv_8_nonzero_funding_rate() {
     assert!(real_capital <= deposits, "CAPITAL {} exceeds deposits {} — value created",
         usd(real_capital as i128), usd(deposits as i128));
 }
+
+#[test]
+fn structural_what_does_an_unfundable_gain_domain_actually_cost_postfix() {
+    // The structural claim: the LP vault is bound to ONE domain (registry.domain=0)
+    // at creation, but the LP's GAINS draw on domain(opposite(its side)). An LP that
+    // ends up LONG therefore needs domain 1, which no instruction can ever fund.
+    //
+    // QUESTION (post-fix): does an unfundable gain domain still COST the LP anything?
+    // Compare identical price paths at several backing levels, measured against the
+    // price the LP's own leg was settled to.
+    println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
+    let path = walk(15_565, 3_000, 60, 0xD00D);
+    let mut rows: Vec<(String, i128, u128, u128)> = Vec::new();
+    for (trader_long, side) in [(false, "LPlong(gainDom=1,UNFUNDABLE)"), (true, "LPshort(gainDom=0,fundable)")] {
+        for seed_usd in [0u128, 50, 100_000] {
+            let mut c = base_cfg(&format!("STRUCT_{side}_seed${seed_usd}"));
+            c.crank = CrankWho::LpOnly;
+            c.trader_long = trader_long;
+            c.size_q = 36_429_872_495;
+            c.trader_capital = 20_000_000_000;
+            c.lp_capital = 5_000_000_000;
+            c.gain_domain_seed = seed_usd * 1_000_000;
+            c.path = path.clone();
+            let r = run(&c);
+            let lp_signed = if trader_long { -c.size_q } else { c.size_q };
+            let honest = lp_signed * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
+            let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest;
+            println!("  {:<44} unexplained={:>13}  gain-pot: fresh=${:<12} spent=${:<12} rate={}",
+                c.label, usd(unexplained),
+                usd((r.gain_dom_fresh / 1_000_000_000_000u128) as i128),
+                usd((r.gain_dom_spent / 1_000_000_000_000u128) as i128),
+                r.gain_dom_rate);
+            // NON-VACUITY
+            assert!(r.crank_ok > 20, "{}: too few cranks — VACUOUS", c.label);
+            assert_eq!(r.initial_abs_pos, r.final_abs_pos, "{}: position changed", c.label);
+            rows.push((c.label.clone(), unexplained, r.gain_dom_spent, r.gain_dom_rate));
+        }
+    }
+    println!("\n  Interpretation: an UNFUNDABLE gain domain behaves like seed $0.");
+    println!("  If seed $0 is honest, the structural gap costs nothing in normal operation post-fix.");
+}
+
+#[test]
+fn structural_seed_sweep_partial_backing_is_worse_than_none() {
+    // Sweep the gain-domain seed on ONE fixed path. If loss is ~0 at seed=0, peaks at
+    // some partial level, and returns to ~0 once the seed is ample, then the harm is
+    // the REALIZATION HAIRCUT at credit_rate<1 — not the absence of backing.
+    println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
+    let path = walk(15_565, 3_000, 60, 0xD00D);
+    let mut worst = (0u128, 0i128);
+    for seed_usd in [0u128, 5, 25, 50, 100, 250, 500, 1_000, 5_000, 100_000] {
+        let mut c = base_cfg(&format!("SWEEP_seed${seed_usd}"));
+        c.crank = CrankWho::LpOnly;
+        c.trader_long = false; // LP LONG => gain domain 1 (the unfundable one in production)
+        c.size_q = 36_429_872_495;
+        c.trader_capital = 20_000_000_000;
+        c.lp_capital = 5_000_000_000;
+        c.gain_domain_seed = seed_usd * 1_000_000;
+        c.path = path.clone();
+        let r = run(&c);
+        let honest = c.size_q * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
+        let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest;
+        let exhausted = r.gain_dom_rate < 1_000_000_000_000u128;
+        println!("  seed ${:<7} unexplained={:>13}  spent=${:<12} rate={:<14} {}",
+            seed_usd, usd(unexplained),
+            usd((r.gain_dom_spent / 1_000_000_000_000u128) as i128),
+            r.gain_dom_rate,
+            if exhausted { "<- pot UNDER-backed (rate<1)" } else { "" });
+        if unexplained.abs() > worst.1.abs() { worst = (seed_usd, unexplained); }
+        assert!(r.crank_ok > 20, "seed {seed_usd}: too few cranks — VACUOUS");
+        assert_eq!(r.initial_abs_pos, r.final_abs_pos, "seed {seed_usd}: position changed");
+    }
+    println!("\n  WORST at seed ${} -> {}", worst.0, usd(worst.1));
+    println!("  => harm is NOT 'no backing'; it is PARTIAL backing (credit_rate < 1).");
+}
+
+/// GROUND TRUTH: run a path at a given gain-domain seed, then CLOSE the position,
+/// convert PnL to capital and withdraw as much as possible. Returns actual dollars
+/// extracted. Immune to how the harness values un-realized PnL.
+fn dollars_actually_extracted(seed_atoms: u128, path: &[u64], trader_long: bool) -> (u128, i128, u128, u128) {
+    let init = path[0];
+    let (mut header, mut markets) = market_fixture(init);
+    let mut lp = account_fixture(LP_SEED);
+    let mut tr = account_fixture(7);
+    let size = 36_429_872_495i128;
+    let lp_dep = 5_000_000_000u128;
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000).unwrap();
+        // Production seeds BOTH domains at MAX expiry (the freshness-deadlock defuse).
+        // seed_atoms == 0 means "no seed at all", which reproduces the deadlock.
+        if seed_atoms != 0 {
+            for d in [0usize, 1usize] {
+                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2).unwrap();
+            }
+        }
+        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        if trader_long {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+        } else {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false).unwrap();
+        }
+    }
+    let mut slot = SLOTS_PER_STEP;
+    let mut ok = 0u32;
+    for &px in path.iter().skip(1) {
+        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
+            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        slot += SLOTS_PER_STEP;
+    }
+    // settle the lag at the engine's own price
+    for _ in 0..2 {
+        let p = markets[0].engine.asset.effective_price.get();
+        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
+            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
+        slot += SLOTS_PER_STEP;
+    }
+    let settled_price = markets[0].engine.asset.effective_price.get();
+    // CLOSE the LP position (settles BOTH sides, realizing the counterparty's loss)
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: settled_price, fee_bps: 0 };
+        let r = if trader_long {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false)
+        } else {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true)
+        };
+        if r.is_err() {
+            // A close failure is itself a result, not a reason to abort the sweep.
+            // Dump the exact state so the gate can be identified rather than guessed.
+            let g = &markets[0].engine;
+            println!("  CLOSE FAILED {r:?} | LP cap={} pnl={} cryst={} | hlock={} negPnl={} lossStale={} mode={} | \
+                      gainDom fresh={} spent={} rate={} | lossDom fresh={} | cranks_ok={}",
+                usd(lp.capital.get() as i128), usd(lp.pnl.get()),
+                usd(lp.residual_crystallized_loss_atoms_total.get() as i128),
+                header.bankruptcy_hlock_active, header.negative_pnl_account_count.get(),
+                header.loss_stale_active, header.mode,
+                usd((g.source_credit_short.fresh_reserved_backing_num.get()/1_000_000_000_000u128) as i128),
+                usd((g.source_credit_short.spent_backing_num.get()/1_000_000_000_000u128) as i128),
+                g.source_credit_short.credit_rate_num.get(),
+                usd((g.source_credit_long.fresh_reserved_backing_num.get()/1_000_000_000_000u128) as i128),
+                ok);
+            return (0, lp.pnl.get(), ok as u128, settled_price as u128);
+        }
+    }
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut lp);
+        let _ = m.convert_released_pnl_to_capital_not_atomic(&mut v);
+    }
+    fn try_wd(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
+              a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
+        let hs=*h; let ms=mk.clone(); let as_=*a;
+        let ok = { let mut m = MarketGroupV16ViewMut::new(h, mk);
+                   let mut v = PortfolioV16ViewMut::new(a);
+                   m.withdraw_not_atomic(&mut v, amt).is_ok() };
+        if !ok { *h=hs; *mk=ms; *a=as_; }
+        ok
+    }
+    let target = lp.capital.get() + lp.pnl.get().max(0) as u128;
+    let mut got = 0u128; let mut amt = target; let step = (target/2000).max(1);
+    while amt > 0 { if try_wd(&mut header, &mut markets, &mut lp, amt) { got = amt; break; } amt = amt.saturating_sub(step); }
+    (got, lp.pnl.get(), ok as u128, settled_price as u128)
+}
+
+fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: bool, every: usize) -> (u128, i128, u128, u128) {
+    let init = path[0];
+    let (mut header, mut markets) = market_fixture(init);
+    let mut lp = account_fixture(LP_SEED);
+    let mut tr = account_fixture(7);
+    let size = 36_429_872_495i128;
+    let lp_dep = 5_000_000_000u128;
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000).unwrap();
+        // Production seeds BOTH domains at MAX expiry (the freshness-deadlock defuse).
+        // seed_atoms == 0 means "no seed at all", which reproduces the deadlock.
+        if seed_atoms != 0 {
+            for d in [0usize, 1usize] {
+                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2).unwrap();
+            }
+        }
+        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        if trader_long {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+        } else {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false).unwrap();
+        }
+    }
+    let mut slot = SLOTS_PER_STEP;
+    let mut ok = 0u32;
+    for (i, &px) in path.iter().enumerate().skip(1) {
+        // REAL slower keeper: wall-clock advances every step regardless of whether we
+        // crank, so a coarser cadence genuinely puts MORE slots between settlements.
+        if i % every != 0 && i != path.len() - 1 { slot += SLOTS_PER_STEP; continue; }
+        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
+            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        slot += SLOTS_PER_STEP;
+    }
+    // settle the lag at the engine's own price
+    for _ in 0..2 {
+        let p = markets[0].engine.asset.effective_price.get();
+        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
+            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
+        slot += SLOTS_PER_STEP;
+    }
+    let settled_price = markets[0].engine.asset.effective_price.get();
+    // CLOSE the LP position (settles BOTH sides, realizing the counterparty's loss)
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: settled_price, fee_bps: 0 };
+        let r = if trader_long {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false)
+        } else {
+            m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true)
+        };
+        if r.is_err() {
+            // A close failure is itself a result, not a reason to abort the sweep.
+            // Dump the exact state so the gate can be identified rather than guessed.
+            let g = &markets[0].engine;
+            println!("  CLOSE FAILED {r:?} | LP cap={} pnl={} cryst={} | hlock={} negPnl={} lossStale={} mode={} | \
+                      gainDom fresh={} spent={} rate={} | lossDom fresh={} | cranks_ok={}",
+                usd(lp.capital.get() as i128), usd(lp.pnl.get()),
+                usd(lp.residual_crystallized_loss_atoms_total.get() as i128),
+                header.bankruptcy_hlock_active, header.negative_pnl_account_count.get(),
+                header.loss_stale_active, header.mode,
+                usd((g.source_credit_short.fresh_reserved_backing_num.get()/1_000_000_000_000u128) as i128),
+                usd((g.source_credit_short.spent_backing_num.get()/1_000_000_000_000u128) as i128),
+                g.source_credit_short.credit_rate_num.get(),
+                usd((g.source_credit_long.fresh_reserved_backing_num.get()/1_000_000_000_000u128) as i128),
+                ok);
+            return (0, lp.pnl.get(), ok as u128, settled_price as u128);
+        }
+    }
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut lp);
+        let _ = m.convert_released_pnl_to_capital_not_atomic(&mut v);
+    }
+    fn try_wd(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
+              a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
+        let hs=*h; let ms=mk.clone(); let as_=*a;
+        let ok = { let mut m = MarketGroupV16ViewMut::new(h, mk);
+                   let mut v = PortfolioV16ViewMut::new(a);
+                   m.withdraw_not_atomic(&mut v, amt).is_ok() };
+        if !ok { *h=hs; *mk=ms; *a=as_; }
+        ok
+    }
+    let target = lp.capital.get() + lp.pnl.get().max(0) as u128;
+    let mut got = 0u128; let mut amt = target; let step = (target/2000).max(1);
+    while amt > 0 { if try_wd(&mut header, &mut markets, &mut lp, amt) { got = amt; break; } amt = amt.saturating_sub(step); }
+    (got, lp.pnl.get(), ok as u128, settled_price as u128)
+}
+
+
+/// Does pushing FEWER prices (coarser keeper cadence) reduce backing consumption?
+/// The engine's effective_price only advances when someone pushes it, so a slower
+/// keeper makes the engine see a COARSER path -> less engine-visible total variation.
+/// Backing is consumed by variation (spec §2.2), so this should bite. Measures real
+/// withdrawn dollars against the LP's own settled price, same as every other test here.
+#[test]
+fn cadence_sweep_does_pushing_fewer_prices_reduce_backing_burn() {
+    let lp_dep = 5_000_000_000i128;
+    let seed = 5_000_000_000u128; // production: 100% of LP, BOTH domains, MAX expiry
+    let full = walk(15_565, 12_000, 60, 0xD00D);
+    println!("  path steps={} (engine sees every Nth)", full.len() - 1);
+    for every in [1usize, 2, 5, 20, 100] {
+        let (got, _pnl, cranks, settled) = dollars_extracted_at_cadence(seed, &full, false, every);
+        // engine-visible total variation at this cadence
+        let seen: Vec<u64> = full.iter().enumerate()
+            .filter(|(i, _)| *i == 0 || i % every == 0 || *i == full.len() - 1)
+            .map(|(_, &p)| p).collect();
+        let mut tv = 0i128; for w in seen.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let attempted = seen.len() - 1;
+        println!("  every {:<4} engineTV {:<9} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks OK {}/{} attempted)",
+            every, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks, attempted);
+        assert!(cranks > 20, "every {every}: VACUOUS - engine barely cranked");
+        assert!(got > 0, "every {every}: LP could not exit at all");
+    }
+    println!("\n  If delta shrinks as `every` grows -> keeper cadence is a real lever on backing burn.");
+}
+
+#[test]
+fn ground_truth_does_partial_backing_cost_REAL_dollars() {
+    // The sweep measured NOMINAL pnl, which the design says is only worth credit_rate.
+    // This measures DOLLARS ACTUALLY WITHDRAWN after closing — the only figure that
+    // cannot be an artifact of how the harness values an un-realized claim.
+    let path = walk(15_565, 3_000, 60, 0xD00D);
+    let lp_dep = 5_000_000_000i128;
+    // honest: LP LONG, equity change = size * (settled - init)
+    println!("  LP deposited $5000.000000 in every run; LP is LONG (gain domain = the unfundable one)");
+    let mut results = Vec::new();
+    for seed in [0u128, 25, 100, 1_000, 5_000, 100_000] {
+        let (got, pnl_left, cranks, settled) = dollars_actually_extracted(seed, &path, false);
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        println!("  seed ${:<7} withdrew ${:<14} pnl_left={:<12} vs honest ${:<14} delta {:<14} (cranks {})",
+            seed, usd(got as i128), usd(pnl_left), usd(honest), usd(got as i128 - honest), cranks);
+        assert!(cranks > 20, "seed {seed}: too few cranks — VACUOUS");
+        if got > 0 { results.push((seed, got as i128 - honest)); }
+    }
+    let spread = results.iter().map(|r| r.1).max().unwrap() - results.iter().map(|r| r.1).min().unwrap();
+    println!("\n  spread across seeds = {}", usd(spread));
+    println!("  If ~0: partial backing costs NO real dollars and the sweep loss was nominal only.");
+}
+
+#[test]
+fn ground_truth_does_the_zero_seed_loss_SCALE_with_path_length() {
+    // seed $0 lost $13.44 in real withdrawn dollars on a 3,000-step path while an
+    // amply-seeded run was exact. Is that a bounded one-off (a single conversion
+    // haircut at close) or does it GROW with total price variation (a slow bleed)?
+    let lp_dep = 5_000_000_000i128;
+    let mut exited: Vec<(usize, i128, i128)> = Vec::new();
+    let mut deadlocked: Vec<usize> = Vec::new();
+    for steps in [500usize, 1_500, 3_000, 6_000] {
+        let path = walk(15_565, steps, 60, 0xD00D);
+        let (got, _pnl, cranks, settled) = dollars_actually_extracted(0, &path, false);
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        // total variation of the ENGINE-visible path
+        let mut tv = 0i128; for w in path.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
+        println!("  steps {:<6} totalVariation {:<9} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks {})",
+            steps, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
+        assert!(cranks > 20, "steps {steps}: VACUOUS");
+        // NOT `assert!(got > 0)`. At seed 0 the answer to this test's own question
+        // turns out to be worse than "a bleed": past ~6,000 steps the domain goes
+        // Stale and the LP cannot exit AT ALL (Err(Stale) with hlock=0 and ~$4,989
+        // of capital still sitting there — the freshness deadlock). Asserting the
+        // LP can always exit asserted something seed 0 does not actually provide,
+        // so it turned a real finding into a red build. Record which regime we hit.
+        if got == 0 {
+            deadlocked.push(steps);
+        } else {
+            exited.push((steps, tv, got as i128 - honest));
+        }
+    }
+    println!("\n  exited: {exited:?}");
+    println!("  DEADLOCKED (could not exit at all): {deadlocked:?}");
+    println!("\n  If delta is flat across path lengths -> bounded one-off conversion haircut.");
+    println!("  If delta grows with totalVariation  -> an ongoing bleed even at seed 0.");
+    // The point of the test: seed 0 is never merely lossy, it eventually bricks.
+    // Production seeds 100% of the LP on BOTH domains precisely to avoid this.
+    assert!(!exited.is_empty(), "VACUOUS: no path length produced a measurable exit");
+    assert!(
+        !deadlocked.is_empty(),
+        "seed 0 no longer deadlocks on long paths — the freshness deadlock this test \
+         documents may have been fixed; re-derive the seeding guidance before relaxing it"
+    );
+}
+
+#[test]
+fn decisive_can_a_DUST_seed_at_max_expiry_give_liveness_without_the_haircut() {
+    // Two separable jobs are conflated in one number today:
+    //   (1) LIVENESS  - a Fresh bucket at MAX expiry stops the whole domain going
+    //                   Stale (auto-reserves INHERIT its expiry). Load-bearing.
+    //   (2) BACKING   - the AMOUNT. If it is ever fully consumed, credit_rate drops
+    //                   below 1 and face burns at 1/r => real, withdrawable loss.
+    // If a DUST amount at MAX expiry delivers (1) without entering (2), that is the fix.
+    let lp_dep = 5_000_000_000i128;
+    let path = walk(15_565, 6_000, 60, 0xD00D); // long enough to expire a finite bucket
+    for (label, atoms) in [
+        ("NO seed (deadlock repro)", 0u128),
+        ("DUST 1 atom @MAX", 1u128),
+        ("DUST $0.01 @MAX", 10_000u128),
+        ("$100 @MAX (production today)", 100_000_000u128),
+        ("$5000 @MAX (ample)", 5_000_000_000u128),
+    ] {
+        let (got, _pnl, cranks, settled) = dollars_actually_extracted(atoms, &path, false);
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        if got == 0 {
+            println!("  {label:<30} LP COULD NOT EXIT (cranks {cranks})");
+        } else {
+            println!("  {:<30} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks {})",
+                label, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
+        }
+        assert!(cranks > 20, "{label}: VACUOUS");
+    }
+    println!("\n  Looking for: a seed that both EXITS and shows ~0 delta.");
+}
+
+#[test]
+fn product_what_does_TODAYS_launch_config_actually_cost() {
+    // Production today: backingSeedPerDomain = max(100% of LP, $0.01), seeded into
+    // BOTH domains at u64::MAX/2 expiry. For a $5,000 LP that is $5,000 per domain.
+    // Measure real withdrawable dollars across the seed range a creator might pick.
+    let lp_dep = 5_000_000_000i128;
+    let path = walk(15_565, 6_000, 60, 0xD00D);
+    for (label, atoms) in [
+        ("dust $0.01",                 10_000u128),
+        ("10% of LP  ($500)",         500_000_000u128),
+        ("20% of LP  ($1,000)",     1_000_000_000u128),
+        ("50% of LP  ($2,500)",     2_500_000_000u128),
+        ("100% of LP ($5,000) TODAY",5_000_000_000u128),
+        ("200% of LP ($10,000)",   10_000_000_000u128),
+    ] {
+        let (got, _pnl, cranks, settled) = dollars_actually_extracted(atoms, &path, false);
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        if got == 0 {
+            println!("  {label:<28} LP COULD NOT EXIT (cranks {cranks})");
+        } else {
+            println!("  {:<28} withdrew ${:<13} honest ${:<13} delta {:<13} capital tied up ${}",
+                label, usd(got as i128), usd(honest), usd(got as i128 - honest),
+                usd((atoms * 2) as i128));
+        }
+        assert!(cranks > 20, "{label}: VACUOUS");
+    }
+}
+
+#[test]
+fn product_does_the_100pct_seed_survive_a_LONG_LIVED_market() {
+    // 100% of LP is exact on a 6,000-step path. But backing demand grows with
+    // position x total price variation, without bound. Does today's config stay
+    // exact as the market ages, or does it eventually exhaust and fall into the
+    // lossy regime?
+    let lp_dep = 5_000_000_000i128;
+    for steps in [3_000usize, 6_000, 12_000, 24_000] {
+        let path = walk(15_565, steps, 60, 0xD00D);
+        let mut tv = 0i128; for w in path.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
+        let (got, _pnl, cranks, settled) = dollars_actually_extracted(5_000_000_000u128, &path, false);
+        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        if got == 0 {
+            println!("  steps {:<7} tv {:<9} LP COULD NOT EXIT (cranks {})", steps, tv, cranks);
+        } else {
+            println!("  steps {:<7} tv {:<9} withdrew ${:<13} honest ${:<13} delta {:<13} (cranks {})",
+                steps, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
+        }
+        assert!(cranks > 20, "steps {steps}: VACUOUS");
+    }
+    println!("\n  Flat delta => 100% seed is durable. Growing delta => it is rented time.");
+}
