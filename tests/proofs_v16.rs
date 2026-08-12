@@ -11,10 +11,14 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
+    kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
+    kani_loss_stale_trade_scope_allowed,
+    kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
@@ -70,6 +74,29 @@ fn one_market_view_fixture() -> (
     }
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
+}
+
+/// Like `one_market_view_fixture`, but with two independent portfolio
+/// accounts (long/short axis) sharing the same market group — used by the
+/// taker-only trade-fee-charge proofs, which need a long-side and a
+/// short-side account simultaneously.
+fn two_account_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let long_header = empty_account_fixture(market_id, 5);
+    let short_header = empty_account_fixture(market_id, 6);
+    (header, markets, long_header, short_header)
 }
 
 fn one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
@@ -669,6 +696,8 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
     let effective_before = markets[0].engine.asset.effective_price.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
+    let raw_target_before = markets[0].engine.asset.raw_oracle_target_price.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let res = market.set_asset_raw_oracle_target_not_atomic(0, target as u64);
@@ -676,6 +705,15 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     kani::cover!(
         target > 100 && c_tot > 255 && insurance > 255 && surplus > 255,
         "raw target update covers nontrivial target/effective lag over wide symbolic value state"
+    );
+    let target_changed = target as u64 != raw_target_before;
+    kani::cover!(
+        target_changed,
+        "raw target update covers a genuine target change (oracle_epoch must bump)"
+    );
+    kani::cover!(
+        !target_changed,
+        "raw target update covers an idempotent no-op target (oracle_epoch must NOT bump)"
     );
     assert_eq!(res, Ok(()));
     assert_eq!(
@@ -685,6 +723,16 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     assert_eq!(
         market.markets[0].engine.asset.effective_price.get(),
         effective_before
+    );
+    // Engine #107 / #93: a target-only push must bump oracle_epoch exactly
+    // when the target actually changes, so every health cert minted before
+    // this call becomes stale (cert_oracle_epoch mismatch) and cannot remain
+    // "current" across newly introduced target/effective lag. An idempotent
+    // re-push of the same target must NOT spuriously bump the epoch (would
+    // needlessly invalidate unrelated in-flight certs).
+    assert_eq!(
+        market.header.oracle_epoch.get(),
+        oracle_epoch_before + u64::from(target_changed)
     );
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
@@ -3098,6 +3146,105 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
     }
 }
 
+// E5 (upstream engine #109 / 143e68c4, "Prevent same-trade OI masking"): a
+// trade may reduce only OI that existed BEFORE that trade -- this proves the
+// kernel gate's admission decision exactly matches an independently derived
+// reference computation of per-side reduction (not merely "some check fires
+// sometimes"), and separately exercises the exact same-call flip-and-crossed
+// -reduction shape that is the actual exploit this fix closes (one leg flips
+// sign, freeing up fresh same-call exposure on one side while the other leg
+// sheds preexisting exposure that must be funded from the PRE-trade ledger,
+// not from the flipping leg's own same-call addition).
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi() {
+    let oi_long_q: u128 = kani::any();
+    let oi_short_q: u128 = kani::any();
+    let account_a_current_q: i128 = kani::any();
+    let account_a_next_q: i128 = kani::any();
+    let account_b_current_q: i128 = kani::any();
+    let account_b_next_q: i128 = kani::any();
+
+    kani::assume(oi_long_q <= MAX_POSITION_ABS_Q);
+    kani::assume(oi_short_q <= MAX_POSITION_ABS_Q);
+    kani::assume(
+        account_a_current_q != i128::MIN && account_a_current_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_a_next_q != i128::MIN && account_a_next_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_b_current_q != i128::MIN && account_b_current_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+    kani::assume(
+        account_b_next_q != i128::MIN && account_b_next_q.unsigned_abs() <= MAX_POSITION_ABS_Q,
+    );
+
+    let on_side_long = |q: i128| if q > 0 { q as u128 } else { 0u128 };
+    let on_side_short = |q: i128| if q < 0 { q.unsigned_abs() } else { 0u128 };
+
+    let expected_long_reduction = on_side_long(account_a_current_q)
+        .saturating_sub(on_side_long(account_a_next_q))
+        + on_side_long(account_b_current_q).saturating_sub(on_side_long(account_b_next_q));
+    let expected_short_reduction = on_side_short(account_a_current_q)
+        .saturating_sub(on_side_short(account_a_next_q))
+        + on_side_short(account_b_current_q).saturating_sub(on_side_short(account_b_next_q));
+
+    let expected_ok = expected_long_reduction <= oi_long_q && expected_short_reduction <= oi_short_q;
+
+    let result = kani_trade_preexisting_oi_reduction_gate(
+        oi_long_q,
+        oi_short_q,
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
+    );
+
+    kani::cover!(
+        expected_ok && expected_long_reduction > 0,
+        "gate admits a trade that only spends already-existing long OI"
+    );
+    kani::cover!(
+        expected_ok && expected_short_reduction > 0,
+        "gate admits a trade that only spends already-existing short OI"
+    );
+    kani::cover!(
+        !expected_ok && expected_long_reduction > oi_long_q,
+        "gate rejects long-side reduction that exceeds the preexisting ledger"
+    );
+    kani::cover!(
+        !expected_ok && expected_short_reduction > oi_short_q,
+        "gate rejects short-side reduction that exceeds the preexisting ledger"
+    );
+    // The exact same-trade OI-masking exploit shape: account A flips sign
+    // (adds fresh same-call long exposure while shedding all of its
+    // preexisting short exposure) in the same call that account B purely
+    // reduces its preexisting long exposure -- account B's reduction must be
+    // funded strictly from the PRE-trade oi_long_q ledger, never from
+    // account A's same-call same-trade addition.
+    kani::cover!(
+        !expected_ok
+            && account_a_current_q < 0
+            && account_a_next_q > 0
+            && account_b_current_q > 0
+            && account_b_next_q > 0
+            && account_b_next_q < account_b_current_q,
+        "gate rejects the same-call flip-and-crossed-reduction masking shape"
+    );
+
+    assert_eq!(
+        result.is_ok(),
+        expected_ok,
+        "gate admission must match preexisting-OI-only funding"
+    );
+    if let Ok((long_reduction_q, short_reduction_q)) = result {
+        assert_eq!(long_reduction_q, expected_long_reduction);
+        assert_eq!(short_reduction_q, expected_short_reduction);
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -3706,6 +3853,129 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
         uncovered && close_q < leg_abs_q
     );
     assert!(!covered_loss_with_other_risk);
+}
+
+// FIX E3 (upstream #92 / b97e1746): proves the "min-fee chunking" exploit is
+// closed -- a partial liquidation chunk whose proportional fee falls below
+// the configured absolute floor must be REJECTED (NonProgress), not silently
+// inflated up to the floor (which is what let a caller pick a tiny close_q
+// to under-pay the liquidation fee).
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_fee_rejects_subminimum_partial_chunks() {
+    let raw_fee_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
+    let cap_extra: u16 = kani::any();
+    kani::assume(min_liquidation_abs_raw > 0);
+    let raw_fee = raw_fee_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
+    let liquidation_fee_cap = min_liquidation_abs + cap_extra as u128;
+    kani::assume(raw_fee < min_liquidation_abs);
+    let result =
+        kani_liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, false);
+    kani::cover!(
+        raw_fee > 0 && cap_extra > 0,
+        "subminimum partial liquidation proof covers positive proportional fee and nontrivial cap"
+    );
+    assert_eq!(result, Err(V16Error::NonProgress));
+}
+
+// Addendum proof (upstream b97e1746, ported verbatim per E3 review addendum):
+// the binary-search selector returns a value in [1, old_abs_q], and when it
+// selects a partial close (< old_abs_q) that close is a *locally minimal*
+// healthy close bounded by partial_hi -- one atom less is unhealthy.
+#[kani::proof]
+#[kani::unwind(10)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
+    let equity_raw: u8 = kani::any();
+    let position_q = 1_000u128;
+    let maintenance = (position_q / 10).max(80);
+    let equity = equity_raw as u128;
+    kani::assume(equity > 0 && equity < maintenance);
+    let mut config = V16Config::public_user_fund(1, 0, 1);
+    config.maintenance_margin_bps = 1_000;
+    config.initial_margin_bps = 1_000;
+    config.min_nonzero_mm_req = 80;
+    config.min_nonzero_im_req = 81;
+    config.liquidation_fee_bps = 800;
+    config.liquidation_fee_cap = 1_000;
+    config.max_price_move_bps_per_slot = 1;
+    let cert = HealthCertV16 {
+        certified_equity: equity as i128,
+        certified_maintenance_req: maintenance,
+        certified_liq_deficit: maintenance - equity,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side: SideV16::Long,
+        basis_pos_q: position_q as i128,
+        ..PortfolioLegV16::EMPTY
+    };
+    let price = POS_SCALE as u64;
+    let selected = kani_liquidation_engine_close_request_q(
+        config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps,
+    )
+    .unwrap();
+    let partial_hi = kani_liquidation_partial_search_hi(config, position_q, price).unwrap();
+    assert!((1..=position_q).contains(&selected));
+    if selected < position_q {
+        assert!(selected <= partial_hi);
+        assert!(kani_liquidation_projected_healthy_after_close(
+            config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps, selected,
+        )
+        .unwrap());
+        if selected > 1 {
+            assert!(!kani_liquidation_projected_healthy_after_close(
+                config,
+                cert,
+                equity,
+                0,
+                leg,
+                price,
+                price,
+                config.liquidation_fee_bps,
+                selected - 1,
+            )
+            .unwrap());
+        }
+    } else {
+        assert!(
+            partial_hi == 0
+                || !kani_liquidation_projected_healthy_after_close(
+                    config, cert, equity, 0, leg, price, price, config.liquidation_fee_bps,
+                    partial_hi,
+                )
+                .unwrap()
+        );
+    }
+}
+
+// Companion to the proof above: a full-position close is exempt from the
+// sub-minimum rejection (dust closes must still be able to progress) and
+// instead has its fee clamped up to the floor, exactly as before the fix.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_fee_allows_subminimum_full_close() {
+    let raw_fee_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
+    let cap_extra: u16 = kani::any();
+    kani::assume(min_liquidation_abs_raw > 0);
+    let raw_fee = raw_fee_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
+    let liquidation_fee_cap = min_liquidation_abs + cap_extra as u128;
+    kani::assume(raw_fee < min_liquidation_abs);
+    let result =
+        kani_liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, true);
+    kani::cover!(
+        raw_fee > 0 && cap_extra > 0,
+        "subminimum full-close liquidation proof covers positive proportional fee and nontrivial cap"
+    );
+    assert_eq!(result, Ok(min_liquidation_abs));
 }
 
 #[kani::proof]
@@ -8471,6 +8741,12 @@ fn proof_v16_new_unfunded_domain_cannot_consume_shared_insurance() {
 fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     let insurance: u128 = kani::any();
     let budgeted: u128 = kani::any();
+    // Protocol-fee RESERVE amendment (~/v17/DECISIONS-LEDGER.md): the
+    // wrapper-supplied floor (e.g. `protocol_fee_accrued_atoms -
+    // protocol_fee_withdrawn_atoms`) that this credit must never dip
+    // `next_insurance` below, on top of `budgeted`. `additional_reserved ==
+    // 0` recovers the pre-amendment behavior exactly.
+    let additional_reserved: u128 = kani::any();
     let c_tot: u128 = kani::any();
     let capital: u128 = kani::any();
     let amount: u128 = kani::any();
@@ -8478,12 +8754,18 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     kani::assume(c_tot <= u128::MAX - insurance);
 
     let result = MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
-        insurance, budgeted, c_tot, capital, amount,
+        insurance,
+        budgeted,
+        additional_reserved,
+        c_tot,
+        capital,
+        amount,
     );
     let next_c_tot_expected = c_tot.checked_add(amount);
     let next_capital_expected = capital.checked_add(amount);
+    let reserved_floor = budgeted.saturating_add(additional_reserved);
     let expected_ok = amount <= insurance
-        && budgeted <= insurance - amount
+        && reserved_floor <= insurance - amount
         && next_c_tot_expected.is_some()
         && next_capital_expected.is_some();
 
@@ -8499,12 +8781,29 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         amount > 0 && !expected_ok && budgeted == insurance,
         "credit-account-from-insurance delta covers rejecting fully budgeted insurance"
     );
+    kani::cover!(
+        amount > 0 && additional_reserved > 0 && expected_ok,
+        "credit-account-from-insurance delta covers a nonzero protocol reservation that still leaves free surplus"
+    );
+    kani::cover!(
+        amount > 0
+            && amount <= insurance
+            && additional_reserved > 0
+            && budgeted <= insurance - amount
+            && !expected_ok,
+        "credit-account-from-insurance delta covers the reserve blocking a draw the pre-amendment (budgeted-only) check would have allowed"
+    );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((next_insurance, next_c_tot, next_capital)) = result {
         assert_eq!(next_insurance, insurance - amount);
         assert_eq!(next_c_tot, next_c_tot_expected.unwrap());
         assert_eq!(next_capital, next_capital_expected.unwrap());
         assert!(budgeted <= next_insurance);
+        assert!(
+            additional_reserved <= next_insurance,
+            "the reserve amendment's core guarantee: a crank-reward-style credit can never dip insurance below the caller-declared reservation"
+        );
+        assert!(reserved_floor <= next_insurance);
         assert_eq!(next_insurance - budgeted, insurance - budgeted - amount);
         assert_eq!(
             next_insurance.checked_add(next_c_tot).unwrap(),
@@ -8513,7 +8812,7 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
         );
     } else if amount > insurance {
         assert_eq!(result, Err(V16Error::CounterUnderflow));
-    } else if budgeted > insurance - amount {
+    } else if reserved_floor > insurance - amount {
         assert_eq!(result, Err(V16Error::LockActive));
     } else {
         assert_eq!(result, Err(V16Error::ArithmeticOverflow));
@@ -11848,19 +12147,29 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
     let c_tot_raw: u8 = kani::any();
     let capital_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
+    // Protocol-fee RESERVE amendment: a nonzero reservation carved out of the
+    // same unbudgeted-surplus pool, on top of `budget_remaining`, that must
+    // remain untouched by this credit.
+    let reserved_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&amount_raw));
     kani::assume(budget_raw <= 4);
     kani::assume(unbudgeted_raw <= 4);
     kani::assume(c_tot_raw <= 8);
     kani::assume(capital_raw <= 8);
     kani::assume(surplus_raw <= 4);
+    kani::assume(reserved_raw <= 4);
     let amount = amount_raw as u128;
     let budget_remaining = budget_raw as u128;
     let unbudgeted_surplus = unbudgeted_raw as u128;
     let c_tot = c_tot_raw as u128;
     let capital = capital_raw as u128;
     let surplus = surplus_raw as u128;
-    let insurance = budget_remaining + unbudgeted_surplus + amount;
+    let additional_reserved = reserved_raw as u128;
+    // `insurance` is sized so that after the credit, exactly
+    // `budget_remaining + additional_reserved + unbudgeted_surplus` remains --
+    // i.e. `unbudgeted_surplus` is the truly-free residual left over even
+    // after both the domain-budget floor AND the protocol reservation.
+    let insurance = budget_remaining + additional_reserved + unbudgeted_surplus + amount;
     let vault = c_tot + insurance + surplus;
     let senior_before = c_tot + insurance;
     let residual_before = vault - senior_before;
@@ -11869,11 +12178,26 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
         MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
             insurance,
             budget_remaining,
+            additional_reserved,
             c_tot,
             capital,
             amount,
         )
         .unwrap();
+
+    kani::cover!(
+        additional_reserved > 0,
+        "value-neutral credit covers a nonzero protocol reservation"
+    );
+    assert!(
+        next_insurance >= budget_remaining + additional_reserved,
+        "reserve amendment: credit never dips insurance below budget + protocol reservation"
+    );
+    assert_eq!(
+        next_insurance - (budget_remaining + additional_reserved),
+        unbudgeted_surplus,
+        "residual free surplus after reserve is exactly conserved"
+    );
 
     let mut flow = TokenValueFlowProofV16::empty(vault, vault);
     flow.debit(TokenValueClassV16::InsuranceCapital, amount)
@@ -12182,4 +12506,471 @@ fn proof_v16_public_backing_fee_charges_only_selected_domain() {
         c_tot_before + insurance_before + earnings_before
     );
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-fee design §1.5: withdraw_insurance_surplus_not_atomic.
+// ---------------------------------------------------------------------------
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_insurance_surplus_never_dips_below_budget_remaining_total() {
+    let vault: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let source_reserved: u128 = kani::any();
+    let budget_remaining_total: u128 = kani::any();
+    let amount: u128 = kani::any();
+    // Genuine precondition, not vacuity-inducing: mirrors the real
+    // production invariant enforced by `validate_header_aggregate_totals`
+    // (v16.rs `validate_shape` -> per-term bound), which checks EACH term
+    // individually against `header.insurance`, not their sum (the N2
+    // finding). Both `source_reserved` and `budget_remaining_total` can
+    // still each range over the *full* `0..=insurance` interval
+    // independently (including both == insurance simultaneously), so the
+    // adversarial "reservations exceed available surplus" case is still
+    // fully explored below.
+    kani::assume(source_reserved <= insurance);
+    kani::assume(budget_remaining_total <= insurance);
+
+    let available_surplus = insurance
+        .saturating_sub(source_reserved)
+        .saturating_sub(budget_remaining_total);
+    let expected_ok = amount <= available_surplus && amount <= vault;
+
+    kani::cover!(
+        expected_ok && amount > 0,
+        "surplus withdraw covers a nontrivial success"
+    );
+    kani::cover!(
+        amount > available_surplus && amount <= vault,
+        "surplus withdraw covers rejection by insufficient unbudgeted surplus"
+    );
+    kani::cover!(
+        amount <= available_surplus && amount > vault,
+        "surplus withdraw covers rejection by insufficient vault liquidity"
+    );
+    kani::cover!(
+        source_reserved.saturating_add(budget_remaining_total) > insurance,
+        "surplus withdraw covers the reservations-exceed-insurance saturating case"
+    );
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_withdraw_insurance_surplus_delta(
+        vault,
+        insurance,
+        source_reserved,
+        budget_remaining_total,
+        amount,
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_vault, next_insurance)) = result {
+        assert_eq!(next_vault, vault - amount);
+        assert_eq!(next_insurance, insurance - amount);
+        // No-theft-of-domain-claim obligation: this withdrawal can never
+        // dip insurance below what's already earmarked for a domain budget
+        // or a source-credit reservation.
+        assert!(next_insurance >= budget_remaining_total);
+        assert!(next_insurance >= source_reserved);
+    } else {
+        assert!(amount > available_surplus || amount > vault);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_insurance_surplus_conserves_vault_insurance_lockstep() {
+    let vault_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let vault = vault_raw as u128;
+    let insurance = insurance_raw as u128;
+    let amount = amount_raw as u128;
+    // Genuine precondition: the vault must actually back the insurance
+    // ledger it's paired with, matching the real solvency invariant
+    // (`c_tot + insurance <= vault`, simplified here to `insurance <=
+    // vault` since c_tot is irrelevant to this primitive and is held at 0
+    // in this fixture) -- not narrowing the amount/surplus space at all.
+    kani::assume(insurance <= vault);
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(vault);
+    header.insurance = V16PodU128::new(insurance);
+    // Leave domain budgets / source reservations at their fixture default
+    // (0) so the full `insurance` amount is unbudgeted surplus -- this
+    // isolates the primitive's vault<->insurance lockstep property from the
+    // budget-bound rejection already covered by the sibling harness above.
+    let c_tot_before = header.c_tot;
+    let backing_before = header.backing_provider_earnings_total;
+    let domain_long_before = markets[0].engine.insurance_domain_budget_long;
+    let domain_short_before = markets[0].engine.insurance_domain_budget_short;
+    let source_reserved_before = header.source_insurance_credit_reserved_total_atoms;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let insurance_before = market.header.insurance.get();
+
+    kani::cover!(amount > 0 && amount <= insurance, "nontrivial surplus withdraw succeeds");
+    kani::cover!(amount > insurance, "surplus withdraw rejects overdraw");
+
+    let result = market.withdraw_insurance_surplus_not_atomic(amount);
+
+    if amount <= insurance {
+        assert!(result.is_ok());
+        assert_eq!(vault_before - market.header.vault.get(), amount);
+        assert_eq!(insurance_before - market.header.insurance.get(), amount);
+        assert_eq!(
+            vault_before - market.header.vault.get(),
+            insurance_before - market.header.insurance.get()
+        );
+        // No side effects outside vault/insurance: c_tot, domain budgets,
+        // backing earnings, and the source-reservation total are all
+        // byte-identical.
+        assert_eq!(market.header.c_tot, c_tot_before);
+        assert_eq!(
+            market.header.backing_provider_earnings_total,
+            backing_before
+        );
+        assert_eq!(
+            market.markets[0].engine.insurance_domain_budget_long,
+            domain_long_before
+        );
+        assert_eq!(
+            market.markets[0].engine.insurance_domain_budget_short,
+            domain_short_before
+        );
+        assert_eq!(
+            market.header.source_insurance_credit_reserved_total_atoms,
+            source_reserved_before
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.insurance.get(), insurance_before);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-fee design §1A + N1: taker-only trade fee charge.
+// ---------------------------------------------------------------------------
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_taker_only_charges_exactly_one_side() {
+    let taker_is_long_account: bool = kani::any();
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let long_pnl_neg: bool = kani::any();
+    let short_pnl_neg: bool = kani::any();
+    let fee_raw: u8 = kani::any();
+
+    let long_capital = long_capital_raw as u128;
+    let short_capital = short_capital_raw as u128;
+    let fee = fee_raw as u128;
+
+    let (mut header, mut markets, mut long_header, mut short_header) = two_account_view_fixture();
+    long_header.capital = V16PodU128::new(long_capital);
+    short_header.capital = V16PodU128::new(short_capital);
+    // pnl sign is the only thing the waiver reads; magnitude is irrelevant,
+    // so -1 is a fully general representative of "negative" here (no
+    // narrowing of the adversarial space -- charge_account_fee_current_not_atomic
+    // only ever tests `pnl.get() < 0`, never a magnitude).
+    long_header.pnl = V16PodI128::new(if long_pnl_neg { -1 } else { 0 });
+    short_header.pnl = V16PodI128::new(if short_pnl_neg { -1 } else { 0 });
+    // Genuine precondition, not narrowing amount/capital space: c_tot/vault
+    // must be large enough to back both accounts' capital simultaneously
+    // (the real invariant), so the internal `checked_sub`/`checked_add`
+    // calls inside `charge_account_fee_current_not_atomic` cannot spuriously
+    // overflow/underflow for reasons unrelated to the taker-only logic
+    // under proof.
+    header.c_tot = V16PodU128::new(long_capital + short_capital);
+    header.vault = V16PodU128::new(long_capital + short_capital);
+
+    let long_capital_before = long_header.capital.get();
+    let short_capital_before = short_header.capital.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    let (fee_a, fee_b) = market
+        .kani_charge_trade_fee_taker_only_not_atomic(
+            &mut long,
+            &mut short,
+            fee,
+            taker_is_long_account,
+        )
+        .unwrap();
+
+    kani::cover!(fee_a > 0 && fee_b == 0, "taker-is-long branch collects a nonzero fee");
+    kani::cover!(fee_b > 0 && fee_a == 0, "taker-is-short branch (or its N1 fallback) collects a nonzero fee");
+
+    // "Insolvent" for a side means `charge_account_fee_current_not_atomic`
+    // hands back 0 for a genuinely nonzero fee on that side, for either of
+    // its two structurally distinct reasons: the pnl<0 waiver, or capital
+    // == 0 (`fee.min(capital) == 0` when capital is 0, independent of pnl
+    // sign). Both reasons must feed the SAME "insolvent" predicate for the
+    // no-evasion obligation below, because both are the ways
+    // `charge_trade_fee_taker_only_not_atomic`'s widened trigger
+    // (`taker_fee == 0 && fee != 0`, no pnl qualifier -- fix, security
+    // review 2026-07-15, MEDIUM) can see `taker_fee == 0`.
+    let taker_capital = if taker_is_long_account { long_capital } else { short_capital };
+    let maker_capital = if taker_is_long_account { short_capital } else { long_capital };
+    let taker_pnl_neg = if taker_is_long_account { long_pnl_neg } else { short_pnl_neg };
+    let maker_pnl_neg = if taker_is_long_account { short_pnl_neg } else { long_pnl_neg };
+    let taker_insolvent = taker_pnl_neg || taker_capital == 0;
+    let maker_insolvent = maker_pnl_neg || maker_capital == 0;
+
+    kani::cover!(
+        fee_a == 0 && fee_b == 0 && fee > 0 && taker_insolvent && maker_insolvent,
+        "fee-bearing fill where BOTH sides are insolvent (pnl<0 OR capital==0, independently \
+         per side) -- post-fix, this is the ONLY state in which the fee is legitimately \
+         uncollected (documented, not a theft/evasion bug)"
+    );
+    kani::cover!(
+        long_pnl_neg && short_pnl_neg && fee > 0,
+        "both taker and maker are pnl<0 simultaneously -- both genuinely waived, not an evasion path"
+    );
+    kani::cover!(
+        taker_is_long_account && long_pnl_neg && !short_pnl_neg && short_capital > 0 && fee > 0 && fee_b > 0,
+        "N1 fallback fires: long taker waived by pnl<0, solvent short maker charged instead"
+    );
+    kani::cover!(
+        !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0 && fee > 0 && fee_a > 0,
+        "N1 fallback fires: short taker waived by pnl<0, solvent long maker charged instead"
+    );
+    // Fix regression covers (2026-07-15, MEDIUM): the taker is drawn to
+    // capital == 0 while NOT underwater (pnl >= 0) -- e.g. an earlier leg
+    // of a multi-leg batch already exhausted it. Pre-fix, the pnl<0-only
+    // trigger meant this state collected fee_a == fee_b == 0 (evasion).
+    // Post-fix the fallback must fire and charge the solvent maker.
+    kani::cover!(
+        taker_is_long_account && !long_pnl_neg && long_capital == 0 && short_capital > 0 && !short_pnl_neg && fee > 0 && fee_b > 0,
+        "fix: N1 fallback fires on capital-exhaustion alone (long taker, pnl>=0, capital==0) -- solvent short maker charged"
+    );
+    kani::cover!(
+        !taker_is_long_account && !short_pnl_neg && short_capital == 0 && long_capital > 0 && !long_pnl_neg && fee > 0 && fee_a > 0,
+        "fix: N1 fallback fires on capital-exhaustion alone (short taker, pnl>=0, capital==0) -- solvent long maker charged"
+    );
+
+    // Mutual exclusivity: taker-only charging never collects from both
+    // sides on the same fill (this is the formal "taker-only" statement).
+    assert!(fee_a == 0 || fee_b == 0, "both sides charged simultaneously -- taker-only violated");
+
+    // N1 no-evasion obligation (WIDENED 2026-07-15 alongside the fix): a
+    // fee-bearing fill with at least one reachable solvent payer -- taker OR
+    // maker, "solvent" meaning NOT insolvent by EITHER reason above -- must
+    // collect something nonzero. Before the fix this block only guarded
+    // `taker_capital > 0`, leaving the `taker_capital == 0 && !taker_pnl_neg`
+    // cell of the space entirely unconstrained -- exactly the gap the
+    // evasion exploited, and exactly why the old proof passed against the
+    // vulnerable code. `taker_insolvent`/`maker_insolvent` now fold BOTH
+    // waiver reasons (pnl<0 OR capital==0) into one predicate so that gap
+    // cannot reopen silently.
+    if fee > 0 {
+        if !taker_insolvent {
+            assert!(fee_a > 0 || fee_b > 0, "solvent taker (pnl>=0, capital>0) must be charged");
+        } else if !maker_insolvent {
+            assert!(
+                fee_a > 0 || fee_b > 0,
+                "N1: insolvent taker (pnl<0 OR capital==0) must fall back to a solvent maker"
+            );
+        }
+        // else: both insolvent -- fee legitimately uncollected (covered above).
+    }
+
+    // Whichever side receives a zero charge is byte-identical in capital
+    // before/after (the "maker balance unchanged by the fee" property).
+    if fee_a == 0 {
+        assert_eq!(long.header.capital.get(), long_capital_before);
+    }
+    if fee_b == 0 {
+        assert_eq!(short.header.capital.get(), short_capital_before);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_taker_only_conserves_notional_unaffected() {
+    let taker_is_long_account: bool = kani::any();
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let fee_raw: u8 = kani::any();
+    // Blocker #4 fix (VERIFICATION-RESULTS.md item 4): without these, the N1
+    // maker-fallback arm inside `charge_trade_fee_taker_only_not_atomic`
+    // (fires when the taker's own charge attempt returns 0 *because*
+    // `pnl < 0`, not because `fee == 0`) is structurally unreachable in this
+    // harness -- confirmed by mutation, a pnl-corrupting mutation inside the
+    // fallback arm went uncaught (0/3249 checks failed). Mirrors the nondet
+    // pnl bools already used by the sibling harness
+    // `proof_v16_taker_only_charges_exactly_one_side` -- sign is the only
+    // thing the waiver reads, so `-1` is a fully general representative of
+    // "negative" (no narrowing of the adversarial space).
+    let long_pnl_neg: bool = kani::any();
+    let short_pnl_neg: bool = kani::any();
+
+    let long_capital = long_capital_raw as u128;
+    let short_capital = short_capital_raw as u128;
+    let fee = fee_raw as u128;
+
+    let (mut header, mut markets, mut long_header, mut short_header) = two_account_view_fixture();
+    long_header.capital = V16PodU128::new(long_capital);
+    short_header.capital = V16PodU128::new(short_capital);
+    long_header.pnl = V16PodI128::new(if long_pnl_neg { -1 } else { 0 });
+    short_header.pnl = V16PodI128::new(if short_pnl_neg { -1 } else { 0 });
+    header.c_tot = V16PodU128::new(long_capital + short_capital);
+    header.vault = V16PodU128::new(long_capital + short_capital);
+
+    let long_legs_before = long_header.legs;
+    let short_legs_before = short_header.legs;
+    let long_bitmap_before = long_header.active_bitmap;
+    let short_bitmap_before = short_header.active_bitmap;
+    let long_pnl_before = long_header.pnl;
+    let short_pnl_before = short_header.pnl;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    kani::cover!(fee > 0 && taker_is_long_account, "nontrivial fee, long taker");
+    kani::cover!(fee > 0 && !taker_is_long_account, "nontrivial fee, short taker");
+    kani::cover!(
+        fee > 0 && taker_is_long_account && long_pnl_neg && !short_pnl_neg && short_capital > 0,
+        "N1 fallback branch reachable: long taker pnl<0-waived, solvent short maker falls back"
+    );
+    kani::cover!(
+        fee > 0 && !taker_is_long_account && short_pnl_neg && !long_pnl_neg && long_capital > 0,
+        "N1 fallback branch reachable: short taker pnl<0-waived, solvent long maker falls back"
+    );
+    // Fix regression covers (2026-07-15, MEDIUM): the capital-exhaustion
+    // fallback arm (taker pnl >= 0 but capital == 0) is reachable through
+    // this harness too, and -- the actual property this harness proves --
+    // still leaves legs/active_bitmap/pnl on both accounts untouched.
+    kani::cover!(
+        fee > 0 && taker_is_long_account && !long_pnl_neg && long_capital == 0 && short_capital > 0 && !short_pnl_neg,
+        "fix: N1 fallback branch reachable via capital-exhaustion alone (long taker, pnl>=0, capital==0)"
+    );
+    kani::cover!(
+        fee > 0 && !taker_is_long_account && !short_pnl_neg && short_capital == 0 && long_capital > 0 && !long_pnl_neg,
+        "fix: N1 fallback branch reachable via capital-exhaustion alone (short taker, pnl>=0, capital==0)"
+    );
+
+    let _ = market
+        .kani_charge_trade_fee_taker_only_not_atomic(
+            &mut long,
+            &mut short,
+            fee,
+            taker_is_long_account,
+        )
+        .unwrap();
+
+    // The fee-charge decision (`taker_is_long_account`) only ever gates
+    // which side's *capital* moves -- including along the N1 maker-fallback
+    // arm, now exercised above. It structurally cannot touch either
+    // account's position legs, active-bitmap, or pnl: the position-delta
+    // application (`apply_current_position_delta_with_lookup`) is a
+    // wholly separate call in `apply_trade_after_refresh_not_atomic`,
+    // downstream of the fee charge, that never receives
+    // `taker_is_long_account`. This guards against a future refactor
+    // accidentally coupling fee-side selection to position-side selection.
+    assert_eq!(long.header.legs, long_legs_before);
+    assert_eq!(short.header.legs, short_legs_before);
+    assert_eq!(long.header.active_bitmap, long_bitmap_before);
+    assert_eq!(short.header.active_bitmap, short_bitmap_before);
+    assert_eq!(long.header.pnl, long_pnl_before);
+    assert_eq!(short.header.pnl, short_pnl_before);
+}
+
+// E2 (upstream engine #108, fixes #97): the persisted risk-change gate must
+// admit a risk-increasing trade iff the asset lifecycle is Active AND both
+// side modes are Normal, and must admit every risk-*reducing* trade
+// unconditionally regardless of lifecycle/side-mode. Exhaustive over the
+// full symbolic (lifecycle x mode_long x mode_short x risk_increasing)
+// space via bounded integer selectors, following this file's established
+// pattern for symbolic enum construction (see
+// proof_v16_public_finalize_side_reset_success_is_value_neutral above).
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes() {
+    let lifecycle_sel: u8 = kani::any();
+    let mode_long_sel: u8 = kani::any();
+    let mode_short_sel: u8 = kani::any();
+    let risk_increasing: bool = kani::any();
+    kani::assume(lifecycle_sel <= 5);
+    kani::assume(mode_long_sel <= 2);
+    kani::assume(mode_short_sel <= 2);
+
+    let lifecycle = match lifecycle_sel {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let mode_long = match mode_long_sel {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let mode_short = match mode_short_sel {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    asset.mode_long = mode_long;
+    asset.mode_short = mode_short;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.kani_require_asset_risk_change_allowed(0, risk_increasing);
+
+    let expected_ok = !risk_increasing
+        || (lifecycle == AssetLifecycleV16::Active
+            && mode_long == SideModeV16::Normal
+            && mode_short == SideModeV16::Normal);
+
+    // Branch-reachability covers -- proves the harness genuinely walks every
+    // arm of the spec rather than being vacuously satisfied by a narrow
+    // symbolic range.
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_long == SideModeV16::Normal
+            && mode_short == SideModeV16::Normal,
+        "risk-increasing trade admitted: Active lifecycle, both sides Normal"
+    );
+    kani::cover!(
+        !risk_increasing,
+        "risk-reducing trade admitted regardless of lifecycle/side-mode"
+    );
+    kani::cover!(
+        risk_increasing && lifecycle != AssetLifecycleV16::Active,
+        "risk-increasing trade blocked by non-Active asset lifecycle"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_long != SideModeV16::Normal,
+        "risk-increasing trade blocked by long-side recovery mode alone"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && mode_short != SideModeV16::Normal,
+        "risk-increasing trade blocked by short-side recovery mode alone"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if !expected_ok {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
 }

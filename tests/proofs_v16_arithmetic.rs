@@ -2,6 +2,7 @@
 
 use percolator::v16::{
     kani_adjust_u128, kani_checked_fee_bps, kani_risk_notional_ceil, kani_scaled_adl_delta_fast,
+    kani_trade_fee_notional_ceil, kani_trade_notional_floor,
 };
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
@@ -313,4 +314,47 @@ fn proof_v16_risk_notional_ceil_unaligned_ceil_is_correct() {
     );
 
     assert_eq!(got, want);
+}
+
+// E4 (upstream 8f25aa5d): the fee-notional helper must strictly DOMINATE the
+// floor notional used for margin/PnL bookkeeping -- in particular it must be
+// STRICTLY GREATER (not merely >=) whenever the floor division has a nonzero
+// remainder, which is exactly the sub-atom-fee bug class (floor==0 while a
+// fee should still be charged). A mutant that aliases `trade_fee_notional_ceil`
+// back to `trade_notional_floor` (the pre-fix bug) satisfies `>=` trivially but
+// fails the strict inequality on the covered unaligned branch below, so this
+// harness is non-vacuous against that exact regression, not just a `>=` check
+// that floor-only code would also satisfy.
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned() {
+    let q_raw: u16 = kani::any();
+    let price_raw: u16 = kani::any();
+    kani::assume((1..=4000).contains(&q_raw));
+    kani::assume((1..=4000).contains(&price_raw));
+    let size_q = q_raw as u128;
+    let price = price_raw as u64;
+
+    let floor = kani_trade_notional_floor(size_q, price).unwrap();
+    let ceil = kani_trade_fee_notional_ceil(size_q, price).unwrap();
+    let product = size_q * price as u128;
+
+    kani::cover!(
+        product % POS_SCALE != 0,
+        "unaligned product: ceil strictly exceeds floor (the sub-atom-fee branch)"
+    );
+    kani::cover!(
+        product % POS_SCALE == 0,
+        "aligned product: ceil equals floor (no spurious fee on exact fills)"
+    );
+
+    if product % POS_SCALE == 0 {
+        assert_eq!(ceil, floor, "aligned fills must not be over-charged");
+    } else {
+        assert_eq!(ceil, floor + 1, "unaligned fills must round the fee up by exactly one atom");
+    }
+    // The sub-atom-fee bug in one sentence: floor can be 0 while size_q,
+    // price are both nonzero (product < POS_SCALE); ceil must not be.
+    assert!(ceil >= 1, "ceil-notional is never zero for a nonzero fill");
 }

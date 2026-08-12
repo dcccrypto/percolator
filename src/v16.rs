@@ -211,6 +211,12 @@ pub enum V16Error {
     RecoveryRequired,
     CounterOverflow,
     CounterUnderflow,
+    /// Equity is below the initial-margin requirement for this action.
+    /// Distinct from `InvalidConfig` (configuration error) so callers can
+    /// surface a user-readable "insufficient margin" message rather than a
+    /// generic config-error bucket.  The wrapper maps this to
+    /// `PercolatorError::EngineInsufficientInitialMargin` (Custom 49).
+    InsufficientInitialMargin,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -340,6 +346,231 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
         close_q,
         leg_abs_q,
     )
+}
+
+// FIX E3 (upstream #92 / b97e1746): liquidation size + fee are now fully
+// engine-selected. The caller (wrapper/keeper) supplies only `asset_index`;
+// the engine binary-searches the minimal partial close that restores
+// maintenance health (or closes the leg fully when no such partial exists),
+// and always derives the fee rate from CONFIG, never from the caller.
+fn liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    if abs_pos_q == 0 {
+        return Ok(0);
+    }
+    if abs_pos_q > MAX_POSITION_ABS_Q || price > MAX_ORACLE_PRICE {
+        return Err(V16Error::InvalidConfig);
+    }
+    let product = abs_pos_q * price as u128;
+    let q = product / POS_SCALE;
+    let r = product % POS_SCALE;
+    q.checked_add(u128::from(r != 0))
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+fn liquidation_leg_maintenance_requirement(
+    config: V16Config,
+    abs_q: u128,
+    side: SideV16,
+    effective_price: u64,
+    raw_target_price: u64,
+) -> V16Result<u128> {
+    if abs_q == 0 {
+        return Ok(0);
+    }
+    if config.maintenance_margin_bps > MAX_MARGIN_BPS {
+        return Err(V16Error::InvalidConfig);
+    }
+    let risk_notional = liquidation_risk_notional_ceil(abs_q, effective_price)?;
+    let adverse_delta =
+        V16Core::target_effective_lag_adverse_delta(side, effective_price, raw_target_price);
+    let target_lag_penalty = liquidation_risk_notional_ceil(abs_q, adverse_delta)?;
+    let base = ((risk_notional * config.maintenance_margin_bps as u128) / MAX_MARGIN_BPS as u128)
+        .max(config.min_nonzero_mm_req);
+    base.checked_add(target_lag_penalty)
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+fn liquidation_projected_health_deficit_from_parts(
+    certified_equity: i128,
+    certified_maintenance_req: u128,
+    old_leg_maintenance: u128,
+    new_leg_maintenance: u128,
+    charged_fee: u128,
+) -> V16Result<u128> {
+    let post_maintenance = certified_maintenance_req
+        .checked_sub(old_leg_maintenance)
+        .and_then(|v| v.checked_add(new_leg_maintenance))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let charged_fee_i128 = i128::try_from(charged_fee).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let post_equity = certified_equity
+        .checked_sub(charged_fee_i128)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if post_equity < 0 {
+        return post_maintenance
+            .checked_add(post_equity.unsigned_abs())
+            .ok_or(V16Error::ArithmeticOverflow);
+    }
+    Ok(post_maintenance.saturating_sub(post_equity as u128))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn liquidation_projected_healthy_after_close(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
+) -> V16Result<bool> {
+    let old_abs_q = leg.basis_pos_q.unsigned_abs();
+    if close_q == 0 || close_q > old_abs_q {
+        return Ok(false);
+    }
+    let old_maintenance = liquidation_leg_maintenance_requirement(
+        config, old_abs_q, leg.side, effective_price, raw_target_price,
+    )?;
+    let new_abs_q = old_abs_q - close_q;
+    let new_maintenance = liquidation_leg_maintenance_requirement(
+        config, new_abs_q, leg.side, effective_price, raw_target_price,
+    )?;
+    let fee_notional = liquidation_risk_notional_ceil(close_q, effective_price)?;
+    let fee = liquidation_fee_for_close(
+        fee_notional, fee_bps, config.min_liquidation_abs, config.liquidation_fee_cap,
+        close_q == old_abs_q,
+    )?;
+    let charged_fee = if pnl >= 0 { fee.min(capital) } else { 0 };
+    Ok(liquidation_projected_health_deficit_from_parts(
+        cert.certified_equity, cert.certified_maintenance_req, old_maintenance, new_maintenance, charged_fee,
+    )? == 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn liquidation_partial_close_is_healthy(
+    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
+    effective_price: u64, raw_target_price: u64, fee_bps: u64, close_q: u128,
+) -> V16Result<bool> {
+    match liquidation_projected_healthy_after_close(
+        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, close_q,
+    ) {
+        // A partial close below the configured absolute fee floor is not an
+        // admissible liquidation chunk. Every other error remains fail-closed.
+        Err(V16Error::NonProgress) => Ok(false),
+        result => result,
+    }
+}
+
+fn min_abs_q_for_risk_notional_at_least(risk_notional: u128, effective_price: u64) -> V16Result<u128> {
+    if risk_notional == 0 {
+        return Ok(0);
+    }
+    if effective_price == 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    let numerator = risk_notional - 1;
+    if let Some(product) = numerator.checked_mul(POS_SCALE) {
+        return (product / effective_price as u128)
+            .checked_add(1)
+            .ok_or(V16Error::ArithmeticOverflow);
+    }
+    U256::from_u128(numerator)
+        .checked_mul(U256::from_u128(POS_SCALE))
+        .and_then(|v| v.checked_div(U256::from_u128(effective_price as u128)))
+        .and_then(|v| v.try_into_u128())
+        .and_then(|v| v.checked_add(1))
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+fn liquidation_partial_search_hi(config: V16Config, old_abs_q: u128, effective_price: u64) -> V16Result<u128> {
+    if config.maintenance_margin_bps == 0 {
+        return Ok(0);
+    }
+    let floor_exit_notional = V16Config::checked_mul_div_ceil_to_u128(
+        config.min_nonzero_mm_req, MAX_MARGIN_BPS as u128, config.maintenance_margin_bps as u128,
+    )?;
+    let floor_exit_q = min_abs_q_for_risk_notional_at_least(floor_exit_notional, effective_price)?;
+    Ok(old_abs_q.saturating_sub(floor_exit_q))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn liquidation_engine_close_request_q(
+    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
+    effective_price: u64, raw_target_price: u64, fee_bps: u64,
+) -> V16Result<u128> {
+    let old_abs_q = leg.basis_pos_q.unsigned_abs();
+    if old_abs_q == 0 {
+        return Err(V16Error::InvalidLeg);
+    }
+    if cert.certified_equity < 0 || pnl < 0 {
+        return Ok(old_abs_q);
+    }
+    if !liquidation_projected_healthy_after_close(
+        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, old_abs_q,
+    )? {
+        return Ok(old_abs_q);
+    }
+    // The absolute maintenance floor makes projected health non-monotone: a
+    // partial close can become healthy, unhealthy again as its fee grows while
+    // maintenance is flat, then healthy on the full-close discontinuity. Search
+    // only the proportional-margin prefix. Crossing into the floor region is a
+    // deterministic dust/full-close policy.
+    let partial_hi = liquidation_partial_search_hi(config, old_abs_q, effective_price)?;
+    if partial_hi == 0
+        || !liquidation_partial_close_is_healthy(
+            config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, partial_hi,
+        )?
+    {
+        return Ok(old_abs_q);
+    }
+    let mut lo = 1u128;
+    let mut hi = partial_hi;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let healthy = liquidation_partial_close_is_healthy(
+            config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, mid,
+        )?;
+        if healthy { hi = mid; } else { lo = mid.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?; }
+    }
+    if liquidation_partial_close_is_healthy(
+        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, lo,
+    )? { Ok(lo) } else { Ok(old_abs_q) }
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_projected_health_deficit_from_parts(
+    certified_equity: i128, certified_maintenance_req: u128, old_leg_maintenance: u128,
+    new_leg_maintenance: u128, charged_fee: u128,
+) -> V16Result<u128> {
+    liquidation_projected_health_deficit_from_parts(
+        certified_equity, certified_maintenance_req, old_leg_maintenance, new_leg_maintenance, charged_fee,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_projected_healthy_after_close(
+    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
+    effective_price: u64, raw_target_price: u64, fee_bps: u64, close_q: u128,
+) -> V16Result<bool> {
+    liquidation_projected_healthy_after_close(
+        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, close_q,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_engine_close_request_q(
+    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
+    effective_price: u64, raw_target_price: u64, fee_bps: u64,
+) -> V16Result<u128> {
+    liquidation_engine_close_request_q(
+        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_partial_search_hi(config: V16Config, old_abs_q: u128, effective_price: u64) -> V16Result<u128> {
+    liquidation_partial_search_hi(config, old_abs_q, effective_price)
 }
 
 fn add_open_interest_for_new_position(
@@ -2887,7 +3118,10 @@ impl<'a> PortfolioV16View<'a> {
             && close_progress.close_id != 0
             && !close_progress.has_irreversible_progress()
             && close_progress.residual_remaining == close_progress.gross_loss_at_close_start;
-        if !close_progress.is_empty() && !inert_canceled_close {
+        if !close_progress.is_empty()
+            && !inert_canceled_close
+            && !close_progress.is_finalized_inert()
+        {
             return Ok(false);
         }
 
@@ -3050,6 +3284,17 @@ impl CloseProgressLedgerV16 {
             || self.explicit_loss_assigned != 0
             || self.quantity_adl_applied_q != 0
             || self.drift_consumed != 0
+    }
+
+    /// A close that finished paying out (finalized, no residual left) but is
+    /// still `active` -- the ledger stays active to preserve close identity /
+    /// history (close_id watermark, progress totals) for audit purposes.
+    /// Economically it is terminal: no obligation remains. Exempt from the
+    /// active-close gates below so it does not strand funds/rent (E6, port
+    /// of upstream engine c8aab338; companion to the canceled-ledger
+    /// exemption above / Finding E).
+    fn is_finalized_inert(self) -> bool {
+        self.active && self.finalized && !self.canceled && self.residual_remaining == 0
     }
 
     pub fn is_empty(self) -> bool {
@@ -3758,8 +4003,6 @@ impl SourceCreditLienAggregateProofV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationRequestV16 {
     pub asset_index: usize,
-    pub close_q: u128,
-    pub fee_bps: u64,
 }
 
 #[repr(C)]
@@ -4947,7 +5190,10 @@ impl MarketGroupV16HeaderAccount {
     /// assert_public_invariants (the runtime-form mirror that did is dropped with runtime-vec; the
     /// candidate validate_public_user_fund is the sole guarantee, identical to grow_* and the fork).
     #[cfg(feature = "fork-facade")]
-    pub fn apply_fee_policy_update_not_atomic(&mut self, update: FeePolicyUpdateV16) -> V16Result<()> {
+    pub fn apply_fee_policy_update_not_atomic(
+        &mut self,
+        update: FeePolicyUpdateV16,
+    ) -> V16Result<()> {
         if decode_market_mode(self.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -5316,9 +5562,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         // re-credits c_tot debits backing first, so the strengthened stack must
         // always be covered. A state violating it is double-promising atoms.
         let senior_with_backing = senior
-            .checked_add(
-                self.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
-            )
+            .checked_add(self.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if senior_with_backing > self.header.vault.get() {
             return Err(V16Error::InvalidConfig);
@@ -7646,12 +7890,94 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    fn withdraw_insurance_surplus_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget_remaining_total: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        let available_surplus = insurance
+            .saturating_sub(source_reserved_atoms)
+            .saturating_sub(budget_remaining_total);
+        if amount > available_surplus || amount > vault {
+            return Err(V16Error::LockActive);
+        }
+        let next_vault = vault
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let next_insurance = insurance
+            .checked_sub(amount)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((next_vault, next_insurance))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_withdraw_insurance_surplus_delta(
+        vault: u128,
+        insurance: u128,
+        source_reserved_atoms: u128,
+        budget_remaining_total: u128,
+        amount: u128,
+    ) -> V16Result<(u128, u128)> {
+        Self::withdraw_insurance_surplus_delta(
+            vault,
+            insurance,
+            source_reserved_atoms,
+            budget_remaining_total,
+            amount,
+        )
+    }
+
+    /// Withdraws external quote out of the market's *unbudgeted* insurance
+    /// surplus — value that was charged into `header.insurance` but never
+    /// credited to any domain's `insurance_domain_budget_*`. Domain budgets
+    /// and source-credit reservations are untouched and cannot be reduced by
+    /// this call. Protocol-agnostic at the engine level: the caller (wrapper)
+    /// is responsible for tracking *who* is entitled to how much of the
+    /// surplus (e.g. an accrued/withdrawn ledger) — this primitive only
+    /// enforces "you cannot withdraw more than the surplus that isn't
+    /// backing any domain or reservation," mirroring
+    /// `withdraw_domain_insurance_not_atomic`'s bound style.
+    pub fn withdraw_insurance_surplus_not_atomic(&mut self, amount: u128) -> V16Result<()> {
+        let vault_before = self.header.vault.get();
+        let (next_vault, next_insurance) = Self::withdraw_insurance_surplus_delta(
+            vault_before,
+            self.header.insurance.get(),
+            self.header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            self.header.insurance_domain_budget_remaining_total.get(),
+            amount,
+        )?;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::insurance_capital_to_external_out(
+            amount,
+            vault_before,
+            self.header.vault.get(),
+        )?
+        .validate()?;
+        self.validate_shape()
+    }
+
     /// Pays an account from unbudgeted insurance surplus, e.g. a crank reward.
     ///
     /// Budgeted domain insurance remains isolated and cannot be consumed by this path.
+    ///
+    /// `additional_reserved` (protocol-fee RESERVE amendment,
+    /// ~/v17/DECISIONS-LEDGER.md) is a caller-supplied floor -- on top of
+    /// `budget_remaining` -- that this credit must never dip `next_insurance`
+    /// below. The engine has no concept of "who" the reservation belongs to
+    /// (that ledger lives in the wrapper's `WrapperConfigV16`, e.g.
+    /// `protocol_fee_accrued_atoms - protocol_fee_withdrawn_atoms`); it only
+    /// enforces that whatever the caller declares reserved cannot be consumed
+    /// by this crank-reward-style credit. Pass `0` to recover the prior
+    /// (pre-reserve) behavior exactly.
     fn credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,
+        additional_reserved: u128,
         c_tot: u128,
         capital: u128,
         amount: u128,
@@ -7659,7 +7985,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let next_insurance = insurance
             .checked_sub(amount)
             .ok_or(V16Error::CounterUnderflow)?;
-        if budget_remaining > next_insurance {
+        let reserved_floor = budget_remaining.saturating_add(additional_reserved);
+        if reserved_floor > next_insurance {
             return Err(V16Error::LockActive);
         }
         let next_c_tot = c_tot
@@ -7675,6 +8002,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,
+        additional_reserved: u128,
         c_tot: u128,
         capital: u128,
         amount: u128,
@@ -7682,16 +8010,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::credit_account_from_insurance_delta(
             insurance,
             budget_remaining,
+            additional_reserved,
             c_tot,
             capital,
             amount,
         )
     }
 
+    /// `additional_reserved` -- see `credit_account_from_insurance_delta` doc
+    /// -- lets the caller (wrapper) carve out atoms (e.g. the protocol's
+    /// accrued-but-unwithdrawn fee claim) that this crank-reward-style credit
+    /// must never touch, on top of the pre-existing domain-budget isolation.
+    /// Pass `0` for pre-reserve-amendment behavior.
     pub fn credit_account_from_insurance_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         amount: u128,
+        additional_reserved: u128,
     ) -> V16Result<()> {
         if amount == 0 {
             return Ok(());
@@ -7700,6 +8035,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (next_insurance, next_c_tot, next_capital) = Self::credit_account_from_insurance_delta(
             self.header.insurance.get(),
             self.header.insurance_domain_budget_remaining_total.get(),
+            additional_reserved,
             self.header.c_tot.get(),
             account.header.capital.get(),
             amount,
@@ -8882,8 +9218,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
-        // PROPORTIONAL (candidate fix): burn only the support-matched face, not the
-        // whole positive face, on an under-supported loss.
+        // PROPORTIONAL: burn only the support-matched face, not the whole positive
+        // face, on an under-supported loss. Burning it all double-charged the account
+        // (accumulated gain destroyed AND the loss still taken from capital).
         if junior_face_burned > old_positive_face {
             return Err(V16Error::ArithmeticOverflow);
         }
@@ -8992,19 +9329,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && decode_market_mode(self.header.mode)? == MarketModeV16::Live)
             || remaining_loss != 0
         {
-            // Burn only the part of the incoming gain that EXCEEDS the account's
-            // outstanding loss. That excess is what would become a NEW positive
-            // claim, and an unbacked new claim is correctly refused.
-            //
-            // The part that merely NETS against the outstanding loss is not a new
-            // claim at all — it is the counterparty's loss being realized against a
-            // debt the account already owes — so it requires no source backing and
-            // must not be burned. Burning it made an underwater account permanently
-            // unrecoverable: `source_credit_state_realizable_support_for_face`
-            // returns 0 whenever `positive_claim_bound_num == 0`, and an underwater
-            // account has no positive claims by definition, so support was
-            // structurally always 0 and the entire recovery was destroyed on every
-            // settlement regardless of how much backing existed.
+            // Burn only the part of the gain EXCEEDING the outstanding loss. The part
+            // that merely NETS against the loss is the counterparty's loss being
+            // realized against a debt already owed, so it needs no source backing.
+            // Burning it made an underwater account permanently unrecoverable.
             junior_face_burned = new_face_support.saturating_sub(old_loss);
         }
         if junior_face_burned > new_face_support {
@@ -9582,6 +9910,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        // FIX-1b: the reserve path (reserve_new_capital_backed_loss_for_source_domain_not_atomic)
+        // can zero the PnL before settle_negative_pnl_from_principal_core_not_atomic sees it,
+        // causing the settle to return early and bypass the try_clear at line 13248.  Call
+        // try_clear here unconditionally so a FeeSweep/Refresh also clears the hlock when all
+        // five health conditions are satisfied.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         self.collect_account_backing_utilization_fees_not_atomic(account)?;
         if decode_bool(account.header.b_stale_state)? {
             return Err(V16Error::BStale);
@@ -10015,8 +10349,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.require_asset_mark_pushable(asset_index)?;
         let mut asset = self.asset_state(asset_index)?;
+        let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
+        let next_oracle_epoch = if target_changed {
+            Some(
+                self.header
+                    .oracle_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            )
+        } else {
+            None
+        };
         asset.raw_oracle_target_price = raw_oracle_target_price;
         self.set_asset_state(asset_index, asset)?;
+        if let Some(next) = next_oracle_epoch {
+            self.header.oracle_epoch = V16PodU64::new(next);
+        }
         self.validate_shape()
     }
 
@@ -10387,12 +10736,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn require_asset_active_for_risk_increase(&self, asset_index: usize) -> V16Result<()> {
-        let asset = self.asset_state(asset_index)?;
-        if asset.lifecycle != AssetLifecycleV16::Active {
-            return Err(V16Error::LockActive);
+    fn require_asset_risk_change_allowed(
+        &self,
+        asset_index: usize,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        if !risk_increasing {
+            return Ok(());
         }
-        Ok(())
+        let asset = self.asset_state(asset_index)?;
+        asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+    }
+
+    #[cfg(kani)]
+    pub fn kani_require_asset_risk_change_allowed(
+        &self,
+        asset_index: usize,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        self.require_asset_risk_change_allowed(asset_index, risk_increasing)
     }
 
     fn validate_configured_asset_index(&self, asset_index: usize) -> V16Result<()> {
@@ -10952,12 +11314,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // accumulator has reached it. `None` preserves toly baseline.
         #[cfg(feature = "fork-facade")]
         if let Some(threshold) = instruction_threshold_bps_opt {
-            if self
-                .header
-                .stress_consumption_bps_e9_since_envelope
-                .get()
-                >= threshold
-            {
+            if self.header.stress_consumption_bps_e9_since_envelope.get() >= threshold {
                 return Ok(HLockLaneV16::HMax);
             }
         }
@@ -11118,6 +11475,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::position_delta_lookup_for_asset(short_account, request.asset_index, short_delta)?;
         let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
             || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let preflight_asset = self.asset_state(request.asset_index)?;
+        kernel_trade_preexisting_oi_reduction_gate(
+            preflight_asset.oi_eff_long_q,
+            preflight_asset.oi_eff_short_q,
+            long_lookup.current_q,
+            long_lookup.next_q,
+            short_lookup.current_q,
+            short_lookup.next_q,
+        )?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let blocked_by_pending_domain_barrier = pending_domain_loss_barrier_blocks_position_change(
             self.position_change_touches_pending_domain_loss_barrier(
@@ -11234,7 +11600,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         validate_basis(basis_pos_q)?;
         let mut asset = self.asset_state(asset_index)?;
-        self.require_asset_active_for_risk_increase(asset_index)?;
+        self.require_asset_risk_change_allowed(asset_index, true)?;
         let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
             SideV16::Long => (
                 asset.a_long,
@@ -11533,7 +11899,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.clear_leg(account, asset_index);
         }
         if current.signum() != new.signum() {
-            self.require_asset_active_for_risk_increase(asset_index)?;
+            self.require_asset_risk_change_allowed(asset_index, true)?;
             self.clear_leg(account, asset_index)?;
             let side = if new > 0 {
                 SideV16::Long
@@ -11543,7 +11909,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.attach_leg(account, asset_index, side, new);
         }
         if new.unsigned_abs() > current.unsigned_abs() {
-            self.require_asset_active_for_risk_increase(asset_index)?;
+            self.require_asset_risk_change_allowed(asset_index, true)?;
         }
         let mut old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
@@ -11617,14 +11983,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if gross_loss == 0 {
             return Ok(());
         }
-        if account.header.close_progress.try_to_runtime()?.active {
+        let current = account.header.close_progress.try_to_runtime()?;
+        if current.active && !current.is_finalized_inert() {
             return Err(V16Error::LockActive);
         }
         let domain = self.insurance_domain_index(asset_index, domain_side)?;
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let current = account.header.close_progress.try_to_runtime()?;
         let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
         let ledger = CloseProgressLedgerV16 {
@@ -12231,12 +12597,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let config = self.header.config.try_to_runtime_shape()?;
-        if request.asset_index >= config.max_market_slots as usize
-            || request.close_q == 0
-            || request.fee_bps > config.liquidation_fee_bps.max(config.max_trading_fee_bps)
-        {
+        if request.asset_index >= config.max_market_slots as usize {
             return Err(V16Error::InvalidConfig);
         }
+        // FIX E3 (upstream #92): fee rate is CONFIG-only, never a caller hint.
+        let fee_bps = config.liquidation_fee_bps;
         self.require_asset_live_reducible(request.asset_index)?;
         self.validate_account_scalar_preflight(&account.as_view())?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
@@ -12260,7 +12625,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
-        let close_q = request.close_q.min(leg.basis_pos_q.unsigned_abs());
+        let asset = self.asset_state(request.asset_index)?;
+        // FIX E3 (upstream #92): liquidation size is engine-selected -- close
+        // just enough to restore maintenance health when a healthy partial
+        // close exists, otherwise close the leg fully. `.min` below is
+        // defense in depth: `liquidation_engine_close_request_q` already
+        // returns a value in `[1, leg.basis_pos_q.unsigned_abs()]`.
+        let close_request_q = liquidation_engine_close_request_q(
+            config,
+            cert,
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            leg,
+            asset.effective_price,
+            asset.raw_oracle_target_price,
+            fee_bps,
+        )?;
+        let close_q = close_request_q.min(leg.basis_pos_q.unsigned_abs());
         let close_i128 = i128::try_from(close_q).map_err(|_| V16Error::ArithmeticOverflow)?;
         let close_delta = match leg.side {
             SideV16::Long => close_i128
@@ -12293,13 +12674,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg.side,
             &account.as_view(),
         )?;
-        let fee_notional = risk_notional_ceil(
-            close_q,
-            self.asset_state(request.asset_index)?.effective_price,
+        let fee_notional = liquidation_risk_notional_ceil(close_q, asset.effective_price)?;
+        let fee = liquidation_fee_for_close(
+            fee_notional,
+            fee_bps,
+            config.min_liquidation_abs,
+            config.liquidation_fee_cap,
+            close_q == leg.basis_pos_q.unsigned_abs(),
         )?;
-        let fee = checked_fee_bps(fee_notional, request.fee_bps)?
-            .max(config.min_liquidation_abs)
-            .min(config.liquidation_fee_cap);
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
@@ -12320,6 +12702,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        // FIX-1: consume_domain_insurance_for_negative_pnl sets hlock=1 at entry (line 7758)
+        // and then zeroes the account's negative PnL via set_account_pnl, which decrements
+        // negative_pnl_account_count.  When insurance covers the full loss, all five
+        // try_clear conditions are met at this point but the hlock was never cleared.
+        // Call try_clear here so a full-insurance liquidation unblocks LP/insurance
+        // withdrawals without requiring a separate FeeSweep transaction.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         let residual = if account.header.pnl.get() < 0 {
             account.header.pnl.get().unsigned_abs()
         } else {
@@ -12444,7 +12833,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let equity = cert.certified_equity;
         if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::InvalidConfig);
+            return Err(V16Error::InsufficientInitialMargin);
         }
         Ok(())
     }
@@ -12602,12 +12991,93 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(cert)
     }
 
+    /// Taker-only trade fee charge (design §1A), with the N1 maker-fallback
+    /// folded in. Only the side that initiated the trade
+    /// (`taker_is_long_account` selects `long_account` vs `short_account`)
+    /// pays `fee`; the passive maker/LP side pays nothing — *unless* the
+    /// taker's own charge attempt returns `0` while `fee != 0` (i.e. the fee
+    /// was genuinely owed but the taker paid nothing), in which case the
+    /// solvent maker is charged `fee.min(maker.capital)` instead.
+    /// `charge_account_fee_current_not_atomic` returns `0` for **two**
+    /// structurally distinct reasons and the fallback fires on *either*:
+    /// the taker's negative-PnL waiver (`pnl < 0`), or the taker's capital
+    /// being exhausted (`fee.min(capital) == 0` while `pnl >= 0`, e.g. an
+    /// earlier leg of a multi-leg batch already drew capital to zero). A
+    /// version of this fallback gated on the pnl<0 waiver alone left the
+    /// capital-exhausted-but-not-underwater case fee-free — closed
+    /// 2026-07-15 (security review, MEDIUM: fee evasion). This does NOT
+    /// strip the pnl<0 guard on the taker's own charge attempt — the guard
+    /// still fires first, exactly as before; only the *consequence* of it
+    /// (or of capital exhaustion) firing changes: fallback to maker instead
+    /// of collecting nothing.
+    ///
+    /// Returns `(fee_a, fee_b)` in the caller's original long/short axis
+    /// (`fee_a` = amount charged to `long_account`, `fee_b` = amount charged
+    /// to `short_account`) — independent of which side was the taker.
+    fn charge_trade_fee_taker_only_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        fee: u128,
+        taker_is_long_account: bool,
+    ) -> V16Result<(u128, u128)> {
+        // Maker-fallback (N1): when the taker's fee resolves to 0 on a
+        // fee-bearing fill, charge the maker instead of losing the fee. The
+        // trigger is `taker_fee == 0 && fee != 0` WITHOUT a `pnl < 0` qualifier
+        // on purpose: charge_account_fee_current_not_atomic returns 0 for TWO
+        // structurally distinct reasons — the pnl<0 waiver AND capital == 0
+        // (fee.min(capital) == 0). Gating the fallback on pnl<0 alone let a
+        // capital-depleted-but-not-underwater taker (e.g. an early batch leg
+        // sized to exhaust capital, so every later leg pays nothing) evade the
+        // fee entirely — protocol/LP/creator/insurance all get 0. Widening to
+        // "taker paid nothing for any reason" closes that revenue leak
+        // (security review 2026-07-15, MEDIUM).
+        if taker_is_long_account {
+            let taker_fee = self.charge_account_fee_current_not_atomic(long_account, fee)?;
+            if taker_fee == 0 && fee != 0 {
+                Ok((
+                    0u128,
+                    self.charge_account_fee_current_not_atomic(short_account, fee)?,
+                ))
+            } else {
+                Ok((taker_fee, 0u128))
+            }
+        } else {
+            let taker_fee = self.charge_account_fee_current_not_atomic(short_account, fee)?;
+            if taker_fee == 0 && fee != 0 {
+                Ok((
+                    self.charge_account_fee_current_not_atomic(long_account, fee)?,
+                    0u128,
+                ))
+            } else {
+                Ok((0u128, taker_fee))
+            }
+        }
+    }
+
+    #[cfg(kani)]
+    pub fn kani_charge_trade_fee_taker_only_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        fee: u128,
+        taker_is_long_account: bool,
+    ) -> V16Result<(u128, u128)> {
+        self.charge_trade_fee_taker_only_not_atomic(
+            long_account,
+            short_account,
+            fee,
+            taker_is_long_account,
+        )
+    }
+
     fn apply_trade_after_refresh_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
         recertify_after_fill: bool,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeApplyOutcomeV16> {
         let (abs_size_q, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
         let trade_preflight = self.validate_trade_position_preflight(
@@ -12616,13 +13086,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             request,
         )?;
         let risk_increasing = trade_preflight.risk_increasing;
-        if risk_increasing {
-            self.require_asset_active_for_risk_increase(request.asset_index)?;
-        }
+        self.require_asset_risk_change_allowed(request.asset_index, risk_increasing)?;
         let notional = trade_notional_floor(abs_size_q, request.exec_price)?;
-        let fee = checked_fee_bps(notional, request.fee_bps)?;
-        let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
-        let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
+        let fee_notional = trade_fee_notional_ceil(abs_size_q, request.exec_price)?;
+        let fee = checked_fee_bps(fee_notional, request.fee_bps)?;
+        let (fee_a, fee_b) = self.charge_trade_fee_taker_only_not_atomic(
+            long_account,
+            short_account,
+            fee,
+            taker_is_long_account,
+        )?;
         self.apply_current_position_delta_with_lookup(
             long_account,
             request.asset_index,
@@ -12760,11 +13233,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeOutcomeV16> {
         let outcome = self.execute_batch_with_fee_loss_stale_scoped_not_atomic(
             long_account,
             short_account,
             core::slice::from_ref(&request),
+            taker_is_long_account,
         )?;
         Ok(TradeOutcomeV16 {
             fee_a: outcome.fee_a,
@@ -12778,6 +13253,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
@@ -12804,6 +13280,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_account,
             short_account,
             requests,
+            taker_is_long_account,
         );
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = restore_loss_stale_active;
@@ -12833,12 +13310,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<TradeOutcomeV16> {
         let outcome = self.fork_execute_batch_with_admit_threshold_not_atomic(
             long_account,
             short_account,
             core::slice::from_ref(&request),
             threshold_bps_opt,
+            taker_is_long_account,
         )?;
         Ok(TradeOutcomeV16 {
             fee_a: outcome.fee_a,
@@ -12856,6 +13335,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
@@ -12878,13 +13358,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
-        let result = self
-            .fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
-                long_account,
-                short_account,
-                requests,
-                threshold_bps_opt,
-            );
+        let result = self.fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            threshold_bps_opt,
+            taker_is_long_account,
+        );
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
@@ -12903,6 +13383,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
         threshold_bps_opt: Option<u128>,
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -12922,16 +13403,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_account_for_position_action_and_refresh_not_atomic(long_account)?;
         self.settle_account_for_position_action_and_refresh_not_atomic(short_account)?;
         // A-1: threshold injected here (key difference from the toly baseline loop)
-        let locked = self.h_lock_lane(
-            Some(&long_account.as_view()),
-            false,
-            threshold_bps_opt,
-        )? == HLockLaneV16::HMax
-            || self.h_lock_lane(
-                Some(&short_account.as_view()),
-                false,
-                threshold_bps_opt,
-            )? == HLockLaneV16::HMax;
+        let locked = self.h_lock_lane(Some(&long_account.as_view()), false, threshold_bps_opt)?
+            == HLockLaneV16::HMax
+            || self.h_lock_lane(Some(&short_account.as_view()), false, threshold_bps_opt)?
+                == HLockLaneV16::HMax;
         let mut outcome = BatchTradeOutcomeV16 {
             fill_count: 0,
             fee_a: 0,
@@ -12949,6 +13424,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 short_account,
                 requests[i],
                 recertify_after_fill,
+                taker_is_long_account,
             )?;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
@@ -12979,6 +13455,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -13027,6 +13504,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 short_account,
                 requests[i],
                 recertify_after_fill,
+                taker_is_long_account,
             )?;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
@@ -13165,6 +13643,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         if residual == 0 {
             account.header.health_cert.valid = 0;
+            // Insurance fully covered the loss: negative_pnl_account_count may have
+            // reached zero — attempt to auto-clear the hlock.
+            self.try_clear_bankruptcy_hlock_if_healthy()?;
             return Ok(());
         }
 
@@ -13188,6 +13669,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.set_account_pnl(account, new_pnl)?;
         account.header.health_cert.valid = 0;
+        // Residual was booked into explicit/social loss: if this settled the last
+        // negative-PnL account, auto-clear the hlock now.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         Ok(())
     }
 
@@ -13241,6 +13725,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if new_pnl < 0 {
             self.header.bankruptcy_hlock_active = 1;
         }
+        // If settling this account's PnL brought the last negative-PnL account to
+        // zero (and all other health counters are already zero), auto-clear the hlock
+        // so LP/insurance withdrawals are unblocked.  The helper is O(1) and
+        // short-circuits immediately when the hlock is already clear.
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             paid,
             vault_before,
@@ -13249,6 +13738,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         account.header.health_cert.valid = 0;
         Ok(paid)
+    }
+
+    // FIX-1: try to auto-clear `bankruptcy_hlock_active` once the market returns to a
+    // provably healthy state.  The hlock is SET on any deep-liquidation / insurance-
+    // consumption path (see every `self.header.bankruptcy_hlock_active = 1` site).
+    // It was NEVER cleared, permanently trapping LP/insurance backing withdrawals and
+    // oracle reconfig even after the bankruptcy was fully settled.
+    //
+    // Clear-condition (mirrors `group_has_position_or_loss_state_for_oracle_reset`):
+    //   negative_pnl_account_count == 0  — no accounts still in loss/bankruptcy
+    //   stale_certificate_count == 0     — all certificates processed
+    //   b_stale_account_count == 0       — no b-stale accounts outstanding
+    //   pnl_pos_tot == 0                 — no live positive-PnL positions
+    //   recovery_reason.is_none()        — not in recovery mode
+    //
+    // This is conservative: the hlock cannot be cleared while ANY outstanding
+    // loss/stale/position state remains, so clearing it is strictly safe —
+    // re-enabling insurance withdrawals only when the market is at rest.
+    //
+    // Called at the end of every principal-settlement and resolved-bankruptcy-
+    // settlement path; the early-return on `!hlock_active` keeps it O(1).
+    fn try_clear_bankruptcy_hlock_if_healthy(&mut self) -> V16Result<()> {
+        if !decode_bool(self.header.bankruptcy_hlock_active)? {
+            return Ok(());
+        }
+        if self.header.negative_pnl_account_count.get() == 0
+            && self.header.stale_certificate_count.get() == 0
+            && self.header.b_stale_account_count.get() == 0
+            && self.header.pnl_pos_tot.get() == 0
+            && self.header.recovery_reason.try_to_runtime()?.is_none()
+        {
+            self.header.bankruptcy_hlock_active = 0;
+        }
+        Ok(())
     }
 
     fn charge_account_fee_current_not_atomic(
@@ -13898,9 +14421,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // irreversible progress and residual_remaining == gross_loss_at_close_start,
         // so it represents no obligation. Blocking withdraw on it permanently freezes a
         // flat, solvent user who cured a forced close. Only an active/in-progress close
-        // ledger must block withdrawal.
+        // ledger must block withdrawal. A finalized zero-residual close (E6) is likewise
+        // inert -- it paid out in full and only stays `active` to preserve close
+        // identity/history.
         let close_progress = account.header.close_progress.try_to_runtime()?;
-        if close_progress != CloseProgressLedgerV16::EMPTY && !close_progress.canceled {
+        if close_progress != CloseProgressLedgerV16::EMPTY
+            && !close_progress.canceled
+            && !close_progress.is_finalized_inert()
+        {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
@@ -15347,6 +15875,62 @@ fn trade_preflight_risk_gate(
     Ok(())
 }
 
+/// A trade may reduce only OI that existed before that trade. This makes
+/// aggregate accounting independent of which counterparty mutates first.
+/// (engine upstream #109 / 143e68c4 "Prevent same-trade OI masking";
+/// ported as a free fn to match this fork's `position_delta_increases_risk`
+/// / `trade_preflight_risk_gate` sibling-function convention.)
+fn kernel_trade_preexisting_oi_reduction_gate(
+    oi_long_q: u128,
+    oi_short_q: u128,
+    account_a_current_q: i128,
+    account_a_next_q: i128,
+    account_b_current_q: i128,
+    account_b_next_q: i128,
+) -> V16Result<(u128, u128)> {
+    let side_reduction = |current_q: i128, next_q: i128, side: SideV16| {
+        let on_side = |position_q: i128| match side {
+            SideV16::Long if position_q > 0 => position_q as u128,
+            SideV16::Short if position_q < 0 => position_q.unsigned_abs(),
+            _ => 0,
+        };
+        on_side(current_q).saturating_sub(on_side(next_q))
+    };
+    let long_reduction_q = side_reduction(account_a_current_q, account_a_next_q, SideV16::Long)
+        .checked_add(side_reduction(
+            account_b_current_q,
+            account_b_next_q,
+            SideV16::Long,
+        ))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let short_reduction_q =
+        side_reduction(account_a_current_q, account_a_next_q, SideV16::Short)
+            .checked_add(side_reduction(
+                account_b_current_q,
+                account_b_next_q,
+                SideV16::Short,
+            ))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+    if long_reduction_q > oi_long_q || short_reduction_q > oi_short_q {
+        return Err(V16Error::LockActive);
+    }
+    Ok((long_reduction_q, short_reduction_q))
+}
+
+fn asset_risk_increase_gate(
+    lifecycle: AssetLifecycleV16,
+    mode_long: SideModeV16,
+    mode_short: SideModeV16,
+) -> V16Result<()> {
+    if lifecycle != AssetLifecycleV16::Active
+        || mode_long != SideModeV16::Normal
+        || mode_short != SideModeV16::Normal
+    {
+        return Err(V16Error::LockActive);
+    }
+    Ok(())
+}
+
 #[cfg(kani)]
 pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     position_delta_increases_risk(current, delta_q)
@@ -15364,6 +15948,25 @@ pub fn kani_trade_preflight_risk_gate(
         asset_loss_stale,
         target_effective_lag,
         touches_pending_domain_barrier,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_trade_preexisting_oi_reduction_gate(
+    oi_long_q: u128,
+    oi_short_q: u128,
+    account_a_current_q: i128,
+    account_a_next_q: i128,
+    account_b_current_q: i128,
+    account_b_next_q: i128,
+) -> V16Result<(u128, u128)> {
+    kernel_trade_preexisting_oi_reduction_gate(
+        oi_long_q,
+        oi_short_q,
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
     )
 }
 
@@ -15398,6 +16001,30 @@ pub fn kani_trade_notional_floor(size_q: u128, exec_price: u64) -> V16Result<u12
     trade_notional_floor(size_q, exec_price)
 }
 
+// E4 (upstream 8f25aa5d, "Charge sub-atom trade fees on ceil notional"): the fee
+// charged on a fill must be computed on the CEIL notional, not the floor notional
+// used for margin/PnL bookkeeping (`trade_notional_floor` above). A sub-atom fill
+// (size_q * exec_price / POS_SCALE < 1) floors to notional=0 and therefore fee=0
+// via `checked_fee_bps`'s notional==0 short-circuit, even though the fill opens
+// nonzero OI (free, fee-less risk). Reuses `risk_notional_ceil` (already used by
+// the liquidation-fee path at this same ceil-notional pattern) so a trade sized
+// to leave ANY nonzero remainder after the POS_SCALE division rounds up to at
+// least 1 atom of notional, and therefore charges at least 1 atom of fee whenever
+// fee_bps != 0. Deliberately kept as a SEPARATE value from `notional` above --
+// `notional` (floor) still drives `TradeApplyOutcomeV16.notional` / batch
+// aggregation / PnL-neutral accounting; only the fee calc uses the ceil.
+fn trade_fee_notional_ceil(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    if size_q == 0 || exec_price == 0 {
+        return Ok(0);
+    }
+    risk_notional_ceil(size_q, exec_price)
+}
+
+#[cfg(kani)]
+pub fn kani_trade_fee_notional_ceil(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    trade_fee_notional_ceil(size_q, exec_price)
+}
+
 fn checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
     if notional == 0 || fee_bps == 0 {
         return Ok(0);
@@ -15422,6 +16049,51 @@ fn checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
 #[cfg(kani)]
 pub fn kani_checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
     checked_fee_bps(notional, fee_bps)
+}
+
+// FIX E3 (upstream #92 / b97e1746): liquidation fee is CONFIG-derived only
+// (never caller-supplied `fee_bps`), and a partial liquidation chunk whose
+// proportional fee falls below `min_liquidation_abs` is rejected as
+// NonProgress rather than silently inflated to the floor -- that inflation
+// is exactly the "min-fee chunking" exploit this fix closes. A full-position
+// close is exempt from the floor rejection (dust closes must still be able
+// to progress) and is instead clamped up to the floor as before.
+fn liquidation_fee_for_close(
+    fee_notional: u128, fee_bps: u64, min_liquidation_abs: u128, liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    if fee_notional > MAX_ACCOUNT_NOTIONAL || fee_bps > MAX_MARGIN_BPS {
+        return Err(V16Error::InvalidConfig);
+    }
+    let product = fee_notional * fee_bps as u128;
+    let q = product / MAX_MARGIN_BPS as u128;
+    let r = product % MAX_MARGIN_BPS as u128;
+    let raw_fee = q.checked_add(u128::from(r != 0)).ok_or(V16Error::ArithmeticOverflow)?;
+    liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
+}
+
+fn liquidation_fee_from_raw_fee(
+    raw_fee: u128, min_liquidation_abs: u128, liquidation_fee_cap: u128, closes_full_position: bool,
+) -> V16Result<u128> {
+    if !closes_full_position && min_liquidation_abs != 0 && raw_fee < min_liquidation_abs {
+        return Err(V16Error::NonProgress);
+    }
+    Ok(raw_fee.max(min_liquidation_abs).min(liquidation_fee_cap))
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_fee_for_close(
+    fee_notional: u128, fee_bps: u64, min_liquidation_abs: u128, liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    liquidation_fee_for_close(fee_notional, fee_bps, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
+}
+
+#[cfg(kani)]
+pub fn kani_liquidation_fee_from_raw_fee(
+    raw_fee: u128, min_liquidation_abs: u128, liquidation_fee_cap: u128, closes_full_position: bool,
+) -> V16Result<u128> {
+    liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
 }
 
 fn checked_i128_mul(a: i128, b: i128) -> V16Result<i128> {
@@ -15834,6 +16506,32 @@ pub mod lp_vault {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// BUG-2 / N7 anti-inflation design note: percolator-stake's N7 hardening
+    /// (`percolator-stake/src/math.rs`, `percolator-stake/src/state.rs`) pairs
+    /// TWO defenses: a `VIRTUAL_SHARES`/`VIRTUAL_ASSETS` offset in the pure
+    /// pro-rata math AND a `MINIMUM_LIQUIDITY` dead-share lock applied by the
+    /// caller at genesis. This module intentionally carries ONLY the second
+    /// one (`percolator-prog::v16_program::handle_deposit_to_lp_vault`
+    /// applies `LP_VAULT_MINIMUM_LIQUIDITY` against the genesis deposit) —
+    /// stake's own doc calls that the PRIMARY defense, with the virtual-offset
+    /// merely defense-in-depth. A virtual-offset variant of
+    /// `lp_shares_for_deposit`/`lp_atoms_for_redemption` was prototyped and
+    /// REJECTED here: `handle_execute_redemption` (v16_program.rs) computes
+    /// `principal_portion` as a SEPARATE, un-offset
+    /// `wide_mul_div_floor_u128(shares, available_principal, total_shares)`
+    /// call (not routed through `lp_atoms_for_redemption`) so it can split
+    /// `atoms` into principal-vs-earnings; offsetting `lp_atoms_for_redemption`
+    /// alone desynchronizes the two computations and can make
+    /// `principal_portion > atoms_out`, underflowing `earnings_portion =
+    /// atoms_out - principal_portion` (a redemption-DoS regression, confirmed
+    /// with concrete inputs: shares=500, total_shares=1_000_000, nav=
+    /// available_principal=2_000_000 -> atoms_out=999 vs principal_portion=
+    /// 1_000). Fixing that would require re-deriving the principal/earnings
+    /// split under the offset too, which is out of scope for this fix and
+    /// not required — the dead-share lock alone makes genesis-donation
+    /// inflation unprofitable. Do not add a virtual-offset here without also
+    /// re-deriving `handle_execute_redemption`'s split.
+    ///
     /// LP shares to mint for a deposit of `amount` atoms against a vault
     /// with `total_shares` outstanding and `nav_atoms` net asset value
     /// (computed BEFORE this deposit). Round DOWN — the vault keeps any
@@ -15934,8 +16632,8 @@ pub mod lp_vault {
 #[cfg(feature = "fork-facade")]
 pub mod fork_facade {
     use super::{
-        account_equity_from_parts, validate_fee_credits, validate_non_min_i128,
-        PortfolioV16View, V16Error, V16Result,
+        account_equity_from_parts, validate_fee_credits, validate_non_min_i128, PortfolioV16View,
+        V16Error, V16Result,
     };
 
     // -----------------------------------------------------------------------
@@ -16030,5 +16728,115 @@ pub mod fork_facade {
         }
         let equity = cert.certified_equity;
         equity >= 0 && (equity as u128) >= cert.certified_initial_req
+    }
+}
+
+// ============================================================================
+// E6 unit tests (finalized-inert close ledger; port of upstream engine c8aab338)
+// ============================================================================
+//
+// `begin_close_progress_ledger` is crate-private, so its non-vacuity coverage
+// lives here (in-crate, with access to private items) rather than in the
+// `tests/` integration suite, which only sees the public API. The other two
+// E6 call sites (the withdraw gate and the empty-account dematerialization
+// gate) are both public API and are covered in
+// `tests/v16_spec_tests.rs::v16_finalized_zero_residual_close_does_not_block_withdraw`
+// and `..._does_not_block_dematerialization`.
+#[cfg(test)]
+mod e6_finalized_close_inert_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn one_asset_market_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+        let market_group_id = [21u8; 32];
+        let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+        let mut header =
+            MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+        let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 0)
+            .unwrap();
+        {
+            let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            view.validate_shape().unwrap();
+        }
+        (header, markets)
+    }
+
+    fn empty_account_fixture(market_group_id: [u8; 32]) -> PortfolioAccountV16Account {
+        let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+            market_group_id,
+            [30u8; 32],
+            [31u8; 32],
+        ));
+        let mut account = PortfolioAccountV16Account::default();
+        account.init_empty_in_place(provenance).unwrap();
+        account
+    }
+
+    // Mirrors `finalized_inert_close_progress` in tests/v16_spec_tests.rs: a close
+    // that finished paying out (finalized, zero residual) but is still `active`
+    // because the ledger stays active to preserve close identity/history.
+    fn finalized_inert_ledger(
+        market_id: u64,
+        close_id: u64,
+        gross: u128,
+    ) -> CloseProgressLedgerV16 {
+        CloseProgressLedgerV16 {
+            active: true,
+            finalized: true,
+            canceled: false,
+            close_id,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: gross,
+            drift_reference_slot: 0,
+            max_close_slot: 0,
+            support_consumed: gross,
+            junior_face_burned: gross,
+            residual_remaining: 0,
+            ..CloseProgressLedgerV16::EMPTY
+        }
+    }
+
+    // E6, third call site: `begin_close_progress_ledger` (the close-progress-active
+    // gate hit while reserving a fresh bankruptcy-close on backing loss) must treat
+    // a finalized zero-residual close as inert and allow the *next* close to begin,
+    // strictly advancing close_id. Before the fix this unconditionally errored
+    // LockActive on any `active` ledger, permanently blocking a second bankruptcy
+    // event on an account whose prior close had already finished paying out in
+    // full -- stranding the account (and its rent) forever.
+    #[test]
+    fn finalized_inert_close_allows_next_close_to_begin() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        let market_group_id = header.market_group_id;
+        let mut account_header = empty_account_fixture(market_group_id);
+        let market_id = markets[0].engine.asset.market_id.get();
+
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&finalized_inert_ledger(market_id, 3, 5));
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        account.validate_with_market(&market.as_view()).unwrap();
+
+        market
+            .begin_close_progress_ledger(&mut account, 0, SideV16::Long, 7)
+            .unwrap();
+
+        let next = account.header.close_progress.try_to_runtime().unwrap();
+        assert!(next.active && !next.finalized && !next.canceled);
+        assert_eq!(next.close_id, 4);
+        assert_eq!(next.gross_loss_at_close_start, 7);
+        assert_eq!(next.residual_remaining, 7);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get(),
+            1
+        );
     }
 }

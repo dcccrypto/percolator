@@ -1,9 +1,9 @@
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
+    LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
@@ -59,8 +59,68 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     account
 }
 
+// E6: a close ledger that finished paying out -- `finalized`, zero residual --
+// but is still `active` because the ledger stays active to preserve close
+// identity/history (close_id watermark, progress totals) for audit purposes.
+// `support_consumed == junior_face_burned == gross` and
+// `residual_remaining == 0` satisfy validate_close_progress_ledger_with_market's
+// progress/residual bookkeeping invariant for a finalized ledger.
+fn finalized_inert_close_progress(market_id: u64, close_id: u64, gross: u128) -> CloseProgressLedgerV16 {
+    CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        canceled: false,
+        close_id,
+        asset_index: 0,
+        market_id,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross,
+        drift_reference_slot: 0,
+        max_close_slot: 0,
+        support_consumed: gross,
+        junior_face_burned: gross,
+        residual_remaining: 0,
+        ..CloseProgressLedgerV16::EMPTY
+    }
+}
+
 fn signed_q(q: u128) -> i128 {
     i128::try_from(q).unwrap()
+}
+
+/// Like `market_fixture`, but with a nonzero `max_trading_fee_bps` cap so
+/// trade requests may carry a fee (the base `market_fixture` config has
+/// `max_trading_fee_bps: 0`, which is why every pre-existing trade test in
+/// this file uses `fee_bps: 0`).
+fn market_fixture_with_trade_fee(
+    market_slots: u32,
+    init_price: u64,
+    max_trading_fee_bps: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let mut cfg =
+        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+    cfg.max_trading_fee_bps = max_trading_fee_bps;
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
+    let mut markets = (0..market_slots)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for i in 0..market_slots as usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                init_price,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
+    {
+        let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.validate_shape().unwrap();
+    }
+    (header, markets)
 }
 
 #[test]
@@ -152,6 +212,7 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -303,7 +364,7 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     market.deposit_not_atomic(&mut short, 1_000).unwrap();
 
     let outcome = market
-        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests, true)
         .unwrap();
 
     assert_eq!(outcome.fill_count, 2);
@@ -361,7 +422,7 @@ fn v16_batch_trade_supports_mixed_signed_spread_legs() {
     market.deposit_not_atomic(&mut lp, 1_000).unwrap();
 
     let outcome = market
-        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut taker, &mut lp, &requests)
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut taker, &mut lp, &requests, true)
         .unwrap();
 
     assert_eq!(outcome.fill_count, 2);
@@ -423,7 +484,9 @@ fn v16_single_trade_matches_batch_of_one_state() {
         market.deposit_not_atomic(&mut long, 1_000).unwrap();
         market.deposit_not_atomic(&mut short, 1_000).unwrap();
         market
-            .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, request)
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long, &mut short, request, true,
+            )
             .unwrap()
     };
     let batch_outcome = {
@@ -433,7 +496,12 @@ fn v16_single_trade_matches_batch_of_one_state() {
         market.deposit_not_atomic(&mut long, 1_000).unwrap();
         market.deposit_not_atomic(&mut short, 1_000).unwrap();
         market
-            .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &[request])
+            .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                &[request],
+                true,
+            )
             .unwrap()
     };
 
@@ -468,6 +536,7 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
     }
@@ -493,6 +562,7 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
                     fee_bps: 0,
                 },
             ],
+            true,
         )
         .expect("batch must not reject a final-IM-valid basket due to interim IM");
 
@@ -551,6 +621,7 @@ fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -573,6 +644,7 @@ fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
                 exec_price: 101,
                 fee_bps: 0,
             }],
+            true,
         )
         .unwrap();
 
@@ -605,6 +677,7 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -625,6 +698,7 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
             exec_price: 101,
             fee_bps: 0,
         }],
+        true,
     );
 
     assert_eq!(res, Err(V16Error::LockActive));
@@ -662,6 +736,7 @@ fn v16_public_scoped_trade_preserves_unrelated_loss_stale_summary() {
                 exec_price: 100,
                 fee_bps: 0,
             },
+            true,
         )
         .expect("unrelated loss-stale summary must not block a locally current trade");
 
@@ -698,8 +773,9 @@ fn v16_batch_trade_is_bounded_by_configured_portfolio_asset_cap() {
     market.deposit_not_atomic(&mut long, 1_000).unwrap();
     market.deposit_not_atomic(&mut short, 1_000).unwrap();
 
-    let res = market
-        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests);
+    let res = market.execute_batch_with_fee_loss_stale_scoped_not_atomic(
+        &mut long, &mut short, &requests, true,
+    );
 
     assert_eq!(res, Err(V16Error::InvalidConfig));
 }
@@ -729,6 +805,7 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
@@ -738,10 +815,82 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 
     assert_eq!(asset.raw_oracle_target_price, 111);
     assert_eq!(asset.effective_price, 100);
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 111)
+        .unwrap();
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_raw_oracle_target_only_change_invalidates_a_cached_health_cert() {
+    // Regression for engine #107 / #93: a target-only push (no accrual, no
+    // effective_price move) must invalidate any health cert taken while the
+    // old target was in force, because target/effective lag -- and therefore
+    // risk -- has grown even though the cert's own numbers are stale-blind
+    // to it. We drive this through a real cert-gated not_atomic API
+    // (charge_account_backing_fee_not_atomic) rather than reading the epoch
+    // counter directly, so the test fails the way an exploit would: a stale
+    // cert being admitted to authorize a financial action.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 30);
+    header.vault = V16PodU128::new(100);
+    header.c_tot = V16PodU128::new(100);
+    account_header.capital = V16PodU128::new(100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 1, 10)
+        .unwrap();
+
+    // Cert taken while the target is still 100 (matches effective_price, no
+    // lag) and current against every header epoch at the moment it's minted.
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 100,
+        certified_initial_req: 50,
+        certified_maintenance_req: 40,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // Sanity: with the target unchanged, this exact cert is still admitted
+    // (proves the setup is correct and the rejection below is caused
+    // specifically by the target push, not some other staleness source).
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let capital_before = account.header.capital.get();
+
+    // Now push a target-only change: raw_oracle_target_price moves from 100
+    // to 111 while effective_price (100) does not -- new target/effective
+    // lag with zero accrual in between.
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 111)
+        .unwrap();
+
+    // The cert minted above is now stale: it was current for the pre-push
+    // oracle_epoch and must be rejected, not silently admitted under grown
+    // target/effective lag.
+    let err = market.charge_account_backing_fee_not_atomic(&mut account, 0, 6, 1, 4);
+    assert_eq!(
+        err,
+        Err(V16Error::Stale),
+        "cached cert must be invalidated by a target-only oracle push"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[test]
@@ -1012,6 +1161,78 @@ fn v16_view_rejects_overwithdraw() {
     assert_eq!(err, Err(V16Error::LockActive));
 }
 
+// E6 (port of upstream engine c8aab338): a finalized zero-residual close
+// ledger represents no outstanding obligation -- it must not permanently
+// freeze a flat, solvent user's withdrawal just because the ledger is still
+// `active` for history/identity. Companion to the already-carried Finding E
+// (canceled-ledger) exemption proven by `v16_view_rejects_overwithdraw`'s
+// sibling tests above.
+#[test]
+fn v16_finalized_zero_residual_close_does_not_block_withdraw() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 7);
+    let market_id = markets[0].engine.asset.market_id.get();
+
+    {
+        let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
+        market_view
+            .deposit_not_atomic(&mut account_view, 10)
+            .unwrap();
+    }
+
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&finalized_inert_close_progress(
+            market_id, 3, 5,
+        ));
+
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
+
+    market_view
+        .withdraw_not_atomic(&mut account_view, 4)
+        .unwrap();
+
+    assert_eq!(account_view.header.capital.get(), 6);
+    assert_eq!(market_view.header.c_tot.get(), 6);
+    assert_eq!(market_view.header.vault.get(), 6);
+    // Withdraw does not itself mutate the finalized ledger -- it only stops
+    // treating it as a blocker.
+    let after_close = account_view.header.close_progress.try_to_runtime().unwrap();
+    assert!(after_close.active && after_close.finalized && after_close.residual_remaining == 0);
+}
+
+// E6, second call site: a finalized zero-residual close ledger must also be
+// treated as inert by the empty-account dematerialization gate
+// (`is_empty_for_dematerialization`, reached via
+// register/deregister_empty_materialized_portfolio_not_atomic), so an
+// otherwise-empty account is not stranded from ordinary lifecycle bookkeeping
+// (materialized-portfolio rent accounting) after an insurance-covered
+// liquidation finishes paying out.
+#[test]
+fn v16_finalized_zero_residual_close_does_not_block_dematerialization() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 8);
+    let market_id = markets[0].engine.asset.market_id.get();
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&finalized_inert_close_progress(
+            market_id, 2, 5,
+        ));
+
+    let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account_view = PortfolioV16ViewMut::new(&mut account_header);
+
+    market_view
+        .register_empty_materialized_portfolio_not_atomic(&account_view.as_view())
+        .unwrap();
+    assert_eq!(market_view.header.materialized_portfolio_count.get(), 1);
+
+    market_view
+        .deregister_empty_materialized_portfolio_not_atomic(&account_view.as_view())
+        .unwrap();
+    assert_eq!(market_view.header.materialized_portfolio_count.get(), 0);
+}
+
 #[cfg(feature = "fuzz")]
 #[test]
 fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
@@ -1089,7 +1310,7 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     market
-        .credit_account_from_insurance_not_atomic(&mut account, 3)
+        .credit_account_from_insurance_not_atomic(&mut account, 3, 0)
         .unwrap();
     assert_eq!(market.header.vault.get(), 10);
     assert_eq!(market.header.insurance.get(), 7);
@@ -1101,12 +1322,58 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     market
         .credit_domain_insurance_budget_not_atomic(0, 7)
         .unwrap();
-    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1);
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1, 0);
     assert_eq!(
         err,
         Err(V16Error::LockActive),
         "budgeted domain insurance must not be paid as a cranker reward"
     );
+}
+
+#[test]
+fn v16_credit_account_from_insurance_respects_additional_reserved() {
+    // Starvation-attack regression (protocol-fee RESERVE amendment,
+    // ~/v17/DECISIONS-LEDGER.md): a crank-reward-style credit must never dip
+    // `header.insurance` below the caller-declared `additional_reserved`
+    // floor (e.g. the protocol's accrued-but-unwithdrawn fee claim), even
+    // when the naive unbudgeted-surplus check (pre-amendment: `budget_remaining
+    // > next_insurance`) would have allowed it.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let mut account_header = account_fixture(1, 9);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // No domain budget allocated (budget_remaining == 0), so the pre-amendment
+    // check would allow draining the full 10 atoms of unbudgeted surplus as a
+    // "cranker reward". With a 6-atom protocol reservation in place, only 4
+    // atoms are actually free.
+    let protocol_owed: u128 = 6;
+
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 5, protocol_owed);
+    assert_eq!(
+        err,
+        Err(V16Error::LockActive),
+        "cranker reward must not be able to dip insurance below the protocol's reserved claim"
+    );
+    // Insurance/vault/capital must be untouched by the rejected attempt.
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(account.header.capital.get(), 0);
+
+    // Exactly the free amount (10 - 6 = 4) still succeeds.
+    market
+        .credit_account_from_insurance_not_atomic(&mut account, 4, protocol_owed)
+        .unwrap();
+    assert_eq!(market.header.insurance.get(), 6);
+    assert_eq!(account.header.capital.get(), 4);
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    // The reserved floor (6) is now exactly `header.insurance` -- any further
+    // draw, however small, must fail.
+    let err = market.credit_account_from_insurance_not_atomic(&mut account, 1, protocol_owed);
+    assert_eq!(err, Err(V16Error::LockActive));
+    assert_eq!(market.header.insurance.get(), 6, "reserve floor is exact");
 }
 
 #[test]
@@ -1448,14 +1715,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     let vault_before = market.header.vault.get();
 
     let out = market
-        .liquidate_account_not_atomic(
-            &mut account,
-            LiquidationRequestV16 {
-                asset_index: 0,
-                close_q: POS_SCALE,
-                fee_bps: 0,
-            },
-        )
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
         .expect("liquidation should progress by booking residual, not draining other domains");
 
     assert_eq!(out.insurance_used, 0);
@@ -1466,6 +1726,93 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         0
     );
     assert!(out.residual_booked > 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+// FIX E3 (upstream #92 / b97e1746): liquidation size + fee are now fully
+// engine-selected. This test proves the engine picks the MINIMAL healthy
+// partial close (981, not the full 10_000 position) and charges the
+// correspondingly smaller fee (79, not 800) -- the exact opposite of the
+// pre-fix "caller picks close_q" behavior this fix closes.
+#[test]
+fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
+    const PRICE: u64 = POS_SCALE as u64;
+    const POSITION_Q: u128 = 10_000;
+    const ACCOUNT_CAPITAL: u128 = 980;
+    const EXPECTED_CLOSE_Q: u128 = 981;
+    const EXPECTED_FEE: u128 = 79;
+
+    let (mut header, mut markets) = market_fixture(1, PRICE);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.min_nonzero_mm_req = V16PodU128::new(800);
+    header.config.min_nonzero_im_req = V16PodU128::new(801);
+    header.config.liquidation_fee_bps = V16PodU64::new(800);
+    header.config.min_liquidation_abs = V16PodU128::new(0);
+    header.config.liquidation_fee_cap = V16PodU128::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1);
+    header
+        .config
+        .try_to_runtime_shape()
+        .unwrap()
+        .validate_public_user_fund()
+        .unwrap();
+    header.vault = V16PodU128::new(ACCOUNT_CAPITAL * 2);
+    header.c_tot = V16PodU128::new(ACCOUNT_CAPITAL * 2);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.effective_price = PRICE;
+    asset.raw_oracle_target_price = PRICE;
+    asset.oi_eff_long_q = POSITION_Q * 2;
+    asset.oi_eff_short_q = POSITION_Q * 2;
+    asset.loss_weight_sum_long = POSITION_Q * 2;
+    asset.loss_weight_sum_short = POSITION_Q * 2;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    let mut account_header = account_fixture(1, 14);
+    account_header.capital = V16PodU128::new(ACCOUNT_CAPITAL);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: i128::try_from(POSITION_Q).unwrap(),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POSITION_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let out = market
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
+        .unwrap();
+
+    assert_eq!(out.closed_q, EXPECTED_CLOSE_Q); // 981, NOT 10_000 (full close)
+    assert_eq!(out.fee_charged, EXPECTED_FEE); // 79, NOT 800 (8% of full notional)
+    assert_eq!(account.header.capital.get(), ACCOUNT_CAPITAL - EXPECTED_FEE);
+    assert_eq!(account.header.active_bitmap[0].get(), 1); // leg stays open (partial)
+    let leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(
+        leg.basis_pos_q,
+        i128::try_from(POSITION_Q - EXPECTED_CLOSE_Q).unwrap()
+    );
+    let cert = account.header.health_cert.try_to_runtime().unwrap();
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(cert.certified_equity, 901);
+    assert_eq!(cert.certified_maintenance_req, 901);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
@@ -1532,11 +1879,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
                 effective_price: 100,
                 funding_rate_e9: 0,
                 action: percolator::PermissionlessCrankActionV16::Liquidate(
-                    LiquidationRequestV16 {
-                        asset_index: 0,
-                        close_q: POS_SCALE,
-                        fee_bps: 0,
-                    },
+                    LiquidationRequestV16 { asset_index: 0 },
                 ),
             },
         )
@@ -1751,6 +2094,7 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
                 exec_price: 1,
                 fee_bps: 0,
             },
+            true,
         )
         .expect("risk-increasing trade should atomically lien backed source credit for IM");
 
@@ -1836,6 +2180,7 @@ fn v16_residual_reward_credit_uses_real_principal_not_notional() {
                 exec_price: 1_000,
                 fee_bps: 0,
             },
+            true,
         )
         .unwrap();
 
@@ -1884,6 +2229,7 @@ fn v16_residual_reward_credit_is_capped_by_available_crystallized_loss() {
                 exec_price: 1_000,
                 fee_bps: 0,
             },
+            true,
         )
         .unwrap();
 
@@ -2068,6 +2414,7 @@ fn v16_trade_created_parked_source_claim_survives_later_deposit() {
                     exec_price: 100,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
         market
@@ -2118,7 +2465,9 @@ fn v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep() 
 
     assert_eq!(account.header.pnl.get(), 25);
     assert_eq!(
-        account.header.source_domains[0].source_claim_bound_num.get(),
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
         25 * BOUND_SCALE
     );
     assert_eq!(market.header.pnl_pos_tot.get(), 25);
@@ -2139,4 +2488,742 @@ fn v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep() 
     let err = market.add_account_source_positive_pnl_not_atomic(&mut account, 0, 1);
     assert_eq!(err, Err(V16Error::LockActive));
     assert_eq!(account.header.pnl.get(), 25);
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-fee design §1A: taker-only trade fee charging.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v16_taker_only_charges_long_side_when_taker_is_long_account() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1_000);
+    let mut long_header = account_fixture(1, 41);
+    let mut short_header = account_fixture(1, 42);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let short_capital_before = short.header.capital.get();
+
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 1_000, // notional 100 -> fee 10
+            },
+            true, // long_account is the taker
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fee_a, 10, "taker (long) pays the full fee");
+    assert_eq!(outcome.fee_b, 0, "maker (short) pays nothing");
+    assert_eq!(long.header.capital.get(), 1_000 - 10);
+    assert_eq!(
+        short.header.capital.get(),
+        short_capital_before,
+        "maker's capital is byte-identical before/after the fee-bearing fill"
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_taker_only_charges_short_side_when_taker_is_short_account() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1_000);
+    let mut long_header = account_fixture(1, 43);
+    let mut short_header = account_fixture(1, 44);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let long_capital_before = long.header.capital.get();
+
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 1_000,
+            },
+            false, // short_account is the taker
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fee_a, 0, "maker (long) pays nothing");
+    assert_eq!(outcome.fee_b, 10, "taker (short) pays the full fee");
+    assert_eq!(
+        long.header.capital.get(),
+        long_capital_before,
+        "maker's capital is byte-identical before/after the fee-bearing fill"
+    );
+    assert_eq!(short.header.capital.get(), 1_000 - 10);
+    market.validate_shape().unwrap();
+}
+
+// E4 (upstream 8f25aa5d): a sub-atom fill (size_q * exec_price / POS_SCALE < 1,
+// i.e. floor-notional == 0) must still charge a nonzero fee via ceil-notional,
+// because it opens nonzero OI (free risk) despite the floored notional reading
+// zero. Adapted from upstream's `v16_subatom_trade_charges_fee_on_ceil_fee_notional`
+// for this fork's taker-only single-payer fee model (upstream charges both legs
+// independently; here exactly one side -- the taker -- pays the fee).
+#[test]
+fn v16_subatom_trade_charges_fee_on_ceil_fee_notional() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1);
+    let mut long_header = account_fixture(1, 213);
+    let mut short_header = account_fixture(1, 214);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    // sub_atom_size * exec_price / POS_SCALE floors to 0 (999_900 / 1_000_000),
+    // but ceils to 1 -- this is the exact boundary upstream's fix targets.
+    let sub_atom_size = POS_SCALE / 100 - 1;
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(sub_atom_size),
+                exec_price: 100,
+                fee_bps: 1,
+            },
+            true, // long_account is the taker
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome.notional, 0,
+        "floor-notional (margin/PnL basis) is unaffected by the fee fix"
+    );
+    assert_eq!(
+        outcome.fee_a, 1,
+        "ceil-notional fee: sub-atom fill must not charge a fee of 0"
+    );
+    assert_eq!(outcome.fee_b, 0, "maker (short) pays nothing under taker-only");
+    assert_eq!(long.header.capital.get(), 1_000 - 1);
+    assert_eq!(short.header.capital.get(), 1_000);
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_long_q.get(),
+        sub_atom_size,
+        "nonzero risk was opened despite the floored notional reading zero"
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.oi_eff_short_q.get(),
+        sub_atom_size
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_taker_only_batch_mixed_spread_charges_taker_on_every_leg() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(2, 100, 1_000);
+    let mut taker_header = account_fixture(2, 45);
+    let mut lp_header = account_fixture(2, 46);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+        market.deposit_not_atomic(&mut taker, 1_000).unwrap();
+        market.deposit_not_atomic(&mut lp, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    let lp_capital_before = lp.header.capital.get();
+
+    // A mixed long/short spread against one LP: taker (account_a, the
+    // engine's fixed first positional account for batches per design §1A.3)
+    // goes long asset 0 and short asset 1.
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: -signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+    ];
+
+    let outcome = market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            &mut taker,
+            &mut lp,
+            &requests,
+            true, // taker == account_a is always the engine's first (long_account) slot for batches
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(
+        outcome.fee_a, 20,
+        "taker pays fee on both legs of the spread (10 + 10)"
+    );
+    assert_eq!(outcome.fee_b, 0, "LP pays nothing on either leg");
+    assert_eq!(taker.header.capital.get(), 1_000 - 20);
+    assert_eq!(
+        lp.header.capital.get(),
+        lp_capital_before,
+        "LP's capital is unchanged across every leg of the batch"
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_taker_only_n1_maker_fallback_when_taker_pnl_negative() {
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1_000);
+    let mut long_header = account_fixture(1, 47);
+    let mut short_header = account_fixture(1, 48);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        // Certify both accounts once while flat/pnl==0 so `stale_state` is
+        // false and `health_cert.valid` is true against the *current*
+        // epochs/bitmap. `settle_account_for_position_action_and_refresh_not_atomic`
+        // (called at the top of the trade pipeline) then takes its early-out
+        // branch instead of re-settling the account, which is what lets the
+        // negative pnl injected below survive into the fee-charge site
+        // un-settled — exactly the "current path deliberately skips loss
+        // settlement" property the N1 guard is written against.
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+    }
+    // N1: the taker (long) already carries a negative PnL, which fires the
+    // pre-existing `charge_account_fee_current_not_atomic` waiver
+    // (`account.header.pnl.get() < 0`). Under pure taker-only charging this
+    // would let an underwater taker trade fee-free; the maker-fallback must
+    // instead charge the solvent maker `fee.min(maker.capital)`.
+    long_header.pnl = V16PodI128::new(-5);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let long_capital_before = long.header.capital.get();
+
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 1_000,
+            },
+            true, // long_account (the underwater taker) initiated the trade
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome.fee_a, 0,
+        "taker's own charge is waived by the pnl<0 guard, not stripped"
+    );
+    assert_eq!(
+        outcome.fee_b, 10,
+        "N1 fallback: the solvent maker is charged instead of nobody"
+    );
+    assert_eq!(
+        long.header.capital.get(),
+        long_capital_before,
+        "the pnl<0 guard still protects the taker's own capital"
+    );
+    assert_eq!(long.header.pnl.get(), -5, "taker pnl untouched by the fee path");
+    assert_eq!(short.header.capital.get(), 1_000 - 10);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_taker_only_n1_no_fallback_when_fee_is_genuinely_zero() {
+    // Distinguishes "fee == 0" (no fallback — nothing to collect from anyone)
+    // from "pnl < 0 waived a nonzero fee" (fallback fires). Both taker and
+    // maker have negative PnL here, but fee_bps is 0, so neither should ever
+    // be charged and outcome.fee_a/fee_b must both be 0.
+    let (mut header, mut markets) = market_fixture_with_trade_fee(1, 100, 1_000);
+    let mut long_header = account_fixture(1, 49);
+    let mut short_header = account_fixture(1, 50);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+    }
+    long_header.pnl = V16PodI128::new(-5);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let long_capital_before = long.header.capital.get();
+    let short_capital_before = short.header.capital.get();
+
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fee_a, 0);
+    assert_eq!(outcome.fee_b, 0);
+    assert_eq!(long.header.capital.get(), long_capital_before);
+    assert_eq!(short.header.capital.get(), short_capital_before);
+}
+
+#[test]
+fn v16_taker_only_n1_maker_fallback_when_taker_capital_zero_pnl_nonnegative() {
+    // Fee-evasion regression (security review 2026-07-15, MEDIUM). Before the
+    // fix, the maker-fallback trigger was
+    // `taker_fee == 0 && fee != 0 && taker.pnl < 0`. A taker whose capital is
+    // drawn to exactly 0 WITHOUT being underwater (pnl >= 0) also makes
+    // `charge_account_fee_current_not_atomic` return 0 -- via
+    // `fee.min(capital) == 0`, a structurally different reason than the
+    // pnl<0 waiver -- but the old pnl<0 qualifier didn't fire for this case,
+    // so the fallback never charged the maker either: the fee vanished
+    // entirely (protocol/LP/creator/insurance all got 0).
+    //
+    // This reproduces the exact scenario the security review flagged: a
+    // multi-leg batch where an EARLY leg drains the taker's capital to
+    // exactly 0 (paying its own fee in full, so it is NOT underwater -- pnl
+    // stays 0), and a LATER leg in the SAME batch then owes a nonzero fee
+    // with nothing left to pay it. Leg 2 closes the position leg 1 opened
+    // (net batch position == 0) so the batch-final initial-margin check
+    // (`finish_trade_checks_not_atomic` certifies once, after all legs, for
+    // multi-leg batches) sees a flat book and a trivial (zero) margin
+    // requirement regardless of the taker's zero capital.
+    let (mut header, mut markets) = market_fixture_with_trade_fee(2, 100, 1_000);
+    let mut long_header = account_fixture(2, 51);
+    let mut short_header = account_fixture(2, 52);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        // Taker (long) is funded with exactly one leg's fee (10) -- enough to
+        // pay leg 1 in full and land at capital == 0, pnl == 0 (NOT
+        // negative) before leg 2 is even evaluated.
+        market.deposit_not_atomic(&mut long, 10).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    let requests = [
+        // Leg 1: taker opens long POS_SCALE @ 100, fee 10 -- fully solvent,
+        // pays in full, capital drops 10 -> 0.
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+        // Leg 2: taker closes the same position back to flat, notional 100,
+        // fee 10 -- taker capital is now 0, so the taker's own charge
+        // attempt collects 0 even though pnl is still 0 (not negative).
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: -signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 1_000,
+        },
+    ];
+
+    let outcome = market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            &requests,
+            true, // long_account is the taker on every leg
+        )
+        .unwrap();
+
+    assert_eq!(outcome.fill_count, 2);
+    assert_eq!(
+        outcome.fee_a, 10,
+        "taker pays leg 1 in full (solvent), then owes 0 on leg 2 (capital \
+         exhausted) -- total taker-side charge is just leg 1's fee"
+    );
+    assert_eq!(
+        outcome.fee_b, 10,
+        "fix: leg 2's fee is NOT lost -- the maker-fallback fires because \
+         the taker's own charge returned 0, even though the taker's pnl is \
+         NOT negative (capital exhaustion, not the pnl<0 waiver)"
+    );
+    assert_eq!(long.header.capital.get(), 0, "taker fully drained by leg 1");
+    assert_eq!(long.header.pnl.get(), 0, "taker was never underwater");
+    assert_eq!(
+        short.header.capital.get(),
+        1_000 - 10,
+        "maker pays leg 2's fee via the fallback"
+    );
+    market.validate_shape().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// New engine primitive: withdraw_insurance_surplus_not_atomic (design §1.5).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v16_withdraw_insurance_surplus_zero_amount_is_a_noop() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(500);
+    header.insurance = V16PodU128::new(200);
+    let vault_before = header.vault;
+    let insurance_before = header.insurance;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.withdraw_insurance_surplus_not_atomic(0).unwrap();
+
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.insurance, insurance_before);
+}
+
+#[test]
+fn v16_withdraw_insurance_surplus_rejects_amount_exceeding_surplus() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(500);
+    header.insurance = V16PodU128::new(200);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(150);
+    // Unbudgeted surplus = insurance(200) - source_reserved(0) - budget_remaining(150) = 50.
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let err = market.withdraw_insurance_surplus_not_atomic(51);
+    assert_eq!(err, Err(V16Error::LockActive));
+}
+
+#[test]
+fn v16_withdraw_insurance_surplus_rejects_amount_exceeding_vault() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(40);
+    header.insurance = V16PodU128::new(200);
+    // Unbudgeted surplus = 200 (no reservations/budget set), but vault only
+    // has 40 physical atoms — the vault bound must still gate the transfer.
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let err = market.withdraw_insurance_surplus_not_atomic(41);
+    assert_eq!(err, Err(V16Error::LockActive));
+}
+
+#[test]
+fn v16_withdraw_insurance_surplus_exact_boundary_succeeds() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(500);
+    header.insurance = V16PodU128::new(200);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(150);
+    // Exact boundary: surplus == 50, withdraw exactly 50.
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market.withdraw_insurance_surplus_not_atomic(50).unwrap();
+
+    assert_eq!(market.header.vault.get(), 450);
+    assert_eq!(market.header.insurance.get(), 150);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        150,
+        "domain budgets are untouched by the surplus withdrawal"
+    );
+    market.validate_shape().unwrap();
+}
+
+// --- E2 (upstream engine #108, fixes #97): fresh risk must be blocked while
+// either side of an asset is mid side-recovery (ResetPending/DrainOnly), not
+// just while the asset's overall lifecycle is non-Active. Risk-REDUCING
+// trades must remain admitted throughout recovery.
+
+#[test]
+fn v16_trade_rejects_fresh_risk_when_either_side_is_recovering() {
+    let cases = [
+        (SideModeV16::ResetPending, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::ResetPending),
+        (SideModeV16::DrainOnly, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::DrainOnly),
+    ];
+    for (mode_long, mode_short) in cases {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut long_header = account_fixture(1, 60);
+        let mut short_header = account_fixture(1, 61);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut long = PortfolioV16ViewMut::new(&mut long_header);
+            let mut short = PortfolioV16ViewMut::new(&mut short_header);
+            market.deposit_not_atomic(&mut long, 1_000).unwrap();
+            market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        }
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.mode_long = mode_long;
+        asset.mode_short = mode_short;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+        let vault_before = header.vault.get();
+        let c_tot_before = header.c_tot.get();
+        let insurance_before = header.insurance.get();
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let long_capital_before = long.header.capital.get();
+        let short_capital_before = short.header.capital.get();
+
+        let res = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        );
+
+        assert_eq!(
+            res,
+            Err(V16Error::LockActive),
+            "fresh risk admitted with mode_long={mode_long:?} mode_short={mode_short:?}"
+        );
+        // Rollback-clean rejection: no partial state mutation, no fee leakage.
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.c_tot.get(), c_tot_before);
+        assert_eq!(market.header.insurance.get(), insurance_before);
+        assert_eq!(long.header.capital.get(), long_capital_before);
+        assert_eq!(short.header.capital.get(), short_capital_before);
+        market.validate_shape().unwrap();
+    }
+}
+
+#[test]
+fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 62);
+    let mut short_header = account_fixture(1, 63);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        // Open long +2*POS_SCALE / short -2*POS_SCALE while both side modes
+        // are still Normal.
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(2 * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+
+    // Now put the asset mid side-recovery on BOTH sides simultaneously (the
+    // gate is not side-specific by design).
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.mode_short = SideModeV16::DrainOnly;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    // A matched reduction (-POS_SCALE) shrinks both legs' magnitude
+    // (long: +2 -> +1, short: -2 -> -1) and must still be admitted.
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("risk-reducing trade must stay open during side recovery");
+
+    assert_eq!(outcome.notional, 100);
+    let long_leg = long.header.legs[0].try_to_runtime().unwrap();
+    let short_leg = short.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(long_leg.basis_pos_q, signed_q(POS_SCALE));
+    assert_eq!(short_leg.basis_pos_q, -signed_q(POS_SCALE));
+    market.validate_shape().unwrap();
+}
+
+// E5 (upstream engine #109 / 143e68c4, "Prevent same-trade OI masking"): a
+// single trade may reduce only OI that existed BEFORE that trade -- otherwise
+// one leg's same-call addition can be spent as if it were preexisting
+// reduction capacity on the other leg, making aggregate accounting depend on
+// mutation order within one apply_trade_after_refresh_not_atomic call.
+//
+// Scenario: `liquidated` flips short(-10) -> long(+1) in the same call that
+// `survivor` reduces long(+13) -> long(+2). In isolation, survivor's leg
+// alone appears to free up 11 units of long-side reduction capacity, but the
+// asset's PRE-TRADE ledger only records oi_eff_long_q = oi_eff_short_q =
+// MATCHED_Q = 10 units (the pre-fix bug: the ledger is authoritative, not
+// whatever a single leg's raw basis happens to show, and one leg cannot
+// "loan" the other leg's same-call delta as spendable reduction capacity).
+// The gate must reject with LockActive and mutate NOTHING -- not the asset
+// ledger, not vault/c_tot/insurance, not either leg -- proving this is a
+// preflight rejection, not a partial-apply rollback.
+#[test]
+fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+    const LIQUIDATED_SHORT_Q: u128 = 10 * POS_SCALE;
+    const SURVIVOR_LONG_Q: u128 = 13 * POS_SCALE;
+    const FLIP_SIZE_Q: u128 = 11 * POS_SCALE; // liquidated: -10 -> +1; survivor: +13 -> +2
+
+    let (mut header, mut markets) = market_fixture(1, 100);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.loss_weight_sum_long = MATCHED_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    // resolved_payout_blocker_count must reconcile with the asset's own
+    // stored_pos_count_long(1) + stored_pos_count_short(1) totals, or
+    // set_asset_state's delta-reconciliation throws CounterUnderflow before
+    // the trade path (and therefore the OI gate) is ever reached.
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    let mut liquidated_header = account_fixture(1, 217);
+    liquidated_header.capital = V16PodU128::new(1_000_000);
+    liquidated_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(LIQUIDATED_SHORT_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        epoch_snap: asset.epoch_short,
+        loss_weight: LIQUIDATED_SHORT_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    liquidated_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut survivor_header = account_fixture(1, 218);
+    survivor_header.capital = V16PodU128::new(1_000_000);
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_LONG_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_LONG_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+
+    let asset_before = market.markets[0].engine.asset;
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let liquidated_capital_before = liquidated.header.capital.get();
+    let survivor_capital_before = survivor.header.capital.get();
+
+    // `liquidated` is the long_account param (receives +FLIP_SIZE_Q, flipping
+    // short(-10) -> long(+1)); `survivor` is the short_account param
+    // (receives -FLIP_SIZE_Q, reducing long(+13) -> long(+2)).
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut liquidated,
+        &mut survivor,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(FLIP_SIZE_Q),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        true,
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        market.markets[0].engine.asset, asset_before,
+        "rejected trade must not mutate the asset ledger at all"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(liquidated.header.capital.get(), liquidated_capital_before);
+    assert_eq!(survivor.header.capital.get(), survivor_capital_before);
+    let liquidated_leg = liquidated.header.legs[0].try_to_runtime().unwrap();
+    let survivor_leg = survivor.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(liquidated_leg.basis_pos_q, -signed_q(LIQUIDATED_SHORT_Q));
+    assert_eq!(survivor_leg.basis_pos_q, signed_q(SURVIVOR_LONG_Q));
+    market.validate_shape().unwrap();
 }

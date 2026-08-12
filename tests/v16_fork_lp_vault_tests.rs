@@ -198,6 +198,29 @@ fn deposit_then_immediate_redeem_never_profits() {
     );
 }
 
+/// BUG-2 anti-inflation invariant (engine-side half of the defense): the
+/// genesis-deposit dead-share carve-out is applied by the WRAPPER
+/// (`percolator-prog::v16_program::handle_deposit_to_lp_vault`, using
+/// `LP_VAULT_MINIMUM_LIQUIDITY`) against the exact `amount` this function
+/// returns for `total_shares == 0`. This pure-math layer's contribution to
+/// that defense is simply returning the FULL, un-truncated `amount` at
+/// genesis (not silently reserving/dropping any of it) — the wrapper needs
+/// the full value to compute `amount - LP_VAULT_MINIMUM_LIQUIDITY` correctly.
+/// The actual "genesis-donation-inflation-unprofitable" behavior (a too-small
+/// genesis deposit is rejected outright) is exercised end-to-end in
+/// `percolator-prog`'s `deposit_genesis_at_or_below_minimum_liquidity_is_rejected`.
+#[test]
+fn shares_genesis_returns_full_amount_for_wrapper_dead_share_carve_out() {
+    let amount: u128 = 1_000 + 1; // LP_VAULT_MINIMUM_LIQUIDITY + 1
+    let shares = lp_shares_for_deposit(amount, 0, 0).unwrap();
+    assert_eq!(
+        shares, amount,
+        "genesis mint must return the FULL amount, uncarved — the wrapper carves out \
+         LP_VAULT_MINIMUM_LIQUIDITY itself so it can bump total_lp_shares_outstanding \
+         by the full amount while minting only the remainder"
+    );
+}
+
 // ── lp_fee_split ────────────────────────────────────────────────────
 
 #[test]
