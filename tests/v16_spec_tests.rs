@@ -6,7 +6,8 @@ use percolator::{
     PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
@@ -3226,4 +3227,223 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
     assert_eq!(liquidated_leg.basis_pos_q, -signed_q(LIQUIDATED_SHORT_Q));
     assert_eq!(survivor_leg.basis_pos_q, signed_q(SURVIVOR_LONG_Q));
     market.validate_shape().unwrap();
+}
+
+// Builds a resolved market in which `taker` holds exactly one active leg (so
+// `resolved_bankruptcy_attribution` resolves via the leg scan) and carries an
+// unabsorbed loss larger than its capital. Returns the asset's `market_id` so the
+// caller can stamp a prior close ledger onto the account if it wants one.
+fn resolved_market_with_bankrupt_taker_funded(
+    fund_insurance: bool,
+) -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    u64,
+) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut taker_header = account_fixture(1, 91);
+    let mut maker_header = account_fixture(1, 92);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut maker = PortfolioV16ViewMut::new(&mut maker_header);
+        market.deposit_not_atomic(&mut taker, 1_000).unwrap();
+        market.deposit_not_atomic(&mut maker, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut taker,
+                &mut maker,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        // With insurance funded the bankruptcy path consumes it and reaches
+        // `advance_close_progress_ledger`'s ledger-state guard. Without it, the
+        // advance short-circuits on an all-zero progress delta and the failure is
+        // silent instead -- both variants are exercised below.
+        if fund_insurance {
+            market.deposit_domain_insurance_not_atomic(0, 500).unwrap();
+            market.deposit_domain_insurance_not_atomic(1, 500).unwrap();
+        }
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+
+    // Loss exceeds capital, so principal settlement cannot clear it and the
+    // resolved close must route through the bankruptcy path.
+    taker_header.pnl = V16PodI128::new(-5_000);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let market_id = markets[0].engine.asset.market_id.get();
+    (header, markets, taker_header, market_id)
+}
+
+// E6 exempted finalized-inert ledgers inside `begin_close_progress_ledger`, but
+// `settle_resolved_bankruptcy_negative_pnl` decides whether to CALL it by testing
+// the raw `close_progress.active` flag. A finalized-inert ledger is still
+// `active`, so the fresh close is skipped and the stale finalized ledger is kept;
+// the following `advance_close_progress_ledger` then rejects it outright, and the
+// whole resolved close reverts. An account that survived one fully-covered
+// bankruptcy and meets a second at resolution can no longer be closed.
+#[test]
+fn e6_second_bankruptcy_reopens_finalized_inert_close_ledger() {
+    let (mut header, mut markets, mut taker_header, market_id) =
+        resolved_market_with_bankrupt_taker_funded(true);
+
+    // An earlier bankruptcy on this account finished paying out in full: the
+    // ledger is finalized with zero residual, but stays `active` to preserve
+    // close identity for audit. `domain_side` is the side that BACKS the loss,
+    // i.e. the opposite of the account's own leg (validated at the
+    // `ledger.domain_side != opposite_side(leg.side)` check), so a long taker
+    // carries a Short-domain ledger.
+    taker_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: true,
+            canceled: false,
+            close_id: 3,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Short,
+            gross_loss_at_close_start: 5,
+            drift_reference_slot: 0,
+            max_close_slot: 0,
+            support_consumed: 5,
+            junior_face_burned: 5,
+            residual_remaining: 0,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+
+    // The constructed state must itself be valid, otherwise the revert below
+    // would prove nothing about the close path.
+    assert_eq!(market.validate_shape(), Ok(()), "market shape must be valid");
+    assert_eq!(
+        taker.validate_with_market(&market.as_view()),
+        Ok(()),
+        "account (including the finalized-inert ledger) must be valid"
+    );
+
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut taker, 0)
+        .expect("a second bankruptcy must reopen the inert close, not revert");
+    assert!(matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }));
+
+    // The replacement close is a well-formed first-class close, not a patched-up
+    // remnant: the loss is absorbed, the close-id watermark advances rather than
+    // colliding, the domain barrier it took is released again, and both validators
+    // still accept the resulting state.
+    assert_eq!(taker.header.pnl.get(), 0, "the loss is fully absorbed");
+    let ledger = taker.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.close_id, 4, "close-id watermark advances from 3");
+    assert!(ledger.finalized && ledger.residual_remaining == 0);
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get(),
+        0,
+        "the barrier taken by the reopened close is released again"
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(taker.validate_with_market(&market.as_view()), Ok(()));
+}
+
+// Control: identical account and market, but with no prior close on record. The
+// same resolved close must not hit LockActive, which pins the finalized-inert
+// ledger -- not the bankruptcy itself -- as the cause above.
+#[test]
+fn e6_resolved_close_on_bankruptcy_without_prior_close_is_not_blocked() {
+    let (mut header, mut markets, mut taker_header, _market_id) =
+        resolved_market_with_bankrupt_taker_funded(true);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+
+    let result = market.close_resolved_account_not_atomic(&mut taker, 0);
+    assert_ne!(
+        result.err(),
+        Some(V16Error::LockActive),
+        "a first bankruptcy at resolution must not be blocked"
+    );
+}
+
+// The same defect with no insurance on the loss-backing domain, where it is
+// SILENT rather than an error and has market-wide reach.
+//
+// `consume_domain_insurance_for_negative_pnl` returns 0, so the `advance` that
+// raises LockActive above is skipped. `book_bankruptcy_residual_chunk_*` is then
+// reached with the stale finalized ledger, whose `residual_remaining` is 0, so
+// both the booking and the advance short-circuit on their zero guards and the
+// call returns Ok having booked nothing. The close makes no progress and can be
+// re-cranked forever.
+//
+// The account's own capital is stranded, but the wider consequence is that
+// `negative_pnl_account_count` never falls to zero, and
+// `resolved_positive_payout_ready` gates every positive resolved payout on that
+// counter -- so no winner in the market can be paid either.
+#[test]
+fn e6_second_bankruptcy_completes_without_insurance() {
+    let (mut header, mut markets, mut taker_header, market_id) =
+        resolved_market_with_bankrupt_taker_funded(false);
+
+    taker_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: true,
+            canceled: false,
+            close_id: 3,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Short,
+            gross_loss_at_close_start: 5,
+            drift_reference_slot: 0,
+            max_close_slot: 0,
+            support_consumed: 5,
+            junior_face_burned: 5,
+            residual_remaining: 0,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(taker.validate_with_market(&market.as_view()), Ok(()));
+
+    // The reopened close books the residual as explicit loss and completes, with
+    // no insurance available and without new capital being added.
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut taker, 0)
+        .expect("the close must progress rather than stall");
+    assert!(
+        matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }),
+        "close completes instead of returning ProgressOnly forever"
+    );
+
+    assert_eq!(taker.header.pnl.get(), 0, "the loss is absorbed, not parked");
+    // Before the fix this counter never returned to zero, and
+    // `resolved_positive_payout_ready` gates every positive resolved payout on it
+    // -- so a single stalled account withheld every winner's payout market-wide.
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        0,
+        "the market's positive-payout gate is released"
+    );
+    let ledger = taker.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.close_id, 4, "close-id watermark advances from 3");
+    assert!(ledger.finalized && ledger.residual_remaining == 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(taker.validate_with_market(&market.as_view()), Ok(()));
 }
