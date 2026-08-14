@@ -3297,6 +3297,19 @@ impl CloseProgressLedgerV16 {
         self.active && self.finalized && !self.canceled && self.residual_remaining == 0
     }
 
+    /// True when a fresh close may be opened over this ledger: either nothing is
+    /// recorded, or the previous close is finalized-inert (paid out in full, kept
+    /// `active` only to carry the close-id watermark).
+    ///
+    /// `begin_close_progress_ledger` enforces exactly this, so every caller that
+    /// decides whether to *call* it must ask the same question. Testing the raw
+    /// `active` flag instead skips the fresh close for a finalized-inert ledger and
+    /// leaves the stale one in place, which `advance_close_progress_ledger` then
+    /// refuses -- stranding the account on its next bankruptcy.
+    fn close_slot_available(self) -> bool {
+        !self.active || self.is_finalized_inert()
+    }
+
     pub fn is_empty(self) -> bool {
         !self.active
             && !self.finalized
@@ -11984,7 +11997,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let current = account.header.close_progress.try_to_runtime()?;
-        if current.active && !current.is_finalized_inert() {
+        if !current.close_slot_available() {
             return Err(V16Error::LockActive);
         }
         let domain = self.insurance_domain_index(asset_index, domain_side)?;
@@ -12400,7 +12413,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         let domain_side = opposite_side(bankrupt_side);
-        if !account.header.close_progress.try_to_runtime()?.active {
+        // Defence in depth: every caller of this function already opens a close
+        // when the gross loss is non-zero, so a finalized-inert ledger is not
+        // reachable here today. Asking the same question as the sibling site keeps
+        // the two consistent if that ever changes. The capacity pre-flight stays on
+        // this branch so a residual with no bookable capacity still routes to
+        // recovery rather than erroring.
+        if account
+            .header
+            .close_progress
+            .try_to_runtime()?
+            .close_slot_available()
+        {
             if self.bankruptcy_residual_single_step_capacity(
                 asset_index,
                 bankrupt_side,
@@ -13621,7 +13645,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         self.header.bankruptcy_hlock_active = 1;
         let gross_residual = account.header.pnl.get().unsigned_abs();
-        if !account.header.close_progress.try_to_runtime()?.active {
+        // A close left over from an earlier bankruptcy that paid out in full is
+        // finalized but still `active`, so testing `active` alone would skip the
+        // fresh close and leave the stale ledger in place -- which
+        // `advance_close_progress_ledger` then refuses, stranding the account.
+        if account
+            .header
+            .close_progress
+            .try_to_runtime()?
+            .close_slot_available()
+        {
             self.begin_close_progress_ledger(
                 account,
                 asset_index,
