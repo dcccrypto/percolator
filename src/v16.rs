@@ -13814,18 +13814,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     //                                    is precisely when backing must not leave.
     //
     // LIVENESS of the mode_* term (this is a lock, so it needs an exit):
+    //   The exit is the OPEN-INTEREST conjunct above, NOT a mode transition.
+    //
     //   `finalize_side_reset_not_atomic` does NOT clear DrainOnly — it returns
     //   V16Error::LockActive for it (:10988 long, :11002 short) and only promotes
-    //   ResetPending -> Normal. The exit from DrainOnly is draining the side's OI to
-    //   zero: the same block that sets DrainOnly when `opp_oi_after != 0` (:12549/:12556)
-    //   instead calls `begin_full_drain_reset_inner` when `opp_oi_after == 0` (:12562),
-    //   which sets ResetPending; `finalize_side_reset_not_atomic` then returns it to
-    //   Normal and this predicate stops holding the hlock.
-    //   That exit is reachable by ordinary user action, because DrainOnly only blocks
-    //   RISK INCREASES: `asset_risk_increase_gate` (:15957) rejects on
-    //   `mode != Normal`, while position REDUCTIONS stay permitted. So holders can
-    //   always close, OI drains, the side resets, and the hlock clears. See
-    //   `drain_only_side_can_reach_normal_and_release_hlock`.
+    //   ResetPending -> Normal. And a side that has already drained can never reach
+    //   ResetPending either: `begin_full_drain_reset_inner` is its only writer
+    //   (:12474/:12499), has exactly one call site (:12562), and is reachable only via
+    //   `reduce_position` (:12567) <- `liquidate_account_not_atomic` (:12742) /
+    //   `rebalance_reduce_position_not_atomic` (:12798), both of which require an ACTIVE
+    //   LEG. Ordinary closes decrement oi_eff at :11924/:11931 via `adjust_u128` and
+    //   never route through that block. So the mode byte is effectively terminal, and
+    //   testing it alone would latch this predicate — and the hlock — forever.
+    //
+    //   Gating on live OI gives the term an exit that ordinary user action reaches:
+    //   DrainOnly blocks only RISK INCREASES (`asset_risk_increase_gate` rejects on
+    //   `mode != Normal`) while position REDUCTIONS stay permitted, so holders can always
+    //   close, exposure drains to zero, and the impairment stops counting.
+    //   See `drained_drain_only_side_does_not_latch_the_hlock` and
+    //   `drain_only_side_releases_the_hlock_once_its_exposure_drains`.
     // b_*/b_epoch_start_* (absorbed-loss bookkeeping, monotone) and social_loss_dust/
     // remainder (sub-atom quarantine sink that never drains) are intentionally excluded.
     //
@@ -13839,12 +13846,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut i = 0usize;
         while i < configured {
             let slot = self.markets[i].engine_slot();
+            // A non-Normal side counts ONLY while it still carries open interest.
+            //
+            // mode is set to DrainOnly at :12549/:12556 exactly when a side still has OI
+            // and its backing ratio has fallen below MIN_A_SIDE — under-backed for what
+            // it holds, which is when backing must not be withdrawn. Once that OI has
+            // drained the exposure is gone and there is nothing left to hold backing for.
+            //
+            // The OI conjunct is what makes this term a lock with an exit rather than a
+            // latch. `begin_full_drain_reset_inner` is the ONLY writer of ResetPending
+            // (:12474/:12499) and has exactly one call site (:12562), reachable only via
+            // `reduce_position` (:12567) whose only callers are
+            // `liquidate_account_not_atomic` (:12742) and
+            // `rebalance_reduce_position_not_atomic` (:12798) — both requiring an ACTIVE
+            // LEG. Ordinary closes decrement oi_eff at :11924/:11931 through `adjust_u128`
+            // and never reach that block, so a side can arrive at zero OI with its mode
+            // byte still DrainOnly and NOTHING can ever move it back to Normal. Testing
+            // the mode byte alone would therefore pin bankruptcy_hlock_active forever and
+            // block LP/insurance backing withdrawals for every domain in the group.
+            // See `drained_drain_only_side_does_not_latch_the_hlock`.
+            let impaired_long = slot.asset.mode_long != 0 && slot.asset.oi_eff_long_q.get() != 0;
+            let impaired_short = slot.asset.mode_short != 0 && slot.asset.oi_eff_short_q.get() != 0;
             if slot.pending_domain_loss_barrier_long.get() != 0
                 || slot.pending_domain_loss_barrier_short.get() != 0
                 || slot.asset.explicit_unallocated_loss_long.get() != 0
                 || slot.asset.explicit_unallocated_loss_short.get() != 0
-                || slot.asset.mode_long != 0
-                || slot.asset.mode_short != 0
+                || impaired_long
+                || impaired_short
             {
                 return true;
             }
@@ -17030,8 +17058,12 @@ mod bankruptcy_hlock_clear_predicate_tests {
         let (mut header, mut markets) = one_asset_market_fixture();
 
         header.bankruptcy_hlock_active = 1;
-        // SideModeV16::ResetPending encodes as a non-zero mode byte.
+        // SideModeV16::ResetPending encodes as a non-zero mode byte. The side must also
+        // still carry open interest: a non-Normal side is unabsorbed impairment only
+        // while it has exposure, and pinning on the mode byte alone latches the hlock
+        // forever (see drained_drain_only_side_does_not_latch_the_hlock).
         markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::ResetPending);
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(1_000);
 
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
@@ -17040,70 +17072,122 @@ mod bankruptcy_hlock_clear_predicate_tests {
 
         assert_eq!(
             market.header.bankruptcy_hlock_active, 1,
-            "hlock must stay engaged while an asset side is not Normal"
+            "hlock must stay engaged while an asset side is not Normal AND still exposed"
         );
     }
 
-    /// The `mode_* != Normal` term is a LOCK, so it must have a reachable exit —
-    /// otherwise a single under-backed side would hold LP/insurance backing
-    /// withdrawals for the whole group indefinitely.
+    /// REPRODUCTION of the permanent-lock regression (expected to FAIL before the fix).
     ///
-    /// The exit is NOT `finalize_side_reset_not_atomic`: that returns
-    /// `V16Error::LockActive` for DrainOnly and only promotes ResetPending. (An earlier
-    /// revision of the comment above claimed otherwise — the same class of
-    /// confidently-wrong comment this change set out to fix.) The real sequence is
-    /// DrainOnly -> (side OI reaches 0) -> ResetPending -> finalize -> Normal, and it is
-    /// reachable because DrainOnly blocks only risk INCREASES, never reductions.
+    /// A DrainOnly side whose open interest has already reached zero can never leave
+    /// DrainOnly: `begin_full_drain_reset_inner` is the ONLY writer of ResetPending
+    /// (src/v16.rs:12474/12499) and has exactly one call site (:12562), reachable only
+    /// through `reduce_position` (:12567) whose only callers are
+    /// `liquidate_account_not_atomic` (:12742) and `rebalance_reduce_position_not_atomic`
+    /// (:12798) — both of which need an ACTIVE LEG. Ordinary closes decrement oi_eff at
+    /// :11924/:11931 via `adjust_u128` and never route through that block, so the side
+    /// drains to zero OI while its mode byte stays DrainOnly forever.
+    ///
+    /// With `mode_* != Normal` in the predicate that latches `bankruptcy_hlock_active`
+    /// permanently, blocking LP/insurance backing withdrawals for every domain in the
+    /// group — a regression the base does not have.
     #[test]
-    fn drain_only_side_can_reach_normal_and_release_hlock() {
-        // 1. finalize refuses to clear DrainOnly directly.
+    fn drained_drain_only_side_does_not_latch_the_hlock() {
         let (mut header, mut markets) = one_asset_market_fixture();
         header.bankruptcy_hlock_active = 1;
+        // The impaired side has already drained: mode still DrainOnly, but zero OI.
         markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::DrainOnly);
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(0);
+        markets[0].engine.asset.oi_eff_short_q = V16PodU128::new(0);
+
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        assert!(
-            market.group_has_unabsorbed_bankruptcy_loss(),
-            "a DrainOnly side is unabsorbed impairment and must hold the hlock"
-        );
         assert_eq!(
             market.finalize_side_reset_not_atomic(0, SideV16::Long),
             Err(V16Error::LockActive),
-            "finalize_side_reset must NOT clear DrainOnly — the doc comment claiming it              does was wrong"
-        );
-        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
-        assert_eq!(market.header.bankruptcy_hlock_active, 1);
-
-        // 2. Reductions stay allowed in DrainOnly, which is what makes the exit
-        //    reachable; only risk increases are gated.
-        assert_eq!(
-            asset_risk_increase_gate(
-                AssetLifecycleV16::Active,
-                SideModeV16::DrainOnly,
-                SideModeV16::Normal,
-            ),
-            Err(V16Error::LockActive),
-            "DrainOnly must block risk increases"
-        );
-
-        // 3. Once the side has drained it becomes ResetPending, finalize returns it to
-        //    Normal, and the hlock then clears.
-        markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::ResetPending);
-        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        market
-            .finalize_side_reset_not_atomic(0, SideV16::Long)
-            .expect("a drained ResetPending side must finalize to Normal");
-        assert_eq!(
-            market.asset_state(0).unwrap().mode_long,
-            SideModeV16::Normal
+            "sanity: finalize cannot rescue a DrainOnly side"
         );
         assert!(
             !market.group_has_unabsorbed_bankruptcy_loss(),
-            "with every side back to Normal there is no unabsorbed impairment left"
+            "a DrainOnly side with ZERO open interest carries no unabsorbed exposure — \
+             pinning the hlock on it is a permanent lock, since nothing can move the mode \
+             byte back to Normal once OI has already drained"
         );
         market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
         assert_eq!(
             market.header.bankruptcy_hlock_active, 0,
-            "the hlock must release once the impaired side has reset — otherwise the              mode_* term is a permanent trap"
+            "hlock must release once the impaired side has no exposure left"
+        );
+    }
+
+    /// A DrainOnly side that STILL carries open interest is genuinely under-backed
+    /// (mode is set at :12549/:12556 exactly when `a < MIN_A_SIDE` with OI remaining),
+    /// so it must keep holding the hlock.
+    #[test]
+    fn live_drain_only_side_with_open_interest_still_holds_the_hlock() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        header.bankruptcy_hlock_active = 1;
+        markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::DrainOnly);
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(1_000);
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert!(market.group_has_unabsorbed_bankruptcy_loss());
+        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+        assert_eq!(
+            market.header.bankruptcy_hlock_active, 1,
+            "an under-backed side with live OI must keep backing locked"
+        );
+    }
+
+    /// The `mode_* != Normal` term is a LOCK, so it needs a reachable exit.
+    ///
+    /// An earlier revision of this test claimed the exit was
+    /// DrainOnly -> ResetPending -> finalize_side_reset -> Normal, and "proved" it by
+    /// hand-writing `mode_long = ResetPending` under a comment asserting the side had
+    /// drained. That asserted its own premise, and the premise was FALSE: nothing moves a
+    /// drained side out of DrainOnly (see
+    /// drained_drain_only_side_does_not_latch_the_hlock for the call-graph proof).
+    ///
+    /// The real exit is the OI conjunct. The impairment stops counting when the side's
+    /// exposure reaches zero, which ordinary closing achieves via the :11924/:11931
+    /// adjust_u128 path — no privileged instruction required. This walks that transition
+    /// by changing only open interest, never the mode byte.
+    #[test]
+    fn drain_only_side_releases_the_hlock_once_its_exposure_drains() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        header.bankruptcy_hlock_active = 1;
+        markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::DrainOnly);
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(5_000);
+
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            assert!(
+                market.group_has_unabsorbed_bankruptcy_loss(),
+                "under-backed side with live OI holds the lock"
+            );
+            market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+            assert_eq!(market.header.bankruptcy_hlock_active, 1);
+            // finalize cannot rescue DrainOnly — this is why the mode byte alone must not
+            // be the pin.
+            assert_eq!(
+                market.finalize_side_reset_not_atomic(0, SideV16::Long),
+                Err(V16Error::LockActive)
+            );
+        }
+
+        // Ordinary closing drains the side. The mode byte is deliberately left DrainOnly,
+        // because in production nothing clears it on this path.
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(0);
+        assert_eq!(
+            markets[0].engine.asset.mode_long,
+            encode_side_mode(SideModeV16::DrainOnly),
+            "mode stays DrainOnly — the exit must not depend on it changing"
+        );
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert!(!market.group_has_unabsorbed_bankruptcy_loss());
+        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+        assert_eq!(
+            market.header.bankruptcy_hlock_active, 0,
+            "the lock must release once exposure is gone, or it is a permanent trap"
         );
     }
 
