@@ -13773,25 +13773,107 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(paid)
     }
 
-    // FIX-1: try to auto-clear `bankruptcy_hlock_active` once the market returns to a
-    // provably healthy state.  The hlock is SET on any deep-liquidation / insurance-
-    // consumption path (see every `self.header.bankruptcy_hlock_active = 1` site).
-    // It was NEVER cleared, permanently trapping LP/insurance backing withdrawals and
-    // oracle reconfig even after the bankruptcy was fully settled.
+    // FIX-1 background: `bankruptcy_hlock_active` is SET on any deep-liquidation /
+    // insurance-consumption path (see every `self.header.bankruptcy_hlock_active = 1`
+    // site). It was originally never cleared, permanently trapping LP/insurance backing
+    // withdrawals and oracle reconfig even after the bankruptcy was settled. The auto-
+    // clear below re-enables those once the loss is provably absorbed.
     //
-    // Clear-condition (mirrors `group_has_position_or_loss_state_for_oracle_reset`):
-    //   negative_pnl_account_count == 0  — no accounts still in loss/bankruptcy
-    //   stale_certificate_count == 0     — all certificates processed
-    //   b_stale_account_count == 0       — no b-stale accounts outstanding
-    //   pnl_pos_tot == 0                 — no live positive-PnL positions
-    //   recovery_reason.is_none()        — not in recovery mode
+    // Per-asset "unabsorbed bankruptcy loss still in flight" predicate for the hlock
+    // auto-clear. Deliberately NOT `asset_local_has_position_or_loss_state`: that is an
+    // "asset empty / market at rest" predicate (used by the oracle re-anchor path, which
+    // must block on ANY open position) and it trips on benign activity (`oi_eff_*`,
+    // `stored_pos_count_*`, `loss_weight_sum_*`) and on the monotone social-loss index
+    // (`b_*`, `b_epoch_start_*`) that never returns to zero after the first socialized
+    // bankruptcy. Requiring those here would leave the hlock — and with it LP/insurance
+    // withdrawals and the HMax haircut lane — engaged forever in any market that has ever
+    // carried a position, which is the pre-FIX-1 defect.
     //
-    // This is conservative: the hlock cannot be cleared while ANY outstanding
-    // loss/stale/position state remains, so clearing it is strictly safe —
-    // re-enabling insurance withdrawals only when the market is at rest.
+    // Only fields that represent loss NOT YET ABSORBED BY ANYONE qualify:
     //
-    // Called at the end of every principal-settlement and resolved-bankruptcy-
-    // settlement path; the early-return on `!hlock_active` keeps it O(1).
+    //   pending_domain_loss_barrier_*  an open bankruptcy-close ledger with residual,
+    //                                  raised at begin_close_progress_ledger and cleared
+    //                                  when the residual hits 0 or on cure-cancel. This is
+    //                                  the term that actually fixes the reported hole: a
+    //                                  real ledger, with its own clearing sites, that no
+    //                                  single user controls, and whose over-lock window is
+    //                                  bounded by max_bankrupt_close_lifetime_slots.
+    //
+    //   explicit_unallocated_loss_*    the designated unallocatable-loss sink. HONEST
+    //                                  STATUS: this field has ZERO write sites in the
+    //                                  engine, so the row never fires — but calling it
+    //                                  "inert" would be wrong and was wrong in an earlier
+    //                                  revision of this comment. The engine DOES compute
+    //                                  unallocatable loss, as
+    //                                  `BResidualBookingOutcomeV16::explicit_loss`
+    //                                  (:12249/:12269/:12294), and then books it into the
+    //                                  per-ACCOUNT `close_progress.explicit_loss_assigned`
+    //                                  (:12114) where it counts as PROGRESS — finalizing
+    //                                  the ledger, dropping pending_domain_loss_barrier_*
+    //                                  and zeroing the bankrupt account's PnL, with no
+    //                                  asset-level record left behind. So on the one path
+    //                                  that produces the thing this row exists to catch,
+    //                                  the hlock clears in the same call sequence that
+    //                                  writes the loss off. The row is kept so the
+    //                                  predicate is already correct if the asset-level sink
+    //                                  is ever wired up; the gap itself is pre-existing and
+    //                                  is NOT closed here.
+    //
+    // b_*/b_epoch_start_* (absorbed-loss bookkeeping, monotone) and social_loss_dust/
+    // remainder (sub-atom quarantine sink that never drains) are intentionally excluded.
+    //
+    // WHY THE SIDE MODE BYTE IS NOT A TERM HERE.
+    // An earlier revision also counted `mode_* != Normal` (later narrowed to
+    // `mode_* != Normal AND oi_eff_* != 0`). Both forms were wrong, in opposite ways, and
+    // the term is gone:
+    //   * Bare `mode_* != Normal` LATCHED PERMANENTLY. Nothing moves a drained side out of
+    //     DrainOnly: begin_full_drain_reset_inner is the only writer of ResetPending
+    //     (:12474/:12499), has one call site (:12562) reachable only via reduce_position
+    //     <- liquidate_account_not_atomic / rebalance_reduce_position_not_atomic, both of
+    //     which need an ACTIVE LEG, while ordinary closes decrement oi_eff at
+    //     :11924/:11931 and never route there.
+    //   * Adding `AND oi_eff_* != 0` removed the latch but created a HOSTAGE. Because
+    //     bankruptcy_hlock_active is a single group-wide byte consumed by the wrapper's
+    //     WithdrawBackingBucket / WithdrawBackingBucketEarnings / WithdrawInsuranceAsset,
+    //     one holder on a DrainOnly side who simply declines to close freezes LP backing,
+    //     LP earnings and insurance for EVERY domain in the group — at a cost of one
+    //     position quantum plus min_nonzero_mm_req of equity, indefinitely. Holding is
+    //     legal (asset_risk_increase_gate blocks only risk INCREASES), liquidation is
+    //     deficit-gated so a solvent holder never qualifies, and no permissionless path can
+    //     force the close. With funding and maintenance fees configured to zero the
+    //     holder's equity never decays, so the freeze is permanent and free.
+    //   * `mode == ResetPending AND oi_eff != 0` is additionally UNREACHABLE — ResetPending
+    //     can only be entered with oi_eff already 0 — so that half was dead code.
+    // Upstream reached the same conclusion independently: aeyakovenko/percolator #120
+    // rejects inferring the affected asset "from mutable state such as DrainOnly, B state,
+    // insurance spend, and barriers" as "unsound in both directions", and prefers a durable
+    // per-asset lock bit (an ABI break we cannot take on the deployed layout).
+    //
+    // Raw POD reads only: this adds no new error return to the settlement/liquidation
+    // paths that call try_clear with `?`, so a single corrupt slot byte cannot revert a
+    // liquidation on an unrelated asset. The scan is O(configured assets) but runs only
+    // when the hlock is set (post-bankruptcy); the common path early-returns before it.
+    fn group_has_unabsorbed_bankruptcy_loss(&self) -> bool {
+        let configured =
+            (self.header.config.max_market_slots.get() as usize).min(self.markets.len());
+        let mut i = 0usize;
+        while i < configured {
+            let slot = self.markets[i].engine_slot();
+            // ONLY genuine unabsorbed-loss ledgers gate the hlock. Deliberately NOT the
+            // side mode byte — see the note above the function for why that term was
+            // dropped.
+            if slot.pending_domain_loss_barrier_long.get() != 0
+                || slot.pending_domain_loss_barrier_short.get() != 0
+                || slot.asset.explicit_unallocated_loss_long.get() != 0
+                || slot.asset.explicit_unallocated_loss_short.get() != 0
+            {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     fn try_clear_bankruptcy_hlock_if_healthy(&mut self) -> V16Result<()> {
         if !decode_bool(self.header.bankruptcy_hlock_active)? {
             return Ok(());
@@ -13801,6 +13883,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && self.header.b_stale_account_count.get() == 0
             && self.header.pnl_pos_tot.get() == 0
             && self.header.recovery_reason.try_to_runtime()?.is_none()
+            && !self.group_has_unabsorbed_bankruptcy_loss()
         {
             self.header.bankruptcy_hlock_active = 0;
         }
@@ -16870,6 +16953,180 @@ mod e6_finalized_close_inert_tests {
                 .pending_domain_loss_barrier_long
                 .get(),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod bankruptcy_hlock_clear_predicate_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn one_asset_market_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+        let market_group_id = [22u8; 32];
+        let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+        let mut header =
+            MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+        let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 0)
+            .unwrap();
+        {
+            let view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            view.validate_shape().unwrap();
+        }
+        (header, markets)
+    }
+
+    fn empty_account_fixture(market_group_id: [u8; 32]) -> PortfolioAccountV16Account {
+        let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+            market_group_id,
+            [30u8; 32],
+            [31u8; 32],
+        ));
+        let mut account = PortfolioAccountV16Account::default();
+        account.init_empty_in_place(provenance).unwrap();
+        account
+    }
+
+    // Regression: an open bankruptcy-close ledger with residual (raised via
+    // `begin_close_progress_ledger`, the operation `settle_resolved_bankruptcy_negative_pnl`
+    // performs immediately before it calls the clear helper) MUST hold the hlock.
+    // `pending_domain_loss_barrier_*` is per-asset state the pre-fix predicate did not
+    // inspect, so it released the hlock while the residual was still in flight.
+    #[test]
+    fn hlock_held_while_asset_close_ledger_has_residual() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        let market_group_id = header.market_group_id;
+        let mut account_header = empty_account_fixture(market_group_id);
+
+        // A bankruptcy / insurance-consumption event engaged the hlock.
+        header.bankruptcy_hlock_active = 1;
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        account.validate_with_market(&market.as_view()).unwrap();
+
+        // Move the bankruptcy residual off the account and onto the asset.
+        market
+            .begin_close_progress_ledger(&mut account, 0, SideV16::Long, 7)
+            .unwrap();
+
+        // Asset-level loss is outstanding (barrier raised), while every group-header
+        // counter the pre-fix predicate inspected reads zero.
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get(),
+            1
+        );
+        assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+        assert_eq!(market.header.stale_certificate_count.get(), 0);
+        assert_eq!(market.header.b_stale_account_count.get(), 0);
+        assert_eq!(market.header.pnl_pos_tot.get(), 0);
+        assert!(market
+            .header
+            .recovery_reason
+            .try_to_runtime()
+            .unwrap()
+            .is_none());
+
+        assert!(market.group_has_unabsorbed_bankruptcy_loss());
+        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+
+        assert_eq!(
+            market.header.bankruptcy_hlock_active, 1,
+            "hlock must stay engaged while a close ledger still has residual"
+        );
+    }
+
+    // Regression: an asset side left in a non-Normal mode (DrainOnly / ResetPending)
+    // represents structural impairment mid-resolution, and also covers the social-loss
+    // quarantine window (the same `begin_full_drain_reset_inner` that quarantines dust
+    // sets mode = ResetPending). It MUST hold the hlock.
+    /// A side in DrainOnly must NOT hold the hlock, no matter how much open interest it
+    /// still carries.
+    ///
+    /// This is the anti-hostage property. `bankruptcy_hlock_active` is ONE group-wide byte
+    /// which the wrapper consumes to gate WithdrawBackingBucket,
+    /// WithdrawBackingBucketEarnings and WithdrawInsuranceAsset. If a side's mode byte
+    /// could hold it, a single holder who simply declines to close would freeze LP backing,
+    /// LP earnings and insurance for EVERY domain in the group — indefinitely, and for the
+    /// price of one position quantum plus min_nonzero_mm_req of equity. Holding is legal
+    /// (asset_risk_increase_gate blocks only risk INCREASES), liquidation is deficit-gated
+    /// so a solvent holder never qualifies, and no permissionless path can force the close.
+    ///
+    /// Two earlier revisions of this predicate had that defect: the bare mode term latched
+    /// permanently, and the `AND oi_eff != 0` narrowing turned the latch into a hostage.
+    /// Neither is present now, and this test is what keeps them out.
+    #[test]
+    fn a_drain_only_side_never_holds_the_hlock() {
+        for oi in [0u128, 1, 5_000] {
+            let (mut header, mut markets) = one_asset_market_fixture();
+            header.bankruptcy_hlock_active = 1;
+            markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::DrainOnly);
+            markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(oi);
+
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            assert!(
+                !market.group_has_unabsorbed_bankruptcy_loss(),
+                "a DrainOnly side (oi_eff={oi}) must not gate the hlock — the side mode byte \
+                 is user-controlled and this byte is group-wide"
+            );
+            market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+            assert_eq!(
+                market.header.bankruptcy_hlock_active, 0,
+                "hlock must release with oi_eff={oi}; anything else is a free, permanent \
+                 freeze of every domain's backing"
+            );
+        }
+    }
+
+    /// Same for ResetPending, for completeness — no side mode gates the hlock.
+    #[test]
+    fn a_reset_pending_side_never_holds_the_hlock() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+        header.bankruptcy_hlock_active = 1;
+        markets[0].engine.asset.mode_long = encode_side_mode(SideModeV16::ResetPending);
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert!(!market.group_has_unabsorbed_bankruptcy_loss());
+        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+        assert_eq!(market.header.bankruptcy_hlock_active, 0);
+    }
+
+    // Liveness guard (the assertion the over-strict candidate fix failed): after a
+    // bankruptcy the hlock MUST still be able to clear on a market that merely has an
+    // ordinary open position. `oi_eff_*` / `stored_pos_count_*` / `loss_weight_sum_*`
+    // are benign activity, not unabsorbed loss; blocking on them would permanently trap
+    // LP/insurance withdrawals (the pre-FIX-1 defect). This test fails under a fix that
+    // reuses `asset_local_has_position_or_loss_state`.
+    #[test]
+    fn hlock_clears_with_open_position_and_no_unabsorbed_loss() {
+        let (mut header, mut markets) = one_asset_market_fixture();
+
+        header.bankruptcy_hlock_active = 1;
+        // An open position: set the position-presence fields in the shape the engine's
+        // own invariant requires them to co-move (oi_eff > 0 => loss_weight_sum > 0 =>
+        // stored_pos_count > 0; see validate_shape). No loss fields set.
+        markets[0].engine.asset.oi_eff_long_q = V16PodU128::new(1_000);
+        markets[0].engine.asset.loss_weight_sum_long = V16PodU128::new(1_000);
+        markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+        // The strict "market at rest" predicate correctly reports activity...
+        assert!(market.asset_local_has_position_or_loss_state(0).unwrap());
+        // ...but there is no UNABSORBED LOSS, so the hlock predicate must not block.
+        assert!(!market.group_has_unabsorbed_bankruptcy_loss());
+
+        market.try_clear_bankruptcy_hlock_if_healthy().unwrap();
+
+        assert_eq!(
+            market.header.bankruptcy_hlock_active, 0,
+            "hlock must clear on a market that only has an ordinary open position"
         );
     }
 }
