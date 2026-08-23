@@ -7170,9 +7170,38 @@ fn proof_v16_live_positive_kf_delta_without_source_rejects() {
         "live positive K/F delta without source burns excess face against existing loss"
     );
     if start_negative {
-        assert_eq!(result, Ok((0, delta as u128)));
-        assert_eq!(account.header.pnl.get(), -loss);
-        assert_eq!(market.header.negative_pnl_account_count.get(), 1);
+        // 2026-08-23: this branch encoded UPSTREAM's original policy — an unsupported
+        // positive K/F delta arriving at a negative-PnL account was burned ENTIRELY and
+        // the loss left untouched (`junior_face_burned = new_face_support`).
+        //
+        // Our commit 9a681a69 ("stop settlement destroying an account's positive PnL")
+        // deliberately changed that line to
+        //     junior_face_burned = new_face_support.saturating_sub(old_loss)
+        // so the arriving face first OFFSETS the loss and only the excess is burned.
+        // That is the fix for the LP drain (issue #127), filed upstream as
+        // aeyakovenko/percolator#172, which is still OPEN and unanswered.
+        //
+        // The proof was never updated alongside the fix, and Kani was not in CI, so it
+        // has been failing silently ever since. It now certifies the behaviour we
+        // actually intend. **If upstream rules against us on #172, the code AND this
+        // proof revert together** — the assertions below are the fork's position, not
+        // an upstream-blessed invariant.
+        // Derived from the production path, not guessed:
+        //   support_consumed   = 0                              (no source domain)
+        //   junior_face_burned = delta.saturating_sub(loss)      (only the excess)
+        //   retained_face      = delta - burned = min(delta, loss)
+        //   new_pnl            = retained_face - loss = min(delta, loss) - loss
+        // so the account climbs toward 0 and reaches it exactly when delta >= loss.
+        let expected_burn = (delta as u128).saturating_sub(loss as u128);
+        let expected_pnl = delta.min(loss) - loss;
+        assert_eq!(result, Ok((0, expected_burn)));
+        assert_eq!(account.header.pnl.get(), expected_pnl);
+        // The account leaves the negative set precisely when the loss is fully offset.
+        let expected_negative_count = if expected_pnl < 0 { 1 } else { 0 };
+        assert_eq!(
+            market.header.negative_pnl_account_count.get(),
+            expected_negative_count
+        );
         assert_eq!(market.header.pnl_pos_tot.get(), 0);
         assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
         assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
