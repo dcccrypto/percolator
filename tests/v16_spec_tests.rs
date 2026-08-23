@@ -6,7 +6,7 @@ use percolator::{
     PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
@@ -3446,4 +3446,149 @@ fn e6_second_bankruptcy_completes_without_insurance() {
     assert!(ledger.finalized && ledger.residual_remaining == 0);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(taker.validate_with_market(&market.as_view()), Ok(()));
+}
+
+/// #137 — the initial-margin source-credit lien must be released when the exposure
+/// that required it is closed, so the account can convert its own positive PnL while
+/// the market is still Live.
+#[test]
+fn im_lien_is_released_when_the_position_closes_in_live() {
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut long_header = account_fixture(1, 8);
+    let mut short_header = account_fixture(1, 9);
+    let claim = 100u128;
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_header.source_domains[0].domain = V16PodU32::new(0);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    // Backing principal is vault-funded and senior-side: vault must cover it.
+    header.vault = V16PodU128::new(claim + header.vault.get());
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(10 * POS_SCALE),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("risk-increasing trade should atomically lien backed source credit for IM");
+
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(
+        long.header.source_domains[0].source_claim_liened_num.get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        long.header.source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
+        10
+    );
+    assert_eq!(
+        long.header.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .valid_liened_backing_num
+            .get(),
+        10 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .fresh_unliened_backing_num
+            .get(),
+        90 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut long),
+        Err(V16Error::LockActive),
+        "source-backed positive PnL must not be realized while the source-claim exposure remains open"
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+
+    let lien_open = long.header.source_domains[0].source_claim_liened_num.get();
+    assert_ne!(lien_open, 0, "fixture must actually create an IM lien");
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut short,
+            &mut long,
+            TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: 1, fee_bps: 0 },
+            true,
+        )
+        .expect("closing trade");
+
+    // Refresh so certificate staleness (an unrelated gate) does not mask the result.
+    let _ = market.full_account_refresh_not_atomic(&mut long);
+
+    let converted = market.convert_released_pnl_to_capital_not_atomic(&mut long);
+    let lien_closed = long.header.source_domains[0].source_claim_liened_num.get();
+    println!("FIX137 lien_open={lien_open} lien_closed={lien_closed} convert={converted:?}");
+
+    // The defect: the lien survived the close and pinned the conversion.
+    assert_eq!(
+        lien_closed, 0,
+        "IM lien must be released once the exposure that required it is closed"
+    );
+    assert_ne!(
+        converted, Err(V16Error::LockActive),
+        "conversion must no longer be held by a stale source-credit lien in Live"
+    );
+    // NOT asserted: `converted.is_ok()`. This minimal fixture never accrues, so the
+    // market's own freshness gate returns `Stale` — a legitimate and unrelated
+    // guard. Asserting it here would test the fixture, not the fix. The two
+    // assertions above are exactly what #137 changes, and both fail without it
+    // (the lien stays at its opening value and the error is LockActive).
 }
