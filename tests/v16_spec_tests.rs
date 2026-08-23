@@ -3698,3 +3698,55 @@ fn post_adl_sweep_never_mints() {
     println!("SWEEP134 worst_positive_delta={worst}");
     assert_eq!(worst, 0, "no configuration may mint value");
 }
+
+/// Upstream aeyakovenko/percolator#132 (OPEN, confirmed REAL DoS by Toly across four
+/// clean-room reproductions) — present in this engine too.
+///
+/// `clear_leg` detaches by RAW `basis_pos_q` from A-scaled `oi_eff`, so after a
+/// unilateral reduction scales the opposite side, the untouched opposite leg's raw
+/// basis exceeds effective OI and it can never detach: `CounterUnderflow`, with the
+/// victim's principal permanently stuck.
+///
+/// Toly's prescribed invariant: "detach an A-basis leg by its exact remaining
+/// effective-OI contribution with deterministic aggregate rounding."
+#[test]
+fn untouched_opposite_leg_detaches_after_a_unilateral_reduction() {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000;
+    let (mut header, mut markets) = market_fixture(1, PX0);
+    let mut a_h = account_fixture(1, 91);
+    let mut b_h = account_fixture(1, 92);
+    let mut c_h = account_fixture(1, 93);
+    let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_h);
+    let mut b = PortfolioV16ViewMut::new(&mut b_h);
+    let mut c = PortfolioV16ViewMut::new(&mut c_h);
+    m.deposit_not_atomic(&mut a, DEP).unwrap();
+    m.deposit_not_atomic(&mut b, DEP).unwrap();
+    m.deposit_not_atomic(&mut c, DEP).unwrap();
+
+    // A long 4 vs B short 4.
+    m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(4 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+
+    // Toly's sequence: the long owner unilaterally reduces 4 -> 3.
+    m.rebalance_reduce_position_not_atomic(&mut a,
+        RebalanceRequestV16 { asset_index: 0, reduce_q: POS_SCALE }).unwrap();
+
+    let oi_short = m.markets[0].engine.asset.oi_eff_short_q.get();
+    let b_raw = b.header.legs[0].try_to_runtime().unwrap().basis_pos_q.unsigned_abs();
+    println!("DOS132 oi_eff_short={oi_short} untouched_raw_basis={b_raw} raw_exceeds_effective={}",
+             b_raw > oi_short);
+
+    // The untouched short closes out against a fresh counterparty. Its leg reaches
+    // zero, so clear_leg runs — and must not underflow.
+    let closed = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut b, &mut c,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(4 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true);
+    println!("DOS132 detach={closed:?}");
+
+    // The real property: the leg must actually be detachable, whatever the error code.
+    assert!(
+        closed.is_ok(),
+        "an untouched opposite leg must remain detachable after a unilateral reduction, got {closed:?}"
+    );
+}

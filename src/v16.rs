@@ -11477,6 +11477,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::trade_signed_size_deltas(size_q)
     }
 
+    /// #132: scale a raw position into its effective (A-basis) equivalent so it can be
+    /// compared against `oi_eff_*`. A leg contributes `basis * a_side / a_basis`; with no
+    /// existing leg `a_basis == a_side`, so raw and effective coincide and the value is
+    /// returned unchanged. Floor division matches how `oi_eff` itself is derived.
+    fn effective_position_bounds_for_gate(
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        asset: &AssetStateV16,
+        current_q: i128,
+        next_q: i128,
+    ) -> V16Result<(i128, i128)> {
+        let slot = match account.active_leg_slot_for_asset(asset_index)? {
+            Some(slot) => slot,
+            None => return Ok((current_q, next_q)),
+        };
+        let leg = account.header.legs[slot].try_to_runtime()?;
+        if !leg.active || leg.a_basis == 0 {
+            return Ok((current_q, next_q));
+        }
+        let a_side = match leg.side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
+        };
+        if a_side == leg.a_basis {
+            return Ok((current_q, next_q));
+        }
+        let scale = |q: i128| -> V16Result<i128> {
+            if q == 0 {
+                return Ok(0);
+            }
+            let mag = wide_mul_div_floor_u128(q.unsigned_abs(), a_side, leg.a_basis);
+            let mag = i128::try_from(mag).map_err(|_| V16Error::ArithmeticOverflow)?;
+            Ok(if q < 0 { -mag } else { mag })
+        };
+        Ok((scale(current_q)?, scale(next_q)?))
+    }
+
     fn validate_trade_position_preflight(
         &self,
         long_account: &PortfolioV16View<'_>,
@@ -11491,13 +11528,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
             || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
         let preflight_asset = self.asset_state(request.asset_index)?;
+        // #132: the gate compares a reduction derived from RAW basis against A-scaled
+        // oi_eff. After a unilateral reduction has scaled a side, an untouched
+        // opposite leg's raw basis exceeds effective OI and every close is refused
+        // with LockActive -- the leg becomes permanently undetachable.
+        //
+        // Convert each account's position into the SAME effective units the gate's
+        // right-hand side already uses, so both sides of the comparison agree.
+        // Toly, aeyakovenko/percolator#121: "every later position/settlement/terminal
+        // path must instead consume the A-basis representation consistently".
+        let (long_cur_eff, long_next_eff) = Self::effective_position_bounds_for_gate(
+            long_account,
+            request.asset_index,
+            &preflight_asset,
+            long_lookup.current_q,
+            long_lookup.next_q,
+        )?;
+        let (short_cur_eff, short_next_eff) = Self::effective_position_bounds_for_gate(
+            short_account,
+            request.asset_index,
+            &preflight_asset,
+            short_lookup.current_q,
+            short_lookup.next_q,
+        )?;
         kernel_trade_preexisting_oi_reduction_gate(
             preflight_asset.oi_eff_long_q,
             preflight_asset.oi_eff_short_q,
-            long_lookup.current_q,
-            long_lookup.next_q,
-            short_lookup.current_q,
-            short_lookup.next_q,
+            long_cur_eff,
+            long_next_eff,
+            short_cur_eff,
+            short_next_eff,
         )?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let blocked_by_pending_domain_barrier = pending_domain_loss_barrier_blocks_position_change(
@@ -11740,14 +11800,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     if let Some(new_dust) = dust_after_clear {
                         asset.social_loss_dust_long_num = new_dust;
                     }
-                    asset.oi_eff_long_q = asset
-                        .oi_eff_long_q
-                        .checked_sub(leg.basis_pos_q.unsigned_abs())
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    asset.loss_weight_sum_long = asset
+                    // #132 / Toly's invariant: "detach an A-basis leg by its exact
+                    // remaining effective-OI contribution with deterministic aggregate
+                    // rounding." Subtracting RAW basis_pos_q from A-scaled oi_eff
+                    // underflows whenever a unilateral reduction has scaled this side.
+                    //
+                    // The contribution is taken as the DIFFERENCE OF AGGREGATES, which
+                    // is the deterministic-aggregate-rounding part: per-leg rounding
+                    // does not sum to the rounding of the sum, but a telescoping
+                    // difference does — the last leg leaves oi_eff at exactly zero.
+                    let w_after = asset
                         .loss_weight_sum_long
                         .checked_sub(leg.loss_weight)
                         .ok_or(V16Error::CounterUnderflow)?;
+                    let eff_before = wide_mul_div_floor_u128(
+                        asset.a_long,
+                        asset.loss_weight_sum_long,
+                        SOCIAL_WEIGHT_SCALE,
+                    );
+                    let eff_after =
+                        wide_mul_div_floor_u128(asset.a_long, w_after, SOCIAL_WEIGHT_SCALE);
+                    let contribution = eff_before.saturating_sub(eff_after);
+                    asset.oi_eff_long_q = asset
+                        .oi_eff_long_q
+                        .checked_sub(contribution)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    asset.loss_weight_sum_long = w_after;
                 }
             }
             SideV16::Short => {
@@ -11765,14 +11843,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     if let Some(new_dust) = dust_after_clear {
                         asset.social_loss_dust_short_num = new_dust;
                     }
-                    asset.oi_eff_short_q = asset
-                        .oi_eff_short_q
-                        .checked_sub(leg.basis_pos_q.unsigned_abs())
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    asset.loss_weight_sum_short = asset
+                    // #132 / Toly's invariant: "detach an A-basis leg by its exact
+                    // remaining effective-OI contribution with deterministic aggregate
+                    // rounding." Subtracting RAW basis_pos_q from A-scaled oi_eff
+                    // underflows whenever a unilateral reduction has scaled this side.
+                    //
+                    // The contribution is taken as the DIFFERENCE OF AGGREGATES, which
+                    // is the deterministic-aggregate-rounding part: per-leg rounding
+                    // does not sum to the rounding of the sum, but a telescoping
+                    // difference does — the last leg leaves oi_eff at exactly zero.
+                    let w_after = asset
                         .loss_weight_sum_short
                         .checked_sub(leg.loss_weight)
                         .ok_or(V16Error::CounterUnderflow)?;
+                    let eff_before = wide_mul_div_floor_u128(
+                        asset.a_short,
+                        asset.loss_weight_sum_short,
+                        SOCIAL_WEIGHT_SCALE,
+                    );
+                    let eff_after =
+                        wide_mul_div_floor_u128(asset.a_short, w_after, SOCIAL_WEIGHT_SCALE);
+                    let contribution = eff_before.saturating_sub(eff_after);
+                    asset.oi_eff_short_q = asset
+                        .oi_eff_short_q
+                        .checked_sub(contribution)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    asset.loss_weight_sum_short = w_after;
                 }
             }
         }
