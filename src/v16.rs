@@ -11929,11 +11929,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let old_abs = old_leg.basis_pos_q.unsigned_abs();
         let new_abs = new.unsigned_abs();
-        let new_weight = loss_weight_for_basis(new_abs, old_leg.a_basis)?;
         let preserve_pending_obligation_weight =
             same_side_risk_reduction_or_flat_obligation(current, new)
                 && self.has_pending_domain_loss_barrier(asset_index, old_leg.side)?;
         let mut asset = self.asset_state(asset_index)?;
+        // #134: when a leg GROWS across an `a` change, the increment must be booked at
+        // the CURRENT a_side, not at the leg's frozen a_basis. Otherwise the added
+        // notional settles at the stale ratio while the fresh counterparty settles at
+        // 1, and the difference is minted against the vault.
+        //
+        // Follows upstream's ruling on aeyakovenko/percolator#121: the frozen a_basis
+        // snapshot is BY DESIGN and RebalanceReduce cannot rewrite counterparty legs —
+        // "every later position/settlement/terminal path must instead consume the
+        // A-basis representation consistently". `loss_weight` IS that representation
+        // (a-independent by construction), so the increment is weighted at a_side.
+        let a_side_now = match old_leg.side {
+            SideV16::Long => asset.a_long,
+            SideV16::Short => asset.a_short,
+        };
+        let new_weight = if new_abs > old_abs && old_leg.a_basis != a_side_now {
+            let increment = new_abs - old_abs;
+            old_leg
+                .loss_weight
+                .checked_add(loss_weight_for_basis(increment, a_side_now)?)
+                .ok_or(V16Error::CounterOverflow)?
+        } else {
+            loss_weight_for_basis(new_abs, old_leg.a_basis)?
+        };
         match old_leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q = adjust_u128(asset.oi_eff_long_q, old_abs, new_abs)?;
@@ -11952,6 +11974,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         old_leg.basis_pos_q = new;
         if !preserve_pending_obligation_weight {
+            // Rebase a_basis to the value implied by the blended weight so the leg's own
+            // invariant (loss_weight == basis * SCALE / a_basis) continues to hold.
+            if new_weight != 0 {
+                // CEIL, not floor: the leg validator recomputes
+                // loss_weight_for_basis(basis, a_basis) (which itself ceils) and
+                // requires stored >= recomputed. Flooring a_basis makes the recomputed
+                // weight land one atom ABOVE the stored one and trips InvalidLeg.
+                let rebased = checked_mul_div_ceil_u256(
+                    U256::from_u128(new_abs),
+                    U256::from_u128(SOCIAL_WEIGHT_SCALE),
+                    U256::from_u128(new_weight),
+                )
+                .and_then(|v| v.try_into_u128())
+                .ok_or(V16Error::ArithmeticOverflow)?;
+                if (MIN_A_SIDE..=ADL_ONE).contains(&rebased) {
+                    old_leg.a_basis = rebased;
+                }
+            }
             old_leg.loss_weight = new_weight;
         }
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&old_leg);

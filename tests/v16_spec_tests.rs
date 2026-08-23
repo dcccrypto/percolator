@@ -3592,3 +3592,60 @@ fn im_lien_is_released_when_the_position_closes_in_live() {
     // assertions above are exactly what #137 changes, and both fail without it
     // (the lien stays at its opening value and the error is LockActive).
 }
+
+/// #134 — a position opened against a side whose `a` was scaled down by an ADL must
+/// not create value. Conservation: obligations == vault, with no deposit or withdrawal.
+#[test]
+fn post_adl_new_position_conserves_value() { for d in [1u64, 10, 100, 1_000, 10_000, 100_000] { scen134(d); } }
+
+/// Asserts the residue does not SCALE with the price move. Pre-fix it was
+/// `minted = dpx * trade * h` (linear); post-fix it is a constant 1-atom floor/ceil
+/// residue in the conservative direction (vault >= obligations).
+fn scen134(dpx: u64) {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000;
+    let (mut header, mut markets) = market_fixture(1, PX0);
+    let mut a_h = account_fixture(1, 61);
+    let mut b_h = account_fixture(1, 62);
+    let mut c_h = account_fixture(1, 63);
+    let obl = |m: &MarketGroupV16ViewMut<'_, u64>| -> u128 {
+        m.header.c_tot.get() + m.header.pnl_pos_tot.get() + m.header.insurance.get() };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_h);
+    let mut b = PortfolioV16ViewMut::new(&mut b_h);
+    let mut c = PortfolioV16ViewMut::new(&mut c_h);
+    market.deposit_not_atomic(&mut a, DEP).unwrap();
+    market.deposit_not_atomic(&mut b, DEP).unwrap();
+    market.deposit_not_atomic(&mut c, DEP).unwrap();
+    let v0 = market.header.vault.get();
+
+    market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+    market.rebalance_reduce_position_not_atomic(&mut a,
+        RebalanceRequestV16 { asset_index: 0, reduce_q: 4 * POS_SCALE }).unwrap();
+    assert!(market.markets[0].engine.asset.a_short.get() < ADL_ONE, "ADL must scale a_short");
+
+    // C opens against B, whose short leg carries a frozen a_basis from before the ADL.
+    market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut c, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+
+    market.accrue_asset_to_not_atomic(0, 2, PX0 + dpx, 0, true).unwrap();
+    let _ = market.full_account_refresh_not_atomic(&mut a);
+    let _ = market.full_account_refresh_not_atomic(&mut b);
+    let _ = market.full_account_refresh_not_atomic(&mut c);
+
+    let vault = market.header.vault.get();
+    let o = obl(&market);
+    let delta = o as i128 - vault as i128;
+    println!("CONS134 dpx={dpx:>7} delta={delta:>7}");
+    assert!(
+        delta <= 0,
+        "obligations must never exceed the vault (mint), got +{delta} at dpx={dpx}"
+    );
+    assert!(
+        delta >= -1,
+        "residue must stay a single conservative atom, got {delta} at dpx={dpx}"
+    );
+    assert_eq!(vault, v0, "no deposits or withdrawals occurred");
+
+}
