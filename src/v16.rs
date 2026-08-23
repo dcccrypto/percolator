@@ -1052,7 +1052,8 @@ impl V16Core {
         Ok((bucket, source))
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
+    // #137: NOT cfg-gated. The Live release path must exist in the deployed
+    // binary; gating it to kani/fuzz is what left the IM lien permanent.
     fn prepare_counterparty_lien_release_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
@@ -1286,7 +1287,8 @@ impl V16Core {
         Ok((reservation, source))
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
+    // #137: NOT cfg-gated. The Live release path must exist in the deployed
+    // binary; gating it to kani/fuzz is what left the IM lien permanent.
     fn prepare_insurance_lien_release_delta(
         mut reservation: InsuranceCreditReservationV16,
         mut source: SourceCreditStateV16,
@@ -6528,7 +6530,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
+    // #137: reachable from the Live release path — must be compiled in.
     pub fn release_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -6783,7 +6785,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
+    // #137: reachable from the Live release path — must be compiled in.
     pub fn release_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -14226,6 +14228,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
+        // #137: release any source-credit lien whose exposure has already closed
+        // BEFORE the preflight, so a stale lien cannot hold the conversion in Live.
+        // Mirrors upstream av/codex/blocker-dos-flat-source-lien-convert-20260728
+        // ("Release flat source liens before PnL conversion", 4d4f9ed8), minus the
+        // contracts layer this fork does not carry.
+        if Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
+            self.release_account_source_credit_liens_if_unneeded_not_atomic(account)?;
+        }
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
         let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
         if converted != 0 {
@@ -14235,7 +14245,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
+    // #137: NOT cfg-gated. The Live release path must exist in the deployed
+    // binary; gating it to kani/fuzz is what left the IM lien permanent.
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
