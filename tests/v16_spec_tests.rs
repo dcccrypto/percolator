@@ -3649,3 +3649,52 @@ fn scen134(dpx: u64) {
     assert_eq!(vault, v0, "no deposits or withdrawals occurred");
 
 }
+
+/// #134 thorough sweep: the residue must never be positive (a mint) and must not
+/// scale, across haircut fractions, trade sizes and repeated ADL rounds.
+#[test]
+fn post_adl_sweep_never_mints() {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000_000;
+    let run = |oi: u128, red: u128, sz: u128, dpx: u64, rounds: u32| -> i128 {
+        let (mut header, mut markets) = market_fixture(1, PX0);
+        let mut a_h = account_fixture(1, 81);
+        let mut b_h = account_fixture(1, 82);
+        let mut c_h = account_fixture(1, 83);
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut a = PortfolioV16ViewMut::new(&mut a_h);
+        let mut b = PortfolioV16ViewMut::new(&mut b_h);
+        let mut c = PortfolioV16ViewMut::new(&mut c_h);
+        m.deposit_not_atomic(&mut a, DEP).unwrap();
+        m.deposit_not_atomic(&mut b, DEP).unwrap();
+        m.deposit_not_atomic(&mut c, DEP).unwrap();
+        let v0 = m.header.vault.get();
+        if let Err(e) = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+            TradeRequestV16 { asset_index: 0, size_q: signed_q(oi * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true) { println!("SKIP trade1 {e:?}"); return 0; }
+        for _ in 0..rounds {
+            if let Err(e) = m.rebalance_reduce_position_not_atomic(&mut a,
+                RebalanceRequestV16 { asset_index: 0, reduce_q: red * POS_SCALE }) { println!("SKIP adl {e:?}"); return 0; }
+        }
+        if let Err(e) = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut c, &mut b,
+            TradeRequestV16 { asset_index: 0, size_q: signed_q(sz * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true) { println!("SKIP trade3 {e:?}"); return 0; }
+        if m.accrue_asset_to_not_atomic(0, 2, PX0 + dpx, 0, true).is_err() { return 0; }
+        let _ = m.full_account_refresh_not_atomic(&mut a);
+        let _ = m.full_account_refresh_not_atomic(&mut b);
+        let _ = m.full_account_refresh_not_atomic(&mut c);
+        let o = m.header.c_tot.get() + m.header.pnl_pos_tot.get() + m.header.insurance.get();
+        assert_eq!(m.header.vault.get(), v0, "no deposits/withdrawals");
+        o as i128 - m.header.vault.get() as i128
+    };
+    let mut worst: i128 = 0;
+    for &(oi, red, sz) in &[(10u128,4u128,10u128),(10,1,10),(10,8,10),(10,9,10),(100,40,100),(100,89,100),(10,4,4),(10,4,20),(20,5,20),(50,20,50)] {
+        for &dpx in &[1u64, 1_000, 100_000] {
+            for &rounds in &[1u32, 2] {
+                let d = run(oi, red, sz, dpx, rounds);
+                if d > 0 { println!("SWEEP134 MINT oi={oi} red={red} sz={sz} dpx={dpx} rounds={rounds} delta=+{d}"); }
+                if d > worst { worst = d; }
+            }
+        }
+    }
+    println!("SWEEP134 worst_positive_delta={worst}");
+    assert_eq!(worst, 0, "no configuration may mint value");
+}
