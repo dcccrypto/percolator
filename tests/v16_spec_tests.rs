@@ -3592,3 +3592,161 @@ fn im_lien_is_released_when_the_position_closes_in_live() {
     // assertions above are exactly what #137 changes, and both fail without it
     // (the lien stays at its opening value and the error is LockActive).
 }
+
+/// #134 — a position opened against a side whose `a` was scaled down by an ADL must
+/// not create value. Conservation: obligations == vault, with no deposit or withdrawal.
+#[test]
+fn post_adl_new_position_conserves_value() { for d in [1u64, 10, 100, 1_000, 10_000, 100_000] { scen134(d); } }
+
+/// Asserts the residue does not SCALE with the price move. Pre-fix it was
+/// `minted = dpx * trade * h` (linear); post-fix it is a constant 1-atom floor/ceil
+/// residue in the conservative direction (vault >= obligations).
+fn scen134(dpx: u64) {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000;
+    let (mut header, mut markets) = market_fixture(1, PX0);
+    let mut a_h = account_fixture(1, 61);
+    let mut b_h = account_fixture(1, 62);
+    let mut c_h = account_fixture(1, 63);
+    let obl = |m: &MarketGroupV16ViewMut<'_, u64>| -> u128 {
+        m.header.c_tot.get() + m.header.pnl_pos_tot.get() + m.header.insurance.get() };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_h);
+    let mut b = PortfolioV16ViewMut::new(&mut b_h);
+    let mut c = PortfolioV16ViewMut::new(&mut c_h);
+    market.deposit_not_atomic(&mut a, DEP).unwrap();
+    market.deposit_not_atomic(&mut b, DEP).unwrap();
+    market.deposit_not_atomic(&mut c, DEP).unwrap();
+    let v0 = market.header.vault.get();
+
+    market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+    market.rebalance_reduce_position_not_atomic(&mut a,
+        RebalanceRequestV16 { asset_index: 0, reduce_q: 4 * POS_SCALE }).unwrap();
+    assert!(market.markets[0].engine.asset.a_short.get() < ADL_ONE, "ADL must scale a_short");
+
+    // C opens against B, whose short leg carries a frozen a_basis from before the ADL.
+    market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut c, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+
+    market.accrue_asset_to_not_atomic(0, 2, PX0 + dpx, 0, true).unwrap();
+    let _ = market.full_account_refresh_not_atomic(&mut a);
+    let _ = market.full_account_refresh_not_atomic(&mut b);
+    let _ = market.full_account_refresh_not_atomic(&mut c);
+
+    let vault = market.header.vault.get();
+    let o = obl(&market);
+    let delta = o as i128 - vault as i128;
+    println!("CONS134 dpx={dpx:>7} delta={delta:>7}");
+    assert!(
+        delta <= 0,
+        "obligations must never exceed the vault (mint), got +{delta} at dpx={dpx}"
+    );
+    assert!(
+        delta >= -1,
+        "residue must stay a single conservative atom, got {delta} at dpx={dpx}"
+    );
+    assert_eq!(vault, v0, "no deposits or withdrawals occurred");
+
+}
+
+/// #134 thorough sweep: the residue must never be positive (a mint) and must not
+/// scale, across haircut fractions, trade sizes and repeated ADL rounds.
+#[test]
+fn post_adl_sweep_never_mints() {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000_000;
+    let run = |oi: u128, red: u128, sz: u128, dpx: u64, rounds: u32| -> i128 {
+        let (mut header, mut markets) = market_fixture(1, PX0);
+        let mut a_h = account_fixture(1, 81);
+        let mut b_h = account_fixture(1, 82);
+        let mut c_h = account_fixture(1, 83);
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut a = PortfolioV16ViewMut::new(&mut a_h);
+        let mut b = PortfolioV16ViewMut::new(&mut b_h);
+        let mut c = PortfolioV16ViewMut::new(&mut c_h);
+        m.deposit_not_atomic(&mut a, DEP).unwrap();
+        m.deposit_not_atomic(&mut b, DEP).unwrap();
+        m.deposit_not_atomic(&mut c, DEP).unwrap();
+        let v0 = m.header.vault.get();
+        if let Err(e) = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+            TradeRequestV16 { asset_index: 0, size_q: signed_q(oi * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true) { println!("SKIP trade1 {e:?}"); return 0; }
+        for _ in 0..rounds {
+            if let Err(e) = m.rebalance_reduce_position_not_atomic(&mut a,
+                RebalanceRequestV16 { asset_index: 0, reduce_q: red * POS_SCALE }) { println!("SKIP adl {e:?}"); return 0; }
+        }
+        if let Err(e) = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut c, &mut b,
+            TradeRequestV16 { asset_index: 0, size_q: signed_q(sz * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true) { println!("SKIP trade3 {e:?}"); return 0; }
+        if m.accrue_asset_to_not_atomic(0, 2, PX0 + dpx, 0, true).is_err() { return 0; }
+        let _ = m.full_account_refresh_not_atomic(&mut a);
+        let _ = m.full_account_refresh_not_atomic(&mut b);
+        let _ = m.full_account_refresh_not_atomic(&mut c);
+        let o = m.header.c_tot.get() + m.header.pnl_pos_tot.get() + m.header.insurance.get();
+        assert_eq!(m.header.vault.get(), v0, "no deposits/withdrawals");
+        o as i128 - m.header.vault.get() as i128
+    };
+    let mut worst: i128 = 0;
+    for &(oi, red, sz) in &[(10u128,4u128,10u128),(10,1,10),(10,8,10),(10,9,10),(100,40,100),(100,89,100),(10,4,4),(10,4,20),(20,5,20),(50,20,50)] {
+        for &dpx in &[1u64, 1_000, 100_000] {
+            for &rounds in &[1u32, 2] {
+                let d = run(oi, red, sz, dpx, rounds);
+                if d > 0 { println!("SWEEP134 MINT oi={oi} red={red} sz={sz} dpx={dpx} rounds={rounds} delta=+{d}"); }
+                if d > worst { worst = d; }
+            }
+        }
+    }
+    println!("SWEEP134 worst_positive_delta={worst}");
+    assert_eq!(worst, 0, "no configuration may mint value");
+}
+
+/// Upstream aeyakovenko/percolator#132 (OPEN, confirmed REAL DoS by Toly across four
+/// clean-room reproductions) — present in this engine too.
+///
+/// `clear_leg` detaches by RAW `basis_pos_q` from A-scaled `oi_eff`, so after a
+/// unilateral reduction scales the opposite side, the untouched opposite leg's raw
+/// basis exceeds effective OI and it can never detach: `CounterUnderflow`, with the
+/// victim's principal permanently stuck.
+///
+/// Toly's prescribed invariant: "detach an A-basis leg by its exact remaining
+/// effective-OI contribution with deterministic aggregate rounding."
+#[test]
+fn untouched_opposite_leg_detaches_after_a_unilateral_reduction() {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000;
+    let (mut header, mut markets) = market_fixture(1, PX0);
+    let mut a_h = account_fixture(1, 91);
+    let mut b_h = account_fixture(1, 92);
+    let mut c_h = account_fixture(1, 93);
+    let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_h);
+    let mut b = PortfolioV16ViewMut::new(&mut b_h);
+    let mut c = PortfolioV16ViewMut::new(&mut c_h);
+    m.deposit_not_atomic(&mut a, DEP).unwrap();
+    m.deposit_not_atomic(&mut b, DEP).unwrap();
+    m.deposit_not_atomic(&mut c, DEP).unwrap();
+
+    // A long 4 vs B short 4.
+    m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(4 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true).unwrap();
+
+    // Toly's sequence: the long owner unilaterally reduces 4 -> 3.
+    m.rebalance_reduce_position_not_atomic(&mut a,
+        RebalanceRequestV16 { asset_index: 0, reduce_q: POS_SCALE }).unwrap();
+
+    let oi_short = m.markets[0].engine.asset.oi_eff_short_q.get();
+    let b_raw = b.header.legs[0].try_to_runtime().unwrap().basis_pos_q.unsigned_abs();
+    println!("DOS132 oi_eff_short={oi_short} untouched_raw_basis={b_raw} raw_exceeds_effective={}",
+             b_raw > oi_short);
+
+    // The untouched short closes out against a fresh counterparty. Its leg reaches
+    // zero, so clear_leg runs — and must not underflow.
+    let closed = m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut b, &mut c,
+        TradeRequestV16 { asset_index: 0, size_q: signed_q(4 * POS_SCALE), exec_price: PX0, fee_bps: 0 }, true);
+    println!("DOS132 detach={closed:?}");
+
+    // The real property: the leg must actually be detachable, whatever the error code.
+    assert!(
+        closed.is_ok(),
+        "an untouched opposite leg must remain detachable after a unilateral reduction, got {closed:?}"
+    );
+}
