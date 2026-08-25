@@ -12272,7 +12272,14 @@ fn proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated() {
     let surplus = surplus_raw as u128;
     let now_slot = 7u64;
 
-    let (mut header, mut markets, _) = one_market_direct_view_fixture();
+    // #142: `one_market_direct_view_fixture()` never produces a shape-valid header, and
+    // this operation RETURNS `self.validate_shape()` as its result — so with that fixture
+    // it errors on every path. The old `kani::assume(validate_shape() == Ok(()))` was
+    // therefore unsatisfiable and killed the harness, which then reported SUCCESSFUL with
+    // 0 of 2 covers reachable. `one_market_view_fixture()` IS shape-valid — it is what
+    // `proof_v16_expired_backing_yields_zero_realizable_support_after_expiry` assumes
+    // shape-validity on, with 2 of 2 covers satisfied.
+    let (mut header, mut markets, _) = one_market_view_fixture();
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
@@ -12376,15 +12383,26 @@ fn proof_v16_public_backing_fee_charges_only_selected_domain() {
     let unrelated_backing_num = unrelated_backing_raw as u128 * BOUND_SCALE;
     let unrelated_budget = unrelated_budget_raw as u128;
     let (market_group_id, _, _) = ids();
+    // #140: this harness built the header with `MarketGroupV16HeaderAccount::default()`
+    // plus hand-poked fields. Such a header is never shape-valid, so
+    // `charge_account_backing_fee_not_atomic` returned `InvalidConfig` on EVERY path --
+    // the `Ok` branch was UNSATISFIABLE and the cover below unreachable, so the proof
+    // asserted nothing while reporting a failure. Build it the way the known-good
+    // fixtures do (real constructor + real activation) so the market is shape-valid on
+    // entry and the assertions actually execute.
     let cfg = V16Config::public_user_fund_with_market_slots(1, 2, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::default();
-    header.market_group_id = market_group_id;
-    header.config = V16ConfigAccount::from_runtime(&cfg);
-    header.asset_slot_capacity = V16PodU32::new(2);
-    header.asset_activation_count = V16PodU64::new(2);
-    header.next_market_id = V16PodU64::new(3);
-    header.slot_last = V16PodU64::new(1);
-    header.current_slot = V16PodU64::new(1);
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 2, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+    ];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+        // asset_activation_cooldown_slots == 1, so the second activation needs slot 2.
+        view.activate_empty_market_not_atomic(1, 100, 2).unwrap();
+    }
     header.vault = V16PodU128::new(capital + unrelated_budget + 1 + unrelated_backing_raw as u128);
     header.c_tot = V16PodU128::new(capital);
     header.insurance = V16PodU128::new(unrelated_budget);
@@ -12394,18 +12412,6 @@ fn proof_v16_public_backing_fee_charges_only_selected_domain() {
             .checked_add(unrelated_backing_num)
             .unwrap(),
     );
-    let mut markets = [
-        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
-        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
-    ];
-    let mut asset0 = AssetStateV16::default();
-    asset0.market_id = 1;
-    asset0.lifecycle = AssetLifecycleV16::Active;
-    asset0.raw_oracle_target_price = 100;
-    asset0.effective_price = 100;
-    asset0.fund_px_last = 100;
-    asset0.slot_last = 1;
-    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id: 1,
         fresh_unliened_backing_num: selected_backing_num,
@@ -12419,14 +12425,6 @@ fn proof_v16_public_backing_fee_charges_only_selected_domain() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    let mut asset1 = AssetStateV16::default();
-    asset1.market_id = 2;
-    asset1.lifecycle = AssetLifecycleV16::Active;
-    asset1.raw_oracle_target_price = 100;
-    asset1.effective_price = 100;
-    asset1.fund_px_last = 100;
-    asset1.slot_last = 1;
-    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
     markets[1].engine.insurance_domain_budget_long = V16PodU128::new(unrelated_budget);
     markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id: 2,
