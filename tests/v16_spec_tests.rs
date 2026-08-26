@@ -4110,3 +4110,167 @@ fn partial_reduce_of_stale_a_basis_leg_preserves_conservation() {
 // `v16_wrapper_prediction_asset_can_drain_retire_...` in percolator-prog — a
 // different repo, and not where someone changing
 // `rebalance_reduce_position_not_atomic` would look. That is the real gap.
+/// Shared fixture for the Live source-credit-lien regressions below: an account
+/// that opened a risk-increasing trade (minting the IM lien) and then closed it,
+/// leaving a stale lien and realizable positive PnL.
+#[allow(clippy::type_complexity)]
+fn live_stale_im_lien_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut long_header = account_fixture(1, 8);
+    let mut short_header = account_fixture(1, 9);
+    let claim = 100u128;
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_header.source_domains[0].domain = V16PodU32::new(0);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim + header.vault.get());
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    }
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: 1, fee_bps: 0 },
+                true,
+            )
+            .expect("opening trade mints the IM lien");
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut short,
+                &mut long,
+                TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: 1, fee_bps: 0 },
+                true,
+            )
+            .expect("closing trade");
+    }
+    (header, markets, long_header)
+}
+
+/// The Live lien release must leave the account with a CURRENT certificate.
+///
+/// `release_account_source_credit_liens_if_unneeded_not_atomic` advances the market
+/// `risk_epoch` (it recomputes the source-credit domain), which retires every
+/// outstanding certificate including the one the release derived for itself. It
+/// previously also cleared `health_cert.valid` on exit. Either alone is enough to
+/// make `ensure_favorable_action_current_certificate` reject the account, so the
+/// conversion that `convert_released_pnl_to_capital_not_atomic` performs
+/// immediately after the release returned `Stale` — and because the instruction
+/// returned an error, the runtime discarded the release along with it, so the lien
+/// could never clear in `Live` at all.
+///
+/// Regression for the durable freeze reported in #148 (a recurrence of #137).
+#[test]
+fn live_lien_release_leaves_a_current_certificate_so_conversion_succeeds() {
+    let (mut header, mut markets, mut acct) = live_stale_im_lien_fixture();
+
+    let lien = acct.source_domains[0].source_lien_effective_reserved.get();
+    assert_ne!(lien, 0, "fixture must carry the stale IM lien the release targets");
+
+    // Model the runtime: an instruction that returns Err commits nothing, so a
+    // failing conversion must not be credited with the release it performed.
+    let mut outcomes = Vec::new();
+    for _ in 0..4 {
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut a = PortfolioV16ViewMut::new(&mut acct);
+            let _ = market.full_account_refresh_not_atomic(&mut a);
+        }
+        let (h, m, s) = (header, markets.clone(), acct);
+        let res = {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut a = PortfolioV16ViewMut::new(&mut acct);
+            market.convert_released_pnl_to_capital_not_atomic(&mut a)
+        };
+        if res.is_err() {
+            header = h;
+            markets = m;
+            acct = s;
+        }
+        outcomes.push(res);
+    }
+
+    assert_eq!(
+        outcomes[0],
+        Ok(100),
+        "the first conversion must succeed; it previously returned Err(Stale) because \
+         the release retired the certificate the preflight then demanded"
+    );
+    assert!(
+        outcomes[1..].iter().all(|r| *r == Ok(0)),
+        "later conversions are no-ops once the claim is realized; got {outcomes:?}"
+    );
+    assert_eq!(
+        acct.source_domains[0].source_lien_effective_reserved.get(),
+        0,
+        "the released lien must be committed, not rolled back with an error"
+    );
+}
+
+/// The release is `pub` and reachable on its own, so it must leave a usable
+/// certificate regardless of how it is reached — not only when it happens to be
+/// called from inside `convert_released_pnl_to_capital_not_atomic`.
+///
+/// This distinguishes certifying inside the release from certifying at that one
+/// call site: the call site is guarded by `valid_source_lien_effective_reserved_sum
+/// != 0`, which is already false after a direct release, so a call-site-only fix
+/// leaves this path returning `Stale`.
+#[test]
+fn direct_live_lien_release_leaves_a_certificate_the_conversion_can_use() {
+    let (mut header, mut markets, mut acct) = live_stale_im_lien_fixture();
+
+    let released = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut a = PortfolioV16ViewMut::new(&mut acct);
+        market.release_account_source_credit_liens_if_unneeded_not_atomic(&mut a)
+    };
+    assert_eq!(released, Ok(10), "the release itself succeeds");
+    assert!(
+        acct.health_cert.try_to_runtime().unwrap().valid,
+        "the release must leave a valid certificate, as every other self-contained \
+         mutating operation in this engine does"
+    );
+
+    let converted = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut a = PortfolioV16ViewMut::new(&mut acct);
+        market.convert_released_pnl_to_capital_not_atomic(&mut a)
+    };
+    assert_eq!(
+        converted,
+        Ok(100),
+        "converting straight after a direct release must not be blocked by the \
+         certificate that release retired"
+    );
+}

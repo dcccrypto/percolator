@@ -14641,7 +14641,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         account.compact_source_domains();
-        account.header.health_cert.valid = 0;
+        // The releases above advanced the market `risk_epoch` and therefore retired
+        // the certificate this function derived for itself at the top. Leave a
+        // current one instead of clearing the flag, so a caller can act on the
+        // post-release state in the same instruction. This matches how every other
+        // self-contained mutating operation here ends (reduce/liquidate, batch
+        // trade); `health_cert.valid = 0` is the leaf-mutator idiom, and this
+        // function is not a leaf -- it mode-gates, settles, certifies and runs its
+        // own margin gate. Certifying before the validations below also means the
+        // new certificate is itself covered by them.
+        self.certify_account_after_local_settlement_with_price_override(account, None)?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
         Ok(released_effective)
