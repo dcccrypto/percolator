@@ -1,0 +1,135 @@
+name: CI
+
+# Restored 2026-08-27. `main` branch protection requires four status checks —
+# test, clippy, fmt, "Kani Proofs" — but this repo had NO .github/workflows at all, so none
+# of them could ever report and every PR to main was permanently unmergeable. The last
+# workflow run was 2026-04-18.
+#
+# The job NAMES below are chosen to match those required contexts exactly. Renaming a job
+# here silently re-blocks every PR, so don't.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_MIN_STACK: 8388608
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --verbose
+      # --no-fail-fast matters: without it cargo stops at the first failing SUITE and the
+      # totals it prints are a truncated subset. That has produced wrong pass/fail numbers
+      # in this project before.
+      - name: Test
+        run: cargo test --no-fail-fast --verbose
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # -W, not -D: the crate currently has ~57 warnings. Making them errors would fail every
+      # PR for pre-existing debt rather than for anything the PR did.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -W clippy::all
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # SCOPED TO THE FILES THIS PR TOUCHES, deliberately.
+      #
+      # `cargo fmt --check` over the whole repo fails today: there are 243 diff hunks,
+      # including src/v16.rs. Reformatting them is NOT deployment-neutral — measured
+      # 2026-08-27, running `cargo fmt` changed the compiled wrapper .so from 2e88fb83… to
+      # 9f25ac81…, because release builds embed file/line in panic paths. So a repo-wide
+      # reformat has to be sequenced deliberately against a deploy, not smuggled in with a
+      # CI restoration.
+      #
+      # Checking only changed files still enforces the property that matters right now — no
+      # NEW drift — and reports honestly instead of being permanently red. Switch this to a
+      # whole-repo `cargo fmt --check` once the reformat has landed.
+      - name: Check formatting of changed files
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then
+            echo "not a pull_request event — checking the last commit's files"
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+          fi
+          FILES=$(git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- '*.rs' || true)
+          if [ -z "$FILES" ]; then
+            echo "no Rust files changed — nothing to check"
+            exit 0
+          fi
+          echo "checking:"; echo "$FILES" | sed 's/^/  /'
+          # shellcheck disable=SC2086
+          rustfmt --edition 2021 --check $FILES
+
+  kani:
+    name: Kani Proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A BOUNDED subset, not the full suite. All 240 harnesses take hours, which is exactly
+      # why Kani was pulled from CI in the first place (commit 47a39e76, "too slow for every
+      # commit"). Running nothing was the wrong correction: it left "Kani Proofs" as a
+      # required check that could never report.
+      #
+      # These two are here on purpose. Both were VACUOUS until 2026-08-26 — they printed a
+      # verdict while their cover properties were unreachable, so every assertion inside them
+      # was dead code. That is the regression this job exists to catch.
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      - name: Verify repaired harnesses
+        run: |
+          set -euo pipefail
+          for H in \
+            proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated \
+            proof_v16_public_backing_fee_charges_only_selected_domain
+          do
+            echo "=== $H ==="
+            cargo kani --tests --harness "$H" --output-format terse | tee "/tmp/$H.log"
+            # A pass is not enough. Kani reports SUCCESSFUL for a harness whose covers are
+            # unreachable, which is precisely how these two hid. Gate on the cover line.
+            if grep -qE "0 of [0-9]+ cover properties satisfied" "/tmp/$H.log"; then
+              echo "::error::$H is VACUOUS — cover properties unreachable"
+              exit 1
+            fi
+          done
