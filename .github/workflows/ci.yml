@@ -110,8 +110,13 @@ jobs:
       # commit"). Running nothing was the wrong correction: it left "Kani Proofs" as a
       # required check that could never report.
       #
-      # The harnesses below are ones that are non-vacuous on main TODAY, so this job reports
-      # honestly from the moment it lands.
+      # The harnesses below are non-vacuous on main TODAY and are the FASTEST in the suite
+      # (1-2s each, measured), so this job reports honestly and finishes.
+      #
+      # Harness choice is a resource decision, not a taste one. A hosted runner was killed
+      # mid-check ("The runner has received a shutdown signal") on a heavier harness -- CBMC
+      # is memory-hungry and the historical Kani workflow used a larger blacksmith runner.
+      # --jobs 1 keeps the peak down.
       #
       # The two that were VACUOUS until 2026-08-26 —
       # proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated and
@@ -126,13 +131,14 @@ jobs:
         run: |
           set -euo pipefail
           for H in \
-            proof_v16_expired_backing_yields_zero_realizable_support_after_expiry
+            proof_v16_asset_recovery_transition_freezes_price_and_bumps_once \
+            proof_v17_lp_vault_cooldown_enforcement
           do
             echo "=== $H ==="
             # --features fuzz is REQUIRED: `--tests` builds every test target, and the
             # v16_fuzzing target is feature-gated. Without it cargo aborts with
             # "target v16_fuzzing ... requires the features: fuzz" before any proof runs.
-            cargo kani --tests --features fuzz --harness "$H" --output-format terse | tee "/tmp/$H.log"
+            cargo kani --tests --features fuzz --jobs 1 --harness "$H" --output-format terse | tee "/tmp/$H.log"
             # A pass is not enough. Kani reports SUCCESSFUL for a harness whose covers are
             # unreachable, which is precisely how these two hid. Gate on the cover line.
             if grep -qE "0 of [0-9]+ cover properties satisfied" "/tmp/$H.log"; then
