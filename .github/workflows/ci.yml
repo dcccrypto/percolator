@@ -110,9 +110,14 @@ jobs:
       # commit"). Running nothing was the wrong correction: it left "Kani Proofs" as a
       # required check that could never report.
       #
-      # These two are here on purpose. Both were VACUOUS until 2026-08-26 — they printed a
-      # verdict while their cover properties were unreachable, so every assertion inside them
-      # was dead code. That is the regression this job exists to catch.
+      # The harnesses below are ones that are non-vacuous on main TODAY, so this job reports
+      # honestly from the moment it lands.
+      #
+      # The two that were VACUOUS until 2026-08-26 —
+      # proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated and
+      # proof_v16_public_backing_fee_charges_only_selected_domain — are repaired in #147, not
+      # on main. Add them to this list once #147 lands; running them before that would fail
+      # this job for a defect the PR does not contain.
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier
@@ -121,8 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           for H in \
-            proof_v16_reset_empty_asset_oracle_anchor_is_value_neutral_and_idle_gated \
-            proof_v16_public_backing_fee_charges_only_selected_domain
+            proof_v16_expired_backing_yields_zero_realizable_support_after_expiry
           do
             echo "=== $H ==="
             # --features fuzz is REQUIRED: `--tests` builds every test target, and the
