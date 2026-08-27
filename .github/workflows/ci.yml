@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --verbose
@@ -48,7 +48,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -65,7 +65,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      # PINNED. `stable` moves, and rustfmt output changes between releases: this job
+      # failed on a file that `rustfmt --check` accepts locally (exit 0, no diff) purely
+      # because the runner had a newer stable. A moving formatter is a flaky required check.
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt
       # SCOPED TO THE FILES THIS PR TOUCHES, deliberately.
@@ -103,7 +106,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       # A BOUNDED subset, not the full suite. All 240 harnesses take hours, which is exactly
       # why Kani was pulled from CI in the first place (commit 47a39e76, "too slow for every
