@@ -19,6 +19,7 @@ use percolator::lp_vault::{
     lp_vault_nav_atoms,
 };
 use percolator::V16Error;
+use proptest::prelude::*;
 
 // ── lp_vault_nav_atoms ──────────────────────────────────────────────
 
@@ -123,18 +124,40 @@ fn shares_pro_rata_round_down() {
 
 #[test]
 fn shares_round_down_truncates() {
-    // 3 deposit, 2 shares, NAV 3 → 3*2/3 = 2 exact; 1 deposit → 1*2/3 = 0 (round down)
+    // 3 deposit, 2 shares, NAV 3 → 3*2/3 = 2 exact; 2 deposit → 2*2/3 = 1.
     assert_eq!(lp_shares_for_deposit(3, 2, 3).unwrap(), 2);
-    assert_eq!(lp_shares_for_deposit(1, 2, 3).unwrap(), 0);
+    assert_eq!(lp_shares_for_deposit(2, 2, 3).unwrap(), 1);
 }
 
 #[test]
-fn shares_round_to_zero_returns_zero_wrapper_must_reject() {
-    // Note 1: math returns 0 when amount*total < nav; wrapper rejects with
-    // LpVaultZeroSharesMinted. Here we assert the math contract: it returns
-    // 0 (not error), and the inflation case is detectable by the caller.
-    let shares = lp_shares_for_deposit(1, 1_000_000, 1_000_000_000).unwrap();
-    assert_eq!(shares, 0, "tiny deposit vs inflated NAV rounds to 0 — wrapper must reject");
+fn shares_round_to_zero_is_rejected_by_engine() {
+    // A tiny deposit against an inflated NAV must fail inside the engine. A
+    // caller cannot accidentally accept the deposit while minting no shares.
+    let result = lp_shares_for_deposit(1, 1_000_000, 1_000_000_000);
+    assert_eq!(result, Err(V16Error::LpVaultZeroSharesMinted));
+}
+
+#[test]
+fn first_depositor_inflation_poc_victim_quote_fails_closed() {
+    // Issue #145 PoC state: the attacker owns the only share and has inflated
+    // NAV to 20_001 atoms. The victim's 10_000-atom deposit previously
+    // returned Ok(0), allowing a defective integrator to absorb the deposit.
+    let result = lp_shares_for_deposit(10_000, 1, 20_001);
+    assert_eq!(result, Err(V16Error::LpVaultZeroSharesMinted));
+}
+
+proptest! {
+    #[test]
+    fn successful_deposit_quote_never_mints_zero_shares(
+        amount in 1u128..=u64::MAX as u128,
+        total_shares in 1u128..=u64::MAX as u128,
+        nav_atoms in 1u128..=u64::MAX as u128,
+    ) {
+        match lp_shares_for_deposit(amount, total_shares, nav_atoms) {
+            Ok(shares) => prop_assert!(shares > 0),
+            Err(error) => prop_assert_eq!(error, V16Error::LpVaultZeroSharesMinted),
+        }
+    }
 }
 
 #[test]
