@@ -125,7 +125,10 @@ jobs:
             proof_v16_public_backing_fee_charges_only_selected_domain
           do
             echo "=== $H ==="
-            cargo kani --tests --harness "$H" --output-format terse | tee "/tmp/$H.log"
+            # --features fuzz is REQUIRED: `--tests` builds every test target, and the
+            # v16_fuzzing target is feature-gated. Without it cargo aborts with
+            # "target v16_fuzzing ... requires the features: fuzz" before any proof runs.
+            cargo kani --tests --features fuzz --harness "$H" --output-format terse | tee "/tmp/$H.log"
             # A pass is not enough. Kani reports SUCCESSFUL for a harness whose covers are
             # unreachable, which is precisely how these two hid. Gate on the cover line.
             if grep -qE "0 of [0-9]+ cover properties satisfied" "/tmp/$H.log"; then
