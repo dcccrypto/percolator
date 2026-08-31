@@ -70,9 +70,8 @@ pub use v16::{
     ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
     SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16ActiveBitmap, V16Config,
     V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128,
-    V16PodU16, V16PodU32, V16PodU64, V16Result, PORTFOLIO_SOURCE_DOMAIN_CAP,
-    V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP, V16_LAYOUT_DISCRIMINATOR,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    V16PodU16, V16PodU32, V16PodU64, V16Result, PORTFOLIO_SOURCE_DOMAIN_CAP, V16_ACCOUNT_VERSION,
+    V16_EMPTY_ACTIVE_BITMAP, V16_LAYOUT_DISCRIMINATOR, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 
 // kani_active_bitmap_set is gated #[cfg(any(kani, test, feature="fork-facade"))]
@@ -88,9 +87,9 @@ pub use v16::fork_facade;
 #[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::lp_vault;
 #[cfg(all(not(kani), feature = "fork-facade"))]
-pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
-#[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::FeePolicyUpdateV16;
+#[cfg(all(not(kani), feature = "fork-facade"))]
+pub use v16::STRESS_ENVELOPE_TRIGGER_BPS_E9;
 // Matrix row 38: wide_math is made pub mod under fork-facade (see mod declaration above)
 // so the wrapper can use percolator::wide_math::U256 in expected_source_credit_rate_num.
 // The module is private by default (frozen surface); fork-facade elevates it to pub.

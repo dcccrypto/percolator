@@ -430,30 +430,60 @@ fn liquidation_projected_healthy_after_close(
         return Ok(false);
     }
     let old_maintenance = liquidation_leg_maintenance_requirement(
-        config, old_abs_q, leg.side, effective_price, raw_target_price,
+        config,
+        old_abs_q,
+        leg.side,
+        effective_price,
+        raw_target_price,
     )?;
     let new_abs_q = old_abs_q - close_q;
     let new_maintenance = liquidation_leg_maintenance_requirement(
-        config, new_abs_q, leg.side, effective_price, raw_target_price,
+        config,
+        new_abs_q,
+        leg.side,
+        effective_price,
+        raw_target_price,
     )?;
     let fee_notional = liquidation_risk_notional_ceil(close_q, effective_price)?;
     let fee = liquidation_fee_for_close(
-        fee_notional, fee_bps, config.min_liquidation_abs, config.liquidation_fee_cap,
+        fee_notional,
+        fee_bps,
+        config.min_liquidation_abs,
+        config.liquidation_fee_cap,
         close_q == old_abs_q,
     )?;
     let charged_fee = if pnl >= 0 { fee.min(capital) } else { 0 };
     Ok(liquidation_projected_health_deficit_from_parts(
-        cert.certified_equity, cert.certified_maintenance_req, old_maintenance, new_maintenance, charged_fee,
+        cert.certified_equity,
+        cert.certified_maintenance_req,
+        old_maintenance,
+        new_maintenance,
+        charged_fee,
     )? == 0)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn liquidation_partial_close_is_healthy(
-    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
-    effective_price: u64, raw_target_price: u64, fee_bps: u64, close_q: u128,
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
 ) -> V16Result<bool> {
     match liquidation_projected_healthy_after_close(
-        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, close_q,
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        close_q,
     ) {
         // A partial close below the configured absolute fee floor is not an
         // admissible liquidation chunk. Every other error remains fail-closed.
@@ -462,7 +492,10 @@ fn liquidation_partial_close_is_healthy(
     }
 }
 
-fn min_abs_q_for_risk_notional_at_least(risk_notional: u128, effective_price: u64) -> V16Result<u128> {
+fn min_abs_q_for_risk_notional_at_least(
+    risk_notional: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
     if risk_notional == 0 {
         return Ok(0);
     }
@@ -483,12 +516,18 @@ fn min_abs_q_for_risk_notional_at_least(risk_notional: u128, effective_price: u6
         .ok_or(V16Error::ArithmeticOverflow)
 }
 
-fn liquidation_partial_search_hi(config: V16Config, old_abs_q: u128, effective_price: u64) -> V16Result<u128> {
+fn liquidation_partial_search_hi(
+    config: V16Config,
+    old_abs_q: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
     if config.maintenance_margin_bps == 0 {
         return Ok(0);
     }
     let floor_exit_notional = V16Config::checked_mul_div_ceil_to_u128(
-        config.min_nonzero_mm_req, MAX_MARGIN_BPS as u128, config.maintenance_margin_bps as u128,
+        config.min_nonzero_mm_req,
+        MAX_MARGIN_BPS as u128,
+        config.maintenance_margin_bps as u128,
     )?;
     let floor_exit_q = min_abs_q_for_risk_notional_at_least(floor_exit_notional, effective_price)?;
     Ok(old_abs_q.saturating_sub(floor_exit_q))
@@ -496,8 +535,14 @@ fn liquidation_partial_search_hi(config: V16Config, old_abs_q: u128, effective_p
 
 #[allow(clippy::too_many_arguments)]
 fn liquidation_engine_close_request_q(
-    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
-    effective_price: u64, raw_target_price: u64, fee_bps: u64,
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
 ) -> V16Result<u128> {
     let old_abs_q = leg.basis_pos_q.unsigned_abs();
     if old_abs_q == 0 {
@@ -507,7 +552,15 @@ fn liquidation_engine_close_request_q(
         return Ok(old_abs_q);
     }
     if !liquidation_projected_healthy_after_close(
-        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, old_abs_q,
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        old_abs_q,
     )? {
         return Ok(old_abs_q);
     }
@@ -519,7 +572,15 @@ fn liquidation_engine_close_request_q(
     let partial_hi = liquidation_partial_search_hi(config, old_abs_q, effective_price)?;
     if partial_hi == 0
         || !liquidation_partial_close_is_healthy(
-            config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, partial_hi,
+            config,
+            cert,
+            capital,
+            pnl,
+            leg,
+            effective_price,
+            raw_target_price,
+            fee_bps,
+            partial_hi,
         )?
     {
         return Ok(old_abs_q);
@@ -529,47 +590,110 @@ fn liquidation_engine_close_request_q(
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let healthy = liquidation_partial_close_is_healthy(
-            config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, mid,
+            config,
+            cert,
+            capital,
+            pnl,
+            leg,
+            effective_price,
+            raw_target_price,
+            fee_bps,
+            mid,
         )?;
-        if healthy { hi = mid; } else { lo = mid.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?; }
+        if healthy {
+            hi = mid;
+        } else {
+            lo = mid.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?;
+        }
     }
     if liquidation_partial_close_is_healthy(
-        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, lo,
-    )? { Ok(lo) } else { Ok(old_abs_q) }
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        lo,
+    )? {
+        Ok(lo)
+    } else {
+        Ok(old_abs_q)
+    }
 }
 
 #[cfg(kani)]
 pub fn kani_liquidation_projected_health_deficit_from_parts(
-    certified_equity: i128, certified_maintenance_req: u128, old_leg_maintenance: u128,
-    new_leg_maintenance: u128, charged_fee: u128,
+    certified_equity: i128,
+    certified_maintenance_req: u128,
+    old_leg_maintenance: u128,
+    new_leg_maintenance: u128,
+    charged_fee: u128,
 ) -> V16Result<u128> {
     liquidation_projected_health_deficit_from_parts(
-        certified_equity, certified_maintenance_req, old_leg_maintenance, new_leg_maintenance, charged_fee,
+        certified_equity,
+        certified_maintenance_req,
+        old_leg_maintenance,
+        new_leg_maintenance,
+        charged_fee,
     )
 }
 
 #[cfg(kani)]
 pub fn kani_liquidation_projected_healthy_after_close(
-    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
-    effective_price: u64, raw_target_price: u64, fee_bps: u64, close_q: u128,
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
 ) -> V16Result<bool> {
     liquidation_projected_healthy_after_close(
-        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps, close_q,
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        close_q,
     )
 }
 
 #[cfg(kani)]
 pub fn kani_liquidation_engine_close_request_q(
-    config: V16Config, cert: HealthCertV16, capital: u128, pnl: i128, leg: PortfolioLegV16,
-    effective_price: u64, raw_target_price: u64, fee_bps: u64,
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
 ) -> V16Result<u128> {
     liquidation_engine_close_request_q(
-        config, cert, capital, pnl, leg, effective_price, raw_target_price, fee_bps,
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
     )
 }
 
 #[cfg(kani)]
-pub fn kani_liquidation_partial_search_hi(config: V16Config, old_abs_q: u128, effective_price: u64) -> V16Result<u128> {
+pub fn kani_liquidation_partial_search_hi(
+    config: V16Config,
+    old_abs_q: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
     liquidation_partial_search_hi(config, old_abs_q, effective_price)
 }
 
@@ -16166,14 +16290,13 @@ fn kernel_trade_preexisting_oi_reduction_gate(
             SideV16::Long,
         ))
         .ok_or(V16Error::ArithmeticOverflow)?;
-    let short_reduction_q =
-        side_reduction(account_a_current_q, account_a_next_q, SideV16::Short)
-            .checked_add(side_reduction(
-                account_b_current_q,
-                account_b_next_q,
-                SideV16::Short,
-            ))
-            .ok_or(V16Error::ArithmeticOverflow)?;
+    let short_reduction_q = side_reduction(account_a_current_q, account_a_next_q, SideV16::Short)
+        .checked_add(side_reduction(
+            account_b_current_q,
+            account_b_next_q,
+            SideV16::Short,
+        ))
+        .ok_or(V16Error::ArithmeticOverflow)?;
     if long_reduction_q > oi_long_q || short_reduction_q > oi_short_q {
         return Err(V16Error::LockActive);
     }
@@ -16322,7 +16445,10 @@ pub fn kani_checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
 // close is exempt from the floor rejection (dust closes must still be able
 // to progress) and is instead clamped up to the floor as before.
 fn liquidation_fee_for_close(
-    fee_notional: u128, fee_bps: u64, min_liquidation_abs: u128, liquidation_fee_cap: u128,
+    fee_notional: u128,
+    fee_bps: u64,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
     closes_full_position: bool,
 ) -> V16Result<u128> {
     if fee_notional > MAX_ACCOUNT_NOTIONAL || fee_bps > MAX_MARGIN_BPS {
@@ -16331,12 +16457,22 @@ fn liquidation_fee_for_close(
     let product = fee_notional * fee_bps as u128;
     let q = product / MAX_MARGIN_BPS as u128;
     let r = product % MAX_MARGIN_BPS as u128;
-    let raw_fee = q.checked_add(u128::from(r != 0)).ok_or(V16Error::ArithmeticOverflow)?;
-    liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
+    let raw_fee = q
+        .checked_add(u128::from(r != 0))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    liquidation_fee_from_raw_fee(
+        raw_fee,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
 }
 
 fn liquidation_fee_from_raw_fee(
-    raw_fee: u128, min_liquidation_abs: u128, liquidation_fee_cap: u128, closes_full_position: bool,
+    raw_fee: u128,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
 ) -> V16Result<u128> {
     if !closes_full_position && min_liquidation_abs != 0 && raw_fee < min_liquidation_abs {
         return Err(V16Error::NonProgress);
@@ -16346,17 +16482,34 @@ fn liquidation_fee_from_raw_fee(
 
 #[cfg(kani)]
 pub fn kani_liquidation_fee_for_close(
-    fee_notional: u128, fee_bps: u64, min_liquidation_abs: u128, liquidation_fee_cap: u128,
+    fee_notional: u128,
+    fee_bps: u64,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
     closes_full_position: bool,
 ) -> V16Result<u128> {
-    liquidation_fee_for_close(fee_notional, fee_bps, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
+    liquidation_fee_for_close(
+        fee_notional,
+        fee_bps,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
 }
 
 #[cfg(kani)]
 pub fn kani_liquidation_fee_from_raw_fee(
-    raw_fee: u128, min_liquidation_abs: u128, liquidation_fee_cap: u128, closes_full_position: bool,
+    raw_fee: u128,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
 ) -> V16Result<u128> {
-    liquidation_fee_from_raw_fee(raw_fee, min_liquidation_abs, liquidation_fee_cap, closes_full_position)
+    liquidation_fee_from_raw_fee(
+        raw_fee,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
 }
 
 fn checked_i128_mul(a: i128, b: i128) -> V16Result<i128> {

@@ -183,8 +183,7 @@ fn proof_asymmetric_a_accrual_formula_matches_spec_53() {
     // different a_basis values).
     if a_long != a_short && price_delta != 0 {
         assert_ne!(
-            k_delta_long,
-            k_delta_short,
+            k_delta_long, k_delta_short,
             "asymmetric A + non-zero price move must produce distinct k-deltas"
         );
     }
@@ -192,8 +191,7 @@ fn proof_asymmetric_a_accrual_formula_matches_spec_53() {
     // --- Assertion 3: symmetric A still produces equal k-deltas ---
     if a_long == a_short {
         assert_eq!(
-            k_delta_long,
-            k_delta_short,
+            k_delta_long, k_delta_short,
             "symmetric A must produce equal k-deltas (balanced-book invariant preserved)"
         );
     }

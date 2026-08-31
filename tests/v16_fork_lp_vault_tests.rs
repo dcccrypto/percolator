@@ -134,7 +134,10 @@ fn shares_round_to_zero_returns_zero_wrapper_must_reject() {
     // LpVaultZeroSharesMinted. Here we assert the math contract: it returns
     // 0 (not error), and the inflation case is detectable by the caller.
     let shares = lp_shares_for_deposit(1, 1_000_000, 1_000_000_000).unwrap();
-    assert_eq!(shares, 0, "tiny deposit vs inflated NAV rounds to 0 — wrapper must reject");
+    assert_eq!(
+        shares, 0,
+        "tiny deposit vs inflated NAV rounds to 0 — wrapper must reject"
+    );
 }
 
 #[test]

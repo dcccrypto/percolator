@@ -164,13 +164,23 @@ fn proof_v17_stress_envelope_activation_threshold() {
     let risk_epoch = view.header.risk_epoch.get();
     view.apply_stress_envelope_progress(c, now).unwrap();
     let active = view.header.threshold_stress_active == 1;
-    assert_eq!(active, c >= STRESS_ENVELOPE_TRIGGER_BPS_E9, "flag set iff acc reached trigger");
+    assert_eq!(
+        active,
+        c >= STRESS_ENVELOPE_TRIGGER_BPS_E9,
+        "flag set iff acc reached trigger"
+    );
     if active {
         assert_eq!(view.header.stress_envelope_start_slot.get(), now);
-        assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), risk_epoch);
+        assert_eq!(
+            view.header.stress_envelope_start_credit_epoch.get(),
+            risk_epoch
+        );
     } else {
         assert_eq!(view.header.stress_envelope_start_slot.get(), u64::MAX);
-        assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), u64::MAX);
+        assert_eq!(
+            view.header.stress_envelope_start_credit_epoch.get(),
+            u64::MAX
+        );
     }
 }
 
@@ -187,9 +197,15 @@ fn proof_v17_stress_envelope_clear_resets_fields() {
     view.header.stress_envelope_start_credit_epoch = V16PodU64::new(kani::any());
     view.header.threshold_stress_active = 1;
     view.clear_stress_envelope_v16();
-    assert_eq!(view.header.stress_consumption_bps_e9_since_envelope.get(), 0);
+    assert_eq!(
+        view.header.stress_consumption_bps_e9_since_envelope.get(),
+        0
+    );
     assert_eq!(view.header.stress_envelope_start_slot.get(), u64::MAX);
-    assert_eq!(view.header.stress_envelope_start_credit_epoch.get(), u64::MAX);
+    assert_eq!(
+        view.header.stress_envelope_start_credit_epoch.get(),
+        u64::MAX
+    );
     assert_eq!(view.header.threshold_stress_active, 0);
 }
 
@@ -211,7 +227,10 @@ fn proof_v17_stress_envelope_epoch_reset() {
     view.header.risk_epoch = V16PodU64::new(2);
     // fresh header is Live mode + loss_stale_active=0 → not active-close → epoch-advance clears.
     view.apply_stress_envelope_progress(1, 11).unwrap();
-    assert_eq!(view.header.stress_consumption_bps_e9_since_envelope.get(), 1);
+    assert_eq!(
+        view.header.stress_consumption_bps_e9_since_envelope.get(),
+        1
+    );
     assert_eq!(view.header.threshold_stress_active, 0);
 }
 
@@ -232,7 +251,10 @@ fn proof_v17_stress_envelope_validate_shape_pairing() {
     // proper idle envelope (new_dynamic set sentinels = u64::MAX) passes.
     {
         let view = MarketGroupV16View::new(&header, &markets);
-        assert!(view.validate_shape().is_ok(), "idle envelope (sentinels=MAX) passes");
+        assert!(
+            view.validate_shape().is_ok(),
+            "idle envelope (sentinels=MAX) passes"
+        );
     }
     // torn idle envelope: flag=0, acc=0, but start_slot=0 (!= MAX) → rejected.
     header.stress_envelope_start_slot = V16PodU64::new(0);
@@ -280,11 +302,18 @@ fn proof_v17_apply_fee_policy_update_validates_bounds() {
     let result = group.kani_apply_fee_policy_update_not_atomic(update);
     if m > MAX_MARGIN_BPS {
         assert!(result.is_err());
-        assert_eq!(group.config, before, "rejected update leaves config byte-unchanged");
+        assert_eq!(
+            group.config, before,
+            "rejected update leaves config byte-unchanged"
+        );
     } else {
         assert!(result.is_ok());
         assert_eq!(
-            group.config.try_to_runtime_shape().unwrap().max_trading_fee_bps,
+            group
+                .config
+                .try_to_runtime_shape()
+                .unwrap()
+                .max_trading_fee_bps,
             m
         );
     }
@@ -304,7 +333,9 @@ fn proof_v17_apply_fee_policy_update_persists() {
         liquidation_fee_cap: 0,
         min_liquidation_abs: 0,
     };
-    group.kani_apply_fee_policy_update_not_atomic(update).unwrap();
+    group
+        .kani_apply_fee_policy_update_not_atomic(update)
+        .unwrap();
     let cfg = group.config.try_to_runtime_shape().unwrap();
     assert_eq!(cfg.max_trading_fee_bps, m);
     assert_eq!(cfg.liquidation_fee_bps, 0);
@@ -328,7 +359,9 @@ fn proof_v17_fee_policy_update_no_other_field_mutation() {
         liquidation_fee_cap: 0,
         min_liquidation_abs: 0,
     };
-    group.kani_apply_fee_policy_update_not_atomic(update).unwrap();
+    group
+        .kani_apply_fee_policy_update_not_atomic(update)
+        .unwrap();
     let after_cfg = group.config.try_to_runtime_shape().unwrap();
     let mut expected = before_cfg;
     expected.max_trading_fee_bps = update.max_trading_fee_bps;
@@ -389,7 +422,10 @@ fn proof_v17_a9_validate_public_user_fund_direct() {
         kani::cover!(true, "A-9.SOL: rejection branch reachable");
     } else {
         // validate_public_user_fund_shape passes; fast-path in solvency envelope fires.
-        assert!(result.is_ok(), "A-9.SOL: valid fee accepted (fast-path solvency)");
+        assert!(
+            result.is_ok(),
+            "A-9.SOL: valid fee accepted (fast-path solvency)"
+        );
         kani::cover!(true, "A-9.SOL: acceptance branch reachable");
     }
     kani::cover!(m == 0, "A-9.SOL: zero fee edge case");
@@ -420,8 +456,7 @@ use percolator::v16::HLockLaneV16;
 
 fn a1_live_market_header_with_acc(acc: u128) -> MarketGroupV16HeaderAccount {
     let cfg = V16Config::public_user_fund(1, 0, 1);
-    let mut h =
-        MarketGroupV16HeaderAccount::new_dynamic([3u8; 32], cfg, 1, 0).unwrap();
+    let mut h = MarketGroupV16HeaderAccount::new_dynamic([3u8; 32], cfg, 1, 0).unwrap();
     // inject the accumulator directly (below the trigger so the flag stays 0)
     h.stress_consumption_bps_e9_since_envelope = V16PodU128::new(acc);
     // flag stays 0 (toly baseline: no HMax from the flag path)
@@ -507,11 +542,7 @@ fn proof_v17_admit_threshold_zero_always_lifts_hmax() {
 use percolator::v16::fork_facade;
 use percolator::v16::{PortfolioAccountV16Account, PortfolioV16View, V16PodI128};
 
-fn a4_minimal_account(
-    capital: u64,
-    pnl: i64,
-    fee_credits: i64,
-) -> PortfolioAccountV16Account {
+fn a4_minimal_account(capital: u64, pnl: i64, fee_credits: i64) -> PortfolioAccountV16Account {
     PortfolioAccountV16Account {
         capital: V16PodU128::new(capital as u128),
         pnl: V16PodI128::new(pnl as i128),
@@ -569,15 +600,17 @@ fn proof_v17_fork_facade_trade_open_equity_matches_init_at_identity_override() {
     let Ok(init_eq) = fork_facade::account_equity_init_raw(&view) else {
         return;
     };
-    let Ok(trade_open_eq) =
-        fork_facade::account_equity_trade_open_raw(&view, pnl as i128) else {
+    let Ok(trade_open_eq) = fork_facade::account_equity_trade_open_raw(&view, pnl as i128) else {
         return;
     };
     assert_eq!(
         trade_open_eq, init_eq,
         "trade_open_raw at identity override == init_raw"
     );
-    kani::cover!(true, "A-4 trade_open_raw identity override matches init_raw");
+    kani::cover!(
+        true,
+        "A-4 trade_open_raw identity override matches init_raw"
+    );
 }
 
 // ============================================================================
@@ -628,8 +661,7 @@ fn proof_v17_dual_path_h_lock_lane_none_equiv_toly_baseline() {
     // Fully symbolic accumulator — no artificial upper-bound constraint.
     let acc: u128 = kani::any();
     let cfg = V16Config::public_user_fund(1, 0, 1);
-    let mut header =
-        MarketGroupV16HeaderAccount::new_dynamic([3u8; 32], cfg, 1, 0).unwrap();
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([3u8; 32], cfg, 1, 0).unwrap();
     // Inject symbolic accumulator and let ALL other HMax flags be symbolic
     // (constrained only to valid bool encoding: 0 or 1).
     header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(acc);
@@ -649,9 +681,9 @@ fn proof_v17_dual_path_h_lock_lane_none_equiv_toly_baseline() {
     // Keep mode=0 (Live) so both paths reach the threshold gate (not short-circuited).
     // This is the exact regime where the fork threshold gate can fire.
     header.mode = 0; // MarketModeV16::Live
-    // Sentinel consistency: when stress_flag==0 and acc==0, the start fields
-    // must be u64::MAX (pairing invariant). The harness uses the constructor
-    // which sets them to MAX by default; only override when stress_flag==1.
+                     // Sentinel consistency: when stress_flag==0 and acc==0, the start fields
+                     // must be u64::MAX (pairing invariant). The harness uses the constructor
+                     // which sets them to MAX by default; only override when stress_flag==1.
     if stress_flag == 1 {
         header.stress_envelope_start_slot = V16PodU64::new(0);
         header.stress_envelope_start_credit_epoch = V16PodU64::new(0);
@@ -730,7 +762,10 @@ fn proof_v17_stress_envelope_does_not_mutate_solvency_fields() {
     let pnl_matured_before = view.header.pnl_matured_pos_tot.get();
     let bp_earnings_before = view.header.backing_provider_earnings_total.get();
     let source_claim_before = view.header.source_claim_bound_total_num.get();
-    let ins_credit_before = view.header.source_insurance_credit_reserved_total_atoms.get();
+    let ins_credit_before = view
+        .header
+        .source_insurance_credit_reserved_total_atoms
+        .get();
     let domain_budget_before = view.header.insurance_domain_budget_remaining_total.get();
     let resolved_blocker_before = view.header.resolved_payout_blocker_count.get();
 
@@ -744,11 +779,27 @@ fn proof_v17_stress_envelope_does_not_mutate_solvency_fields() {
 
     // solvency fields UNCHANGED
     assert_eq!(view.header.vault.get(), vault_before, "vault unchanged");
-    assert_eq!(view.header.insurance.get(), insurance_before, "insurance unchanged");
+    assert_eq!(
+        view.header.insurance.get(),
+        insurance_before,
+        "insurance unchanged"
+    );
     assert_eq!(view.header.c_tot.get(), c_tot_before, "c_tot unchanged");
-    assert_eq!(view.header.pnl_pos_tot.get(), pnl_pos_tot_before, "pnl_pos_tot unchanged");
-    assert_eq!(view.header.pnl_pos_bound_tot.get(), pnl_pos_bound_before, "pnl_pos_bound unchanged");
-    assert_eq!(view.header.pnl_matured_pos_tot.get(), pnl_matured_before, "pnl_matured unchanged");
+    assert_eq!(
+        view.header.pnl_pos_tot.get(),
+        pnl_pos_tot_before,
+        "pnl_pos_tot unchanged"
+    );
+    assert_eq!(
+        view.header.pnl_pos_bound_tot.get(),
+        pnl_pos_bound_before,
+        "pnl_pos_bound unchanged"
+    );
+    assert_eq!(
+        view.header.pnl_matured_pos_tot.get(),
+        pnl_matured_before,
+        "pnl_matured unchanged"
+    );
     assert_eq!(
         view.header.backing_provider_earnings_total.get(),
         bp_earnings_before,
@@ -760,7 +811,9 @@ fn proof_v17_stress_envelope_does_not_mutate_solvency_fields() {
         "source_claim_bound unchanged"
     );
     assert_eq!(
-        view.header.source_insurance_credit_reserved_total_atoms.get(),
+        view.header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
         ins_credit_before,
         "ins_credit_reserved unchanged"
     );
@@ -812,20 +865,17 @@ fn proof_v17_header_abi_a6_fields_within_struct_and_slots_after_header() {
     // Dynamic slot offset for index 0 must equal header_size (slots start immediately after header).
     // Use <u8> — stride = size_of::<Market<u8>>() (Market has a u64 id field + T inner).
     let stride = MarketGroupV16HeaderAccount::kani_dynamic_asset_slot_stride::<u8>();
-    let offset_0 =
-        MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<u8>(0)
-            .unwrap();
+    let offset_0 = MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<u8>(0).unwrap();
     assert_eq!(
         offset_0, header_size,
         "slot-0 offset == header_size (slots start right after header)"
     );
 
     // Dynamic slot offset for index 1 must be header_size + stride.
-    let offset_1 =
-        MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<u8>(1)
-            .unwrap();
+    let offset_1 = MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<u8>(1).unwrap();
     assert_eq!(
-        offset_1, header_size + stride,
+        offset_1,
+        header_size + stride,
         "slot-1 offset == header_size + stride"
     );
 
@@ -897,18 +947,18 @@ fn proof_v17_lp_vault_deposit_redeem_no_profit() {
     let ts_raw: u8 = kani::any();
     let nav_raw: u8 = kani::any();
     // Map to [1,15]: (x % 15) + 1. All products stay within u8 range after restriction.
-    let a128 = ((a_raw % 15) + 1) as u128;    // ∈ [1,15]
-    let ts128 = ((ts_raw % 15) + 1) as u128;  // ∈ [1,15]
+    let a128 = ((a_raw % 15) + 1) as u128; // ∈ [1,15]
+    let ts128 = ((ts_raw % 15) + 1) as u128; // ∈ [1,15]
     let nav128 = ((nav_raw % 15) + 1) as u128; // ∈ [1,15]
-    // shares = floor(a * ts / nav). All inputs >= 1: safe divisor.
-    // Max shares = 15*15/1 = 225. All fit in u16.
+                                               // shares = floor(a * ts / nav). All inputs >= 1: safe divisor.
+                                               // Max shares = 15*15/1 = 225. All fit in u16.
     let shares = (a128 * ts128) / nav128;
     // After deposit: new_ts = ts + shares ∈ [2, 240] (8-bit), new_nav = nav+a ∈ [2, 30].
-    let new_ts = ts128 + shares;   // ∈ [2, 240]: safe divisor, 8-bit range
-    let new_nav = nav128 + a128;   // ∈ [2, 30]
-    // atoms_out = floor(shares * new_nav / new_ts).
-    // Mathematical guarantee: shares*(nav+a) <= a*(ts+shares) (algebraic proof).
-    // => atoms_out = floor(shares*new_nav/new_ts) <= a.
+    let new_ts = ts128 + shares; // ∈ [2, 240]: safe divisor, 8-bit range
+    let new_nav = nav128 + a128; // ∈ [2, 30]
+                                 // atoms_out = floor(shares * new_nav / new_ts).
+                                 // Mathematical guarantee: shares*(nav+a) <= a*(ts+shares) (algebraic proof).
+                                 // => atoms_out = floor(shares*new_nav/new_ts) <= a.
     let atoms_out = (shares * new_nav) / new_ts;
     assert!(atoms_out <= a128, "LP-NAV-1: deposit→redeem is non-profit");
 }
@@ -969,7 +1019,10 @@ fn proof_v17_wide_mul_div_floor_stub_correct() {
     let stub_result = kani_stub_wide_mul_div_floor_u128(a, b, d);
     let prod_result = wide_mul_div_floor_u128(a, b, d);
     assert_eq!(stub_result, expected, "stub matches reference floor(a*b/d)");
-    assert_eq!(prod_result, expected, "production matches reference floor(a*b/d)");
+    assert_eq!(
+        prod_result, expected,
+        "production matches reference floor(a*b/d)"
+    );
     kani::cover!(d > 1 && a > 0 && b > 0, "stub-verified: nontrivial case");
 }
 
@@ -1041,14 +1094,24 @@ fn proof_v17_wide_mul_div_floor_postcondition_u16() {
     let product = a128 * b128;
     // Post-condition (a): q*d ≤ a*b
     let qd = q * d128;
-    assert!(qd <= product, "wide_mul_div_floor: q*d <= a*b (floor lower bound)");
+    assert!(
+        qd <= product,
+        "wide_mul_div_floor: q*d <= a*b (floor lower bound)"
+    );
     // Post-condition (b): remainder = a*b - q*d < d
     let remainder = product - qd;
-    assert!(remainder < d128, "wide_mul_div_floor: remainder < d (floor upper bound)");
-    kani::cover!(a > 0 && b > 0 && d_safe > 1 && remainder > 0,
-        "WIDE-MUL-DIV-POST: non-trivial u16 case with remainder > 0");
-    kani::cover!(remainder == 0,
-        "WIDE-MUL-DIV-POST: exact-division case (u16)");
+    assert!(
+        remainder < d128,
+        "wide_mul_div_floor: remainder < d (floor upper bound)"
+    );
+    kani::cover!(
+        a > 0 && b > 0 && d_safe > 1 && remainder > 0,
+        "WIDE-MUL-DIV-POST: non-trivial u16 case with remainder > 0"
+    );
+    kani::cover!(
+        remainder == 0,
+        "WIDE-MUL-DIV-POST: exact-division case (u16)"
+    );
 }
 
 /// LP-NAV-2: fee_split conservation — lp_side + insurance_side == delta_atoms exactly.
@@ -1056,7 +1119,10 @@ fn proof_v17_wide_mul_div_floor_postcondition_u16() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-#[kani::stub(percolator::wide_math::wide_mul_div_floor_u128, kani_stub_wide_mul_div_floor_u128)]
+#[kani::stub(
+    percolator::wide_math::wide_mul_div_floor_u128,
+    kani_stub_wide_mul_div_floor_u128
+)]
 fn proof_v17_lp_vault_fee_split_conservation() {
     let delta: u32 = kani::any();
     let fee_share_bps: u16 = kani::any();
@@ -1073,7 +1139,10 @@ fn proof_v17_lp_vault_fee_split_conservation() {
     assert!(lp_side <= d, "LP-NAV-2: lp_side <= delta");
     assert!(ins_side <= d, "LP-NAV-2: ins_side <= delta");
     kani::cover!(lp_side == d, "LP-NAV-2: fee_share 10_000 case: all to LP");
-    kani::cover!(ins_side == d, "LP-NAV-2: fee_share 0 case: all to insurance");
+    kani::cover!(
+        ins_side == d,
+        "LP-NAV-2: fee_share 0 case: all to insurance"
+    );
 }
 
 /// LP-NAV-3: floor(floor(a*ts/nav)*nav/ts) <= a for all positive u8 integers.
@@ -1119,7 +1188,10 @@ fn proof_v17_lp_vault_shares_round_down_no_over_issue() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-#[kani::stub(percolator::wide_math::wide_mul_div_floor_u128, kani_stub_wide_mul_div_floor_u128)]
+#[kani::stub(
+    percolator::wide_math::wide_mul_div_floor_u128,
+    kani_stub_wide_mul_div_floor_u128
+)]
 fn proof_v17_lp_vault_nav_atoms_sound() {
     let total_principal: u32 = kani::any();
     let total_earnings: u32 = kani::any();
@@ -1129,10 +1201,8 @@ fn proof_v17_lp_vault_nav_atoms_sound() {
     let fee_share_bps: u16 = kani::any();
     kani::assume(fee_share_bps <= 10_000);
     kani::assume(cumulative_recovery <= cumulative_loss); // recovery <= loss always
-    kani::assume(total_withdrawn <= total_earnings);       // withdrawn <= earned always
-    kani::assume(
-        (cumulative_loss - cumulative_recovery) as u128 <= total_principal as u128,
-    ); // available_principal >= 0
+    kani::assume(total_withdrawn <= total_earnings); // withdrawn <= earned always
+    kani::assume((cumulative_loss - cumulative_recovery) as u128 <= total_principal as u128); // available_principal >= 0
 
     let p = total_principal as u128;
     let e = total_earnings as u128;
@@ -1142,7 +1212,10 @@ fn proof_v17_lp_vault_nav_atoms_sound() {
 
     let nav = lp_vault_nav_atoms(p, e, w, l, r, fee_share_bps);
     // Under valid invariants (loss<=principal, withdrawn<=earned), NAV must succeed.
-    assert!(nav.is_ok(), "LP-NAV-4: nav must succeed under valid invariants");
+    assert!(
+        nav.is_ok(),
+        "LP-NAV-4: nav must succeed under valid invariants"
+    );
     let nav_val = nav.unwrap();
     // NAV must be non-negative (trivially, it's u128).
     // NAV = available_principal + lp_earnings. Both are >= 0.
@@ -1158,7 +1231,10 @@ fn proof_v17_lp_vault_nav_atoms_sound() {
         nav_val >= available_principal,
         "LP-NAV-4: nav >= available_principal (lp_earnings >= 0)"
     );
-    kani::cover!(nav_val > available_principal, "LP-NAV-4: earnings component positive");
+    kani::cover!(
+        nav_val > available_principal,
+        "LP-NAV-4: earnings component positive"
+    );
 }
 
 /// LP-NAV-5: floor(s * nav / ts) * ts <= s * nav for all positive u8 inputs.
@@ -1246,8 +1322,7 @@ fn proof_v17_lp_non_drift_production_inequality_gate_sound() {
     //                          domain_budget_remaining=0 <= insurance=0
     // Only the non-drift pair is symbolic.
     let cfg = V16Config::public_user_fund(1, 0, 1);
-    let mut header =
-        MarketGroupV16HeaderAccount::new_dynamic([5u8; 32], cfg, 1, 0).unwrap();
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([5u8; 32], cfg, 1, 0).unwrap();
     // All solvency counters remain at default (0) — senior check passes: 0+0+0 == 0 <= 0 (vault=0).
     // Inject symbolic non-drift pair.
     header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_pos_bound_num);
@@ -1280,12 +1355,18 @@ fn proof_v17_lp_non_drift_production_inequality_gate_sound() {
     // Cover props: both branches must be reachable (kills vacuity).
     // RED control: remove the inequality check at v16.rs:5288-5291 and
     // cover!(result.is_err()) becomes unsatisfied → proof FAILS.
-    kani::cover!(result.is_ok() && pnl_pos_bound_num >= source_claim_num,
-        "LP-NON-DRIFT: passing branch reachable (inequality holds)");
-    kani::cover!(result.is_err() && pnl_pos_bound_num < source_claim_num,
-        "LP-NON-DRIFT: rejection branch reachable (violation path)");
-    kani::cover!(pnl_pos_bound_num == source_claim_num,
-        "LP-NON-DRIFT: equality edge-case (boundary, must pass)");
+    kani::cover!(
+        result.is_ok() && pnl_pos_bound_num >= source_claim_num,
+        "LP-NON-DRIFT: passing branch reachable (inequality holds)"
+    );
+    kani::cover!(
+        result.is_err() && pnl_pos_bound_num < source_claim_num,
+        "LP-NON-DRIFT: rejection branch reachable (violation path)"
+    );
+    kani::cover!(
+        pnl_pos_bound_num == source_claim_num,
+        "LP-NON-DRIFT: equality edge-case (boundary, must pass)"
+    );
 }
 
 // ============================================================================
@@ -1364,12 +1445,17 @@ fn proof_v17_lpvault359_stub_credit_delta_exact_and_guarded() {
     );
     // ADMITTED (the bump guarantees headroom: T0 + stub <= ins0 + stub) AND
     // EXACT-delta: the aggregate becomes precisely total_remaining + stub (no drift).
-    assert_eq!(credited, Ok(total_remaining + stub),
-        "fix ordering: credit admitted and aggregate rises by EXACTLY stub (no drift)");
+    assert_eq!(
+        credited,
+        Ok(total_remaining + stub),
+        "fix ordering: credit admitted and aggregate rises by EXACTLY stub (no drift)"
+    );
     // Invariant preserved: post-credit aggregate <= post-bump insurance.
     if let Ok(next_total) = credited {
-        assert!(next_total <= limit_bumped,
-            "insurance_domain_budget_remaining_total <= insurance preserved");
+        assert!(
+            next_total <= limit_bumped,
+            "insurance_domain_budget_remaining_total <= insurance preserved"
+        );
     }
 
     // ── Path 2: guard soundness — if insurance is NOT bumped, the credit is
@@ -1384,18 +1470,27 @@ fn proof_v17_lpvault359_stub_credit_delta_exact_and_guarded() {
         new_budget,
     );
     if total_remaining + stub <= ins0 {
-        assert_eq!(unbumped, Ok(total_remaining + stub),
-            "fits within un-bumped insurance ⇒ Ok with exact delta");
+        assert_eq!(
+            unbumped,
+            Ok(total_remaining + stub),
+            "fits within un-bumped insurance ⇒ Ok with exact delta"
+        );
     } else {
-        assert!(unbumped.is_err(),
-            "exceeds un-bumped insurance ⇒ Err (fail-closed; no over-budget state written)");
+        assert!(
+            unbumped.is_err(),
+            "exceeds un-bumped insurance ⇒ Err (fail-closed; no over-budget state written)"
+        );
     }
 
     // Both guard branches reachable (kills vacuity); boundary is the fix's exact case.
-    kani::cover!(unbumped.is_err() && total_remaining + stub > ins0,
-        "LPVAULT-359: fail-closed branch reachable (guard fires)");
-    kani::cover!(total_remaining + stub <= ins0,
-        "LPVAULT-359: in-headroom branch reachable");
+    kani::cover!(
+        unbumped.is_err() && total_remaining + stub > ins0,
+        "LPVAULT-359: fail-closed branch reachable (guard fires)"
+    );
+    kani::cover!(
+        total_remaining + stub <= ins0,
+        "LPVAULT-359: in-headroom branch reachable"
+    );
     kani::cover!(stub >= 1, "LPVAULT-359: non-trivial stub credit reachable");
 }
 
@@ -1515,8 +1610,14 @@ fn proof_v17_lien1_counterparty_terminal_release_impaired_aware() {
         assert_eq!(s.valid_liened_backing_num, source_valid - valid_release);
         // IMPAIRED portion drained from the impaired counters ONLY — NOT re-credited to
         // fresh (no senior double-count; expiry already forfeited that backing).
-        assert_eq!(b.impaired_liened_backing_num, bucket_impaired - impaired_release);
-        assert_eq!(s.impaired_liened_backing_num, source_impaired - impaired_release);
+        assert_eq!(
+            b.impaired_liened_backing_num,
+            bucket_impaired - impaired_release
+        );
+        assert_eq!(
+            s.impaired_liened_backing_num,
+            source_impaired - impaired_release
+        );
         // Encumbrance-invariant denominator conserved: the bucket's (fresh_unliened +
         // valid_liened) sum is unchanged (-valid_release + valid_release == 0), so the
         // valid release moves no value — it only re-labels liened -> unliened.

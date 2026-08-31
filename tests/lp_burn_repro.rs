@@ -19,13 +19,13 @@
 //!
 //! Run: cargo test --features fork-facade --test lp_burn_repro -- --nocapture
 
+use percolator::POS_SCALE;
 use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
     V16Config,
 };
-use percolator::POS_SCALE;
 
 const LP_SEED: u8 = 200;
 
@@ -76,9 +76,7 @@ fn market_fixture(init_price: u64) -> (MarketGroupV16HeaderAccount, Vec<Market<u
 
 fn account_fixture(seed: u8) -> PortfolioAccountV16Account {
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        [1; 32],
-        [seed; 32],
-        [3; 32],
+        [1; 32], [seed; 32], [3; 32],
     ));
     let mut a = PortfolioAccountV16Account::default();
     a.init_empty_in_place(header).unwrap();
@@ -308,12 +306,20 @@ fn run(c: &Cfg) -> Res {
             if c.crank == CrankWho::LoserOnly {
                 let lp_is_short = c.trader_long;
                 let price_up = px > prev_for_dir;
-                let crank_lp = if px == prev_for_dir { true }
-                    else if lp_is_short { price_up } else { !price_up };
+                let crank_lp = if px == prev_for_dir {
+                    true
+                } else if lp_is_short {
+                    price_up
+                } else {
+                    !price_up
+                };
                 let target = if crank_lp { &mut lp_h } else { &mut tr_h };
                 match crank_atomic(&mut header, &mut markets, target, mk_req()) {
                     Ok(()) => crank_ok += 1,
-                    Err(e) => { crank_err += 1; crank_errs.push(format!("{}:{}", if crank_lp {"LP"} else {"TR"}, e)); }
+                    Err(e) => {
+                        crank_err += 1;
+                        crank_errs.push(format!("{}:{}", if crank_lp { "LP" } else { "TR" }, e));
+                    }
                 }
             }
             // Counterparty-first: settle the trader BEFORE the LP so its realized
@@ -321,19 +327,28 @@ fn run(c: &Cfg) -> Res {
             if c.crank == CrankWho::CounterpartyFirst {
                 match crank_atomic(&mut header, &mut markets, &mut tr_h, mk_req()) {
                     Ok(()) => crank_ok += 1,
-                    Err(e) => { crank_err += 1; crank_errs.push(format!("TR:{}", e)); }
+                    Err(e) => {
+                        crank_err += 1;
+                        crank_errs.push(format!("TR:{}", e));
+                    }
                 }
             }
             if c.crank != CrankWho::LoserOnly {
                 match crank_atomic(&mut header, &mut markets, &mut lp_h, mk_req()) {
                     Ok(()) => crank_ok += 1,
-                    Err(e) => { crank_err += 1; crank_errs.push(format!("LP:{}", e)); }
+                    Err(e) => {
+                        crank_err += 1;
+                        crank_errs.push(format!("LP:{}", e));
+                    }
                 }
             }
             if c.crank == CrankWho::Both {
                 match crank_atomic(&mut header, &mut markets, &mut tr_h, mk_req()) {
                     Ok(()) => crank_ok += 1,
-                    Err(e) => { crank_err += 1; crank_errs.push(format!("TR:{}", e)); }
+                    Err(e) => {
+                        crank_err += 1;
+                        crank_errs.push(format!("TR:{}", e));
+                    }
                 }
             }
         } else {
@@ -345,7 +360,11 @@ fn run(c: &Cfg) -> Res {
             };
             match res {
                 Ok(_) => accrue_ok += 1,
-                Err(_) => { accrue_err += 1; header = h_save; markets = m_save; }
+                Err(_) => {
+                    accrue_err += 1;
+                    header = h_save;
+                    markets = m_save;
+                }
             }
         }
         // A "burn" = positive PnL that vanished on a settlement that also produced a loss.
@@ -355,8 +374,12 @@ fn run(c: &Cfg) -> Res {
             burned_total += lost;
             burn_events += 1;
         }
-        if lp_h.pnl.get() < 0 { pnl_negative_events += 1; }
-        if lp_h.capital.get() < min_capital { min_capital = lp_h.capital.get(); }
+        if lp_h.pnl.get() < 0 {
+            pnl_negative_events += 1;
+        }
+        if lp_h.capital.get() < min_capital {
+            min_capital = lp_h.capital.get();
+        }
         if lp_h.legs[0].k_snap.get() != lp_k_snap_prev {
             lp_k_snap_ever_moved = true;
             lp_k_snap_prev = lp_h.legs[0].k_snap.get();
@@ -394,14 +417,25 @@ fn run(c: &Cfg) -> Res {
             let target = if which == 0 { &mut lp_h } else { &mut tr_h };
             match crank_atomic(&mut header, &mut markets, target, req) {
                 Ok(()) => crank_ok += 1,
-                Err(e) => { crank_err += 1; crank_errs.push(format!("FINAL{}:{}", which, e)); }
+                Err(e) => {
+                    crank_err += 1;
+                    crank_errs.push(format!("FINAL{}:{}", which, e));
+                }
             }
             slot += SLOTS_PER_STEP;
         }
-        if lp_h.pnl.get() < 0 { pnl_negative_events += 1; }
-        if lp_h.capital.get() < min_capital { min_capital = lp_h.capital.get(); }
-        if lp_h.legs[0].k_snap.get() != lp_k_snap_prev { lp_k_snap_ever_moved = true; }
-        if markets[0].engine.asset.k_long.get() != k_prev { k_ever_moved = true; }
+        if lp_h.pnl.get() < 0 {
+            pnl_negative_events += 1;
+        }
+        if lp_h.capital.get() < min_capital {
+            min_capital = lp_h.capital.get();
+        }
+        if lp_h.legs[0].k_snap.get() != lp_k_snap_prev {
+            lp_k_snap_ever_moved = true;
+        }
+        if markets[0].engine.asset.k_long.get() != k_prev {
+            k_ever_moved = true;
+        }
         if pnl_before_final > 0 && lp_h.pnl.get() <= 0 {
             burned_total += pnl_before_final as u128;
             burn_events += 1;
@@ -441,7 +475,11 @@ fn run(c: &Cfg) -> Res {
             let a = leg.a_basis.get() as i128;
             let k = leg.k_snap.get();
             let d = if a != 0 { k / a } else { 0 };
-            if leg.side == 0 { init as i128 + d } else { init as i128 - d }
+            if leg.side == 0 {
+                init as i128 + d
+            } else {
+                init as i128 - d
+            }
         },
         min_capital,
         initial_abs_pos,
@@ -527,14 +565,20 @@ fn report(c: &Cfg, r: &Res) {
     );
     if !r.crank_errs.is_empty() {
         let mut counts: std::collections::BTreeMap<&str, u32> = Default::default();
-        for e in &r.crank_errs { *counts.entry(e.as_str()).or_insert(0) += 1; }
+        for e in &r.crank_errs {
+            *counts.entry(e.as_str()).or_insert(0) += 1;
+        }
         println!("   crank errors: {:?}", counts);
     }
     // Non-vacuity: the market must have accrued (K advanced), else the run
     // measured nothing. (Whether the LP LEG settled depends on cadence + the fix —
     // under the proportional fix an honest LP can be cranked without a net leg
     // change, so lp_k_snap_moved is informational, not a hard guard.)
-    assert!(r.k_moved, "{}: K never advanced — harness measured nothing", c.label);
+    assert!(
+        r.k_moved,
+        "{}: K never advanced — harness measured nothing",
+        c.label
+    );
 
     // UNIVERSAL PROPERTY (post-fix): measured against the price the ENGINE actually
     // reached, the LP's equity change must equal position x net price move. This is
@@ -546,9 +590,8 @@ fn report(c: &Cfg, r: &Res) {
         // Reference = the price the LP's leg was actually SETTLED to. Using the
         // asset's effective_price instead would charge the LP for a move it was
         // never marked to (a rejected closing settle leaves the delta un-realized).
-        let honest_engine = lp_signed
-            * (r.lp_settled_price - r.engine_initial_price as i128)
-            / POS_SCALE as i128;
+        let honest_engine =
+            lp_signed * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
         let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest_engine;
         // Tolerance = rounding + the DESIGNED realization haircut.
         //   * $0.05 absolute / 0.5% of magnitude: per-settlement flooring (measured at
@@ -641,7 +684,8 @@ fn e1_production_shape_lp_only_crank() {
         assert!(
             unexplained.abs() <= 1_000, // <= $0.001 tolerance
             "{}: LP not honest — unexplained {} atoms (drain regression!)",
-            c.label, unexplained
+            c.label,
+            unexplained
         );
     }
 }
@@ -754,7 +798,11 @@ fn e7_seed_exhaustion_cliff() {
     println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
     // A $100 gain-support seed is what the launch wizard used to post (10% of a
     // $1,000 LP). Run long enough for cumulative support demand to exceed it.
-    for (cycles, label) in [(20usize, "short_run"), (200, "medium_run"), (1000, "long_run")] {
+    for (cycles, label) in [
+        (20usize, "short_run"),
+        (200, "medium_run"),
+        (1000, "long_run"),
+    ] {
         let mut c = base_cfg(&format!("E7_seed100_{label}_{cycles}cycles"));
         c.gain_domain_seed = 100_000_000; // $100
         c.path = sawtooth(100_000, 2_000, cycles);
@@ -775,7 +823,12 @@ fn e8_realistic_market() {
             c.trader_capital = 2_000_000_000;
             c.size_q = 36_429_872_495;
             c.gain_domain_seed = seed_usd * 1_000_000;
-            c.path = walk(15_565, 4_320, sigma, 0xC0FFEE ^ (sigma << 8) ^ (seed_usd as u64));
+            c.path = walk(
+                15_565,
+                4_320,
+                sigma,
+                0xC0FFEE ^ (sigma << 8) ^ (seed_usd as u64),
+            );
             let r = run(&c);
             report(&c, &r);
         }
@@ -815,13 +868,6 @@ fn e9_mitigations() {
     report(&e, &run(&e));
 }
 
-
-
-
-
-
-
-
 #[test]
 fn decisive_can_the_lp_extract_unbacked_pnl() {
     // Under the PROPORTIONAL patch + insolvent counterparty, the LP books a large
@@ -834,19 +880,37 @@ fn decisive_can_the_lp_extract_unbacked_pnl() {
     let mut tr = account_fixture(7);
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 2_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 200_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128 * 13_000, exec_price: init, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 2_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 200_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: POS_SCALE as i128 * 13_000,
+            exec_price: init,
+            fee_bps: 0,
+        };
         // trader long, LP short
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     // Drive price -50% (favourable to the short LP), settling both each step.
     let path = ramp(100_000, 50_000, 40);
     let mut slot = 50u64;
     for &px in path.iter().skip(1) {
         for who in [&mut tr, &mut lp] {
-            let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0, effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+            let req = PermissionlessCrankRequestV16 {
+                now_slot: slot,
+                asset_index: 0,
+                effective_price: px,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            };
             let _ = crank_atomic(&mut header, &mut markets, who, req);
         }
         slot += 50;
@@ -854,10 +918,16 @@ fn decisive_can_the_lp_extract_unbacked_pnl() {
     let lp_cap0 = lp.capital.get();
     let lp_pnl = lp.pnl.get();
     println!("\nAfter insolvency scenario (PROPORTIONAL engine):");
-    println!("  LP capital {}  pnl {}  (trader capital {} pnl {})",
-        usd(lp_cap0 as i128), usd(lp_pnl), usd(tr.capital.get() as i128), usd(tr.pnl.get()));
+    println!(
+        "  LP capital {}  pnl {}  (trader capital {} pnl {})",
+        usd(lp_cap0 as i128),
+        usd(lp_pnl),
+        usd(tr.capital.get() as i128),
+        usd(tr.pnl.get())
+    );
     // Now try to CONVERT the LP's released PnL to capital (credit_rate-gated), then withdraw.
-    let mut converted_ok = 0u32; let mut converted_err = String::new();
+    let mut converted_ok = 0u32;
+    let mut converted_err = String::new();
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut v = PortfolioV16ViewMut::new(&mut lp);
@@ -867,19 +937,36 @@ fn decisive_can_the_lp_extract_unbacked_pnl() {
         }
     }
     let lp_cap_after_convert = lp.capital.get();
-    println!("  convert_released_pnl -> {} (capital {} -> {})",
-        if converted_ok>0 {"OK".into()} else {format!("Err({})", converted_err)},
-        usd(lp_cap0 as i128), usd(lp_cap_after_convert as i128));
+    println!(
+        "  convert_released_pnl -> {} (capital {} -> {})",
+        if converted_ok > 0 {
+            "OK".into()
+        } else {
+            format!("Err({})", converted_err)
+        },
+        usd(lp_cap0 as i128),
+        usd(lp_cap_after_convert as i128)
+    );
     // Try to withdraw as much as possible via a clean snapshot/restore helper.
-    fn try_withdraw(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
-                    acc: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-        let hs = *h; let ms = mk.clone(); let as_ = *acc;
+    fn try_withdraw(
+        h: &mut MarketGroupV16HeaderAccount,
+        mk: &mut Vec<Market<u64>>,
+        acc: &mut PortfolioAccountV16Account,
+        amt: u128,
+    ) -> bool {
+        let hs = *h;
+        let ms = mk.clone();
+        let as_ = *acc;
         let ok = {
             let mut m = MarketGroupV16ViewMut::new(h, mk);
             let mut v = PortfolioV16ViewMut::new(acc);
             m.withdraw_not_atomic(&mut v, amt).is_ok()
         };
-        if !ok { *h = hs; *mk = ms; *acc = as_; }
+        if !ok {
+            *h = hs;
+            *mk = ms;
+            *acc = as_;
+        }
         ok
     }
     let target = lp_cap_after_convert + lp.pnl.get().max(0) as u128;
@@ -888,21 +975,37 @@ fn decisive_can_the_lp_extract_unbacked_pnl() {
     let mut amt = target;
     let step = (target / 200).max(1);
     while amt > 0 {
-        if try_withdraw(&mut header, &mut markets, &mut lp, amt) { withdrawn = amt; break; }
+        if try_withdraw(&mut header, &mut markets, &mut lp, amt) {
+            withdrawn = amt;
+            break;
+        }
         amt = amt.saturating_sub(step);
     }
-    println!("  MAX WITHDRAWABLE by the LP: {} (attempted up to {})", usd(withdrawn as i128), usd(target as i128));
+    println!(
+        "  MAX WITHDRAWABLE by the LP: {} (attempted up to {})",
+        usd(withdrawn as i128),
+        usd(target as i128)
+    );
     println!("  Vault total now: {}", usd(header.vault.get() as i128));
     println!("  => trader put in $200; LP deposited $2000 (system total $2200).");
     println!("  => LP extracted ${:.6}; if >2200 total it is a REAL solvency break, if ~<=2200 the credit_rate gate held.", withdrawn as f64/1e6);
     // NON-VACUITY: the LP must actually be holding unbacked profit for this to test anything.
-    assert!(lp_pnl > 0, "VACUOUS: LP holds no positive PnL, the gate is untested");
+    assert!(
+        lp_pnl > 0,
+        "VACUOUS: LP holds no positive PnL, the gate is untested"
+    );
     // PROPERTY: while the position is OPEN an unbacked claim must not be extractable,
     // and total real money must never exceed what was deposited.
-    assert!(withdrawn <= 2_200_000_000,
-        "SOLVENCY BREAK: LP extracted {} of a $2,200 vault", usd(withdrawn as i128));
-    assert_eq!(header.vault.get(), 2_200_000_000,
-        "vault moved without an external flow");
+    assert!(
+        withdrawn <= 2_200_000_000,
+        "SOLVENCY BREAK: LP extracted {} of a $2,200 vault",
+        usd(withdrawn as i128)
+    );
+    assert_eq!(
+        header.vault.get(),
+        2_200_000_000,
+        "vault moved without an external flow"
+    );
 }
 
 #[test]
@@ -912,7 +1015,13 @@ fn fix_regression_lp_honest_across_volatilities() {
     // its HONEST net P&L across a wide volatility range — no drain.
     println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
     let mut worst = 0i128;
-    for (sigma, seed) in [(20u64, 0xBEEF_u64), (50, 0xF00D), (100, 0xCAFE), (200, 0x1234), (400, 0x99)] {
+    for (sigma, seed) in [
+        (20u64, 0xBEEF_u64),
+        (50, 0xF00D),
+        (100, 0xCAFE),
+        (200, 0x1234),
+        (400, 0x99),
+    ] {
         let mut c = base_cfg(&format!("FIX_sigma{sigma}"));
         c.crank = CrankWho::LpOnly; // production behaviour
         c.size_q = 36_429_872_495;
@@ -921,14 +1030,28 @@ fn fix_regression_lp_honest_across_volatilities() {
         let r = run(&c);
         report(&c, &r);
         let unexplained = ((r.lp_equity_end - r.lp_equity_start) - r.honest_lp_delta).abs();
-        if unexplained > worst { worst = unexplained; }
-        println!("   sigma{:<4} residual unexplained = ${:.6}", sigma, unexplained as f64/1e6);
+        if unexplained > worst {
+            worst = unexplained;
+        }
+        println!(
+            "   sigma{:<4} residual unexplained = ${:.6}",
+            sigma,
+            unexplained as f64 / 1e6
+        );
     }
-    println!("   worst residual across all volatilities: ${:.6}", worst as f64 / 1e6);
+    println!(
+        "   worst residual across all volatilities: ${:.6}",
+        worst as f64 / 1e6
+    );
     // Site-1 (loss-path) fix alone: exact at low vol, small residual at high vol
     // (the site-2 underwater-recovery path, not yet fixed). This guards that the
     // residual stays FAR below the pre-fix drains ($500-$8,000+).
-    assert!(worst < 500_000_000, /* $0.50 vs pre-fix $3,600-$8,000 */ "residual ${:.6} too large — site-1 fix regressed", worst as f64/1e6);
+    assert!(
+        worst < 500_000_000,
+        /* $0.50 vs pre-fix $3,600-$8,000 */
+        "residual ${:.6} too large — site-1 fix regressed",
+        worst as f64 / 1e6
+    );
 }
 
 #[test]
@@ -937,7 +1060,10 @@ fn does_the_lp_ever_actually_get_paid() {
     // (conversion is blocked while exposure is open — verified). After closing,
     // does it actually receive the money?  Run with the gain-domain pot EMPTY
     // (TripleT-like) and FUNDED (Percolator-like).
-    for (label, seed) in [("gain pot EMPTY", 0u128), ("gain pot FUNDED $500", 500_000_000u128)] {
+    for (label, seed) in [
+        ("gain pot EMPTY", 0u128),
+        ("gain pot FUNDED $500", 500_000_000u128),
+    ] {
         let init = 100_000u64;
         let (mut header, mut markets) = market_fixture(init);
         let mut lp = account_fixture(LP_SEED);
@@ -945,23 +1071,42 @@ fn does_the_lp_ever_actually_get_paid() {
         let size = POS_SCALE as i128 * 100;
         {
             let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000).unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+                .unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000)
+                .unwrap();
             if seed != 0 {
                 // gain domain for an LP that is SHORT = domain 0 (long side)
-                m.deposit_fresh_counterparty_backing_not_atomic(0, seed, u64::MAX / 2).unwrap();
+                m.deposit_fresh_counterparty_backing_not_atomic(0, seed, u64::MAX / 2)
+                    .unwrap();
             }
-            let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+            let req = TradeRequestV16 {
+                asset_index: 0,
+                size_q: size,
+                exec_price: init,
+                fee_bps: 0,
+            };
             // trader long, LP short
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         }
         let start_capital = lp.capital.get();
         // Price falls 100,000 -> 70,000: favourable to the SHORT LP. Settle both each step.
         let mut slot = 50u64;
         for &px in ramp(100_000, 70_000, 30).iter().skip(1) {
             for who in [&mut tr, &mut lp] {
-                let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0, effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+                let req = PermissionlessCrankRequestV16 {
+                    now_slot: slot,
+                    asset_index: 0,
+                    effective_price: px,
+                    funding_rate_e9: 0,
+                    action: PermissionlessCrankActionV16::Refresh,
+                };
                 let _ = crank_atomic(&mut header, &mut markets, who, req);
             }
             slot += 50;
@@ -970,49 +1115,116 @@ fn does_the_lp_ever_actually_get_paid() {
         // CLOSE the LP's position: LP goes long, trader goes short, same size.
         let close_res = {
             let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-            let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: 70_000, fee_bps: 0 };
+            let req = TradeRequestV16 {
+                asset_index: 0,
+                size_q: size,
+                exec_price: 70_000,
+                fee_bps: 0,
+            };
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false)
-                .map_err(|e| format!("{:?}", e))
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                req,
+                false,
+            )
+            .map_err(|e| format!("{:?}", e))
         };
         // Now try to convert PnL -> capital, then withdraw everything.
         let conv = {
             let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
             let mut v = PortfolioV16ViewMut::new(&mut lp);
-            m.convert_released_pnl_to_capital_not_atomic(&mut v).map(|_| ()).map_err(|e| format!("{:?}", e))
+            m.convert_released_pnl_to_capital_not_atomic(&mut v)
+                .map(|_| ())
+                .map_err(|e| format!("{:?}", e))
         };
         let cap_after_convert = lp.capital.get();
         // Max withdrawable (descending probe with rollback)
-        fn try_wd(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
-                  a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-            let hs = *h; let ms = mk.clone(); let as_ = *a;
-            let ok = { let mut m = MarketGroupV16ViewMut::new(h, mk);
-                       let mut v = PortfolioV16ViewMut::new(a);
-                       m.withdraw_not_atomic(&mut v, amt).is_ok() };
-            if !ok { *h = hs; *mk = ms; *a = as_; }
+        fn try_wd(
+            h: &mut MarketGroupV16HeaderAccount,
+            mk: &mut Vec<Market<u64>>,
+            a: &mut PortfolioAccountV16Account,
+            amt: u128,
+        ) -> bool {
+            let hs = *h;
+            let ms = mk.clone();
+            let as_ = *a;
+            let ok = {
+                let mut m = MarketGroupV16ViewMut::new(h, mk);
+                let mut v = PortfolioV16ViewMut::new(a);
+                m.withdraw_not_atomic(&mut v, amt).is_ok()
+            };
+            if !ok {
+                *h = hs;
+                *mk = ms;
+                *a = as_;
+            }
             ok
         }
         let target = cap_after_convert + lp.pnl.get().max(0) as u128;
-        let mut got = 0u128; let mut amt = target; let step = (target / 400).max(1);
-        while amt > 0 { if try_wd(&mut header, &mut markets, &mut lp, amt) { got = amt; break; } amt = amt.saturating_sub(step); }
+        let mut got = 0u128;
+        let mut amt = target;
+        let step = (target / 400).max(1);
+        while amt > 0 {
+            if try_wd(&mut header, &mut markets, &mut lp, amt) {
+                got = amt;
+                break;
+            }
+            amt = amt.saturating_sub(step);
+        }
 
         println!("\n=== {label} ===");
         println!("  LP deposited          $1000.000000");
         println!("  profit before close   {}", usd(pnl_before_close));
-        println!("  close trade           {}", close_res.as_ref().map(|_| "OK".to_string()).unwrap_or_else(|e| format!("Err({e})")));
-        println!("  convert PnL->capital  {}", conv.as_ref().map(|_| "OK".to_string()).unwrap_or_else(|e| format!("Err({e})")));
-        println!("  capital after convert {}  (started {})", usd(cap_after_convert as i128), usd(start_capital as i128));
+        println!(
+            "  close trade           {}",
+            close_res
+                .as_ref()
+                .map(|_| "OK".to_string())
+                .unwrap_or_else(|e| format!("Err({e})"))
+        );
+        println!(
+            "  convert PnL->capital  {}",
+            conv.as_ref()
+                .map(|_| "OK".to_string())
+                .unwrap_or_else(|e| format!("Err({e})"))
+        );
+        println!(
+            "  capital after convert {}  (started {})",
+            usd(cap_after_convert as i128),
+            usd(start_capital as i128)
+        );
         println!("  MAX WITHDRAWABLE      {}", usd(got as i128));
-        println!("  >>> LP net vs its $1000 deposit: {}", usd(got as i128 - 1_000_000_000i128));
+        println!(
+            "  >>> LP net vs its $1000 deposit: {}",
+            usd(got as i128 - 1_000_000_000i128)
+        );
         // NON-VACUITY: the LP must actually have earned something to close out.
-        assert!(pnl_before_close > 0, "{label}: no profit before close — VACUOUS");
-        assert!(close_res.is_ok(), "{label}: could not close the position: {:?}", close_res);
+        assert!(
+            pnl_before_close > 0,
+            "{label}: no profit before close — VACUOUS"
+        );
+        assert!(
+            close_res.is_ok(),
+            "{label}: could not close the position: {:?}",
+            close_res
+        );
         // PROPERTY: after closing, the LP receives its deposit PLUS its profit.
-        assert!(conv.is_ok(), "{label}: could not convert PnL after closing: {:?}", conv);
-        assert!(got >= 1_000_000_000, "{label}: LP recovered {} of its $1000 deposit", usd(got as i128));
-        assert!(got as i128 >= 1_000_000_000i128 + pnl_before_close - 50_000,
+        assert!(
+            conv.is_ok(),
+            "{label}: could not convert PnL after closing: {:?}",
+            conv
+        );
+        assert!(
+            got >= 1_000_000_000,
+            "{label}: LP recovered {} of its $1000 deposit",
+            usd(got as i128)
+        );
+        assert!(
+            got as i128 >= 1_000_000_000i128 + pnl_before_close - 50_000,
             "{label}: LP got {} but earned {} on top of its deposit",
-            usd(got as i128), usd(pnl_before_close));
+            usd(got as i128),
+            usd(pnl_before_close)
+        );
     }
 }
 
@@ -1055,7 +1267,13 @@ fn residual_is_a_baseline_artifact_not_an_engine_defect() {
     // harness. Re-measure against the price the ENGINE actually reached.
     println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
     let mut worst_engine_ref = 0i128;
-    for (sigma, seed) in [(20u64, 0xBEEF_u64), (50, 0xF00D), (100, 0xCAFE), (200, 0x1234), (400, 0x99)] {
+    for (sigma, seed) in [
+        (20u64, 0xBEEF_u64),
+        (50, 0xF00D),
+        (100, 0xCAFE),
+        (200, 0x1234),
+        (400, 0x99),
+    ] {
         let mut c = base_cfg(&format!("REF_sigma{sigma}"));
         c.crank = CrankWho::LpOnly;
         c.size_q = 36_429_872_495;
@@ -1072,26 +1290,50 @@ fn residual_is_a_baseline_artifact_not_an_engine_defect() {
             * (r.engine_final_price as i128 - r.engine_initial_price as i128)
             / POS_SCALE as i128;
         let vs_engine = actual - honest_engine;
-        if vs_engine.abs() > worst_engine_ref { worst_engine_ref = vs_engine.abs(); }
+        if vs_engine.abs() > worst_engine_ref {
+            worst_engine_ref = vs_engine.abs();
+        }
 
-        println!("  sigma{:<4} price: path {}->{} | ENGINE {}->{} | cranks ok={} err={}",
-            sigma, c.path[0], c.path.last().unwrap(),
-            r.engine_initial_price, r.engine_final_price, r.crank_ok, r.crank_err);
-        println!("           unexplained vs PATH endpoint  = {:>14}   <- what I reported before",
-            usd(vs_path));
-        println!("           unexplained vs ENGINE price   = {:>14}   <- correct reference",
-            usd(vs_engine));
+        println!(
+            "  sigma{:<4} price: path {}->{} | ENGINE {}->{} | cranks ok={} err={}",
+            sigma,
+            c.path[0],
+            c.path.last().unwrap(),
+            r.engine_initial_price,
+            r.engine_final_price,
+            r.crank_ok,
+            r.crank_err
+        );
+        println!(
+            "           unexplained vs PATH endpoint  = {:>14}   <- what I reported before",
+            usd(vs_path)
+        );
+        println!(
+            "           unexplained vs ENGINE price   = {:>14}   <- correct reference",
+            usd(vs_engine)
+        );
 
         if !r.crank_errs.is_empty() {
             let mut counts: std::collections::BTreeMap<&str, u32> = Default::default();
-            for e in &r.crank_errs { *counts.entry(e.as_str()).or_insert(0) += 1; }
+            for e in &r.crank_errs {
+                *counts.entry(e.as_str()).or_insert(0) += 1;
+            }
             println!("           crank errors: {:?}", counts);
         }
         // NON-VACUITY
-        assert_eq!(r.initial_abs_pos, r.final_abs_pos, "position changed — baseline invalid");
-        assert!(r.k_moved && r.crank_ok > 0, "nothing happened — vacuous run");
+        assert_eq!(
+            r.initial_abs_pos, r.final_abs_pos,
+            "position changed — baseline invalid"
+        );
+        assert!(
+            r.k_moved && r.crank_ok > 0,
+            "nothing happened — vacuous run"
+        );
     }
-    println!("\n  WORST unexplained against the engine's own price: {}", usd(worst_engine_ref));
+    println!(
+        "\n  WORST unexplained against the engine's own price: {}",
+        usd(worst_engine_ref)
+    );
 }
 
 /// Drive an LP deep underwater (capital fully confiscated, pnl NEGATIVE), then
@@ -1106,39 +1348,76 @@ fn underwater_recovery_probe(gain_seed: u128) -> (i128, i128, i128, u128, String
     let size = 36_429_872_495i128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 50_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 50_000_000_000)
+            .unwrap();
         if gain_seed != 0 {
             // LP is SHORT => its gain domain is 0 (long side)
-            m.deposit_fresh_counterparty_backing_not_atomic(0, gain_seed, u64::MAX / 2).unwrap();
+            m.deposit_fresh_counterparty_backing_not_atomic(0, gain_seed, u64::MAX / 2)
+                .unwrap();
         }
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         // trader long, LP short => price UP hurts the LP
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let mut slot = SLOTS_PER_STEP;
     let mut errs: std::collections::BTreeMap<String, u32> = Default::default();
-    let mut step = |header: &mut MarketGroupV16HeaderAccount, markets: &mut Vec<Market<u64>>,
-                    lp: &mut PortfolioAccountV16Account, px: u64, slot: u64,
+    let mut step = |header: &mut MarketGroupV16HeaderAccount,
+                    markets: &mut Vec<Market<u64>>,
+                    lp: &mut PortfolioAccountV16Account,
+                    px: u64,
+                    slot: u64,
                     errs: &mut std::collections::BTreeMap<String, u32>| {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        if let Err(e) = crank_atomic(header, markets, lp, req) { *errs.entry(e).or_insert(0) += 1; }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        if let Err(e) = crank_atomic(header, markets, lp, req) {
+            *errs.entry(e).or_insert(0) += 1;
+        }
     };
     // PHASE 1 — adverse ramp up (~1%/step, under the 3%/step clamp): exhaust capital.
     let mut px = init as f64;
     for _ in 0..300 {
         px *= 1.01;
-        step(&mut header, &mut markets, &mut lp, px as u64, slot, &mut errs);
+        step(
+            &mut header,
+            &mut markets,
+            &mut lp,
+            px as u64,
+            slot,
+            &mut errs,
+        );
         slot += SLOTS_PER_STEP;
-        if lp.capital.get() == 0 && lp.pnl.get() < 0 { break; }
+        if lp.capital.get() == 0 && lp.pnl.get() < 0 {
+            break;
+        }
     }
     let pnl_trough = lp.pnl.get();
     let cap_trough = lp.capital.get();
-    println!("   [phase1 end] leg side={} pos={} capital={} pnl={} price={}",
-        lp.legs[0].side, lp.legs[0].basis_pos_q.get(), usd(lp.capital.get() as i128),
-        usd(lp.pnl.get()), px as u64);
+    println!(
+        "   [phase1 end] leg side={} pos={} capital={} pnl={} price={}",
+        lp.legs[0].side,
+        lp.legs[0].basis_pos_q.get(),
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get()),
+        px as u64
+    );
     // PHASE 2 — favourable ramp back down: gains now arrive on a NEGATIVE-pnl account.
     let mut delivered = 0i128;
     let start_px = px;
@@ -1146,44 +1425,79 @@ fn underwater_recovery_probe(gain_seed: u128) -> (i128, i128, i128, u128, String
         px *= 0.99;
         let before = lp.pnl.get();
         let cap_before = lp.capital.get();
-        step(&mut header, &mut markets, &mut lp, px as u64, slot, &mut errs);
+        step(
+            &mut header,
+            &mut markets,
+            &mut lp,
+            px as u64,
+            slot,
+            &mut errs,
+        );
         let d = lp.pnl.get() - before;
         delivered += d.max(0);
         if i < 6 {
-            println!("   [phase2 step{i}] px={} dPNL={} pnl={} dCAP={} cryst={}",
-                px as u64, usd(d), usd(lp.pnl.get()),
+            println!(
+                "   [phase2 step{i}] px={} dPNL={} pnl={} dCAP={} cryst={}",
+                px as u64,
+                usd(d),
+                usd(lp.pnl.get()),
                 usd(lp.capital.get() as i128 - cap_before as i128),
-                usd(lp.residual_crystallized_loss_atoms_total.get() as i128));
+                usd(lp.residual_crystallized_loss_atoms_total.get() as i128)
+            );
         }
         slot += SLOTS_PER_STEP;
     }
-    println!("   [phase2 end] pos={} capital={} pnl={}",
-        lp.legs[0].basis_pos_q.get(), usd(lp.capital.get() as i128), usd(lp.pnl.get()));
+    println!(
+        "   [phase2 end] pos={} capital={} pnl={}",
+        lp.legs[0].basis_pos_q.get(),
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get())
+    );
     let recovered_price_move = start_px - px; // favourable move delivered in phase 2
     let expected_gain = (size as f64 * recovered_price_move / 1e6) as i128;
     let ek = format!("{:?}", errs);
     let _ = cap_trough;
-    (pnl_trough, lp.pnl.get(), delivered, expected_gain as u128, ek)
+    (
+        pnl_trough,
+        lp.pnl.get(),
+        delivered,
+        expected_gain as u128,
+        ek,
+    )
 }
 
 #[test]
 fn site2_direct_probe_gain_arriving_on_underwater_account() {
-    for (tag, seed) in [("gain pot EMPTY", 0u128), ("gain pot FUNDED $50k", 50_000_000_000u128)] {
+    for (tag, seed) in [
+        ("gain pot EMPTY", 0u128),
+        ("gain pot FUNDED $50k", 50_000_000_000u128),
+    ] {
         let (trough, after, delivered, expected, errs) = underwater_recovery_probe(seed);
         println!("\n=== SITE 2 direct probe — {tag} ===");
         println!("  pnl at trough (capital exhausted): {}", usd(trough));
         println!("  pnl after favourable recovery:     {}", usd(after));
         println!("  pnl actually credited in recovery: {}", usd(delivered));
-        println!("  price-implied recovery gain:       {}", usd(expected as i128));
+        println!(
+            "  price-implied recovery gain:       {}",
+            usd(expected as i128)
+        );
         println!("  crank errors: {errs}");
         // NON-VACUITY: site 2 can only fire if the account really went underwater.
-        assert!(trough < 0, "{tag}: account never went underwater — probe is VACUOUS, site 2 never tested");
-        assert!(expected > 0, "{tag}: no favourable move was generated — probe is VACUOUS");
+        assert!(
+            trough < 0,
+            "{tag}: account never went underwater — probe is VACUOUS, site 2 never tested"
+        );
+        assert!(
+            expected > 0,
+            "{tag}: no favourable move was generated — probe is VACUOUS"
+        );
         // PROPERTY: an underwater account MUST be able to climb back out. Pre-fix it
         // was permanently frozen (0 credited across 150 favourable settlements).
-        assert!(delivered > 0 && after > trough,
+        assert!(
+            delivered > 0 && after > trough,
             "{tag}: underwater account did not recover — credited {} (site 2 regression)",
-            usd(delivered));
+            usd(delivered)
+        );
     }
 }
 
@@ -1202,12 +1516,14 @@ fn assert_no_value_creation(tag: &str, r: &Res, deposits: u128) {
     assert!(
         real_capital <= deposits,
         "{tag}: CAPITAL ({}) exceeds total deposits ({}) — value created!",
-        usd(real_capital as i128), usd(deposits as i128)
+        usd(real_capital as i128),
+        usd(deposits as i128)
     );
     assert!(
         r.vault_end >= real_capital,
         "{tag}: vault ({}) does not cover capital ({}) — insolvent!",
-        usd(r.vault_end as i128), usd(real_capital as i128)
+        usd(r.vault_end as i128),
+        usd(real_capital as i128)
     );
 }
 
@@ -1216,10 +1532,16 @@ fn suite_1_lp_honest_both_sides_all_volatilities() {
     println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
     let mut worst = 0i128;
     let mut ran = 0;
-    for (sigma, seed) in [(5u64, 0xA1_u64), (20, 0xBEEF), (50, 0xF00D), (100, 0xCAFE), (200, 0x1234)] {
+    for (sigma, seed) in [
+        (5u64, 0xA1_u64),
+        (20, 0xBEEF),
+        (50, 0xF00D),
+        (100, 0xCAFE),
+        (200, 0x1234),
+    ] {
         for (trader_long, side) in [(true, "LPshort"), (false, "LPlong")] {
             let mut c = base_cfg(&format!("S1_sigma{sigma}_{side}"));
-            c.crank = CrankWho::LpOnly;      // production behaviour
+            c.crank = CrankWho::LpOnly; // production behaviour
             c.trader_long = trader_long;
             c.size_q = 36_429_872_495;
             c.trader_capital = 5_000_000_000;
@@ -1231,22 +1553,50 @@ fn suite_1_lp_honest_both_sides_all_volatilities() {
                 * (r.engine_final_price as i128 - r.engine_initial_price as i128)
                 / POS_SCALE as i128;
             let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest;
-            if unexplained.abs() > worst { worst = unexplained.abs(); }
+            if unexplained.abs() > worst {
+                worst = unexplained.abs();
+            }
             ran += 1;
-            println!("  {:<20} honest={:>12} actual={:>12} unexplained={:>12}  cranks ok={} err={}",
-                c.label, usd(honest), usd(r.lp_equity_end - r.lp_equity_start), usd(unexplained),
-                r.crank_ok, r.crank_err);
+            println!(
+                "  {:<20} honest={:>12} actual={:>12} unexplained={:>12}  cranks ok={} err={}",
+                c.label,
+                usd(honest),
+                usd(r.lp_equity_end - r.lp_equity_start),
+                usd(unexplained),
+                r.crank_ok,
+                r.crank_err
+            );
             // NON-VACUITY
             assert!(r.k_moved, "{}: K never advanced — VACUOUS", c.label);
-            assert!(r.crank_ok > 100, "{}: only {} cranks succeeded — VACUOUS", c.label, r.crank_ok);
-            assert_eq!(r.initial_abs_pos, r.final_abs_pos, "{}: position changed — baseline invalid", c.label);
-            assert_ne!(r.engine_final_price, r.engine_initial_price, "{}: price never moved — VACUOUS", c.label);
+            assert!(
+                r.crank_ok > 100,
+                "{}: only {} cranks succeeded — VACUOUS",
+                c.label,
+                r.crank_ok
+            );
+            assert_eq!(
+                r.initial_abs_pos, r.final_abs_pos,
+                "{}: position changed — baseline invalid",
+                c.label
+            );
+            assert_ne!(
+                r.engine_final_price, r.engine_initial_price,
+                "{}: price never moved — VACUOUS",
+                c.label
+            );
             assert_no_value_creation(&c.label, &r, c.lp_capital + c.trader_capital);
         }
     }
-    println!("\n  ran {ran} scenarios; WORST unexplained = {}", usd(worst));
+    println!(
+        "\n  ran {ran} scenarios; WORST unexplained = {}",
+        usd(worst)
+    );
     assert_eq!(ran, 10, "not all scenarios ran");
-    assert!(worst <= 2_000_000, "LP not honest: worst unexplained {}", usd(worst));
+    assert!(
+        worst <= 2_000_000,
+        "LP not honest: worst unexplained {}",
+        usd(worst)
+    );
 }
 
 #[test]
@@ -1255,25 +1605,47 @@ fn suite_2_underwater_account_can_recover() {
     // out when the price recovers. Pre-fix it was permanently frozen.
     for (tag, seed) in [("EMPTY pot", 0u128), ("FUNDED pot", 50_000_000_000u128)] {
         let (trough, after, delivered, expected, errs) = underwater_recovery_probe(seed);
-        println!("  {tag:12} trough={} after={} credited={} price-implied={} errs={errs}",
-            usd(trough), usd(after), usd(delivered), usd(expected as i128));
+        println!(
+            "  {tag:12} trough={} after={} credited={} price-implied={} errs={errs}",
+            usd(trough),
+            usd(after),
+            usd(delivered),
+            usd(expected as i128)
+        );
         // NON-VACUITY: prove the account really went underwater and a real gain arrived.
-        assert!(trough < 0, "{tag}: never went underwater — VACUOUS, site 2 untested");
-        assert!(expected > 100_000_000, "{tag}: recovery move too small — VACUOUS");
+        assert!(
+            trough < 0,
+            "{tag}: never went underwater — VACUOUS, site 2 untested"
+        );
+        assert!(
+            expected > 100_000_000,
+            "{tag}: recovery move too small — VACUOUS"
+        );
         // PROPERTY 1: the recovery must actually be credited.
-        assert!(after > trough, "{tag}: account did NOT recover (pre-fix behaviour)");
-        assert!(delivered > 0, "{tag}: zero credited during a favourable recovery");
+        assert!(
+            after > trough,
+            "{tag}: account did NOT recover (pre-fix behaviour)"
+        );
+        assert!(
+            delivered > 0,
+            "{tag}: zero credited during a favourable recovery"
+        );
         // PROPERTY 2 (quantitative): the credited recovery must be close to the
         // price-implied gain. Pre-fix this was 0 of ~$1,242; a weak `> 0` check
         // would pass on a single cent, so pin it to >=95% of the implied move.
         let implied = expected as i128;
-        assert!(delivered * 100 >= implied * 95,
+        assert!(
+            delivered * 100 >= implied * 95,
             "{tag}: only {} credited of a {} price-implied recovery (<95%)",
-            usd(delivered), usd(implied));
+            usd(delivered),
+            usd(implied)
+        );
         // PROPERTY 3: having climbed out of a {} debt, final pnl must be positive.
-        assert!(after > 0,
+        assert!(
+            after > 0,
             "{tag}: account never returned to profit despite a {} favourable move",
-            usd(implied));
+            usd(implied)
+        );
     }
 }
 
@@ -1289,11 +1661,23 @@ fn suite_3_no_value_creation_under_counterparty_insolvency() {
     let size = POS_SCALE as i128 * 13_000;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), tr_dep).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), tr_dep)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let mut slot = SLOTS_PER_STEP;
     let mut ok = 0u32;
@@ -1301,28 +1685,50 @@ fn suite_3_no_value_creation_under_counterparty_insolvency() {
     for _ in 0..120 {
         px *= 0.99; // favourable to the short LP; bankrupts the long trader
         for who in [&mut tr, &mut lp] {
-            let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-                effective_price: px as u64, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-            if crank_atomic(&mut header, &mut markets, who, req).is_ok() { ok += 1; }
+            let req = PermissionlessCrankRequestV16 {
+                now_slot: slot,
+                asset_index: 0,
+                effective_price: px as u64,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            };
+            if crank_atomic(&mut header, &mut markets, who, req).is_ok() {
+                ok += 1;
+            }
         }
         slot += SLOTS_PER_STEP;
     }
     let vault = header.vault.get();
     let real_capital = lp.capital.get() + tr.capital.get();
-    println!("  insolvency: LP cap={} pnl={} | TR cap={} pnl={} | vault={} deposits={}",
-        usd(lp.capital.get() as i128), usd(lp.pnl.get()),
-        usd(tr.capital.get() as i128), usd(tr.pnl.get()),
-        usd(vault as i128), usd((lp_dep + tr_dep) as i128));
+    println!(
+        "  insolvency: LP cap={} pnl={} | TR cap={} pnl={} | vault={} deposits={}",
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get()),
+        usd(tr.capital.get() as i128),
+        usd(tr.pnl.get()),
+        usd(vault as i128),
+        usd((lp_dep + tr_dep) as i128)
+    );
     // NON-VACUITY: the counterparty must actually have been bankrupted.
     assert!(ok > 100, "VACUOUS: too few successful cranks ({ok})");
-    assert!(tr.capital.get() == 0 || tr.pnl.get() < 0,
+    assert!(
+        tr.capital.get() == 0 || tr.pnl.get() < 0,
         "VACUOUS: counterparty was never made insolvent (cap={} pnl={})",
-        usd(tr.capital.get() as i128), usd(tr.pnl.get()));
+        usd(tr.capital.get() as i128),
+        usd(tr.pnl.get())
+    );
     // PROPERTY: real money is conserved.
-    assert_eq!(vault, lp_dep + tr_dep, "vault changed without external flows!");
-    assert!(real_capital <= lp_dep + tr_dep,
+    assert_eq!(
+        vault,
+        lp_dep + tr_dep,
+        "vault changed without external flows!"
+    );
+    assert!(
+        real_capital <= lp_dep + tr_dep,
         "CAPITAL ({}) exceeds deposits ({}) — value created!",
-        usd(real_capital as i128), usd((lp_dep + tr_dep) as i128));
+        usd(real_capital as i128),
+        usd((lp_dep + tr_dep) as i128)
+    );
 }
 
 #[test]
@@ -1337,35 +1743,68 @@ fn suite_4_unbacked_profit_is_not_withdrawable_while_open() {
     let size = POS_SCALE as i128 * 100;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let mut slot = SLOTS_PER_STEP;
     for &px in ramp(100_000, 70_000, 30).iter().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
     let profit = lp.pnl.get();
     let cap_before = lp.capital.get();
-    let conv = { let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-                 let mut v = PortfolioV16ViewMut::new(&mut lp);
-                 m.convert_released_pnl_to_capital_not_atomic(&mut v).map(|_| ()).map_err(|e| format!("{:?}", e)) };
+    let conv = {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut lp);
+        m.convert_released_pnl_to_capital_not_atomic(&mut v)
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e))
+    };
     // try to withdraw MORE than the deposited capital
-    let over = { let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-                 let mut v = PortfolioV16ViewMut::new(&mut lp);
-                 m.withdraw_not_atomic(&mut v, cap_before + 1).is_ok() };
-    println!("  open position: profit={} convert={:?} over-withdraw allowed={}",
-        usd(profit), conv, over);
+    let over = {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut lp);
+        m.withdraw_not_atomic(&mut v, cap_before + 1).is_ok()
+    };
+    println!(
+        "  open position: profit={} convert={:?} over-withdraw allowed={}",
+        usd(profit),
+        conv,
+        over
+    );
     // NON-VACUITY: the account must actually hold profit for this to test anything.
-    assert!(profit > 0, "VACUOUS: no profit accumulated, invariant untested");
+    assert!(
+        profit > 0,
+        "VACUOUS: no profit accumulated, invariant untested"
+    );
     // PROPERTY: cannot convert an unbacked claim while exposed, and cannot
     // withdraw more real money than it actually has.
-    assert!(conv.is_err(), "unbacked profit was converted while the position is OPEN!");
+    assert!(
+        conv.is_err(),
+        "unbacked profit was converted while the position is OPEN!"
+    );
     assert!(!over, "withdrew MORE than capital — real money leaked!");
 }
 
@@ -1381,11 +1820,23 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
     let size = 36_429_872_495i128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let mut slot = SLOTS_PER_STEP;
     let (mut ok, mut err) = (0u32, 0u32);
@@ -1399,8 +1850,13 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
     for &px in walk(15_565, 4_320, 100, 0xCAFE).iter().skip(1) {
         let p_before = markets[0].engine.asset.effective_price.get() as i128;
         let eq_before = lp.capital.get() as i128 + lp.pnl.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         match crank_atomic(&mut header, &mut markets, &mut lp, req) {
             Ok(()) => {
                 ok += 1;
@@ -1411,11 +1867,18 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
                 cum_expected += expected;
                 cum_actual += actual;
                 let d = actual - expected;
-                if d.abs() > worst_step.abs() { worst_step = d; }
+                if d.abs() > worst_step.abs() {
+                    worst_step = d;
+                }
                 if d.abs() > 1 && shown < 5 {
                     shown += 1;
-                    println!("   step diverges: pending_move={} expected={} actual={} diff={}",
-                        pending_move, usd(expected), usd(actual), usd(d));
+                    println!(
+                        "   step diverges: pending_move={} expected={} actual={} diff={}",
+                        pending_move,
+                        usd(expected),
+                        usd(actual),
+                        usd(d)
+                    );
                 }
                 pending_move = markets[0].engine.asset.effective_price.get() as i128 - p_before;
             }
@@ -1426,13 +1889,25 @@ fn diag_is_the_clamp_regime_discrepancy_the_engine_or_the_harness() {
     println!("\n  cranks ok={ok} err={err}");
     println!("  cumulative expected (lag-aware) = {}", usd(cum_expected));
     println!("  cumulative actual               = {}", usd(cum_actual));
-    println!("  cumulative divergence           = {}", usd(cum_actual - cum_expected));
+    println!(
+        "  cumulative divergence           = {}",
+        usd(cum_actual - cum_expected)
+    );
     println!("  worst SINGLE-step divergence    = {}", usd(worst_step));
-    println!("  still-unsettled pending move    = {} (worth {})",
-        pending_move, usd(-size * pending_move / POS_SCALE as i128));
-    assert!(ok > 100 && err > 100, "VACUOUS: need both successes and rejections");
-    assert!(worst_step.abs() <= 1,
-        "ENGINE diverges on a single settlement by {} — not rounding", usd(worst_step));
+    println!(
+        "  still-unsettled pending move    = {} (worth {})",
+        pending_move,
+        usd(-size * pending_move / POS_SCALE as i128)
+    );
+    assert!(
+        ok > 100 && err > 100,
+        "VACUOUS: need both successes and rejections"
+    );
+    assert!(
+        worst_step.abs() <= 1,
+        "ENGINE diverges on a single settlement by {} — not rounding",
+        usd(worst_step)
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1452,11 +1927,16 @@ fn config_with(fees_bps: u64, funding_e9: u64, assets: u32) -> V16Config {
     cfg
 }
 
-fn fixture_cfg(cfg: V16Config, init_price: u64, assets: usize)
-    -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, assets as u32, 0).unwrap();
-    let mut markets: Vec<Market<u64>> =
-        (0..assets).map(|_| Market::new(0u64, EngineAssetSlotV16Account::default())).collect();
+fn fixture_cfg(
+    cfg: V16Config,
+    init_price: u64,
+    assets: usize,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, assets as u32, 0).unwrap();
+    let mut markets: Vec<Market<u64>> = (0..assets)
+        .map(|_| Market::new(0u64, EngineAssetSlotV16Account::default()))
+        .collect();
     // asset_activation_cooldown_slots forces a gap between activations, so each
     // asset must be activated at a strictly later slot than the previous one.
     for i in 0..assets {
@@ -1479,27 +1959,52 @@ fn adv_1_site2_exact_boundary_gain_equals_debt() {
     let size = 36_429_872_495i128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 50_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 50_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     // drive underwater
-    let mut slot = SLOTS_PER_STEP; let mut px = init as f64;
+    let mut slot = SLOTS_PER_STEP;
+    let mut px = init as f64;
     for _ in 0..300 {
         px *= 1.01;
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px as u64, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px as u64,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
-        if lp.capital.get() == 0 && lp.pnl.get() < 0 { break; }
+        if lp.capital.get() == 0 && lp.pnl.get() < 0 {
+            break;
+        }
     }
     // settle out the lag so pnl is exact
     for _ in 0..2 {
         let p = markets[0].engine.asset.effective_price.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: p,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
@@ -1509,19 +2014,40 @@ fn adv_1_site2_exact_boundary_gain_equals_debt() {
     let cur = markets[0].engine.asset.effective_price.get() as i128;
     let dp = debt * POS_SCALE as i128 / size;
     let target = (cur - dp).max(1) as u64;
-    let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-        effective_price: target, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+    let req = PermissionlessCrankRequestV16 {
+        now_slot: slot,
+        asset_index: 0,
+        effective_price: target,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV16::Refresh,
+    };
     let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
     slot += SLOTS_PER_STEP;
     // settle the lag
     let p = markets[0].engine.asset.effective_price.get();
-    let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-        effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+    let req = PermissionlessCrankRequestV16 {
+        now_slot: slot,
+        asset_index: 0,
+        effective_price: p,
+        funding_rate_e9: 0,
+        action: PermissionlessCrankActionV16::Refresh,
+    };
     let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
-    println!("  boundary: debt was {} -> pnl now {}", usd(debt), usd(lp.pnl.get()));
+    println!(
+        "  boundary: debt was {} -> pnl now {}",
+        usd(debt),
+        usd(lp.pnl.get())
+    );
     // PROPERTY: must net to ~zero, never overshoot into unbacked profit.
-    assert!(lp.pnl.get() <= 0, "overshot into UNBACKED profit: {}", usd(lp.pnl.get()));
-    assert!(lp.pnl.get() > -debt, "gain was not credited at all at the boundary");
+    assert!(
+        lp.pnl.get() <= 0,
+        "overshot into UNBACKED profit: {}",
+        usd(lp.pnl.get())
+    );
+    assert!(
+        lp.pnl.get() > -debt,
+        "gain was not credited at all at the boundary"
+    );
 }
 
 #[test]
@@ -1534,35 +2060,68 @@ fn adv_2_nonzero_trading_fees() {
     let size = POS_SCALE as i128 * 100;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: 100_000, fee_bps: 50 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: 100_000,
+            fee_bps: 50,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let start = lp.capital.get() as i128 + lp.pnl.get();
-    let mut slot = SLOTS_PER_STEP; let mut ok = 0;
+    let mut slot = SLOTS_PER_STEP;
+    let mut ok = 0;
     for &px in sawtooth(100_000, 2_000, 20).iter().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() {
+            ok += 1;
+        }
         slot += SLOTS_PER_STEP;
     }
     // Settle the one-step lag at the engine's own price before measuring, else the
     // final accrual's delta is un-realized and looks like a bleed.
     for _ in 0..2 {
         let p = markets[0].engine.asset.effective_price.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: p,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
     let end = lp.capital.get() as i128 + lp.pnl.get();
-    println!("  fees=50bps: LP equity {} -> {} (zero-net sawtooth), insurance={}",
-        usd(start), usd(end), usd(header.insurance.get() as i128));
+    println!(
+        "  fees=50bps: LP equity {} -> {} (zero-net sawtooth), insurance={}",
+        usd(start),
+        usd(end),
+        usd(header.insurance.get() as i128)
+    );
     assert!(ok > 20, "VACUOUS: too few cranks ({ok})");
     // Zero-net path: with fees the LP may EARN fees but must not bleed capital to churn.
-    assert!(end >= start - 100_000, "LP bled {} on a zero-net path WITH fees enabled", usd(start - end));
+    assert!(
+        end >= start - 100_000,
+        "LP bled {} on a zero-net path WITH fees enabled",
+        usd(start - end)
+    );
 }
 
 #[test]
@@ -1571,43 +2130,77 @@ fn adv_3_multiple_traders_against_one_lp() {
     // domain claim-bound aggregation and the shared-backing accounting.
     let (mut header, mut markets) = market_fixture(100_000);
     let mut lp = account_fixture(LP_SEED);
-    let mut traders: Vec<PortfolioAccountV16Account> = (0..3).map(|i| account_fixture(10 + i)).collect();
+    let mut traders: Vec<PortfolioAccountV16Account> =
+        (0..3).map(|i| account_fixture(10 + i)).collect();
     let size = POS_SCALE as i128 * 40;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 3_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 3_000_000_000)
+            .unwrap();
         for t in traders.iter_mut() {
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(t), 1_000_000_000).unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(t), 1_000_000_000)
+                .unwrap();
         }
         for t in traders.iter_mut() {
-            let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: 100_000, fee_bps: 0 };
+            let req = TradeRequestV16 {
+                asset_index: 0,
+                size_q: size,
+                exec_price: 100_000,
+                fee_bps: 0,
+            };
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(t), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(t),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         }
     }
     let start = lp.capital.get() as i128 + lp.pnl.get();
     let lp_pos0 = lp.legs[0].basis_pos_q.get();
-    let mut slot = SLOTS_PER_STEP; let mut ok = 0;
+    let mut slot = SLOTS_PER_STEP;
+    let mut ok = 0;
     for &px in sawtooth(100_000, 2_000, 20).iter().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() {
+            ok += 1;
+        }
         slot += SLOTS_PER_STEP;
     }
     // settle lag
     for _ in 0..2 {
         let p = markets[0].engine.asset.effective_price.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        let _ = crank_atomic(&mut header, &mut markets, &mut lp, req); slot += SLOTS_PER_STEP;
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: p,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
+        slot += SLOTS_PER_STEP;
     }
     let end = lp.capital.get() as i128 + lp.pnl.get();
-    println!("  3 traders: LP pos={} equity {} -> {} (zero-net sawtooth)",
-        lp_pos0, usd(start), usd(end));
+    println!(
+        "  3 traders: LP pos={} equity {} -> {} (zero-net sawtooth)",
+        lp_pos0,
+        usd(start),
+        usd(end)
+    );
     assert!(ok > 20, "VACUOUS: too few cranks");
     assert_eq!(lp.legs[0].basis_pos_q.get(), lp_pos0, "position changed");
-    assert!((end - start).abs() <= 50_000,
-        "LP moved {} on a ZERO-NET path with 3 traders", usd(end - start));
+    assert!(
+        (end - start).abs() <= 50_000,
+        "LP moved {} on a ZERO-NET path with 3 traders",
+        usd(end - start)
+    );
 }
 
 #[test]
@@ -1619,30 +2212,70 @@ fn adv_4_position_changes_midway() {
     let mut tr = account_fixture(7);
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 5_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128 * 50, exec_price: 100_000, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 5_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: POS_SCALE as i128 * 50,
+            exec_price: 100_000,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let deposits = 10_000_000_000u128;
     let mut slot = SLOTS_PER_STEP;
     let mut trades = 0;
     for (i, &px) in sawtooth(100_000, 2_000, 20).iter().enumerate().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         // every 8th step: ADD to the position, then later partially CLOSE it
         if i % 8 == 0 {
-            let sz = if trades % 2 == 0 { POS_SCALE as i128 * 20 } else { -(POS_SCALE as i128 * 10) };
-            let h = header; let mk = markets.clone(); let l = lp; let t = tr;
+            let sz = if trades % 2 == 0 {
+                POS_SCALE as i128 * 20
+            } else {
+                -(POS_SCALE as i128 * 10)
+            };
+            let h = header;
+            let mk = markets.clone();
+            let l = lp;
+            let t = tr;
             let r = {
                 let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-                let req = TradeRequestV16 { asset_index: 0, size_q: sz, exec_price: px, fee_bps: 0 };
+                let req = TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: sz,
+                    exec_price: px,
+                    fee_bps: 0,
+                };
                 m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true)
+                    &mut PortfolioV16ViewMut::new(&mut tr),
+                    &mut PortfolioV16ViewMut::new(&mut lp),
+                    req,
+                    true,
+                )
             };
-            if r.is_ok() { trades += 1; } else { header = h; markets = mk; lp = l; tr = t; }
+            if r.is_ok() {
+                trades += 1;
+            } else {
+                header = h;
+                markets = mk;
+                lp = l;
+                tr = t;
+            }
         }
         slot += SLOTS_PER_STEP;
     }
@@ -1650,10 +2283,21 @@ fn adv_4_position_changes_midway() {
     println!("  position changes: {trades} mid-run trades | LP cap={} pnl={} | TR cap={} pnl={} | vault={}",
         usd(lp.capital.get() as i128), usd(lp.pnl.get()),
         usd(tr.capital.get() as i128), usd(tr.pnl.get()), usd(header.vault.get() as i128));
-    assert!(trades >= 2, "VACUOUS: no mid-run position changes landed ({trades})");
-    assert_eq!(header.vault.get(), deposits, "vault moved without external flow");
-    assert!(real_capital <= deposits, "CAPITAL {} exceeds deposits {} — value created",
-        usd(real_capital as i128), usd(deposits as i128));
+    assert!(
+        trades >= 2,
+        "VACUOUS: no mid-run position changes landed ({trades})"
+    );
+    assert_eq!(
+        header.vault.get(),
+        deposits,
+        "vault moved without external flow"
+    );
+    assert!(
+        real_capital <= deposits,
+        "CAPITAL {} exceeds deposits {} — value created",
+        usd(real_capital as i128),
+        usd(deposits as i128)
+    );
 }
 
 #[test]
@@ -1668,11 +2312,23 @@ fn adv_5_resolved_and_recovery_mode_reachability() {
         let deposits = 2_000_000_000u128;
         {
             let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000).unwrap();
-            let req = TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128 * 100, exec_price: 100_000, fee_bps: 0 };
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+                .unwrap();
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000)
+                .unwrap();
+            let req = TradeRequestV16 {
+                asset_index: 0,
+                size_q: POS_SCALE as i128 * 100,
+                exec_price: 100_000,
+                fee_bps: 0,
+            };
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         }
         // flip the market out of Live
         header.mode = mode_byte;
@@ -1680,24 +2336,44 @@ fn adv_5_resolved_and_recovery_mode_reachability() {
         let (mut ok, mut err) = (0u32, 0u32);
         let mut errkinds: std::collections::BTreeMap<String, u32> = Default::default();
         for &px in sawtooth(100_000, 2_000, 20).iter().skip(1) {
-            let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-                effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+            let req = PermissionlessCrankRequestV16 {
+                now_slot: slot,
+                asset_index: 0,
+                effective_price: px,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            };
             match crank_atomic(&mut header, &mut markets, &mut lp, req) {
                 Ok(()) => ok += 1,
-                Err(e) => { err += 1; *errkinds.entry(e).or_insert(0) += 1; }
+                Err(e) => {
+                    err += 1;
+                    *errkinds.entry(e).or_insert(0) += 1;
+                }
             }
             slot += SLOTS_PER_STEP;
         }
         let real_capital = lp.capital.get() + tr.capital.get();
         println!("  mode={mode_name}: cranks ok={ok} err={err} {errkinds:?}");
-        println!("    LP cap={} pnl={} | TR cap={} pnl={} | vault={}",
-            usd(lp.capital.get() as i128), usd(lp.pnl.get()),
-            usd(tr.capital.get() as i128), usd(tr.pnl.get()), usd(header.vault.get() as i128));
+        println!(
+            "    LP cap={} pnl={} | TR cap={} pnl={} | vault={}",
+            usd(lp.capital.get() as i128),
+            usd(lp.pnl.get()),
+            usd(tr.capital.get() as i128),
+            usd(tr.pnl.get()),
+            usd(header.vault.get() as i128)
+        );
         // PROPERTY (regardless of reachability): real money is never created.
-        assert_eq!(header.vault.get(), deposits, "{mode_name}: vault moved without external flow");
-        assert!(real_capital <= deposits,
+        assert_eq!(
+            header.vault.get(),
+            deposits,
+            "{mode_name}: vault moved without external flow"
+        );
+        assert!(
+            real_capital <= deposits,
             "{mode_name}: CAPITAL {} exceeds deposits {} — value created!",
-            usd(real_capital as i128), usd(deposits as i128));
+            usd(real_capital as i128),
+            usd(deposits as i128)
+        );
     }
 }
 
@@ -1712,24 +2388,42 @@ fn adv_6_liquidation_path() {
     let deposits = 6_000_000_000u128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000)
+            .unwrap();
         // Size so a realistic adverse move actually BREACHES maintenance. The earlier
         // 400-unit position was ~$40 of notional against $1,000 of capital, so the LP
         // was never distressed and the liquidation returned NonProgress — a vacuous test.
-        let req = TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128 * 10_000, exec_price: 100_000, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: POS_SCALE as i128 * 10_000,
+            exec_price: 100_000,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     // adverse move for the short LP
     // Ramp only until the LP BREACHES maintenance while still holding capital.
     // Past ~2x the entry price it is bankrupt and the engine correctly routes to
     // RecoveryRequired (a safe halt), which would bypass the liquidation path.
-    let mut slot = SLOTS_PER_STEP; let mut px = 100_000f64;
+    let mut slot = SLOTS_PER_STEP;
+    let mut px = 100_000f64;
     while px < 188_000.0 {
         px *= 1.02;
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px as u64, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px as u64,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
@@ -1737,27 +2431,55 @@ fn adv_6_liquidation_path() {
     let pnl_before_liq = lp.pnl.get();
     // now LIQUIDATE
     let liq_req = PermissionlessCrankRequestV16 {
-        now_slot: slot, asset_index: 0, effective_price: px as u64, funding_rate_e9: 0,
+        now_slot: slot,
+        asset_index: 0,
+        effective_price: px as u64,
+        funding_rate_e9: 0,
         // W3: liquidation size/fee are ENGINE-selected; the request carries only the asset.
         action: PermissionlessCrankActionV16::Liquidate(percolator::LiquidationRequestV16 {
-            asset_index: 0 }),
+            asset_index: 0,
+        }),
     };
     let liq = crank_atomic(&mut header, &mut markets, &mut lp, liq_req);
     let real_capital = lp.capital.get() + tr.capital.get();
     println!("  liquidation: result={:?}", liq);
-    println!("    before: cap={} pnl={} | after: cap={} pnl={} pos={}",
-        usd(cap_before_liq as i128), usd(pnl_before_liq),
-        usd(lp.capital.get() as i128), usd(lp.pnl.get()), lp.legs[0].basis_pos_q.get());
-    println!("    vault={} deposits={}", usd(header.vault.get() as i128), usd(deposits as i128));
+    println!(
+        "    before: cap={} pnl={} | after: cap={} pnl={} pos={}",
+        usd(cap_before_liq as i128),
+        usd(pnl_before_liq),
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get()),
+        lp.legs[0].basis_pos_q.get()
+    );
+    println!(
+        "    vault={} deposits={}",
+        usd(header.vault.get() as i128),
+        usd(deposits as i128)
+    );
     // NON-VACUITY: the liquidation must actually have EXECUTED. A NonProgress result
     // means the account was never liquidatable and the path was not exercised at all.
-    assert!(liq.is_ok(), "VACUOUS: liquidation did not execute ({liq:?}) — path untested         (LP cap={} pnl={})", usd(cap_before_liq as i128), usd(pnl_before_liq));
-    assert!(lp.legs[0].basis_pos_q.get().unsigned_abs() < (POS_SCALE as u128) * 10_000,
-        "VACUOUS: liquidation did not reduce the position");
+    assert!(
+        liq.is_ok(),
+        "VACUOUS: liquidation did not execute ({liq:?}) — path untested         (LP cap={} pnl={})",
+        usd(cap_before_liq as i128),
+        usd(pnl_before_liq)
+    );
+    assert!(
+        lp.legs[0].basis_pos_q.get().unsigned_abs() < (POS_SCALE as u128) * 10_000,
+        "VACUOUS: liquidation did not reduce the position"
+    );
     // PROPERTY: conservation holds through the liquidation path.
-    assert_eq!(header.vault.get(), deposits, "vault moved without external flow");
-    assert!(real_capital <= deposits, "CAPITAL {} exceeds deposits {} — value created",
-        usd(real_capital as i128), usd(deposits as i128));
+    assert_eq!(
+        header.vault.get(),
+        deposits,
+        "vault moved without external flow"
+    );
+    assert!(
+        real_capital <= deposits,
+        "CAPITAL {} exceeds deposits {} — value created",
+        usd(real_capital as i128),
+        usd(deposits as i128)
+    );
 }
 
 #[test]
@@ -1772,41 +2494,74 @@ fn adv_7_multi_asset_cross_domain_support() {
     let deposits = 10_000_000_000u128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 5_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 5_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 5_000_000_000)
+            .unwrap();
         for a in 0..2usize {
-            let req = TradeRequestV16 { asset_index: a, size_q: POS_SCALE as i128 * 50, exec_price: 100_000, fee_bps: 0 };
+            let req = TradeRequestV16 {
+                asset_index: a,
+                size_q: POS_SCALE as i128 * 50,
+                exec_price: 100_000,
+                fee_bps: 0,
+            };
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         }
     }
     let legs = lp.legs.iter().filter(|l| l.active != 0).count();
     let start = lp.capital.get() as i128 + lp.pnl.get();
     // asset 0 moves AGAINST the LP, asset 1 moves FOR it — cross-asset offset.
-    let mut slot = SLOTS_PER_STEP; let mut ok = 0;
+    let mut slot = SLOTS_PER_STEP;
+    let mut ok = 0;
     for i in 1..=40 {
         let p0 = (100_000f64 * (1.0 + 0.004 * i as f64)) as u64;
         let p1 = (100_000f64 * (1.0 - 0.004 * i as f64)) as u64;
         for (a, p) in [(0usize, p0), (1usize, p1)] {
-            let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: a,
-                effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-            if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+            let req = PermissionlessCrankRequestV16 {
+                now_slot: slot,
+                asset_index: a,
+                effective_price: p,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            };
+            if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() {
+                ok += 1;
+            }
         }
         slot += SLOTS_PER_STEP;
     }
     let end = lp.capital.get() as i128 + lp.pnl.get();
     let real_capital = lp.capital.get() + tr.capital.get();
     println!("  multi-asset: {legs} active legs, cranks ok={ok}");
-    println!("    LP equity {} -> {} | LP cap={} pnl={} | vault={}",
-        usd(start), usd(end), usd(lp.capital.get() as i128), usd(lp.pnl.get()),
-        usd(header.vault.get() as i128));
+    println!(
+        "    LP equity {} -> {} | LP cap={} pnl={} | vault={}",
+        usd(start),
+        usd(end),
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get()),
+        usd(header.vault.get() as i128)
+    );
     // NON-VACUITY
     assert_eq!(legs, 2, "VACUOUS: expected 2 active legs, got {legs}");
     assert!(ok > 20, "VACUOUS: too few cranks ({ok})");
     // PROPERTY: offsetting moves on two assets must not create or destroy real money.
-    assert_eq!(header.vault.get(), deposits, "vault moved without external flow");
-    assert!(real_capital <= deposits, "CAPITAL {} exceeds deposits {} — value created",
-        usd(real_capital as i128), usd(deposits as i128));
+    assert_eq!(
+        header.vault.get(),
+        deposits,
+        "vault moved without external flow"
+    );
+    assert!(
+        real_capital <= deposits,
+        "CAPITAL {} exceeds deposits {} — value created",
+        usd(real_capital as i128),
+        usd(deposits as i128)
+    );
 }
 
 #[test]
@@ -1821,29 +2576,66 @@ fn adv_8_nonzero_funding_rate() {
     let deposits = 2_000_000_000u128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000).unwrap();
-        let req = TradeRequestV16 { asset_index: 0, size_q: POS_SCALE as i128 * 100, exec_price: 100_000, fee_bps: 0 };
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), 1_000_000_000)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 1_000_000_000)
+            .unwrap();
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: POS_SCALE as i128 * 100,
+            exec_price: 100_000,
+            fee_bps: 0,
+        };
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+            &mut PortfolioV16ViewMut::new(&mut tr),
+            &mut PortfolioV16ViewMut::new(&mut lp),
+            req,
+            true,
+        )
+        .unwrap();
     }
     let mut slot = SLOTS_PER_STEP;
     let (mut ok, mut err) = (0u32, 0u32);
     for &px in sawtooth(100_000, 2_000, 20).iter().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 5_000, action: PermissionlessCrankActionV16::Refresh };
-        match crank_atomic(&mut header, &mut markets, &mut lp, req) { Ok(()) => ok += 1, Err(_) => err += 1 }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 5_000,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        match crank_atomic(&mut header, &mut markets, &mut lp, req) {
+            Ok(()) => ok += 1,
+            Err(_) => err += 1,
+        }
         slot += SLOTS_PER_STEP;
     }
     let real_capital = lp.capital.get() + tr.capital.get();
-    println!("  funding=5e5/slot: cranks ok={} err={} | LP cap={} pnl={} | vault={}",
-        ok, err, usd(lp.capital.get() as i128), usd(lp.pnl.get()), usd(header.vault.get() as i128));
+    println!(
+        "  funding=5e5/slot: cranks ok={} err={} | LP cap={} pnl={} | vault={}",
+        ok,
+        err,
+        usd(lp.capital.get() as i128),
+        usd(lp.pnl.get()),
+        usd(header.vault.get() as i128)
+    );
     // NON-VACUITY: funding must actually have been applied somewhere.
-    assert!(ok > 5, "VACUOUS: funding path never executed (ok={ok} err={err})");
+    assert!(
+        ok > 5,
+        "VACUOUS: funding path never executed (ok={ok} err={err})"
+    );
     // PROPERTY: conservation holds with funding live.
-    assert_eq!(header.vault.get(), deposits, "vault moved without external flow");
-    assert!(real_capital <= deposits, "CAPITAL {} exceeds deposits {} — value created",
-        usd(real_capital as i128), usd(deposits as i128));
+    assert_eq!(
+        header.vault.get(),
+        deposits,
+        "vault moved without external flow"
+    );
+    assert!(
+        real_capital <= deposits,
+        "CAPITAL {} exceeds deposits {} — value created",
+        usd(real_capital as i128),
+        usd(deposits as i128)
+    );
 }
 
 #[test]
@@ -1858,7 +2650,10 @@ fn structural_what_does_an_unfundable_gain_domain_actually_cost_postfix() {
     println!("CSV,label,crank,every,gain_seed_usd,net_move,total_variation,reversals,honest,actual,unexplained,burn_events,burned_total");
     let path = walk(15_565, 3_000, 60, 0xD00D);
     let mut rows: Vec<(String, i128, u128, u128)> = Vec::new();
-    for (trader_long, side) in [(false, "LPlong(gainDom=1,UNFUNDABLE)"), (true, "LPshort(gainDom=0,fundable)")] {
+    for (trader_long, side) in [
+        (false, "LPlong(gainDom=1,UNFUNDABLE)"),
+        (true, "LPshort(gainDom=0,fundable)"),
+    ] {
         for seed_usd in [0u128, 50, 100_000] {
             let mut c = base_cfg(&format!("STRUCT_{side}_seed${seed_usd}"));
             c.crank = CrankWho::LpOnly;
@@ -1870,21 +2665,36 @@ fn structural_what_does_an_unfundable_gain_domain_actually_cost_postfix() {
             c.path = path.clone();
             let r = run(&c);
             let lp_signed = if trader_long { -c.size_q } else { c.size_q };
-            let honest = lp_signed * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
+            let honest = lp_signed * (r.lp_settled_price - r.engine_initial_price as i128)
+                / POS_SCALE as i128;
             let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest;
-            println!("  {:<44} unexplained={:>13}  gain-pot: fresh=${:<12} spent=${:<12} rate={}",
-                c.label, usd(unexplained),
+            println!(
+                "  {:<44} unexplained={:>13}  gain-pot: fresh=${:<12} spent=${:<12} rate={}",
+                c.label,
+                usd(unexplained),
                 usd((r.gain_dom_fresh / 1_000_000_000_000u128) as i128),
                 usd((r.gain_dom_spent / 1_000_000_000_000u128) as i128),
-                r.gain_dom_rate);
+                r.gain_dom_rate
+            );
             // NON-VACUITY
             assert!(r.crank_ok > 20, "{}: too few cranks — VACUOUS", c.label);
-            assert_eq!(r.initial_abs_pos, r.final_abs_pos, "{}: position changed", c.label);
-            rows.push((c.label.clone(), unexplained, r.gain_dom_spent, r.gain_dom_rate));
+            assert_eq!(
+                r.initial_abs_pos, r.final_abs_pos,
+                "{}: position changed",
+                c.label
+            );
+            rows.push((
+                c.label.clone(),
+                unexplained,
+                r.gain_dom_spent,
+                r.gain_dom_rate,
+            ));
         }
     }
     println!("\n  Interpretation: an UNFUNDABLE gain domain behaves like seed $0.");
-    println!("  If seed $0 is honest, the structural gap costs nothing in normal operation post-fix.");
+    println!(
+        "  If seed $0 is honest, the structural gap costs nothing in normal operation post-fix."
+    );
 }
 
 #[test]
@@ -1905,17 +2715,30 @@ fn structural_seed_sweep_partial_backing_is_worse_than_none() {
         c.gain_domain_seed = seed_usd * 1_000_000;
         c.path = path.clone();
         let r = run(&c);
-        let honest = c.size_q * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
+        let honest =
+            c.size_q * (r.lp_settled_price - r.engine_initial_price as i128) / POS_SCALE as i128;
         let unexplained = (r.lp_equity_end - r.lp_equity_start) - honest;
         let exhausted = r.gain_dom_rate < 1_000_000_000_000u128;
-        println!("  seed ${:<7} unexplained={:>13}  spent=${:<12} rate={:<14} {}",
-            seed_usd, usd(unexplained),
+        println!(
+            "  seed ${:<7} unexplained={:>13}  spent=${:<12} rate={:<14} {}",
+            seed_usd,
+            usd(unexplained),
             usd((r.gain_dom_spent / 1_000_000_000_000u128) as i128),
             r.gain_dom_rate,
-            if exhausted { "<- pot UNDER-backed (rate<1)" } else { "" });
-        if unexplained.abs() > worst.1.abs() { worst = (seed_usd, unexplained); }
+            if exhausted {
+                "<- pot UNDER-backed (rate<1)"
+            } else {
+                ""
+            }
+        );
+        if unexplained.abs() > worst.1.abs() {
+            worst = (seed_usd, unexplained);
+        }
         assert!(r.crank_ok > 20, "seed {seed_usd}: too few cranks — VACUOUS");
-        assert_eq!(r.initial_abs_pos, r.final_abs_pos, "seed {seed_usd}: position changed");
+        assert_eq!(
+            r.initial_abs_pos, r.final_abs_pos,
+            "seed {seed_usd}: position changed"
+        );
     }
     println!("\n  WORST at seed ${} -> {}", worst.0, usd(worst.1));
     println!("  => harm is NOT 'no backing'; it is PARTIAL backing (credit_rate < 1).");
@@ -1924,7 +2747,11 @@ fn structural_seed_sweep_partial_backing_is_worse_than_none() {
 /// GROUND TRUTH: run a path at a given gain-domain seed, then CLOSE the position,
 /// convert PnL to capital and withdraw as much as possible. Returns actual dollars
 /// extracted. Immune to how the harness values un-realized PnL.
-fn dollars_actually_extracted(seed_atoms: u128, path: &[u64], trader_long: bool) -> (u128, i128, u128, u128) {
+fn dollars_actually_extracted(
+    seed_atoms: u128,
+    path: &[u64],
+    trader_long: bool,
+) -> (u128, i128, u128, u128) {
     let init = path[0];
     let (mut header, mut markets) = market_fixture(init);
     let mut lp = account_fixture(LP_SEED);
@@ -1933,37 +2760,67 @@ fn dollars_actually_extracted(seed_atoms: u128, path: &[u64], trader_long: bool)
     let lp_dep = 5_000_000_000u128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000)
+            .unwrap();
         // Production seeds BOTH domains at MAX expiry (the freshness-deadlock defuse).
         // seed_atoms == 0 means "no seed at all", which reproduces the deadlock.
         if seed_atoms != 0 {
             for d in [0usize, 1usize] {
-                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2).unwrap();
+                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2)
+                    .unwrap();
             }
         }
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         if trader_long {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         } else {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                req,
+                false,
+            )
+            .unwrap();
         }
     }
     let mut slot = SLOTS_PER_STEP;
     let mut ok = 0u32;
     for &px in path.iter().skip(1) {
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() {
+            ok += 1;
+        }
         slot += SLOTS_PER_STEP;
     }
     // settle the lag at the engine's own price
     for _ in 0..2 {
         let p = markets[0].engine.asset.effective_price.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: p,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
@@ -1971,13 +2828,26 @@ fn dollars_actually_extracted(seed_atoms: u128, path: &[u64], trader_long: bool)
     // CLOSE the LP position (settles BOTH sides, realizing the counterparty's loss)
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: settled_price, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: settled_price,
+            fee_bps: 0,
+        };
         let r = if trader_long {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false)
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                req,
+                false,
+            )
         } else {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true)
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
         };
         if r.is_err() {
             // A close failure is itself a result, not a reason to abort the sweep.
@@ -2002,22 +2872,47 @@ fn dollars_actually_extracted(seed_atoms: u128, path: &[u64], trader_long: bool)
         let mut v = PortfolioV16ViewMut::new(&mut lp);
         let _ = m.convert_released_pnl_to_capital_not_atomic(&mut v);
     }
-    fn try_wd(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
-              a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-        let hs=*h; let ms=mk.clone(); let as_=*a;
-        let ok = { let mut m = MarketGroupV16ViewMut::new(h, mk);
-                   let mut v = PortfolioV16ViewMut::new(a);
-                   m.withdraw_not_atomic(&mut v, amt).is_ok() };
-        if !ok { *h=hs; *mk=ms; *a=as_; }
+    fn try_wd(
+        h: &mut MarketGroupV16HeaderAccount,
+        mk: &mut Vec<Market<u64>>,
+        a: &mut PortfolioAccountV16Account,
+        amt: u128,
+    ) -> bool {
+        let hs = *h;
+        let ms = mk.clone();
+        let as_ = *a;
+        let ok = {
+            let mut m = MarketGroupV16ViewMut::new(h, mk);
+            let mut v = PortfolioV16ViewMut::new(a);
+            m.withdraw_not_atomic(&mut v, amt).is_ok()
+        };
+        if !ok {
+            *h = hs;
+            *mk = ms;
+            *a = as_;
+        }
         ok
     }
     let target = lp.capital.get() + lp.pnl.get().max(0) as u128;
-    let mut got = 0u128; let mut amt = target; let step = (target/2000).max(1);
-    while amt > 0 { if try_wd(&mut header, &mut markets, &mut lp, amt) { got = amt; break; } amt = amt.saturating_sub(step); }
+    let mut got = 0u128;
+    let mut amt = target;
+    let step = (target / 2000).max(1);
+    while amt > 0 {
+        if try_wd(&mut header, &mut markets, &mut lp, amt) {
+            got = amt;
+            break;
+        }
+        amt = amt.saturating_sub(step);
+    }
     (got, lp.pnl.get(), ok as u128, settled_price as u128)
 }
 
-fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: bool, every: usize) -> (u128, i128, u128, u128) {
+fn dollars_extracted_at_cadence(
+    seed_atoms: u128,
+    path: &[u64],
+    trader_long: bool,
+    every: usize,
+) -> (u128, i128, u128, u128) {
     let init = path[0];
     let (mut header, mut markets) = market_fixture(init);
     let mut lp = account_fixture(LP_SEED);
@@ -2026,22 +2921,40 @@ fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: boo
     let lp_dep = 5_000_000_000u128;
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep).unwrap();
-        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000).unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut lp), lp_dep)
+            .unwrap();
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut tr), 40_000_000_000)
+            .unwrap();
         // Production seeds BOTH domains at MAX expiry (the freshness-deadlock defuse).
         // seed_atoms == 0 means "no seed at all", which reproduces the deadlock.
         if seed_atoms != 0 {
             for d in [0usize, 1usize] {
-                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2).unwrap();
+                m.deposit_fresh_counterparty_backing_not_atomic(d, seed_atoms, u64::MAX / 2)
+                    .unwrap();
             }
         }
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: init, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: init,
+            fee_bps: 0,
+        };
         if trader_long {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
+            .unwrap();
         } else {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false).unwrap();
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                req,
+                false,
+            )
+            .unwrap();
         }
     }
     let mut slot = SLOTS_PER_STEP;
@@ -2049,17 +2962,32 @@ fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: boo
     for (i, &px) in path.iter().enumerate().skip(1) {
         // REAL slower keeper: wall-clock advances every step regardless of whether we
         // crank, so a coarser cadence genuinely puts MORE slots between settlements.
-        if i % every != 0 && i != path.len() - 1 { slot += SLOTS_PER_STEP; continue; }
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: px, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
-        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() { ok += 1; }
+        if i % every != 0 && i != path.len() - 1 {
+            slot += SLOTS_PER_STEP;
+            continue;
+        }
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: px,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
+        if crank_atomic(&mut header, &mut markets, &mut lp, req).is_ok() {
+            ok += 1;
+        }
         slot += SLOTS_PER_STEP;
     }
     // settle the lag at the engine's own price
     for _ in 0..2 {
         let p = markets[0].engine.asset.effective_price.get();
-        let req = PermissionlessCrankRequestV16 { now_slot: slot, asset_index: 0,
-            effective_price: p, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh };
+        let req = PermissionlessCrankRequestV16 {
+            now_slot: slot,
+            asset_index: 0,
+            effective_price: p,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        };
         let _ = crank_atomic(&mut header, &mut markets, &mut lp, req);
         slot += SLOTS_PER_STEP;
     }
@@ -2067,13 +2995,26 @@ fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: boo
     // CLOSE the LP position (settles BOTH sides, realizing the counterparty's loss)
     {
         let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        let req = TradeRequestV16 { asset_index: 0, size_q: size, exec_price: settled_price, fee_bps: 0 };
+        let req = TradeRequestV16 {
+            asset_index: 0,
+            size_q: size,
+            exec_price: settled_price,
+            fee_bps: 0,
+        };
         let r = if trader_long {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut lp), &mut PortfolioV16ViewMut::new(&mut tr), req, false)
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                req,
+                false,
+            )
         } else {
             m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut PortfolioV16ViewMut::new(&mut tr), &mut PortfolioV16ViewMut::new(&mut lp), req, true)
+                &mut PortfolioV16ViewMut::new(&mut tr),
+                &mut PortfolioV16ViewMut::new(&mut lp),
+                req,
+                true,
+            )
         };
         if r.is_err() {
             // A close failure is itself a result, not a reason to abort the sweep.
@@ -2098,21 +3039,40 @@ fn dollars_extracted_at_cadence(seed_atoms: u128, path: &[u64], trader_long: boo
         let mut v = PortfolioV16ViewMut::new(&mut lp);
         let _ = m.convert_released_pnl_to_capital_not_atomic(&mut v);
     }
-    fn try_wd(h: &mut MarketGroupV16HeaderAccount, mk: &mut Vec<Market<u64>>,
-              a: &mut PortfolioAccountV16Account, amt: u128) -> bool {
-        let hs=*h; let ms=mk.clone(); let as_=*a;
-        let ok = { let mut m = MarketGroupV16ViewMut::new(h, mk);
-                   let mut v = PortfolioV16ViewMut::new(a);
-                   m.withdraw_not_atomic(&mut v, amt).is_ok() };
-        if !ok { *h=hs; *mk=ms; *a=as_; }
+    fn try_wd(
+        h: &mut MarketGroupV16HeaderAccount,
+        mk: &mut Vec<Market<u64>>,
+        a: &mut PortfolioAccountV16Account,
+        amt: u128,
+    ) -> bool {
+        let hs = *h;
+        let ms = mk.clone();
+        let as_ = *a;
+        let ok = {
+            let mut m = MarketGroupV16ViewMut::new(h, mk);
+            let mut v = PortfolioV16ViewMut::new(a);
+            m.withdraw_not_atomic(&mut v, amt).is_ok()
+        };
+        if !ok {
+            *h = hs;
+            *mk = ms;
+            *a = as_;
+        }
         ok
     }
     let target = lp.capital.get() + lp.pnl.get().max(0) as u128;
-    let mut got = 0u128; let mut amt = target; let step = (target/2000).max(1);
-    while amt > 0 { if try_wd(&mut header, &mut markets, &mut lp, amt) { got = amt; break; } amt = amt.saturating_sub(step); }
+    let mut got = 0u128;
+    let mut amt = target;
+    let step = (target / 2000).max(1);
+    while amt > 0 {
+        if try_wd(&mut header, &mut markets, &mut lp, amt) {
+            got = amt;
+            break;
+        }
+        amt = amt.saturating_sub(step);
+    }
     (got, lp.pnl.get(), ok as u128, settled_price as u128)
 }
-
 
 /// Does pushing FEWER prices (coarser keeper cadence) reduce backing consumption?
 /// The engine's effective_price only advances when someone pushes it, so a slower
@@ -2128,18 +3088,30 @@ fn cadence_sweep_does_pushing_fewer_prices_reduce_backing_burn() {
     for every in [1usize, 2, 5, 20, 100] {
         let (got, _pnl, cranks, settled) = dollars_extracted_at_cadence(seed, &full, false, every);
         // engine-visible total variation at this cadence
-        let seen: Vec<u64> = full.iter().enumerate()
+        let seen: Vec<u64> = full
+            .iter()
+            .enumerate()
             .filter(|(i, _)| *i == 0 || i % every == 0 || *i == full.len() - 1)
-            .map(|(_, &p)| p).collect();
-        let mut tv = 0i128; for w in seen.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+            .map(|(_, &p)| p)
+            .collect();
+        let mut tv = 0i128;
+        for w in seen.windows(2) {
+            tv += (w[1] as i128 - w[0] as i128).abs();
+        }
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         let attempted = seen.len() - 1;
         println!("  every {:<4} engineTV {:<9} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks OK {}/{} attempted)",
             every, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks, attempted);
-        assert!(cranks > 20, "every {every}: VACUOUS - engine barely cranked");
+        assert!(
+            cranks > 20,
+            "every {every}: VACUOUS - engine barely cranked"
+        );
         assert!(got > 0, "every {every}: LP could not exit at all");
     }
-    println!("\n  If delta shrinks as `every` grows -> keeper cadence is a real lever on backing burn.");
+    println!(
+        "\n  If delta shrinks as `every` grows -> keeper cadence is a real lever on backing burn."
+    );
 }
 
 #[test]
@@ -2150,17 +3122,23 @@ fn ground_truth_does_partial_backing_cost_REAL_dollars() {
     let path = walk(15_565, 3_000, 60, 0xD00D);
     let lp_dep = 5_000_000_000i128;
     // honest: LP LONG, equity change = size * (settled - init)
-    println!("  LP deposited $5000.000000 in every run; LP is LONG (gain domain = the unfundable one)");
+    println!(
+        "  LP deposited $5000.000000 in every run; LP is LONG (gain domain = the unfundable one)"
+    );
     let mut results = Vec::new();
     for seed in [0u128, 25, 100, 1_000, 5_000, 100_000] {
         let (got, pnl_left, cranks, settled) = dollars_actually_extracted(seed, &path, false);
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         println!("  seed ${:<7} withdrew ${:<14} pnl_left={:<12} vs honest ${:<14} delta {:<14} (cranks {})",
             seed, usd(got as i128), usd(pnl_left), usd(honest), usd(got as i128 - honest), cranks);
         assert!(cranks > 20, "seed {seed}: too few cranks — VACUOUS");
-        if got > 0 { results.push((seed, got as i128 - honest)); }
+        if got > 0 {
+            results.push((seed, got as i128 - honest));
+        }
     }
-    let spread = results.iter().map(|r| r.1).max().unwrap() - results.iter().map(|r| r.1).min().unwrap();
+    let spread =
+        results.iter().map(|r| r.1).max().unwrap() - results.iter().map(|r| r.1).min().unwrap();
     println!("\n  spread across seeds = {}", usd(spread));
     println!("  If ~0: partial backing costs NO real dollars and the sweep loss was nominal only.");
 }
@@ -2176,9 +3154,13 @@ fn ground_truth_does_the_zero_seed_loss_SCALE_with_path_length() {
     for steps in [500usize, 1_500, 3_000, 6_000] {
         let path = walk(15_565, steps, 60, 0xD00D);
         let (got, _pnl, cranks, settled) = dollars_actually_extracted(0, &path, false);
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         // total variation of the ENGINE-visible path
-        let mut tv = 0i128; for w in path.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
+        let mut tv = 0i128;
+        for w in path.windows(2) {
+            tv += (w[1] as i128 - w[0] as i128).abs();
+        }
         println!("  steps {:<6} totalVariation {:<9} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks {})",
             steps, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
         assert!(cranks > 20, "steps {steps}: VACUOUS");
@@ -2200,7 +3182,10 @@ fn ground_truth_does_the_zero_seed_loss_SCALE_with_path_length() {
     println!("  If delta grows with totalVariation  -> an ongoing bleed even at seed 0.");
     // The point of the test: seed 0 is never merely lossy, it eventually bricks.
     // Production seeds 100% of the LP on BOTH domains precisely to avoid this.
-    assert!(!exited.is_empty(), "VACUOUS: no path length produced a measurable exit");
+    assert!(
+        !exited.is_empty(),
+        "VACUOUS: no path length produced a measurable exit"
+    );
     assert!(
         !deadlocked.is_empty(),
         "seed 0 no longer deadlocks on long paths — the freshness deadlock this test \
@@ -2226,12 +3211,19 @@ fn decisive_can_a_DUST_seed_at_max_expiry_give_liveness_without_the_haircut() {
         ("$5000 @MAX (ample)", 5_000_000_000u128),
     ] {
         let (got, _pnl, cranks, settled) = dollars_actually_extracted(atoms, &path, false);
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         if got == 0 {
             println!("  {label:<30} LP COULD NOT EXIT (cranks {cranks})");
         } else {
-            println!("  {:<30} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks {})",
-                label, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
+            println!(
+                "  {:<30} withdrew ${:<14} honest ${:<14} delta {:<14} (cranks {})",
+                label,
+                usd(got as i128),
+                usd(honest),
+                usd(got as i128 - honest),
+                cranks
+            );
         }
         assert!(cranks > 20, "{label}: VACUOUS");
     }
@@ -2246,21 +3238,27 @@ fn product_what_does_TODAYS_launch_config_actually_cost() {
     let lp_dep = 5_000_000_000i128;
     let path = walk(15_565, 6_000, 60, 0xD00D);
     for (label, atoms) in [
-        ("dust $0.01",                 10_000u128),
-        ("10% of LP  ($500)",         500_000_000u128),
-        ("20% of LP  ($1,000)",     1_000_000_000u128),
-        ("50% of LP  ($2,500)",     2_500_000_000u128),
-        ("100% of LP ($5,000) TODAY",5_000_000_000u128),
-        ("200% of LP ($10,000)",   10_000_000_000u128),
+        ("dust $0.01", 10_000u128),
+        ("10% of LP  ($500)", 500_000_000u128),
+        ("20% of LP  ($1,000)", 1_000_000_000u128),
+        ("50% of LP  ($2,500)", 2_500_000_000u128),
+        ("100% of LP ($5,000) TODAY", 5_000_000_000u128),
+        ("200% of LP ($10,000)", 10_000_000_000u128),
     ] {
         let (got, _pnl, cranks, settled) = dollars_actually_extracted(atoms, &path, false);
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         if got == 0 {
             println!("  {label:<28} LP COULD NOT EXIT (cranks {cranks})");
         } else {
-            println!("  {:<28} withdrew ${:<13} honest ${:<13} delta {:<13} capital tied up ${}",
-                label, usd(got as i128), usd(honest), usd(got as i128 - honest),
-                usd((atoms * 2) as i128));
+            println!(
+                "  {:<28} withdrew ${:<13} honest ${:<13} delta {:<13} capital tied up ${}",
+                label,
+                usd(got as i128),
+                usd(honest),
+                usd(got as i128 - honest),
+                usd((atoms * 2) as i128)
+            );
         }
         assert!(cranks > 20, "{label}: VACUOUS");
     }
@@ -2275,14 +3273,29 @@ fn product_does_the_100pct_seed_survive_a_LONG_LIVED_market() {
     let lp_dep = 5_000_000_000i128;
     for steps in [3_000usize, 6_000, 12_000, 24_000] {
         let path = walk(15_565, steps, 60, 0xD00D);
-        let mut tv = 0i128; for w in path.windows(2) { tv += (w[1] as i128 - w[0] as i128).abs(); }
-        let (got, _pnl, cranks, settled) = dollars_actually_extracted(5_000_000_000u128, &path, false);
-        let honest = lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
+        let mut tv = 0i128;
+        for w in path.windows(2) {
+            tv += (w[1] as i128 - w[0] as i128).abs();
+        }
+        let (got, _pnl, cranks, settled) =
+            dollars_actually_extracted(5_000_000_000u128, &path, false);
+        let honest =
+            lp_dep + 36_429_872_495i128 * (settled as i128 - 15_565i128) / POS_SCALE as i128;
         if got == 0 {
-            println!("  steps {:<7} tv {:<9} LP COULD NOT EXIT (cranks {})", steps, tv, cranks);
+            println!(
+                "  steps {:<7} tv {:<9} LP COULD NOT EXIT (cranks {})",
+                steps, tv, cranks
+            );
         } else {
-            println!("  steps {:<7} tv {:<9} withdrew ${:<13} honest ${:<13} delta {:<13} (cranks {})",
-                steps, tv, usd(got as i128), usd(honest), usd(got as i128 - honest), cranks);
+            println!(
+                "  steps {:<7} tv {:<9} withdrew ${:<13} honest ${:<13} delta {:<13} (cranks {})",
+                steps,
+                tv,
+                usd(got as i128),
+                usd(honest),
+                usd(got as i128 - honest),
+                cranks
+            );
         }
         assert!(cranks > 20, "steps {steps}: VACUOUS");
     }

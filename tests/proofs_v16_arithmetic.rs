@@ -352,7 +352,11 @@ fn proof_v16_trade_fee_notional_ceil_strictly_exceeds_floor_when_unaligned() {
     if product % POS_SCALE == 0 {
         assert_eq!(ceil, floor, "aligned fills must not be over-charged");
     } else {
-        assert_eq!(ceil, floor + 1, "unaligned fills must round the fee up by exactly one atom");
+        assert_eq!(
+            ceil,
+            floor + 1,
+            "unaligned fills must round the fee up by exactly one atom"
+        );
     }
     // The sub-atom-fee bug in one sentence: floor can be 0 while size_q,
     // price are both nonzero (product < POS_SCALE); ceil must not be.

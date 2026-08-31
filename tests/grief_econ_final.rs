@@ -310,8 +310,8 @@ fn liquidating_a_broke_holdout_releases_the_group_hlock() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut acct);
 
-    let liq = market
-        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 });
+    let liq =
+        market.liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 });
     println!("BROKE-LIQUIDATE => {:?}", liq);
     println!(
         "  oi_eff_long={} oi_eff_short={} mode_long_normal={} hlock={}",
