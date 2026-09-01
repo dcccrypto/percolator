@@ -217,6 +217,10 @@ pub enum V16Error {
     /// generic config-error bucket.  The wrapper maps this to
     /// `PercolatorError::EngineInsufficientInitialMargin` (Custom 49).
     InsufficientInitialMargin,
+    /// An LP-vault deposit is too small to receive even one share after
+    /// conservative round-down pricing. Rejecting this in the engine prevents
+    /// callers from accepting collateral while silently minting zero shares.
+    LpVaultZeroSharesMinted,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -16957,13 +16961,13 @@ pub mod lp_vault {
     ///   (returns `amount`). Caller guarantees `amount > 0`.
     /// - `total_shares > 0 && nav_atoms == 0`: vault wiped to zero NAV
     ///   while shares still outstanding -> cannot price a deposit; reject.
-    /// - otherwise: `floor(amount * total_shares / nav_atoms)`.
+    /// - otherwise: `floor(amount * total_shares / nav_atoms)`, rejected with
+    ///   `LpVaultZeroSharesMinted` if conservative rounding produces zero.
     ///
-    /// The result MAY be 0 (when `amount * total_shares < nav_atoms`). The
-    /// caller (wrapper) MUST reject a 0 result with an explicit error
-    /// (sign-off Note 1: never silently mint 0 and absorb the deposit).
-    /// Kept as pure math here; the reject policy + error mapping
-    /// (`LpVaultZeroSharesMinted`) live in the wrapper handler.
+    /// The zero-share check deliberately lives in this primitive rather than
+    /// relying on every wrapper to repeat it: no successful quote may absorb a
+    /// deposit without issuing ownership. Callers may retain the same check as
+    /// defense in depth.
     pub fn lp_shares_for_deposit(
         amount: u128,
         total_shares: u128,
@@ -16975,7 +16979,11 @@ pub mod lp_vault {
         if nav_atoms == 0 {
             return Err(V16Error::InvalidConfig);
         }
-        Ok(wide_mul_div_floor_u128(amount, total_shares, nav_atoms))
+        let shares = wide_mul_div_floor_u128(amount, total_shares, nav_atoms);
+        if shares == 0 {
+            return Err(V16Error::LpVaultZeroSharesMinted);
+        }
+        Ok(shares)
     }
 
     /// Collateral atoms to release for redeeming `shares` against a vault
