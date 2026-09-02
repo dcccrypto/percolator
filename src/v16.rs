@@ -12207,8 +12207,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     adjust_u128(w_before, old_leg.loss_weight, new_weight)?
                 };
-                let eff_before =
-                    wide_mul_div_floor_u128(asset.$a, w_before, SOCIAL_WEIGHT_SCALE);
+                let eff_before = wide_mul_div_floor_u128(asset.$a, w_before, SOCIAL_WEIGHT_SCALE);
                 let eff_after = wide_mul_div_floor_u128(asset.$a, w_after, SOCIAL_WEIGHT_SCALE);
                 asset.$oi = if eff_after >= eff_before {
                     asset
