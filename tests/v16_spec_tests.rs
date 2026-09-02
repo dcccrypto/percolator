@@ -4004,3 +4004,109 @@ fn untouched_opposite_leg_detaches_after_a_unilateral_reduction() {
         "an untouched opposite leg must remain detachable after a unilateral reduction, got {closed:?}"
     );
 }
+
+/// #449 — a PARTIAL reduce of a leg whose `a_basis` is STALE must adjust
+/// `oi_eff` by the A-scaled contribution, not by the raw basis delta.
+///
+/// Scenario (0x-SquidSol's PoC shape, real mutators only):
+///   A long 10 / B short 10  and  C long 10 / D short 10   (long OI 20, a_long = ADL_ONE)
+///   D fully closes its FRESH short 10   -> long OI 20 -> 10, a_long -> 0.5*ADL_ONE
+///   A partial-reduces its long, whose `a_basis` is now STALE (still ADL_ONE)
+///
+/// The shrink branch updates `oi_eff` with the RAW delta while
+/// `loss_weight_sum` is maintained in A-correct terms (#134), so the stored
+/// pair drifts. The drift keeps `oi_eff_long == oi_eff_short` (hiding it from
+/// the Live equality guard) but breaks the protocol's own conservation
+/// invariant `c_tot + pnl_pos_tot + insurance <= vault`.
+///
+/// Asserting CONSERVATION rather than a chosen formula keeps this test
+/// independent of the fix's design.
+#[test]
+fn partial_reduce_of_stale_a_basis_leg_preserves_conservation() {
+    const PX0: u64 = 1_000_000;
+    const DEP: u128 = 100_000_000_000;
+    let (mut header, mut markets) = market_fixture(1, PX0);
+    let mut a_h = account_fixture(1, 91);
+    let mut b_h = account_fixture(1, 92);
+    let mut c_h = account_fixture(1, 93);
+    let mut d_h = account_fixture(1, 94);
+    let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_h);
+    let mut b = PortfolioV16ViewMut::new(&mut b_h);
+    let mut c = PortfolioV16ViewMut::new(&mut c_h);
+    let mut d = PortfolioV16ViewMut::new(&mut d_h);
+    for acct in [&mut a, &mut b, &mut c, &mut d] {
+        m.deposit_not_atomic(acct, DEP).unwrap();
+    }
+    let v0 = m.header.vault.get();
+    let trade = |sz: u128| TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_q(sz * POS_SCALE),
+        exec_price: PX0,
+        fee_bps: 0,
+    };
+    m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut a, &mut b, trade(10), true)
+        .expect("A long / B short");
+    m.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut c, &mut d, trade(10), true)
+        .expect("C long / D short");
+
+    // D fully closes its FRESH short -> scales a_long on the opposite side.
+    m.rebalance_reduce_position_not_atomic(
+        &mut d,
+        RebalanceRequestV16 {
+            asset_index: 0,
+            reduce_q: 10 * POS_SCALE,
+        },
+    )
+    .expect("D full close");
+    let a_long_after = m.markets[0].engine.asset.a_long.get();
+    assert!(
+        a_long_after < ADL_ONE,
+        "precondition: a_long must be scaled (got {a_long_after})"
+    );
+
+    // A partial-reduces a leg whose a_basis is now STALE. This is the operation
+    // no existing sweep or Kani proof covers.
+    m.rebalance_reduce_position_not_atomic(
+        &mut a,
+        RebalanceRequestV16 {
+            asset_index: 0,
+            reduce_q: 5 * POS_SCALE,
+        },
+    )
+    .expect("A stale-a_basis partial reduce");
+
+    m.accrue_asset_to_not_atomic(0, 2, PX0 + 1_000, 0, true)
+        .ok();
+    for acct in [&mut a, &mut b, &mut c, &mut d] {
+        let _ = m.full_account_refresh_not_atomic(acct);
+    }
+    assert_eq!(
+        m.header.vault.get(),
+        v0,
+        "no deposits/withdrawals in this scenario"
+    );
+    let obligations = m.header.c_tot.get() + m.header.pnl_pos_tot.get() + m.header.insurance.get();
+    let delta = obligations as i128 - m.header.vault.get() as i128;
+    assert!(
+        delta <= 0,
+        "#449: conservation broken after stale-a_basis partial reduce — \
+         obligations exceed vault by {delta} (vault is SHORT)"
+    );
+}
+
+// #449 part 3 (the dead-leg guard, `effective_close_q == 0 -> Err(InvalidLeg)`)
+// has NO coverage in this crate, and that is stated rather than papered over.
+//
+// I wrote a test for it and deleted it: the scenario I could build (full close,
+// then reduce again) is rejected by an EARLIER check, returning the same
+// `InvalidLeg` whether the guard is present or not. It passed with the guard
+// reverted, which makes it vacuous — worse than absent, because it reads as
+// coverage in a file reviewers trust.
+//
+// Reaching the guard needs a leg that is still ACTIVE while its A-scaled
+// contribution floors to zero, which the fixtures here do not currently
+// construct. The guard's actual regression is
+// `v16_wrapper_prediction_asset_can_drain_retire_...` in percolator-prog — a
+// different repo, and not where someone changing
+// `rebalance_reduce_position_not_atomic` would look. That is the real gap.

@@ -12187,20 +12187,48 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             loss_weight_for_basis(new_abs, old_leg.a_basis)?
         };
+        // #449: `oi_eff` is EFFECTIVE (A-scaled) open interest, not raw notional —
+        // that is what #132 (`clear_leg`) and #134 (`new_weight`, above) established.
+        // Updating it here with the RAW `old_abs -> new_abs` delta drifts the stored
+        // pair off `oi_eff == a_side * loss_weight_sum / SCALE` whenever this leg's
+        // `a_basis` is stale (a prior unilateral close scaled the side). The drift
+        // keeps `oi_eff_long == oi_eff_short`, so the Live equality guard does NOT
+        // fire, but it breaks `c_tot + pnl_pos_tot + insurance <= vault` and
+        // re-introduces the #132-class detach `CounterUnderflow` on a co-side close.
+        //
+        // Use the same DIFFERENCE OF AGGREGATES as `clear_leg`: per-leg rounding does
+        // not sum to the rounding of the sum, but a telescoping difference does, so
+        // the last leg still leaves `oi_eff` at exactly zero.
+        macro_rules! apply_a_scaled_oi_eff {
+            ($oi:ident, $lws:ident, $a:ident) => {{
+                let w_before = asset.$lws;
+                let w_after = if preserve_pending_obligation_weight {
+                    w_before
+                } else {
+                    adjust_u128(w_before, old_leg.loss_weight, new_weight)?
+                };
+                let eff_before = wide_mul_div_floor_u128(asset.$a, w_before, SOCIAL_WEIGHT_SCALE);
+                let eff_after = wide_mul_div_floor_u128(asset.$a, w_after, SOCIAL_WEIGHT_SCALE);
+                asset.$oi = if eff_after >= eff_before {
+                    asset
+                        .$oi
+                        .checked_add(eff_after - eff_before)
+                        .ok_or(V16Error::CounterOverflow)?
+                } else {
+                    asset
+                        .$oi
+                        .checked_sub(eff_before - eff_after)
+                        .ok_or(V16Error::CounterUnderflow)?
+                };
+                asset.$lws = w_after;
+            }};
+        }
         match old_leg.side {
             SideV16::Long => {
-                asset.oi_eff_long_q = adjust_u128(asset.oi_eff_long_q, old_abs, new_abs)?;
-                if !preserve_pending_obligation_weight {
-                    asset.loss_weight_sum_long =
-                        adjust_u128(asset.loss_weight_sum_long, old_leg.loss_weight, new_weight)?;
-                }
+                apply_a_scaled_oi_eff!(oi_eff_long_q, loss_weight_sum_long, a_long)
             }
             SideV16::Short => {
-                asset.oi_eff_short_q = adjust_u128(asset.oi_eff_short_q, old_abs, new_abs)?;
-                if !preserve_pending_obligation_weight {
-                    asset.loss_weight_sum_short =
-                        adjust_u128(asset.loss_weight_sum_short, old_leg.loss_weight, new_weight)?;
-                }
+                apply_a_scaled_oi_eff!(oi_eff_short_q, loss_weight_sum_short, a_short)
             }
         }
         old_leg.basis_pos_q = new;
@@ -12881,8 +12909,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?,
             SideV16::Short => close_i128,
         };
+        // #449: `reduce_matching_open_interest_for_unilateral_close` subtracts its
+        // argument from the OPPOSITE side's `oi_eff` and rescales that side's `a`
+        // PROPORTIONALLY (`a_after = a_before * oi_after / oi_before`). `oi_eff` is
+        // A-scaled, so feeding it the RAW `close_q` over-scales the opposite side's
+        // `a` whenever this leg's `a_basis` is stale. Pass the EFFECTIVE contribution
+        // this close actually removed — read straight off the state the delta wrote,
+        // so the two stay consistent by construction rather than by a duplicated
+        // formula.
+        let oi_eff_on_side = |m: &Self| -> V16Result<u128> {
+            let asset = m.asset_state(asset_index)?;
+            Ok(match leg.side {
+                SideV16::Long => asset.oi_eff_long_q,
+                SideV16::Short => asset.oi_eff_short_q,
+            })
+        };
+        let oi_eff_before = oi_eff_on_side(self)?;
         self.apply_position_delta(account, asset_index, delta)?;
-        self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
+        let oi_eff_after = oi_eff_on_side(self)?;
+        let effective_close_q = oi_eff_before.saturating_sub(oi_eff_after);
+        // A leg that removed NO effective OI while closing a non-zero raw amount is
+        // DEAD (its side was already fully drained by a prior unilateral close).
+        // Under the old raw call this was caught inside
+        // `reduce_matching_open_interest_for_unilateral_close` by
+        // `close_q > opp_oi_before -> Err(InvalidLeg)`; with the effective amount that
+        // guard would silently pass as a 0-sized no-op. Keep the dead-leg forfeit path
+        // reachable by failing closed here instead.
+        if effective_close_q == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        self.reduce_matching_open_interest_for_unilateral_close(
+            asset_index,
+            leg.side,
+            effective_close_q,
+        )
     }
 
     pub fn liquidate_account_not_atomic(
