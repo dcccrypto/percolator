@@ -48,6 +48,7 @@ The keeper crank (`KeeperCrank`) is permissionless — any party may submit it. 
 
 - **Funding drift:** If the keeper is offline for more than `MAX_FUNDING_DT` (approximately 7 hours at typical slot rates), the funding accumulation caps out. Positions are not overfunded, but the cap means accumulated funding is undercharged during the outage window.
 - **Market freeze:** If the keeper is offline indefinitely, no liquidations execute, no funding settles, and no accounts are garbage-collected. Markets remain frozen but all funds remain in the vault — no funds are at risk due to keeper absence, only liveness.
+- **Backing-bucket expiry:** Source-credit backing buckets must be expired promptly once `current_slot` reaches their `expiry_slot`. A flat account may still release a lien after expiry, but the engine treats the expired principal as impaired and never restores it to fresh backing. Monitor expiry-crank failures separately from arithmetic counter errors.
 
 The keeper must remain funded in SOL for transaction fees. Keeper balance below minimum fee threshold is a monitoring alert. The deployment uses Railway with auto-restart on failure.
 

@@ -7362,14 +7362,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(effective)
     }
 
-    // Release one domain's counterparty/insurance source-credit lien (returning the
-    // reserved backing) and clear the account's per-domain lien fields. Mirrors the
-    // per-domain body of release_account_source_credit_liens_if_unneeded_not_atomic
-    // but with no mode gate, for use during terminal (Resolved) wind-down.
+    // Release one domain's counterparty/insurance source-credit lien and clear the
+    // account's per-domain lien fields. The terminal primitives are deliberately
+    // impairment-aware: valid backing returns to the provider, while backing already
+    // forfeited by expiry is only removed from the impaired counters and is never
+    // re-credited. Live release preserves the domain's insurance reservation; Resolved
+    // wind-down releases that terminal reservation as well.
     fn release_account_source_credit_lien_for_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         d: usize,
+        terminal: bool,
     ) -> V16Result<()> {
         let slot = account.source_domain_slot(d)?.ok_or(V16Error::InvalidLeg)?;
         let counterparty_backing = account.header.source_domains[slot]
@@ -7379,18 +7382,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .source_lien_insurance_backing_num
             .get();
         if counterparty_backing != 0 {
-            // Expiry-agnostic: terminal wind-down returns backing, so a time-expired
-            // bucket must not block the release (Finding C).
+            // Expiry/impaired-aware: an unwind must not be blocked by time, but must
+            // not resurrect principal which expiry already removed either.
             self.release_source_credit_lien_from_counterparty_terminal_not_atomic(
                 d,
                 counterparty_backing,
             )?;
         }
         if insurance_backing != 0 {
-            self.release_source_credit_lien_from_insurance_terminal_not_atomic(
-                d,
-                insurance_backing,
-            )?;
+            if terminal {
+                self.release_source_credit_lien_from_insurance_terminal_not_atomic(
+                    d,
+                    insurance_backing,
+                )?;
+            } else {
+                self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
+            }
         }
         let source = &mut account.header.source_domains[slot];
         source.source_claim_liened_num = V16PodU128::new(0);
@@ -7503,7 +7510,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .get()
                     != 0
             {
-                self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+                self.release_account_source_credit_lien_for_domain_not_atomic(account, d, true)?;
             }
             let burnable = Self::source_claim_unliened_num(&account.as_view(), d)?;
             let burn = burnable.min(burn_num);
@@ -14542,31 +14549,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let d = source_snapshot.domain.get() as usize;
             self.domain_asset_side(d)?;
+            // Preserve upstream's targeted semantics: a healthy account may carry
+            // liens for several source domains, but only a domain whose own exposure
+            // has closed is eligible for release.
+            if self.account_has_active_exposure_for_source_domain(&account.as_view(), d)? {
+                slot += 1;
+                continue;
+            }
             let effective = source_snapshot.source_lien_effective_reserved.get();
             let counterparty_backing = source_snapshot.source_lien_counterparty_backing_num.get();
-            let insurance_backing = source_snapshot.source_lien_insurance_backing_num.get();
             if counterparty_backing != 0 {
-                self.release_source_credit_lien_from_counterparty_not_atomic(
-                    d,
-                    counterparty_backing,
-                )?;
-            }
-            if insurance_backing != 0 {
-                self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
+                let bucket = self.backing_bucket_for_domain(d)?;
+                if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= self.header.current_slot.get()
+                {
+                    // Apply the canonical expiry transition before unwinding. It
+                    // moves valid liened backing to impaired counters; the release
+                    // below then clears those counters without minting fresh backing.
+                    self.expire_source_backing_bucket_not_atomic(
+                        d,
+                        self.header.current_slot.get(),
+                    )?;
+                }
             }
             if effective != 0 {
                 released_effective = released_effective
                     .checked_add(effective)
                     .ok_or(V16Error::ArithmeticOverflow)?;
-                let source = &mut account.header.source_domains[slot];
-                source.source_claim_liened_num = V16PodU128::new(0);
-                source.source_claim_counterparty_liened_num = V16PodU128::new(0);
-                source.source_claim_insurance_liened_num = V16PodU128::new(0);
-                source.source_lien_effective_reserved = V16PodU128::new(0);
-                source.source_lien_counterparty_backing_num = V16PodU128::new(0);
-                source.source_lien_insurance_backing_num = V16PodU128::new(0);
-                source.source_lien_fee_last_slot = V16PodU64::new(0);
-                account.reset_source_domain_slot_if_empty(slot);
+                self.release_account_source_credit_lien_for_domain_not_atomic(account, d, false)?;
             }
             slot += 1;
         }
@@ -15023,7 +15033,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if source.is_occupied() {
                 let d = source.domain.get() as usize;
                 if source.source_claim_liened_num.get() != 0 {
-                    self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+                    self.release_account_source_credit_lien_for_domain_not_atomic(
+                        account, d, true,
+                    )?;
                 }
                 let bucket = self.backing_bucket_for_domain(d)?;
                 if bucket.status == BackingBucketStatusV16::Fresh

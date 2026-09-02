@@ -3613,6 +3613,120 @@ fn im_lien_is_released_when_the_position_closes_in_live() {
     // (the lien stays at its opening value and the error is LockActive).
 }
 
+/// #146 — expiry moves liened counterparty backing to the impaired counters. A
+/// subsequent Live release for a flat account must clear that lien without either
+/// reporting an arithmetic underflow or restoring the forfeited backing.
+#[test]
+fn expired_im_lien_release_is_live_and_does_not_restore_backing() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut long_header = account_fixture(1, 18);
+    let mut short_header = account_fixture(1, 19);
+    let claim = 100u128;
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_header.source_domains[0].domain = V16PodU32::new(0);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(10 * POS_SCALE),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("risk-increasing trade must create the IM lien");
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut short,
+            &mut long,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(10 * POS_SCALE),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .expect("closing trade must flatten the lien's exposure");
+
+    let lien_num = long.header.source_domains[0]
+        .source_lien_counterparty_backing_num
+        .get();
+    assert_ne!(lien_num, 0, "fixture must retain a stale IM lien");
+    market
+        .expire_source_backing_bucket_not_atomic(0, 100)
+        .expect("the backing bucket must expire through the production transition");
+    let impaired = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(impaired.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(impaired.impaired_liened_backing_num, lien_num);
+    assert_eq!(impaired.fresh_unliened_backing_num, 0);
+
+    let vault_before = market.header.vault.get();
+    let capital_before = market.header.c_tot.get();
+    let released = market.release_account_source_credit_liens_if_unneeded_not_atomic(&mut long);
+
+    assert_eq!(released, Ok(10));
+    assert_eq!(
+        long.header.source_domains[0].source_claim_liened_num.get(),
+        0
+    );
+    let released_bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(
+        released_bucket.status,
+        BackingBucketStatusV16::Empty,
+        "a fully drained impaired bucket has no residue and canonicalizes to Empty"
+    );
+    assert_eq!(released_bucket.impaired_liened_backing_num, 0);
+    assert_eq!(
+        released_bucket.fresh_unliened_backing_num, 0,
+        "expired principal must never be resurrected as fresh backing"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), capital_before);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
 /// #134 — a position opened against a side whose `a` was scaled down by an ADL must
 /// not create value. Conservation: obligations == vault, with no deposit or withdrawal.
 #[test]
