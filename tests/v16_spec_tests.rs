@@ -4162,7 +4162,12 @@ fn live_stale_im_lien_fixture() -> (
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut long,
                 &mut short,
-                TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: 1, fee_bps: 0 },
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(10 * POS_SCALE),
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
                 true,
             )
             .expect("opening trade mints the IM lien");
@@ -4170,7 +4175,12 @@ fn live_stale_im_lien_fixture() -> (
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
                 &mut short,
                 &mut long,
-                TradeRequestV16 { asset_index: 0, size_q: signed_q(10 * POS_SCALE), exec_price: 1, fee_bps: 0 },
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(10 * POS_SCALE),
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
                 true,
             )
             .expect("closing trade");
@@ -4196,7 +4206,10 @@ fn live_lien_release_leaves_a_current_certificate_so_conversion_succeeds() {
     let (mut header, mut markets, mut acct) = live_stale_im_lien_fixture();
 
     let lien = acct.source_domains[0].source_lien_effective_reserved.get();
-    assert_ne!(lien, 0, "fixture must carry the stale IM lien the release targets");
+    assert_ne!(
+        lien, 0,
+        "fixture must carry the stale IM lien the release targets"
+    );
 
     // Model the runtime: an instruction that returns Err commits nothing, so a
     // failing conversion must not be credited with the release it performed.
