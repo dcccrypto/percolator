@@ -11956,10 +11956,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     let eff_after =
                         wide_mul_div_floor_u128(asset.a_long, w_after, SOCIAL_WEIGHT_SCALE);
                     let contribution = eff_before.saturating_sub(eff_after);
-                    asset.oi_eff_long_q = asset
-                        .oi_eff_long_q
-                        .checked_sub(contribution)
-                        .ok_or(V16Error::CounterUnderflow)?;
+                    // #454: a BARRIER-ZEROED leg has already had its OI removed.
+                    //
+                    // The barrier-zero branch of apply_position_delta_with_lookup_inner
+                    // does `oi_eff_long -= old_abs`, sets basis_pos_q = 0, bumps
+                    // pending_obligation_count, and leaves the leg ACTIVE with its
+                    // loss_weight intact and loss_weight_sum UNCHANGED. Subtracting the
+                    // contribution again here removes the same leg's OI twice — and when
+                    // that leg is the side's only OI, the checked_sub underflows to
+                    // CounterUnderflow and the leg can never detach.
+                    //
+                    // `loss_weight_sum` still MUST decrement: it was deliberately left
+                    // alone by that branch, so this is the only place the weight leaves
+                    // the aggregate. Only the oi_eff subtraction is the double-count.
+                    //
+                    // Currently unreachable — the barrier-zero branch is Live-only, and
+                    // in Live a domain-loss barrier is never held across instructions
+                    // (preflight_liquidation_residual_durability forces the residual to
+                    // book in one chunk, so the close finalizes inside liquidate). This
+                    // is correct-by-construction insurance for the day that durability
+                    // invariant is relaxed.
+                    if leg.basis_pos_q != 0 {
+                        asset.oi_eff_long_q = asset
+                            .oi_eff_long_q
+                            .checked_sub(contribution)
+                            .ok_or(V16Error::CounterUnderflow)?;
+                    }
                     asset.loss_weight_sum_long = w_after;
                 }
             }
@@ -11999,10 +12021,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     let eff_after =
                         wide_mul_div_floor_u128(asset.a_short, w_after, SOCIAL_WEIGHT_SCALE);
                     let contribution = eff_before.saturating_sub(eff_after);
-                    asset.oi_eff_short_q = asset
-                        .oi_eff_short_q
-                        .checked_sub(contribution)
-                        .ok_or(V16Error::CounterUnderflow)?;
+                    // #454: a BARRIER-ZEROED leg has already had its OI removed.
+                    //
+                    // The barrier-zero branch of apply_position_delta_with_lookup_inner
+                    // does `oi_eff_short -= old_abs`, sets basis_pos_q = 0, bumps
+                    // pending_obligation_count, and leaves the leg ACTIVE with its
+                    // loss_weight intact and loss_weight_sum UNCHANGED. Subtracting the
+                    // contribution again here removes the same leg's OI twice — and when
+                    // that leg is the side's only OI, the checked_sub underflows to
+                    // CounterUnderflow and the leg can never detach.
+                    //
+                    // `loss_weight_sum` still MUST decrement: it was deliberately left
+                    // alone by that branch, so this is the only place the weight leaves
+                    // the aggregate. Only the oi_eff subtraction is the double-count.
+                    //
+                    // Currently unreachable — the barrier-zero branch is Live-only, and
+                    // in Live a domain-loss barrier is never held across instructions
+                    // (preflight_liquidation_residual_durability forces the residual to
+                    // book in one chunk, so the close finalizes inside liquidate). This
+                    // is correct-by-construction insurance for the day that durability
+                    // invariant is relaxed.
+                    if leg.basis_pos_q != 0 {
+                        asset.oi_eff_short_q = asset
+                            .oi_eff_short_q
+                            .checked_sub(contribution)
+                            .ok_or(V16Error::CounterUnderflow)?;
+                    }
                     asset.loss_weight_sum_short = w_after;
                 }
             }
