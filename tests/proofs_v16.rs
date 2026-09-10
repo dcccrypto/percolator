@@ -13307,3 +13307,32 @@ fn proof_v16_live_source_backing_expiry_is_bounded_complete_and_isolated() {
         "compact sparse tail terminates the scan"
     );
 }
+
+// upstream f06a04a7: the final IM gate is skipped only for a strict risk reduction.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_margin_gate_is_skipped_only_for_strict_risk_reduction() {
+    let current = kani::any::<i16>() as i128;
+    let next = kani::any::<i16>() as i128;
+    let requires_margin =
+        MarketGroupV16ViewMut::<u64>::kani_trade_account_requires_initial_margin(current, next);
+    let expected = next.unsigned_abs() >= current.unsigned_abs();
+
+    kani::cover!(
+        !requires_margin && current != 0 && next != 0,
+        "strict same-side reduction skips the final IM gate"
+    );
+    kani::cover!(
+        requires_margin && current != next && current.unsigned_abs() == next.unsigned_abs(),
+        "equal-size side flips retain the final IM gate"
+    );
+    kani::cover!(
+        requires_margin && next.unsigned_abs() > current.unsigned_abs(),
+        "risk increases retain the final IM gate"
+    );
+    assert_eq!(requires_margin, expected);
+    if !requires_margin {
+        assert!(next.unsigned_abs() < current.unsigned_abs());
+    }
+}

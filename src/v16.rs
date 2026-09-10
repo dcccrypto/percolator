@@ -829,6 +829,22 @@ impl V16Core {
         (None, false)
     }
 
+    /// Select the terminal owner-forfeit residual route. An unbookable positive
+    /// residual commits Recovery as a successful transition so SVM rollback
+    /// cannot erase the only path to resolved settlement. (upstream 650e3fdf)
+    pub(crate) fn kernel_forfeit_residual_step(
+        residual_remaining: u128,
+        booking_capacity: u128,
+    ) -> ForfeitResidualStepV16 {
+        if residual_remaining == 0 {
+            ForfeitResidualStepV16::NoResidual
+        } else if booking_capacity == 0 {
+            ForfeitResidualStepV16::CommitRecovery
+        } else {
+            ForfeitResidualStepV16::Book
+        }
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -3701,6 +3717,8 @@ struct TradeApplyOutcomeV16 {
     fee_b: u128,
     notional: u128,
     risk_increasing: bool,
+    long_requires_initial_margin: bool,
+    short_requires_initial_margin: bool,
     long_has_source_claims: bool,
     short_has_source_claims: bool,
 }
@@ -3708,6 +3726,8 @@ struct TradeApplyOutcomeV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TradePositionPreflightV16 {
     risk_increasing: bool,
+    long_requires_initial_margin: bool,
+    short_requires_initial_margin: bool,
     long_lookup: PositionDeltaLookupV16,
     short_lookup: PositionDeltaLookupV16,
     long_old_abs_q: u128,
@@ -4277,6 +4297,13 @@ pub struct BResidualBookingOutcomeV16 {
     pub explicit_loss: u128,
     pub delta_b: u128,
     pub remaining_after: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForfeitResidualStepV16 {
+    NoResidual,
+    Book,
+    CommitRecovery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11774,8 +11801,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::position_delta_lookup_for_asset(long_account, request.asset_index, long_delta)?;
         let short_lookup =
             Self::position_delta_lookup_for_asset(short_account, request.asset_index, short_delta)?;
-        let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
-            || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let long_risk_increasing =
+            position_delta_increases_risk(long_lookup.current_q, long_delta)?;
+        let short_risk_increasing =
+            position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let risk_increasing = long_risk_increasing || short_risk_increasing;
         let preflight_asset = self.asset_state(request.asset_index)?;
         // #132: the gate compares a reduction derived from RAW basis against A-scaled
         // oi_eff. After a unilateral reduction has scaled a side, an untouched
@@ -11835,6 +11865,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         Ok(TradePositionPreflightV16 {
             risk_increasing,
+            long_requires_initial_margin: trade_account_requires_initial_margin(
+                long_lookup.current_q,
+                long_lookup.next_q,
+            ),
+            short_requires_initial_margin: trade_account_requires_initial_margin(
+                short_lookup.current_q,
+                short_lookup.next_q,
+            ),
             long_lookup,
             short_lookup,
             long_old_abs_q: long_lookup.current_q.unsigned_abs(),
@@ -13419,6 +13457,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::ensure_no_positive_credit_initial_margin(account)
     }
 
+    #[cfg(kani)]
+    pub fn kani_trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
+        trade_account_requires_initial_margin(current, next)
+    }
+
     fn recertify_account_after_source_lien_change(
         &self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13683,6 +13726,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             fee_b,
             notional,
             risk_increasing,
+            long_requires_initial_margin: trade_preflight.long_requires_initial_margin,
+            short_requires_initial_margin: trade_preflight.short_requires_initial_margin,
             long_has_source_claims: trade_preflight.long_has_source_claims,
             short_has_source_claims: trade_preflight.short_has_source_claims,
         })
@@ -13740,6 +13785,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 fee_b,
                 notional,
                 risk_increasing: applied_risk_increasing,
+                long_requires_initial_margin: true,
+                short_requires_initial_margin: true,
                 long_has_source_claims: applied_long_has_source_claims,
                 short_has_source_claims: applied_short_has_source_claims,
             },
@@ -13752,22 +13799,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         locked: bool,
         risk_increasing: bool,
+        long_requires_initial_margin: bool,
+        short_requires_initial_margin: bool,
         long_has_source_claims: bool,
         short_has_source_claims: bool,
     ) -> V16Result<()> {
         if risk_increasing && !locked {
-            if long_has_source_claims {
+            if long_requires_initial_margin && long_has_source_claims {
                 self.create_initial_margin_source_lien_if_needed(long_account)?;
             }
-            if short_has_source_claims {
+            if short_requires_initial_margin && short_has_source_claims {
                 self.create_initial_margin_source_lien_if_needed(short_account)?;
             }
         }
-        Self::ensure_initial_margin(&long_account.as_view())?;
-        Self::ensure_initial_margin(&short_account.as_view())?;
+        if long_requires_initial_margin {
+            Self::ensure_initial_margin(&long_account.as_view())?;
+        }
+        if short_requires_initial_margin {
+            Self::ensure_initial_margin(&short_account.as_view())?;
+        }
         if locked {
-            Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
-            Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+            if long_requires_initial_margin {
+                Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
+            }
+            if short_requires_initial_margin {
+                Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+            }
         }
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&long_account.as_view())?;
@@ -13961,6 +14018,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             notional: 0,
         };
         let mut risk_increasing = false;
+        let mut long_requires_initial_margin = false;
+        let mut short_requires_initial_margin = false;
         let mut long_has_source_claims = false;
         let mut short_has_source_claims = false;
         let recertify_after_fill = requests.len() == 1;
@@ -13973,6 +14032,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 recertify_after_fill,
                 taker_is_long_account,
             )?;
+            long_requires_initial_margin |= applied.long_requires_initial_margin;
+            short_requires_initial_margin |= applied.short_requires_initial_margin;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
                 &mut risk_increasing,
@@ -13991,6 +14052,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_account,
             locked,
             risk_increasing,
+            long_requires_initial_margin,
+            short_requires_initial_margin,
             long_has_source_claims,
             short_has_source_claims,
         )?;
@@ -14041,6 +14104,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             notional: 0,
         };
         let mut risk_increasing = false;
+        let mut long_requires_initial_margin = false;
+        let mut short_requires_initial_margin = false;
         let mut long_has_source_claims = false;
         let mut short_has_source_claims = false;
         let recertify_after_fill = requests.len() == 1;
@@ -14053,6 +14118,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 recertify_after_fill,
                 taker_is_long_account,
             )?;
+            long_requires_initial_margin |= applied.long_requires_initial_margin;
+            short_requires_initial_margin |= applied.short_requires_initial_margin;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
                 &mut risk_increasing,
@@ -14071,6 +14138,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_account,
             locked,
             risk_increasing,
+            long_requires_initial_margin,
+            short_requires_initial_margin,
             long_has_source_claims,
             short_has_source_claims,
         )?;
@@ -15987,27 +16056,58 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let mut residual_booked = 0u128;
         let mut explicit_loss = 0u128;
-        if residual != 0 {
-            let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
-                account,
-                asset_index,
-                leg.side,
-                residual,
-            )?;
-            residual_booked = outcome.booked_loss;
-            explicit_loss = outcome.explicit_loss;
-            let cleared = residual_booked
-                .checked_add(explicit_loss)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(residual);
-            let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
-            let new_pnl = account
-                .header
-                .pnl
-                .get()
-                .checked_add(cleared_i128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+        let booking_capacity = if residual == 0 {
+            0
+        } else {
+            self.bankruptcy_residual_single_step_capacity(asset_index, leg.side, residual)?
+        };
+        match V16Core::kernel_forfeit_residual_step(residual, booking_capacity) {
+            ForfeitResidualStepV16::NoResidual => {}
+            ForfeitResidualStepV16::CommitRecovery => {
+                // The opposing side may already have completed terminal wind-down.
+                // Returning RecoveryRequired would make SVM rollback the only
+                // terminal transition. The close ledger retains the exact debt.
+                // (upstream 650e3fdf)
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                )?;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(DeadLegForfeitOutcomeV16 {
+                    detached: false,
+                    positive_pnl_forfeited,
+                    loss_settled: total_loss_settled,
+                    support_consumed,
+                    junior_face_burned,
+                    principal_used,
+                    insurance_used,
+                    residual_booked: 0,
+                    explicit_loss: 0,
+                });
+            }
+            ForfeitResidualStepV16::Book => {
+                let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                    account,
+                    asset_index,
+                    leg.side,
+                    residual,
+                )?;
+                residual_booked = outcome.booked_loss;
+                explicit_loss = outcome.explicit_loss;
+                let cleared = residual_booked
+                    .checked_add(explicit_loss)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    .min(residual);
+                let cleared_i128 =
+                    i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let new_pnl = account
+                    .header
+                    .pnl
+                    .get()
+                    .checked_add(cleared_i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_account_pnl(account, new_pnl)?;
+            }
         }
 
         let detached = account.header.pnl.get() >= 0
@@ -16522,6 +16622,13 @@ fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool
         .ok_or(V16Error::ArithmeticOverflow)?;
     validate_basis_or_zero(next)?;
     Ok(next.unsigned_abs() > current.unsigned_abs())
+}
+
+// upstream f06a04a7 "Keep strict trade reductions open below initial margin":
+// only a STRICT reduction of the account's position on the asset is exempt from
+// the final initial-margin gate; equal-size flips and increases keep it.
+fn trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
+    next.unsigned_abs() >= current.unsigned_abs()
 }
 
 fn trade_preflight_risk_gate(
