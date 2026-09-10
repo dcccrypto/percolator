@@ -12355,8 +12355,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
-        let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-        self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        let terminal_impaired = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired;
+        if terminal_impaired {
+            // Once the provider bucket has defaulted, newly crystallized loss is
+            // terminal junior support, not recoverable provider principal.
+            self.credit_post_snapshot_residual_not_atomic(backing)?;
+        } else {
+            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+            self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        }
         Self::record_account_residual_crystallized_loss(account, backing)?;
         account.header.health_cert.valid = 0;
         Ok(())
