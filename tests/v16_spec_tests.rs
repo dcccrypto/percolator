@@ -7481,7 +7481,7 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
 }
 
 #[test]
-fn v16_trade_final_leg_residual_routes_through_close_and_terminal_recovery() {
+fn v16_trade_final_leg_residual_routes_through_close_without_forcing_market_recovery() {
     const SIZE_Q: u128 = 10 * POS_SCALE;
     let (mut header, mut markets) = market_fixture(1, 100);
     header.config.maintenance_margin_bps = V16PodU64::new(1_000);
@@ -7569,21 +7569,39 @@ fn v16_trade_final_leg_residual_routes_through_close_and_terminal_recovery() {
     let finalized = short.header.close_progress.try_to_runtime().unwrap();
     assert!(finalized.active && finalized.finalized && finalized.residual_remaining == 0);
 
-    let recovery = market
-        .permissionless_auto_crank_not_atomic(&mut short, work)
-        .expect("sticky bankruptcy lock must route to terminal recovery");
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 150,
+        funding_rate_e9: 0,
+    }];
+    let normalized = market
+        .permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 {
+                now_slot: work.now_slot,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the completed close account must normalize its stale certificate");
     assert_eq!(
-        recovery.selected,
-        AutoCrankPlanV16::DeclareRecovery {
-            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-        }
+        normalized.selected,
+        AutoCrankPlanV16::RefreshAccount { asset_index: None }
     );
-    assert_eq!(market.header.mode, 2);
 
-    let resolved = market
+    let no_forced_recovery = market
         .permissionless_auto_crank_not_atomic(&mut short, work)
-        .expect("recovery must finalize permissionlessly");
-    assert_eq!(resolved.selected, AutoCrankPlanV16::FinalizeRecovery);
+        .expect("a completed account close is not market-wide recovery authority");
+    assert_eq!(
+        no_forced_recovery.selected,
+        AutoCrankPlanV16::NoAction,
+        "completed residual work must not terminate unrelated market activity"
+    );
+    assert_eq!(market.header.mode, 0);
+
+    market
+        .resolve_market_not_atomic(work.now_slot)
+        .expect("an explicit market-level transition can start terminal settlement");
     assert_eq!(market.header.mode, 1);
 
     let loser_close = market
@@ -7697,118 +7715,6 @@ fn v16_batch_trade_starts_terminal_residual_only_at_final_fill() {
     assert!(active_bitmap_is_empty(
         short.header.active_bitmap.map(V16PodU64::get)
     ));
-    market.validate_shape().unwrap();
-    long.validate_with_market(&market.as_view()).unwrap();
-    short.validate_with_market(&market.as_view()).unwrap();
-}
-
-#[test]
-fn v16_trade_does_not_charge_prior_multi_asset_deficit_to_last_closed_asset() {
-    const SIZE_Q: u128 = 10 * POS_SCALE;
-    let (mut header, mut markets) = market_fixture(2, 100);
-    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
-    header.config.initial_margin_bps = V16PodU64::new(1_000);
-    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
-    header.config.max_accrual_dt_slots = V16PodU64::new(1);
-    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
-    let mut long_header = account_fixture(2, 65);
-    let mut short_header = account_fixture(2, 66);
-
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut long = PortfolioV16ViewMut::new(&mut long_header);
-    let mut short = PortfolioV16ViewMut::new(&mut short_header);
-    market.deposit_not_atomic(&mut long, 2_000).unwrap();
-    market.deposit_not_atomic(&mut short, 250).unwrap();
-    for asset_index in 0..2 {
-        market
-            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut long,
-                &mut short,
-                TradeRequestV16 {
-                    asset_index,
-                    size_q: signed_q(SIZE_Q),
-                    exec_price: 100,
-                    fee_bps: 0,
-                },
-                true,
-            )
-            .unwrap();
-    }
-    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
-        let slot = 2 + offset as u64;
-        market
-            .set_asset_raw_oracle_target_not_atomic(0, price)
-            .unwrap();
-        market
-            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
-            .unwrap();
-    }
-
-    market
-        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-            &mut long,
-            &mut short,
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: -signed_q(SIZE_Q),
-                exec_price: 150,
-                fee_bps: 0,
-            },
-            true,
-        )
-        .expect("the first risk-reducing close must remain available");
-    assert_eq!(short.header.pnl.get(), -250);
-    assert_eq!(
-        short
-            .header
-            .close_progress
-            .try_to_runtime()
-            .unwrap()
-            .residual_remaining,
-        0
-    );
-
-    market
-        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-            &mut long,
-            &mut short,
-            TradeRequestV16 {
-                asset_index: 1,
-                size_q: -signed_q(SIZE_Q),
-                exec_price: 100,
-                fee_bps: 0,
-            },
-            true,
-        )
-        .expect("the final risk-reducing close must remain available");
-    assert!(active_bitmap_is_empty(
-        short.header.active_bitmap.map(V16PodU64::get)
-    ));
-    let ledger = short.header.close_progress.try_to_runtime().unwrap();
-    assert_eq!(ledger.residual_remaining, 0);
-    assert!(
-        market
-            .build_actionable_summary(&short.as_view())
-            .unwrap()
-            .recovery_eligible,
-        "an unattributed flat deficit must recover, not charge asset 1"
-    );
-
-    let work = AutoCrankWorkV16 {
-        now_slot: market.header.current_slot.get(),
-        observations: &[],
-        resolved_close_fee_rate_per_slot: 0,
-    };
-    let recovery = market
-        .permissionless_auto_crank_not_atomic(&mut short, work)
-        .expect("unattributed flat deficit must have a terminal continuation");
-    assert_eq!(
-        recovery.selected,
-        AutoCrankPlanV16::DeclareRecovery {
-            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-        }
-    );
-    assert_eq!(market.header.mode, 2);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
@@ -10213,6 +10119,13 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
     assert_eq!(short.header.liquidation_lock, 1);
     let ledger = short.header.close_progress.try_to_runtime().unwrap();
     assert_eq!(ledger.residual_remaining, 0);
+    assert!(
+        !market
+            .build_actionable_summary(&short.as_view())
+            .unwrap()
+            .recovery_eligible,
+        "an unattributed account must not gain authority to recover the whole market"
+    );
     // no asset domain was charged and no market-wide recovery was declared
     assert_eq!(market.header.mode, 0);
     assert_eq!(market.header.insurance.get(), 0);
