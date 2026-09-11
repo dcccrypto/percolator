@@ -10,12 +10,12 @@ use percolator::v16::{
     kani_auto_crank_lifecycle_dispatchable, kani_auto_crank_refresh_asset,
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_commit_declared_liquidation_recovery,
-    kani_decode_account_kf_settlement_plan_key, kani_eq_engine_asset_slot_v16_account,
-    kani_eq_market_group_v16_header_account, kani_expected_source_credit_rate_num_for_state,
-    kani_first_actionable_slot, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
-    kani_insert_account_kf_settlement_plan_entry, kani_kernel_cert_is_current,
+    kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
+    kani_commit_declared_liquidation_recovery, kani_decode_account_kf_settlement_plan_key,
+    kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
+    kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_insert_account_kf_settlement_plan_entry,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -15029,7 +15029,7 @@ fn proof_v16_cert_is_current_matches_the_favorable_action_gate() {
     let asset_set_epoch: u64 = kani::any();
     let bitmap: [u64; V16_ACTIVE_BITMAP_WORDS] = kani::any();
 
-    let current = kani_kernel_cert_is_current(
+    let current = kani_cert_is_current(
         cert,
         oracle_epoch,
         funding_epoch,
