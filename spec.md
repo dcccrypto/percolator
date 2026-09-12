@@ -1173,9 +1173,11 @@ After authoritative live touch:
 RiskNotional_i = 0 if effective_pos_q(i) == 0
 else ceil(abs(effective_pos_q(i)) * oracle_price / POS_SCALE)
 
-MM_req_i = 0 if flat else max(floor(RiskNotional_i * cfg_maintenance_bps / 10_000), cfg_min_nonzero_mm_req)
-IM_req_i = 0 if flat else max(floor(RiskNotional_i * cfg_initial_bps / 10_000), cfg_min_nonzero_im_req)
+MM_req_i = 0 if flat else max(ceil(RiskNotional_i * cfg_maintenance_bps / 10_000), cfg_min_nonzero_mm_req)
+IM_req_i = 0 if flat else max(ceil(RiskNotional_i * cfg_initial_bps / 10_000), cfg_min_nonzero_im_req)
 ```
+
+Both requirements round UP. Rounding down let one notional be split across two portfolios for a strictly lower aggregate requirement, which is fractional-atom collateral credit; `margin_requirement` therefore uses `mul_div_ceil_u128_or_wide` for the initial and the maintenance leg alike.
 
 Maintenance healthy iff `Eq_net_i > MM_req_i`. Withdrawal healthy iff `Eq_withdraw_raw_i >= IM_req_i`. Risk-increasing trade approval healthy iff `Eq_trade_open_raw_i >= IM_req_post_i`.
 
