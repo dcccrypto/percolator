@@ -3163,7 +3163,7 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 // asset refresh and every other plan are dispatchable from committed state.
 // Pinning this truth table means a future arm that gates committed-state progress
 // on an observation contradicts a machine-checked theorem. Exhaustive over the
-// seven AutoCrankPlanV16 variants this fork carries; the spec matrix
+// eight AutoCrankPlanV16 variants this fork carries; the spec matrix
 // v16_auto_crank_progress_realizable_without_observation_for_every_class ties the
 // predicate to the real dispatch for each reachable class.
 #[kani::proof]
@@ -3184,6 +3184,7 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
         asset_index: i
     }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
+    assert!(!needs_obs(&AutoCrankPlanV16::AdvanceClose));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
     assert!(!needs_obs(&AutoCrankPlanV16::FinalizeRecovery));
     assert!(!needs_obs(&AutoCrankPlanV16::CloseResolved));
@@ -3192,6 +3193,77 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+// Pending close is a production-dispatchable class, not merely a proof-summary
+// placeholder. It outranks B settlement, liquidation, and refresh, but remains
+// below terminal recovery and resolved close in the selector.
+#[kani::proof]
+fn proof_v16_auto_crank_pending_close_priority_is_total() {
+    let lower = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: true,
+            pending_close: true,
+            expired_close: false,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        3,
+        4,
+        Some(5),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(lower, AutoCrankPlanV16::AdvanceClose);
+
+    let terminal = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: true,
+            pending_close: true,
+            expired_close: true,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: true,
+        },
+        3,
+        4,
+        Some(5),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(
+        terminal,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+
+    // The selector remains total for a generic proactive-Recovery summary. The
+    // production classifier does not derive this flag from an account-local
+    // completed or unattributed deficit, because that would grant one account
+    // market-wide termination authority.
+    let proactive_recovery = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: false,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: false,
+            recovery_eligible: true,
+            resolved_winner: false,
+        },
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(
+        proactive_recovery,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
 }
 
 #[kani::proof]
