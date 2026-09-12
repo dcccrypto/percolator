@@ -2018,6 +2018,8 @@ impl V16Core {
             AutoCrankPlanV16::Liquidate {
                 asset_index: liq_slot,
             }
+        } else if summary.source_liens_releasable {
+            AutoCrankPlanV16::ReleaseSourceLiens
         } else if summary.stale {
             AutoCrankPlanV16::RefreshAccount {
                 asset_index: refresh_asset,
@@ -2033,6 +2035,7 @@ impl V16Core {
         pending_close: bool,
         expired_close: bool,
         liquidatable: bool,
+        source_liens_releasable: bool,
         recovery_eligible: bool,
         resolved_winner: bool,
     ) -> ActionableSummaryV16 {
@@ -2042,6 +2045,7 @@ impl V16Core {
             pending_close,
             expired_close,
             liquidatable,
+            source_liens_releasable,
             recovery_eligible,
             resolved_winner,
         }
@@ -3204,6 +3208,7 @@ pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> b
         AutoCrankPlanV16::AdvanceClose
         | AutoCrankPlanV16::SettleBChunk { .. }
         | AutoCrankPlanV16::Liquidate { .. }
+        | AutoCrankPlanV16::ReleaseSourceLiens
         | AutoCrankPlanV16::DeclareRecovery { .. }
         | AutoCrankPlanV16::FinalizeRecovery
         | AutoCrankPlanV16::CloseResolved
@@ -3635,19 +3640,20 @@ pub enum BackingBucketStatusV16 {
     Impaired,
 }
 
-/// Compact ActionableState summary (roadmap Phase 4 / 3A.4): which of the seven
+/// Compact ActionableState summary (roadmap Phase 4 / 3A.4): which of the eight
 /// ActionableState classes are live for an account/market. The liveness
 /// selector reads only this — never per-class witnesses that another active
 /// class could invalidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionableSummaryV16 {
-    pub stale: bool,             // A1
-    pub b_stale: bool,           // A2
-    pub pending_close: bool,     // A3
-    pub expired_close: bool,     // A4
-    pub liquidatable: bool,      // A5
-    pub recovery_eligible: bool, // A6
-    pub resolved_winner: bool,   // A7
+    pub stale: bool,                   // A1
+    pub b_stale: bool,                 // A2
+    pub pending_close: bool,           // A3
+    pub expired_close: bool,           // A4
+    pub liquidatable: bool,            // A5
+    pub source_liens_releasable: bool, // A6
+    pub recovery_eligible: bool,       // A7
+    pub resolved_winner: bool,         // A8
 }
 
 impl ActionableSummaryV16 {
@@ -3657,6 +3663,7 @@ impl ActionableSummaryV16 {
             || self.pending_close
             || self.expired_close
             || self.liquidatable
+            || self.source_liens_releasable
             || self.recovery_eligible
             || self.resolved_winner
     }
@@ -3699,6 +3706,7 @@ pub enum AutoCrankPlanV16 {
     Liquidate {
         asset_index: usize,
     },
+    ReleaseSourceLiens,
     AdvanceClose,
     DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16,
@@ -9420,6 +9428,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.release_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn release_source_credit_lien_from_counterparty_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -9444,7 +9461,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
-        self.validate_shape()
+        Ok(())
     }
 
     // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down; see
@@ -10071,6 +10088,67 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn account_has_source_claims(account: &PortfolioV16View<'_>) -> V16Result<bool> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
+    }
+
+    // Carried in from upstream alongside fdf11670: absent from this fork, and a
+    // dependency of the ReleaseSourceLiens crank-entry guard below.
+    fn account_has_source_liens(account: &PortfolioV16View<'_>) -> bool {
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.source_claim_liened_num.get() != 0 {
+                return true;
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    fn account_source_credit_liens_are_fresh_and_releasable(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<bool> {
+        let mut found = false;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_liened_num.get() != 0 {
+                found = true;
+                let domain = source.domain.get() as usize;
+                self.domain_asset_side(domain)?;
+                let counterparty_backing = source.source_lien_counterparty_backing_num.get();
+                let insurance_backing = source.source_lien_insurance_backing_num.get();
+                let source_credit = self.source_credit_for_domain(domain)?;
+                if counterparty_backing != 0 {
+                    let bucket = self.backing_bucket_for_domain(domain)?;
+                    if bucket.status != BackingBucketStatusV16::Fresh
+                        || bucket.expiry_slot <= now_slot
+                        || bucket.valid_liened_backing_num < counterparty_backing
+                        || source_credit.valid_liened_backing_num < counterparty_backing
+                    {
+                        return Ok(false);
+                    }
+                }
+                if insurance_backing != 0 {
+                    let reservation = self.insurance_reservation_for_domain(domain)?;
+                    if insurance_backing % BOUND_SCALE != 0
+                        || reservation.valid_liened_insurance_num < insurance_backing
+                        || source_credit.valid_liened_insurance_num < insurance_backing
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+            slot += 1;
+        }
+        Ok(found)
     }
 
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
@@ -14418,6 +14496,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
+    ///   source_liens_releasable — Live, flat, independently initial-margin safe,
+    ///                      current account whose obsolete source liens can be
+    ///                      returned without an oracle observation
     ///   recovery_eligible— reserved for selector-level proactive Recovery
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
@@ -14507,6 +14588,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && cert.certified_liq_deficit != 0
             && has_open_risk
             && reset_obligation_asset.is_none();
+        let no_positive_equity = Self::account_no_positive_credit_equity(account)?;
+        let source_liens_releasable = live
+            && cert_current
+            && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+            && no_positive_equity >= 0
+            && (no_positive_equity as u128) >= cert.certified_initial_req
+            && self.account_source_credit_liens_are_fresh_and_releasable(account, now_slot)?;
         // A completed account-local bankruptcy must not let that account force a
         // market-wide Recovery. In particular, a permissionless asset can be
         // attacker-controlled while unrelated assets remain healthy. Outstanding
@@ -14531,6 +14619,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 pending_close,
                 expired_close,
                 liquidatable,
+                source_liens_releasable,
                 recovery_eligible,
                 resolved_winner,
             ),
@@ -14703,8 +14792,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    matches the observation that step needs, derives the liquidation fee from
     ///    CONFIG (never the caller), and dispatches one bounded primitive.
     /// 5. On `Ok(result)`, mirror any wrapper-owned token/custody movement keyed off
-    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B move no
-    ///    custody; liquidate / close-resolved may. `NoAction` => nothing was needed.
+    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B /
+    ///    source-lien release move no custody; liquidate / close-resolved may.
+    ///    `NoAction` => nothing was needed.
     ///    In Recovery, the next call selects `FinalizeRecovery` and performs the
     ///    value-neutral transition to Resolved so terminal account close remains
     ///    publicly reachable. `Err(NonProgress)` => the selected step needed an
@@ -14833,6 +14923,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let outcome = match plan {
             AutoCrankPlanV16::NoAction => AutoCrankOutcomeV16::NoAction,
+            AutoCrankPlanV16::ReleaseSourceLiens => {
+                // fdf11670 guards this inside the core fn. Here the core is shared
+                // with the #137 conversion path, which legitimately runs on a
+                // NON-flat account to release a lien whose own domain has closed,
+                // so the flatness precondition lives on the crank entry instead.
+                if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+                    || !Self::account_has_source_liens(&account.as_view())
+                    || self.account_has_active_source_claim_exposure(&account.as_view())?
+                {
+                    return Err(V16Error::NonProgress);
+                }
+                self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)?;
+                AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+            }
             AutoCrankPlanV16::RefreshAccount { asset_index } => {
                 // Accrue the engine-selected active asset from either a fresh
                 // observation or committed state; if no active asset exists, use
@@ -18955,6 +19059,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     // #137: NOT cfg-gated. The Live release path must exist in the deployed
     // binary; gating it to kani/fuzz is what left the IM lien permanent.
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)
+    }
+
+    // fdf11670: the crank dispatch calls this core directly. The fork body is kept
+    // whole -- per-domain targeting, the canonical backing-expiry transition, and
+    // the terminal re-certification are fork behaviour upstream does not carry.
+    fn release_account_source_credit_liens_if_unneeded_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
