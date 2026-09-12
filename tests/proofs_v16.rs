@@ -8713,10 +8713,16 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     assert_eq!(outcome, PermissionlessProgressOutcomeV16::AccountCurrent);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.slot_last.get(), expected_asset_slot);
-    assert_eq!(
-        market.header.loss_stale_active,
-        if expected_asset_slot < now_slot { 1 } else { 0 }
-    );
+    // Post-92ed4a1a the loss-stale flag is GATED, not a bare slot comparison:
+    // asset_is_loss_stale_at_slot requires a nonzero stale K/F cohort on either
+    // side, or an asset that contributes to the loss-stale summary AND lags the
+    // slot. This market is empty -- no stored positions, no OI, no stale cohort
+    // -- so it contributes nothing and the flag stays clear however far the
+    // clock has to catch up. The two cohort assertions pin the reason, so this
+    // cannot silently become a bare constant if the gate changes again.
+    assert_eq!(asset.stale_account_count_long, 0);
+    assert_eq!(asset.stale_account_count_short, 0);
+    assert_eq!(market.header.loss_stale_active, 0);
     assert_eq!(asset.slot_last, expected_asset_slot);
     assert_eq!(asset.effective_price, effective_price);
     assert_eq!(asset.fund_px_last, effective_price);
@@ -8817,15 +8823,19 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert!(outcome.price_move_active);
     assert!(!outcome.funding_active);
     assert!(outcome.equity_active);
-    assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
+    // Post-92ed4a1a: this fixture carries stored positions on both sides, and the
+    // asserted price move re-targets K/F, so kernel_mark_kf_stale_cohorts marks
+    // both cohorts stale. asset_is_loss_stale_at_slot is then true on its FIRST
+    // clause and the flag is set whether or not the slot caught up -- the mirror
+    // of the empty-market case above, which is clear for the same reason.
+    assert_eq!(asset_after.stale_account_count_long, 1);
+    assert_eq!(asset_after.stale_account_count_short, 1);
+    assert!(outcome.loss_stale_after);
     assert_eq!(asset_after.slot_last, expected_asset_slot);
     assert_eq!(asset_after.effective_price, price);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.slot_last.get(), expected_asset_slot);
-    assert_eq!(
-        market.header.loss_stale_active,
-        if expected_asset_slot < now_slot { 1 } else { 0 }
-    );
+    assert_eq!(market.header.loss_stale_active, 1);
     assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
