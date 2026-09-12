@@ -10,8 +10,8 @@ use percolator::{
     kani_mul_div_floor_u128_wide_reference, kani_prepare_source_credit_domain_recompute_for_epoch,
     kani_prepare_source_credit_domain_recompute_for_epoch_steps,
     kani_prepare_source_positive_claim_burn_delta, kani_raw_basis_for_adl_effective_quantity,
-    SourceCreditStateV16, V16Error, V16Result, ADL_ONE, BOUND_SCALE, MAX_POSITION_ABS_Q,
-    MIN_A_SIDE, POS_SCALE,
+    kani_source_credit_state_realizable_support_for_claim_num, SourceCreditStateV16, V16Error,
+    V16Result, ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_POSITION_ABS_Q, MIN_A_SIDE, POS_SCALE,
 };
 use proptest::prelude::*;
 
@@ -254,4 +254,28 @@ mod source_credit_fast_path_differential {
             Err(V16Error::CounterUnderflow),
         );
     }
+}
+
+// Upstream 592d538c placed this immediately after
+// `margin_requirement_partition_regression`; that test is part of the upstream
+// file this fork does not carry, so the check is appended instead.
+#[test]
+fn source_support_rounds_each_domain_before_aggregation() {
+    let state = SourceCreditStateV16 {
+        positive_claim_bound_num: BOUND_SCALE,
+        exact_positive_claim_num: BOUND_SCALE,
+        fresh_reserved_backing_num: BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let per_domain =
+        kani_source_credit_state_realizable_support_for_claim_num(state, BOUND_SCALE).unwrap();
+
+    assert_eq!(per_domain, 0);
+    assert_eq!(per_domain.checked_add(per_domain), Some(0));
+    assert_eq!(
+        (BOUND_SCALE / 2).checked_add(BOUND_SCALE / 2).unwrap() / BOUND_SCALE,
+        1,
+        "aggregating fractional domain credit first would invent one unusable atom"
+    );
 }
