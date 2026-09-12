@@ -822,6 +822,7 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let raw_target_before = markets[0].engine.asset.raw_oracle_target_price.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let res = market.set_asset_raw_oracle_target_not_atomic(0, target as u64);
 
     kani::cover!(
@@ -859,6 +860,9 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -3308,6 +3312,7 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let long_budget_before = markets[0].engine.insurance_domain_budget_long;
     let short_budget_before = markets[0].engine.insurance_domain_budget_short;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
 
     market.resolve_market_not_atomic(resolved_slot).unwrap();
 
@@ -3346,6 +3351,9 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
         short_budget_before
     );
     assert_eq!(market.validate_shape(), Ok(()));
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -4632,6 +4640,7 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
         .unwrap();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let charged = market
         .kani_charge_account_fee_current_not_atomic(&mut account, requested_fee)
@@ -4685,6 +4694,9 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
     } else {
         assert_eq!(account.header.health_cert.valid, 0);
     }
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -4768,6 +4780,7 @@ fn proof_v16_fee_core_moves_current_capital_to_insurance_only() {
     header.c_tot = V16PodU128::new(7);
     account_header.capital = V16PodU128::new(7);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let charged = market
@@ -4780,6 +4793,9 @@ fn proof_v16_fee_core_moves_current_capital_to_insurance_only() {
     assert_eq!(market.header.c_tot.get(), 7 - requested_fee);
     assert_eq!(market.header.insurance.get(), requested_fee);
     assert_eq!(market.header.vault.get(), 7);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -5908,6 +5924,7 @@ fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
         .utilization_fee_earnings
         .get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
 
     market
         .credit_backing_provider_earnings_not_atomic(0, amount)
@@ -5950,6 +5967,10 @@ fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
         surplus
     );
     assert_eq!(market.validate_shape(), Ok(()));
+    // Exact pool drawdown (spec lockstep: junior_residual_pool -= X ;
+    // backing_provider_earnings += X): the earnings credit draws the junior
+    // pool by exactly the credited amount and nothing else.
+    assert_eq!(market.kani_residual(), residual_before - amount);
 }
 
 #[kani::proof]
@@ -6811,6 +6832,7 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     let risk_epoch_before = header.risk_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     market.mark_asset_drain_only_not_atomic(0).unwrap();
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
@@ -6828,6 +6850,9 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
     );
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     assert_eq!(market.validate_shape(), Ok(()));
+    // Junior-pool isolation: lifecycle marking moves no value and cannot
+    // touch the junior residual pool.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -7486,6 +7511,7 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
     let c_tot_before = header.c_tot.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut acct_header);
 
     // negative_before = 0 (nothing pre-encumbered); new loss = `loss`.
@@ -7516,6 +7542,10 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
         account.header.pnl.get(),
         -(loss as i128) + expected_backing as i128
     );
+    // Junior-pool isolation: the reservation moves capital into backing in
+    // lockstep (c_tot -X, counterparty_backing_principal +X), so the junior
+    // residual pool is untouched by loss crystallization.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 // upstream cc83730b "fix: route terminal losses through impaired domains".
@@ -8355,6 +8385,7 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     let account_capital_before = account_header.capital;
     let account_pnl_before = account_header.pnl;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let paid = market
@@ -8386,6 +8417,9 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     assert_eq!(receipt.terminal_positive_claim_face, terminal);
     assert_eq!(receipt.prior_bound_contribution_num, terminal * BOUND_SCALE);
     assert_eq!(receipt.finalized, payout == claimable);
+    // Exact pool drawdown: a resolved payout draws the junior pool by
+    // exactly the amount paid (vault falls, senior stack untouched).
+    assert_eq!(market.kani_residual(), residual_before - payout);
 }
 
 #[kani::proof]
@@ -8796,6 +8830,7 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
     let fee_credits_before = account_header.fee_credits;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let outcome = market
         .permissionless_crank_not_atomic(
@@ -8853,6 +8888,9 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
     assert_eq!(account.header.pnl, pnl_before);
     assert_eq!(account.header.reserved_pnl, reserved_before);
     assert_eq!(account.header.fee_credits, fee_credits_before);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -8889,6 +8927,7 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     let reserved_before = account_header.reserved_pnl;
     let fee_credits_before = account_header.fee_credits;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let outcome = market
@@ -8963,6 +9002,9 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     assert_eq!(account.header.pnl, pnl_before);
     assert_eq!(account.header.reserved_pnl, reserved_before);
     assert_eq!(account.header.fee_credits, fee_credits_before);
+    // Junior-pool isolation: this transition must not move the junior
+    // residual pool (haircut/payout funding).
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
@@ -10901,6 +10943,7 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
     let long_budget_before = markets[0].engine.insurance_domain_budget_long.get();
     let short_budget_before = markets[0].engine.insurance_domain_budget_short.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
 
     market
         .credit_domain_insurance_budget_not_atomic(0, amount)
@@ -10938,6 +10981,9 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
         market.markets[0].engine.insurance_domain_budget_long.get() - long_budget_before
     );
     assert_eq!(market.validate_shape(), Ok(()));
+    // Junior-pool isolation: budget crediting relabels insurance capacity
+    // only; the junior residual pool is untouched.
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
