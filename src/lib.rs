@@ -87,6 +87,17 @@ pub use v16::kani_active_bitmap_set;
 #[cfg(all(not(kani), feature = "fuzz"))]
 pub use v16::{kani_adl_effective_quantity_ceil, kani_raw_basis_for_adl_effective_quantity};
 
+// Bounded source-credit mul-div kernels + fused claim-burn deltas for the
+// rounding-residue differential fuzz target (upstream 4c4dfb20).
+#[cfg(all(not(kani), feature = "fuzz"))]
+pub use v16::{
+    kani_mul_div_ceil_u128_or_wide, kani_mul_div_ceil_u128_wide_reference,
+    kani_mul_div_floor_u128_or_wide, kani_mul_div_floor_u128_wide_reference,
+    kani_prepare_source_credit_domain_recompute_for_epoch,
+    kani_prepare_source_credit_domain_recompute_for_epoch_steps,
+    kani_prepare_source_positive_claim_burn_delta,
+};
+
 // v17 fork-facade re-exports — present only when the fork-facade feature is enabled (the wrapper
 // opts in on its engine dep). Keeps the production frozen surface minimal by default. Under kani the
 // blanket `pub use v16::*` above already covers these.
