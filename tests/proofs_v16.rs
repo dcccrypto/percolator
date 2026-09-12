@@ -15,7 +15,7 @@ use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
-    kani_insert_account_kf_settlement_plan_entry,
+    kani_insert_account_kf_settlement_plan_entry, kani_kernel_advance_close_ledger,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -18213,4 +18213,90 @@ fn proof_v16_terminal_claim_free_overlap_recredit_updates_only_paired_insurance_
     );
     assert_eq!(residual_remaining, residual_before - expected);
     assert_eq!(market.kani_residual(), residual_before - expected);
+}
+
+// Upstream 7a732fc6 `closure_kernel_advance_close_ledger_rank_witness`, carried
+// under this fork's `proof_v16_*` naming. Upstream gated it on the `contracts`
+// feature; this fork has no `contracts` feature, so it is a plain #[kani::proof]
+// under the crate-level #![cfg(kani)].
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_advance_close_ledger_rank_witness() {
+    // plain full-domain witness (upstream: the contract form exceeds the solver
+    // budget; identical evidentiary power per the flow-witness precedent)
+    let ledger = CloseProgressLedgerV16 {
+        active: kani::any(),
+        finalized: kani::any(),
+        canceled: kani::any(),
+        close_id: kani::any(),
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        domain_side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        gross_loss_at_close_start: kani::any(),
+        drift_reference_slot: kani::any(),
+        max_close_slot: kani::any(),
+        support_consumed: kani::any(),
+        junior_face_burned: kani::any(),
+        insurance_spent: kani::any(),
+        b_loss_booked: kani::any(),
+        explicit_loss_assigned: kani::any(),
+        quantity_adl_applied_q: kani::any(),
+        drift_consumed: kani::any(),
+        residual_remaining: kani::any(),
+    };
+    let sc: u64 = kani::any();
+    let jf: u64 = kani::any();
+    let is_: u64 = kani::any();
+    let bl: u64 = kani::any();
+    let el: u64 = kani::any();
+    let (sc, jf, is_, bl, el) = (sc as u128, jf as u128, is_ as u128, bl as u128, el as u128);
+    // validated-ledger precondition (production-guaranteed)
+    kani::assume(ledger.gross_loss_at_close_start < 1u128 << 64);
+    kani::assume(ledger.drift_consumed < 1u128 << 64);
+    kani::assume(ledger.support_consumed < 1u128 << 64);
+    kani::assume(ledger.insurance_spent < 1u128 << 64);
+    kani::assume(ledger.b_loss_booked < 1u128 << 64);
+    kani::assume(ledger.explicit_loss_assigned < 1u128 << 64);
+    let total = ledger.gross_loss_at_close_start + ledger.drift_consumed;
+    let pre_progress = ledger.support_consumed
+        + ledger.insurance_spent
+        + ledger.b_loss_booked
+        + ledger.explicit_loss_assigned;
+    kani::assume(pre_progress <= total);
+    kani::assume(ledger.residual_remaining == total - pre_progress);
+
+    if let Ok(l) = kani_kernel_advance_close_ledger(ledger, sc, jf, is_, bl, el) {
+        let booked = sc + is_ + bl + el;
+        kani::cover!(booked > 0, "rank witness covers real progress");
+        // exact category deltas
+        assert_eq!(l.support_consumed, ledger.support_consumed + sc);
+        assert_eq!(l.junior_face_burned, ledger.junior_face_burned + jf);
+        assert_eq!(l.insurance_spent, ledger.insurance_spent + is_);
+        assert_eq!(l.b_loss_booked, ledger.b_loss_booked + bl);
+        assert_eq!(l.explicit_loss_assigned, ledger.explicit_loss_assigned + el);
+        // THE RANK: residual decreases by exactly the booked total
+        assert_eq!(l.residual_remaining, ledger.residual_remaining - booked);
+        assert!(l.residual_remaining <= ledger.residual_remaining);
+        // finalization is sticky-exact
+        assert_eq!(l.finalized, ledger.finalized || l.residual_remaining == 0);
+        // immutable identity frozen
+        assert_eq!(l.close_id, ledger.close_id);
+        assert_eq!(
+            l.gross_loss_at_close_start,
+            ledger.gross_loss_at_close_start
+        );
+        assert_eq!(l.drift_reference_slot, ledger.drift_reference_slot);
+        assert_eq!(l.max_close_slot, ledger.max_close_slot);
+        assert_eq!(l.asset_index, ledger.asset_index);
+        assert_eq!(l.market_id, ledger.market_id);
+        assert_eq!(l.quantity_adl_applied_q, ledger.quantity_adl_applied_q);
+        assert_eq!(l.drift_consumed, ledger.drift_consumed);
+        assert_eq!(l.active, ledger.active);
+        assert_eq!(l.canceled, ledger.canceled);
+    }
 }

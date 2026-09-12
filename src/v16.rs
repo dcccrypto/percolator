@@ -984,6 +984,65 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL (liveness rank): the close-progress ledger advance.
+    /// Each partition category grows by exactly its delta; residual_remaining
+    /// is recomputed to the exact partition identity and STRICTLY DECREASES by
+    /// the booked total — the well-founded rank for close progress (a close
+    /// terminates in at most gross_loss booked value); finalization is exactly
+    /// residual == 0; over-booking fails closed; every immutable identity
+    /// field is frozen.
+    pub(crate) fn kernel_advance_close_ledger(
+        mut ledger: CloseProgressLedgerV16,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<CloseProgressLedgerV16> {
+        ledger.support_consumed = ledger
+            .support_consumed
+            .checked_add(support_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.junior_face_burned = ledger
+            .junior_face_burned
+            .checked_add(junior_face_burned)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.insurance_spent = ledger
+            .insurance_spent
+            .checked_add(insurance_spent)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.b_loss_booked = ledger
+            .b_loss_booked
+            .checked_add(b_loss_booked)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger.explicit_loss_assigned = ledger
+            .explicit_loss_assigned
+            .checked_add(explicit_loss_assigned)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let total_loss = ledger
+            .gross_loss_at_close_start
+            .checked_add(ledger.drift_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let progress = ledger
+            .support_consumed
+            .checked_add(ledger.insurance_spent)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let progress = progress
+            .checked_add(ledger.b_loss_booked)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let progress = progress
+            .checked_add(ledger.explicit_loss_assigned)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if progress > total_loss {
+            return Err(V16Error::ArithmeticOverflow);
+        }
+        ledger.residual_remaining = total_loss - progress;
+        if ledger.residual_remaining == 0 {
+            ledger.finalized = true;
+        }
+        Ok(ledger)
+    }
+
     /// PRODUCTION KERNEL: the attach-leg core — snapshot the side's basis
     /// anchors, gate the a-basis range, add open interest, and construct the
     /// new leg. Pure on (AssetStateV16, scalars); the attach glue calls
@@ -3104,6 +3163,25 @@ pub fn kani_cert_is_current(
         risk_epoch,
         asset_set_epoch,
         account_bitmap,
+    )
+}
+
+#[cfg(kani)]
+pub fn kani_kernel_advance_close_ledger(
+    ledger: CloseProgressLedgerV16,
+    support_consumed: u128,
+    junior_face_burned: u128,
+    insurance_spent: u128,
+    b_loss_booked: u128,
+    explicit_loss_assigned: u128,
+) -> V16Result<CloseProgressLedgerV16> {
+    V16Core::kernel_advance_close_ledger(
+        ledger,
+        support_consumed,
+        junior_face_burned,
+        insurance_spent,
+        b_loss_booked,
+        explicit_loss_assigned,
     )
 }
 
@@ -15991,43 +16069,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !ledger.active || ledger.finalized {
             return Err(V16Error::LockActive);
         }
-        ledger.support_consumed = ledger
-            .support_consumed
-            .checked_add(support_consumed)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        ledger.junior_face_burned = ledger
-            .junior_face_burned
-            .checked_add(junior_face_burned)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        ledger.insurance_spent = ledger
-            .insurance_spent
-            .checked_add(insurance_spent)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        ledger.b_loss_booked = ledger
-            .b_loss_booked
-            .checked_add(b_loss_booked)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        ledger.explicit_loss_assigned = ledger
-            .explicit_loss_assigned
-            .checked_add(explicit_loss_assigned)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let total_loss = ledger
-            .gross_loss_at_close_start
-            .checked_add(ledger.drift_consumed)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let progress = ledger
-            .support_consumed
-            .checked_add(ledger.insurance_spent)
-            .and_then(|v| v.checked_add(ledger.b_loss_booked))
-            .and_then(|v| v.checked_add(ledger.explicit_loss_assigned))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if progress > total_loss {
-            return Err(V16Error::ArithmeticOverflow);
-        }
-        ledger.residual_remaining = total_loss - progress;
-        if ledger.residual_remaining == 0 {
-            ledger.finalized = true;
-        }
+        let ledger_advanced = V16Core::kernel_advance_close_ledger(
+            ledger,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )?;
+        let mut ledger = ledger_advanced;
+        let _ = &mut ledger;
         if was_pending && !ledger.has_pending_residual() {
             let count = self.pending_domain_loss_barrier_count(asset_index, domain_side)?;
             self.set_pending_domain_loss_barrier_count(
