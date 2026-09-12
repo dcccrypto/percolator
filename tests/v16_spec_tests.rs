@@ -5301,6 +5301,77 @@ fn v16_auto_crank_releases_flat_source_credit_lien_for_conversion() {
     market.validate_shape().unwrap();
 }
 
+// The A6 classifier must REJECT as well as accept. fdf11670 ships only the
+// positive fixture, so every rejection arm of
+// account_source_credit_liens_are_fresh_and_releasable was uncovered: gutting the
+// whole freshness/sufficiency block left the suite green. These two arms are the
+// reachable ones for this fixture (it funds no insurance leg).
+#[test]
+fn v16_auto_crank_does_not_release_source_liens_against_stale_backing() {
+    // (a) backing that has gone through the CANONICAL expiry transition.
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let winner = PortfolioV16ViewMut::new(&mut winner_header);
+        let now = market.header.current_slot.get();
+        assert!(
+            market
+                .build_actionable_summary_at_slot(&winner.as_view(), now)
+                .unwrap()
+                .source_liens_releasable,
+            "fixture must start releasable, or the rejection below proves nothing"
+        );
+        drop(winner);
+        market
+            .expire_source_backing_bucket_not_atomic(0, 100)
+            .unwrap();
+    }
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let now = market.header.current_slot.get();
+    assert!(
+        !market
+            .build_actionable_summary_at_slot(&winner.as_view(), now)
+            .unwrap()
+            .source_liens_releasable,
+        "expired backing must not classify as releasable"
+    );
+    assert_ne!(
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: now,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .map(|r| r.selected),
+        Ok(AutoCrankPlanV16::ReleaseSourceLiens),
+        "the crank must not dispatch a release against expired backing"
+    );
+    drop(market);
+    drop(winner);
+
+    // (b) a bucket that no longer carries enough VALID LIENED backing to cover the
+    // lien it is supposed to be releasing.
+    let (mut header2, mut markets2, mut winner_header2) = flat_source_credit_lien_fixture();
+    let mut bucket = markets2[0].engine.backing_long.try_to_runtime().unwrap();
+    bucket.valid_liened_backing_num = 0;
+    markets2[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    let market2 = MarketGroupV16ViewMut::new(&mut header2, &mut markets2);
+    let winner2 = PortfolioV16ViewMut::new(&mut winner_header2);
+    let now2 = market2.header.current_slot.get();
+    assert!(
+        !market2
+            .build_actionable_summary_at_slot(&winner2.as_view(), now2)
+            .unwrap()
+            .source_liens_releasable,
+        "a lien exceeding the bucket's valid liened backing must not classify as \
+         releasable"
+    );
+}
+
 #[test]
 fn v16_residual_reward_credit_is_capped_by_available_crystallized_loss() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
