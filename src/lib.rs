@@ -96,6 +96,7 @@ pub use v16::{
     kani_prepare_source_credit_domain_recompute_for_epoch,
     kani_prepare_source_credit_domain_recompute_for_epoch_steps,
     kani_prepare_source_positive_claim_burn_delta,
+    kani_source_credit_state_realizable_support_for_claim_num,
 };
 
 // v17 fork-facade re-exports — present only when the fork-facade feature is enabled (the wrapper
