@@ -1041,6 +1041,47 @@ impl V16Core {
         Ok(())
     }
 
+    /// PRODUCTION KERNEL (#37 batch projection): accumulate one fill's
+    /// outcome into the running batch outcome. EXACT sum: fill_count += 1,
+    /// fees and notional add by exactly the fill's amounts, the three flags
+    /// are monotone-OR. Proving this is the batch-projection invariant — a
+    /// batch outcome is exactly the fold of its per-fill outcomes, so a batch
+    /// is equivalent to its sequence of single fills (no hidden extra work).
+    /// Upstream states that as a `kani::ensures` contract behind its
+    /// `contracts` feature, which this fork does not have; the identical
+    /// postcondition is asserted over the same unconstrained domain by
+    /// `proof_v16_kernel_accumulate_batch_trade_exact_fold`.
+    pub(crate) fn kernel_accumulate_batch_trade(
+        mut outcome: BatchTradeOutcomeV16,
+        risk_increasing: bool,
+        long_has_source_claims: bool,
+        short_has_source_claims: bool,
+        applied: TradeApplyOutcomeV16,
+    ) -> V16Result<(BatchTradeOutcomeV16, bool, bool, bool)> {
+        outcome.fill_count = outcome
+            .fill_count
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        outcome.fee_a = outcome
+            .fee_a
+            .checked_add(applied.fee_a)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        outcome.fee_b = outcome
+            .fee_b
+            .checked_add(applied.fee_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        outcome.notional = outcome
+            .notional
+            .checked_add(applied.notional)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((
+            outcome,
+            risk_increasing | applied.risk_increasing,
+            long_has_source_claims | applied.long_has_source_claims,
+            short_has_source_claims | applied.short_has_source_claims,
+        ))
+    }
+
     /// PRODUCTION KERNEL (liveness rank): the close-progress ledger advance.
     /// Each partition category grows by exactly its delta; residual_remaining
     /// is recomputed to the exact partition identity and STRICTLY DECREASES by
@@ -3329,6 +3370,40 @@ pub fn kani_kernel_locked_margin_gate(
     certified_initial_req: u128,
 ) -> V16Result<()> {
     V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)
+}
+
+#[cfg(kani)]
+#[allow(clippy::too_many_arguments)]
+pub fn kani_kernel_accumulate_batch_trade(
+    outcome: BatchTradeOutcomeV16,
+    risk_increasing: bool,
+    long_has_source_claims: bool,
+    short_has_source_claims: bool,
+    applied_fee_a: u128,
+    applied_fee_b: u128,
+    applied_notional: u128,
+    applied_risk_increasing: bool,
+    applied_long_requires_initial_margin: bool,
+    applied_short_requires_initial_margin: bool,
+    applied_long_has_source_claims: bool,
+    applied_short_has_source_claims: bool,
+) -> V16Result<(BatchTradeOutcomeV16, bool, bool, bool)> {
+    V16Core::kernel_accumulate_batch_trade(
+        outcome,
+        risk_increasing,
+        long_has_source_claims,
+        short_has_source_claims,
+        TradeApplyOutcomeV16 {
+            fee_a: applied_fee_a,
+            fee_b: applied_fee_b,
+            notional: applied_notional,
+            risk_increasing: applied_risk_increasing,
+            long_requires_initial_margin: applied_long_requires_initial_margin,
+            short_requires_initial_margin: applied_short_requires_initial_margin,
+            long_has_source_claims: applied_long_has_source_claims,
+            short_has_source_claims: applied_short_has_source_claims,
+        },
+    )
 }
 
 #[cfg(kani)]
@@ -17737,25 +17812,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_has_source_claims: &mut bool,
         applied: TradeApplyOutcomeV16,
     ) -> V16Result<()> {
-        outcome.fill_count = outcome
-            .fill_count
-            .checked_add(1)
-            .ok_or(V16Error::CounterOverflow)?;
-        outcome.fee_a = outcome
-            .fee_a
-            .checked_add(applied.fee_a)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        outcome.fee_b = outcome
-            .fee_b
-            .checked_add(applied.fee_b)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        outcome.notional = outcome
-            .notional
-            .checked_add(applied.notional)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        *risk_increasing |= applied.risk_increasing;
-        *long_has_source_claims |= applied.long_has_source_claims;
-        *short_has_source_claims |= applied.short_has_source_claims;
+        let (o, ri, lhsc, shsc) = V16Core::kernel_accumulate_batch_trade(
+            *outcome,
+            *risk_increasing,
+            *long_has_source_claims,
+            *short_has_source_claims,
+            applied,
+        )?;
+        *outcome = o;
+        *risk_increasing = ri;
+        *long_has_source_claims = lhsc;
+        *short_has_source_claims = shsc;
         Ok(())
     }
 

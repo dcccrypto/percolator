@@ -15,9 +15,9 @@ use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
-    kani_insert_account_kf_settlement_plan_entry, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_initial_margin_gate,
-    kani_kernel_locked_margin_gate,
+    kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
+    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap,
+    kani_kernel_initial_margin_gate, kani_kernel_locked_margin_gate,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -18520,6 +18520,120 @@ fn proof_v16_kernel_locked_margin_gate_no_positive_credit() {
             assert!(e == V16Error::LockActive || e == V16Error::ArithmeticOverflow);
             if e == V16Error::LockActive {
                 assert!(equity < 0 || (equity as u128) < req);
+            }
+        }
+    }
+}
+
+// Upstream 55a7546e `contract_check_kernel_accumulate_batch_trade`, carried
+// under this fork's `proof_v16_*` naming. Upstream states the postcondition as
+// a `kani::ensures` contract gated on its `contracts` feature and discharges it
+// with `#[kani::proof_for_contract]`; this fork has no `contracts` feature and
+// no `cfg_attr(.., kani::ensures)` anywhere, so the identical postcondition is
+// asserted directly over the same unconstrained domain. Every field of both
+// structs and all three running flags are left `kani::any()`, matching av tip's
+// harness, which quantifies over all EIGHT TradeApplyOutcomeV16 fields (at
+// 55a7546e the struct still had six; this fork and av tip both carry the two
+// `*_requires_initial_margin` flags that arrived with f06a04a7, and the kernel
+// reads neither).
+//
+// THE PROPERTY (#37 batch projection): a batch outcome is the EXACT fold of its
+// per-fill outcomes - fill_count += 1, fee_a/fee_b/notional add by exactly the
+// fill's amounts, and the three flags are monotone-OR, so a batch is equivalent
+// to its bounded sequence of single fills with no hidden extra work. Upstream's
+// `ensures` states the Ok arm with `wrapping_add`; that is asserted verbatim,
+// and because the kernel is checked the harness additionally pins the sums to
+// be EXACT on Ok and the Err arm to be exactly the overflow case (fail-closed,
+// so no partially accumulated outcome ever escapes).
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_accumulate_batch_trade_exact_fold() {
+    let outcome = BatchTradeOutcomeV16 {
+        fill_count: kani::any(),
+        fee_a: kani::any(),
+        fee_b: kani::any(),
+        notional: kani::any(),
+    };
+    let risk_increasing: bool = kani::any();
+    let long_has_source_claims: bool = kani::any();
+    let short_has_source_claims: bool = kani::any();
+    let applied_fee_a: u128 = kani::any();
+    let applied_fee_b: u128 = kani::any();
+    let applied_notional: u128 = kani::any();
+    let applied_risk: bool = kani::any();
+    let applied_long_im: bool = kani::any();
+    let applied_short_im: bool = kani::any();
+    let applied_long_claim: bool = kani::any();
+    let applied_short_claim: bool = kani::any();
+
+    let expected_fill = outcome.fill_count.checked_add(1);
+    let expected_fee_a = outcome.fee_a.checked_add(applied_fee_a);
+    let expected_fee_b = outcome.fee_b.checked_add(applied_fee_b);
+    let expected_notional = outcome.notional.checked_add(applied_notional);
+    let expected_ok = expected_fill.is_some()
+        && expected_fee_a.is_some()
+        && expected_fee_b.is_some()
+        && expected_notional.is_some();
+
+    match kani_kernel_accumulate_batch_trade(
+        outcome,
+        risk_increasing,
+        long_has_source_claims,
+        short_has_source_claims,
+        applied_fee_a,
+        applied_fee_b,
+        applied_notional,
+        applied_risk,
+        applied_long_im,
+        applied_short_im,
+        applied_long_claim,
+        applied_short_claim,
+    ) {
+        Ok((o, ri, lhsc, shsc)) => {
+            kani::cover!(true, "exact fold covers a successful accumulation");
+            kani::cover!(
+                applied_fee_a != 0 && applied_fee_b != 0 && applied_notional != 0,
+                "a successful fold covers a fill with nonzero fees and notional"
+            );
+            kani::cover!(
+                outcome.fill_count > 0,
+                "a successful fold covers accumulation onto a nonempty batch"
+            );
+            kani::cover!(
+                !risk_increasing && applied_risk,
+                "a successful fold covers a flag going false -> true"
+            );
+            // upstream's `ensures`, verbatim
+            assert!(o.fill_count == outcome.fill_count.wrapping_add(1));
+            assert!(o.fee_a == outcome.fee_a.wrapping_add(applied_fee_a));
+            assert!(o.fee_b == outcome.fee_b.wrapping_add(applied_fee_b));
+            assert!(o.notional == outcome.notional.wrapping_add(applied_notional));
+            assert!(ri == (risk_increasing || applied_risk));
+            assert!(lhsc == (long_has_source_claims || applied_long_claim));
+            assert!(shsc == (short_has_source_claims || applied_short_claim));
+            // and the fold is EXACT, not merely wrapping: Ok implies no overflow
+            assert!(expected_ok);
+            assert_eq!(o.fill_count, expected_fill.unwrap());
+            assert_eq!(o.fee_a, expected_fee_a.unwrap());
+            assert_eq!(o.fee_b, expected_fee_b.unwrap());
+            assert_eq!(o.notional, expected_notional.unwrap());
+        }
+        Err(e) => {
+            // fail-closed, and ONLY on a real overflow of one of the four sums
+            assert!(!expected_ok);
+            kani::cover!(
+                expected_fill.is_none(),
+                "rejection covers a fill_count overflow"
+            );
+            kani::cover!(
+                expected_fill.is_some() && expected_fee_a.is_none(),
+                "rejection covers a fee_a overflow"
+            );
+            if expected_fill.is_none() {
+                assert_eq!(e, V16Error::CounterOverflow);
+            } else {
+                assert_eq!(e, V16Error::ArithmeticOverflow);
             }
         }
     }
