@@ -984,6 +984,63 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL (spec #37 gate): the trade-finalization initial-
+    /// margin decision - an EXACT total decision contract: the gate admits
+    /// precisely the states with a VALID certificate whose certified equity
+    /// is nonnegative and covers the certified initial requirement, and
+    /// rejects everything else (Ok <=> condition, both directions). This is
+    /// the verified-certificate gate the maker-exemption rule rides on.
+    /// Upstream states that as a `kani::ensures` contract behind its
+    /// `contracts` feature, which this fork does not have; the identical
+    /// both-directions postcondition is asserted over the same unconstrained
+    /// domain by `proof_v16_kernel_initial_margin_gate_exact_decision`.
+    ///
+    /// FORK FEATURE - DO NOT NORMALIZE AWAY ON A RE-SYNC: the insufficient-
+    /// margin rejection returns this fork's `V16Error::InsufficientInitialMargin`,
+    /// NOT upstream's generic `V16Error::InvalidConfig`, so the wrapper can
+    /// surface a user-readable "insufficient margin"
+    /// (`PercolatorError::EngineInsufficientInitialMargin`, Custom 49) rather
+    /// than a config-error bucket. That variant does not exist upstream.
+    pub(crate) fn kernel_initial_margin_gate(cert: HealthCertV16) -> V16Result<()> {
+        if !cert.valid {
+            return Err(V16Error::Stale);
+        }
+        let equity = cert.certified_equity;
+        if equity < 0 || (equity as u128) < cert.certified_initial_req {
+            return Err(V16Error::InsufficientInitialMargin);
+        }
+        Ok(())
+    }
+
+    /// PRODUCTION KERNEL (spec #37 locked lane): the no-positive-credit
+    /// margin decision - exact total decision over the locked-lane equity
+    /// (capital + min(pnl,0) - |fee debt|) against the certified initial
+    /// requirement: positive PnL credit can NEVER satisfy IM under h-lock.
+    /// Upstream states the precondition (`pnl > i128::MIN && fee_credits >
+    /// i128::MIN && capital < 1 << 100`) as `kani::requires` and the
+    /// postcondition as `kani::ensures`, both behind its `contracts` feature,
+    /// which this fork does not have; both are carried over the identical
+    /// domain by `proof_v16_kernel_locked_margin_gate_no_positive_credit`.
+    pub(crate) fn kernel_locked_margin_gate(
+        capital: u128,
+        pnl: i128,
+        fee_credits: i128,
+        certified_initial_req: u128,
+    ) -> V16Result<()> {
+        let capital_i = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let equity = capital_i
+            .checked_add(pnl.min(0))
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .checked_sub(fee_debt)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if equity < 0 || (equity as u128) < certified_initial_req {
+            return Err(V16Error::LockActive);
+        }
+        Ok(())
+    }
+
     /// PRODUCTION KERNEL (liveness rank): the close-progress ledger advance.
     /// Each partition category grows by exactly its delta; residual_remaining
     /// is recomputed to the exact partition identity and STRICTLY DECREASES by
@@ -3218,6 +3275,21 @@ pub fn kani_kernel_advance_leg_b_snap(
     remaining_after: u128,
 ) -> V16Result<PortfolioLegV16> {
     V16Core::kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after)
+}
+
+#[cfg(kani)]
+pub fn kani_kernel_initial_margin_gate(cert: HealthCertV16) -> V16Result<()> {
+    V16Core::kernel_initial_margin_gate(cert)
+}
+
+#[cfg(kani)]
+pub fn kani_kernel_locked_margin_gate(
+    capital: u128,
+    pnl: i128,
+    fee_credits: i128,
+    certified_initial_req: u128,
+) -> V16Result<()> {
+    V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)
 }
 
 #[cfg(kani)]
@@ -16908,14 +16980,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn ensure_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
         let cert = account.header.health_cert.try_to_runtime()?;
-        if !cert.valid {
-            return Err(V16Error::Stale);
-        }
-        let equity = cert.certified_equity;
-        if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::InsufficientInitialMargin);
-        }
-        Ok(())
+        V16Core::kernel_initial_margin_gate(cert)
     }
 
     #[cfg(kani)]
@@ -17027,12 +17092,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn ensure_no_positive_credit_initial_margin(account: &PortfolioV16View<'_>) -> V16Result<()> {
-        let equity = Self::account_no_positive_credit_equity(account)?;
+        validate_non_min_i128(account.header.pnl.get())?;
+        validate_fee_credits(account.header.fee_credits.get())?;
         let cert = account.header.health_cert.try_to_runtime()?;
-        if equity < 0 || (equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::LockActive);
-        }
-        Ok(())
+        V16Core::kernel_locked_margin_gate(
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            account.header.fee_credits.get(),
+            cert.certified_initial_req,
+        )
     }
 
     #[cfg(kani)]

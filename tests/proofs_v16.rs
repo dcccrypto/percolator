@@ -16,7 +16,8 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap,
+    kani_kernel_advance_leg_b_snap, kani_kernel_initial_margin_gate,
+    kani_kernel_locked_margin_gate,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -18378,6 +18379,128 @@ fn proof_v16_kernel_advance_leg_b_snap_rank_witness() {
             // fails closed, and only because the forward step overflowed
             assert_eq!(e, V16Error::ArithmeticOverflow);
             assert!(leg.b_snap.checked_add(delta_b).is_none());
+        }
+    }
+}
+
+// Upstream 707e3cf1 `contract_check_kernel_initial_margin_gate`, carried under
+// this fork's `proof_v16_*` naming. Upstream states the postcondition as a
+// `kani::ensures` contract gated on its `contracts` feature and discharges it
+// with `#[kani::proof_for_contract]`; this fork has no `contracts` feature and
+// no `cfg_attr(.., kani::ensures)` anywhere, so the identical postcondition is
+// asserted directly over the same unconstrained domain (upstream's harness
+// leaves every one of the 11 HealthCertV16 fields `kani::any()`).
+//
+// THE CONTRACT IS AN EXACT TOTAL DECISION: Ok <=> admit, BOTH DIRECTIONS.
+// FORK: the reject error on the equity branch is this fork's
+// `V16Error::InsufficientInitialMargin` (upstream returns `InvalidConfig`);
+// the harness pins that variant so a future re-sync cannot silently
+// normalize it back to upstream's.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_initial_margin_gate_exact_decision() {
+    let cert = HealthCertV16 {
+        certified_equity: kani::any(),
+        certified_initial_req: kani::any(),
+        certified_maintenance_req: kani::any(),
+        certified_liq_deficit: kani::any(),
+        certified_worst_case_loss: kani::any(),
+        cert_oracle_epoch: kani::any(),
+        cert_funding_epoch: kani::any(),
+        cert_risk_epoch: kani::any(),
+        cert_asset_set_epoch: kani::any(),
+        active_bitmap_at_cert: kani::any(),
+        valid: kani::any(),
+    };
+    // upstream's `admit` predicate, verbatim
+    let admit = cert.valid
+        && cert.certified_equity >= 0
+        && (cert.certified_equity as u128) >= cert.certified_initial_req;
+    match kani_kernel_initial_margin_gate(cert) {
+        Ok(()) => {
+            kani::cover!(true, "exact decision covers an admitted certificate");
+            kani::cover!(
+                cert.certified_equity > 0,
+                "admission covers strictly positive certified equity"
+            );
+            kani::cover!(
+                (cert.certified_equity as u128) == cert.certified_initial_req,
+                "admission covers exactly meeting the initial requirement"
+            );
+            // Ok => admit
+            assert!(admit);
+        }
+        Err(e) => {
+            // Err => !admit  (with Ok => admit above, that is Ok <=> admit)
+            assert!(!admit);
+            // and the rejection is classified exactly
+            if !cert.valid {
+                kani::cover!(true, "rejection covers the invalid-certificate lane");
+                assert_eq!(e, V16Error::Stale);
+            } else {
+                kani::cover!(
+                    cert.certified_equity < 0,
+                    "rejection covers negative certified equity"
+                );
+                kani::cover!(
+                    cert.certified_equity >= 0,
+                    "rejection covers equity short of the initial requirement"
+                );
+                // FORK VARIANT PINNED: ours, not upstream's InvalidConfig.
+                assert_eq!(e, V16Error::InsufficientInitialMargin);
+                assert!(e != V16Error::InvalidConfig);
+            }
+        }
+    }
+}
+
+// Upstream 707e3cf1 `contract_check_kernel_locked_margin_gate`, carried under
+// this fork's `proof_v16_*` naming. Upstream's `kani::requires` precondition
+// (`pnl > i128::MIN && fee_credits > i128::MIN && capital < 1 << 100`) is
+// carried as the identical `kani::assume`, exactly as upstream's own harness
+// states it; its `kani::ensures` postcondition is asserted directly.
+//
+// THE PROPERTY: under h-lock the gate passes only on no-positive-credit
+// equity (capital + min(pnl,0) - |fee debt|) covering the certified initial
+// requirement - positive PnL credit can NEVER satisfy IM in the locked lane.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_locked_margin_gate_no_positive_credit() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_credits: i128 = kani::any();
+    let req: u128 = kani::any();
+    // upstream's kani::requires, verbatim
+    kani::assume(pnl > i128::MIN && fee_credits > i128::MIN && capital < 1u128 << 100);
+    // the locked-lane equity, recomputed independently of the kernel
+    let equity = (capital as i128)
+        .wrapping_add(if pnl < 0 { pnl } else { 0 })
+        .wrapping_sub(fee_credits.unsigned_abs() as i128);
+    match kani_kernel_locked_margin_gate(capital, pnl, fee_credits, req) {
+        Ok(()) => {
+            kani::cover!(true, "locked gate covers a pass");
+            kani::cover!(pnl > 0, "a pass covers strictly positive PnL");
+            kani::cover!(fee_credits < 0, "a pass covers a real fee debt");
+            // upstream's ensures, verbatim
+            assert!(equity >= 0 && (equity as u128) >= req);
+            // POSITIVE PnL CREDIT IS NEVER COUNTED: a pass is exactly a pass
+            // on the pnl-clamped equity, so replacing a positive pnl by 0
+            // cannot change the decision.
+            assert!(kani_kernel_locked_margin_gate(capital, pnl.min(0), fee_credits, req).is_ok());
+        }
+        Err(e) => {
+            kani::cover!(true, "locked gate covers a rejection");
+            kani::cover!(
+                equity >= 0 && (equity as u128) < req,
+                "rejection covers solvent-but-undermargined"
+            );
+            // fails closed, and only in the two declared ways
+            assert!(e == V16Error::LockActive || e == V16Error::ArithmeticOverflow);
+            if e == V16Error::LockActive {
+                assert!(equity < 0 || (equity as u128) < req);
+            }
         }
     }
 }
