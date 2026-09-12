@@ -10,12 +10,12 @@ use percolator::v16::{
     kani_auto_crank_lifecycle_dispatchable, kani_auto_crank_refresh_asset,
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_commit_declared_liquidation_recovery,
-    kani_decode_account_kf_settlement_plan_key, kani_eq_engine_asset_slot_v16_account,
-    kani_eq_market_group_v16_header_account, kani_expected_source_credit_rate_num_for_state,
-    kani_first_actionable_slot, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
-    kani_insert_account_kf_settlement_plan_entry, kani_kernel_cert_is_current,
+    kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
+    kani_commit_declared_liquidation_recovery, kani_decode_account_kf_settlement_plan_key,
+    kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
+    kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_insert_account_kf_settlement_plan_entry,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -859,6 +859,90 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
+    let target: u64 = kani::any();
+    let epoch: u64 = kani::any();
+    kani::assume(target > 0 && target <= MAX_ORACLE_PRICE);
+    kani::assume(epoch < u64::MAX);
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.oracle_epoch = V16PodU64::new(epoch);
+    let old_target = markets[0].engine.asset.raw_oracle_target_price.get();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let cert = HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    assert!(kani_cert_is_current(
+        cert,
+        header.oracle_epoch.get(),
+        header.funding_epoch.get(),
+        header.risk_epoch.get(),
+        header.asset_set_epoch.get(),
+        V16_EMPTY_ACTIVE_BITMAP,
+    ));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, target)
+        .unwrap();
+
+    let changed = target != old_target;
+    kani::cover!(
+        target < old_target,
+        "downward raw-target change invalidates an existing certificate"
+    );
+    kani::cover!(
+        target > old_target,
+        "upward raw-target change invalidates an existing certificate"
+    );
+    kani::cover!(
+        target == old_target,
+        "idempotent raw-target update preserves certificate currentness"
+    );
+
+    assert_eq!(
+        market.header.oracle_epoch.get(),
+        header_before.oracle_epoch.get() + u64::from(changed)
+    );
+    assert_eq!(
+        kani_cert_is_current(
+            cert,
+            market.header.oracle_epoch.get(),
+            market.header.funding_epoch.get(),
+            market.header.risk_epoch.get(),
+            market.header.asset_set_epoch.get(),
+            V16_EMPTY_ACTIVE_BITMAP,
+        ),
+        !changed
+    );
+
+    let mut expected_header = header_before;
+    expected_header.oracle_epoch =
+        V16PodU64::new(header_before.oracle_epoch.get() + u64::from(changed));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_slot = slot_before;
+    let mut expected_asset = expected_slot.asset.try_to_runtime().unwrap();
+    expected_asset.raw_oracle_target_price = target;
+    expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slot,
+        &market.markets[0].engine
+    ));
 }
 
 #[kani::proof]
@@ -15029,7 +15113,7 @@ fn proof_v16_cert_is_current_matches_the_favorable_action_gate() {
     let asset_set_epoch: u64 = kani::any();
     let bitmap: [u64; V16_ACTIVE_BITMAP_WORDS] = kani::any();
 
-    let current = kani_kernel_cert_is_current(
+    let current = kani_cert_is_current(
         cert,
         oracle_epoch,
         funding_epoch,

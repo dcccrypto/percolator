@@ -3085,7 +3085,7 @@ pub fn kani_select_auto_crank_plan(
 }
 
 #[cfg(kani)]
-pub fn kani_kernel_cert_is_current(
+pub fn kani_cert_is_current(
     cert: HealthCertV16,
     oracle_epoch: u64,
     funding_epoch: u64,
