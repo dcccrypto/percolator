@@ -1171,6 +1171,31 @@ impl V16Core {
         side_mode == SideModeV16::ResetPending && leg_epoch_snap.checked_add(1) == Some(asset_epoch)
     }
 
+    /// PRODUCTION KERNEL (liveness rank): the B-settlement leg advance.
+    /// b_snap moves FORWARD by exactly delta_b — the well-founded rank
+    /// component for the B-settlement progress theorem: each successful
+    /// chunk strictly decreases the leg's distance to its B target.
+    /// b_rem is set to new_remainder and b_stale to `remaining_after != 0`
+    /// exactly, and every other leg field is frozen. Upstream states that as a
+    /// `kani::ensures` contract behind its `contracts` feature, which this fork
+    /// does not have; the identical postcondition is asserted over the same
+    /// unconstrained domain by
+    /// `proof_v16_kernel_advance_leg_b_snap_rank_witness`.
+    pub(crate) fn kernel_advance_leg_b_snap(
+        mut leg: PortfolioLegV16,
+        delta_b: u128,
+        new_remainder: u128,
+        remaining_after: u128,
+    ) -> V16Result<PortfolioLegV16> {
+        leg.b_snap = leg
+            .b_snap
+            .checked_add(delta_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        leg.b_rem = new_remainder;
+        leg.b_stale = remaining_after != 0;
+        Ok(leg)
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -3183,6 +3208,16 @@ pub fn kani_kernel_advance_close_ledger(
         b_loss_booked,
         explicit_loss_assigned,
     )
+}
+
+#[cfg(kani)]
+pub fn kani_kernel_advance_leg_b_snap(
+    leg: PortfolioLegV16,
+    delta_b: u128,
+    new_remainder: u128,
+    remaining_after: u128,
+) -> V16Result<PortfolioLegV16> {
+    V16Core::kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after)
 }
 
 #[cfg(kani)]
@@ -13396,13 +13431,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_sub(loss_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
-        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        leg.b_snap = leg
-            .b_snap
-            .checked_add(chunk.delta_b)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        leg.b_rem = chunk.new_remainder;
-        leg.b_stale = chunk.remaining_after != 0;
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let leg = V16Core::kernel_advance_leg_b_snap(
+            leg,
+            chunk.delta_b,
+            chunk.new_remainder,
+            chunk.remaining_after,
+        )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
         self.set_account_pnl_after_domain_first_source_claim_burn(account, new_pnl, source_domain)?;

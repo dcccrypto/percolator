@@ -16,6 +16,7 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_advance_close_ledger,
+    kani_kernel_advance_leg_b_snap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -18298,5 +18299,85 @@ fn proof_v16_kernel_advance_close_ledger_rank_witness() {
         assert_eq!(l.drift_consumed, ledger.drift_consumed);
         assert_eq!(l.active, ledger.active);
         assert_eq!(l.canceled, ledger.canceled);
+    }
+}
+
+// Upstream dffa10de `contract_check_kernel_advance_leg_b_snap`, carried under
+// this fork's `proof_v16_*` naming. Upstream states the postcondition as a
+// `kani::ensures` contract gated on its `contracts` feature and discharges it
+// with `#[kani::proof_for_contract]`; this fork has no `contracts` feature and
+// no `cfg_attr(.., kani::ensures)` anywhere, so the identical postcondition is
+// asserted directly over the same unconstrained domain. Field list follows av
+// 8eb7142a (16 fields incl. kf_epoch_snap), not dffa10de's 15 — this fork has
+// already adopted the kf-cohort layout, so dffa10de's literal would not build.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_advance_leg_b_snap_rank_witness() {
+    let leg = PortfolioLegV16 {
+        active: kani::any(),
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        basis_pos_q: kani::any(),
+        a_basis: kani::any(),
+        k_snap: kani::any(),
+        f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
+        epoch_snap: kani::any(),
+        loss_weight: kani::any(),
+        b_snap: kani::any(),
+        b_rem: kani::any(),
+        b_epoch_snap: kani::any(),
+        b_stale: kani::any(),
+        stale: kani::any(),
+    };
+    let delta_b: u128 = kani::any();
+    let new_remainder: u128 = kani::any();
+    let remaining_after: u128 = kani::any();
+    match kani_kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after) {
+        Ok(l) => {
+            kani::cover!(delta_b > 0, "rank witness covers real B progress");
+            kani::cover!(
+                remaining_after != 0,
+                "rank witness covers a partial (still-stale) chunk"
+            );
+            kani::cover!(
+                remaining_after == 0,
+                "rank witness covers a chunk that clears the leg"
+            );
+            // THE RANK: b_snap moves FORWARD by exactly delta_b, so each
+            // successful chunk strictly decreases the leg's distance to its
+            // B target and B-settlement terminates in bounded chunks.
+            assert_eq!(l.b_snap, leg.b_snap.wrapping_add(delta_b));
+            assert!(l.b_snap >= leg.b_snap);
+            // the other two written fields, set exactly
+            assert_eq!(l.b_rem, new_remainder);
+            assert_eq!(l.b_stale, remaining_after != 0);
+            // every other leg field frozen
+            assert_eq!(l.active, leg.active);
+            assert_eq!(l.asset_index, leg.asset_index);
+            assert_eq!(l.market_id, leg.market_id);
+            assert_eq!(l.side, leg.side);
+            assert_eq!(l.basis_pos_q, leg.basis_pos_q);
+            assert_eq!(l.a_basis, leg.a_basis);
+            assert_eq!(l.k_snap, leg.k_snap);
+            assert_eq!(l.f_snap, leg.f_snap);
+            assert_eq!(l.kf_epoch_snap, leg.kf_epoch_snap);
+            assert_eq!(l.epoch_snap, leg.epoch_snap);
+            assert_eq!(l.loss_weight, leg.loss_weight);
+            assert_eq!(l.b_epoch_snap, leg.b_epoch_snap);
+            assert_eq!(l.stale, leg.stale);
+        }
+        Err(e) => {
+            kani::cover!(true, "rank witness covers the fail-closed rejection");
+            // fails closed, and only because the forward step overflowed
+            assert_eq!(e, V16Error::ArithmeticOverflow);
+            assert!(leg.b_snap.checked_add(delta_b).is_none());
+        }
     }
 }
