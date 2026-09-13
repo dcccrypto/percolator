@@ -11588,6 +11588,67 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
 }
 
 #[test]
+fn v16_terminal_retirement_refuses_to_burn_a_pending_insurance_recredit() {
+    // Coverage for the `first_terminal_claim_free_recredit_asset` gate that
+    // upstream 545e0224 added to `retire_terminal_unbudgeted_insurance_not_atomic`.
+    // Upstream shipped this gate with no direct-entry test: every upstream case
+    // reaches the equivalent state through `advance_terminal_slab_not_atomic`,
+    // which RECREDITS instead of erroring, so the gate never fires under the
+    // upstream suite. Without it the direct entry burns the whole vault,
+    // including the `SPENT` atoms still owed back to the paired insurance
+    // domain (and from there to the counterparty backing provider).
+    const RESIDUAL: u128 = 750;
+    const SPENT: u128 = 123;
+    const RECEIVABLE: u128 = 776;
+    const ASSET: usize = 2;
+
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[ASSET].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(3).unwrap();
+
+    // The two earlier gates do not dominate: no fresh backing and no provider
+    // earnings remain, so only the recredit gate can refuse this state.
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.backing_provider_earnings_total.get(), 0);
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(0),
+        Err(V16Error::LockActive),
+        "a pending claim-free recredit must block direct terminal retirement"
+    );
+    assert_eq!(market.header.vault.get(), RESIDUAL);
+    assert_eq!(market.header.insurance.get(), 0);
+
+    // The bounded crank is the only way forward, and it recredits rather than burns.
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3, 0, 0),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: ASSET,
+            amount: SPENT,
+        })
+    );
+    assert_eq!(market.header.insurance.get(), SPENT);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
 fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() {
     const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
     const ASSET: usize = ASSETS as usize - 1;

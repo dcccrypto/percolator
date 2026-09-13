@@ -9253,7 +9253,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// `LockActive` when already parked on one. This makes the prefix stable across authenticated
     /// slot changes without requiring every continuation to land in one slot. The wrapper owns the
     /// continuation state and closes external custody only for `ReadyToClose`.
-    /// (upstream 545e0224 / af7b4d2a / 6f3c5c12)
+    /// (upstream 545e0224 / a8f81352 / af7b4d2a / 91481480 / 0b63e1c5 / bb877cde /
+    /// 6f3c5c12; d87da490's modulo continuation gate was superseded by bb877cde
+    /// upstream and is deliberately absent here too)
     ///
     /// `additional_reserved` -- see `retire_terminal_unbudgeted_insurance_delta`
     /// doc -- is consulted only by the final `ReadyToClose` retirement. Expiry
@@ -21444,8 +21446,9 @@ impl RiskScoreV16 {
     }
 }
 
-/// Outcome of one bounded terminal cleanup step (upstream 545e0224). The wrapper
-/// owns the `ScanProgress` continuation and closes external custody only for
+/// Outcome of one bounded terminal cleanup step (upstream 545e0224; the
+/// `ScanProgress` variant from 91481480 / bb877cde). The wrapper owns the
+/// `ScanProgress` continuation and closes external custody only for
 /// `ReadyToClose`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalSlabOutcomeV16 {
