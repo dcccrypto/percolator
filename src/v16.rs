@@ -1818,6 +1818,21 @@ impl V16Core {
         (None, false)
     }
 
+    /// PRODUCTION KERNEL: every Live account-local obligation serviced by the
+    /// refresh continuation must make that continuation actionable. In
+    /// particular, clock-driven backing expiry is independent of certificate
+    /// epochs, so a still-current certificate cannot suppress expiry progress.
+    /// (upstream 0e773c77)
+    fn kernel_live_account_refresh_required(
+        live: bool,
+        cert_current: bool,
+        reset_obligation: bool,
+        released_obligation: bool,
+        lapsed_source_backing: bool,
+    ) -> bool {
+        live && (!cert_current || reset_obligation || released_obligation || lapsed_source_backing)
+    }
+
     /// Select the terminal owner-forfeit residual route. An unbookable positive
     /// residual commits Recovery as a successful transition so SVM rollback
     /// cannot erase the only path to resolved settlement. (upstream 650e3fdf)
@@ -12038,6 +12053,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     #[cfg(kani)]
+    pub fn kani_live_account_refresh_required(
+        live: bool,
+        cert_current: bool,
+        reset_obligation: bool,
+        released_obligation: bool,
+        lapsed_source_backing: bool,
+    ) -> bool {
+        V16Core::kernel_live_account_refresh_required(
+            live,
+            cert_current,
+            reset_obligation,
+            released_obligation,
+            lapsed_source_backing,
+        )
+    }
+
+    #[cfg(kani)]
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
@@ -14557,8 +14589,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// state to the ActionableState summary the self-classifying crank dispatches
     /// from. Each flag is exactly its production eligibility predicate, MODE-
     /// GATED so every flag that can be set has a currently-valid dispatch target:
-    ///   stale            — Live, health cert not current or a settled prior-reset
-    ///                      obligation still needs permissionless detachment
+    ///   stale            — Live, health cert not current, a settled prior-reset
+    ///                      obligation needs permissionless detachment, or source
+    ///                      backing used by the account has reached expiry
     ///   b_stale          — Live, some active leg has a cached or derived pending B settlement
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
@@ -14629,15 +14662,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = selected_assets.2;
         let reset_obligation_asset = selected_assets.3;
         let released_obligation_asset = selected_assets.4;
+        // Clock-driven, so it is classified at the AUTHENTICATED execution slot
+        // rather than the committed market slot (fork: _at_slot classification).
+        let lapsed_source_backing = self
+            .first_lapsed_source_backing_for_account_at_slot(account, now_slot)?
+            .is_some();
         let has_open_risk = liquidatable_asset.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.has_pending_residual();
-        let stale = live
-            && (!cert_current
-                || reset_obligation_asset.is_some()
-                || released_obligation_asset.is_some());
+        let stale = V16Core::kernel_live_account_refresh_required(
+            live,
+            cert_current,
+            reset_obligation_asset.is_some(),
+            released_obligation_asset.is_some(),
+            lapsed_source_backing,
+        );
         let b_stale = live && selected_assets.0.is_some();
         // A durable close ledger is independently actionable even after the trade
         // that created it cleared the bankrupt leg. AdvanceClose infers the asset
