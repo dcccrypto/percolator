@@ -8988,12 +8988,12 @@ fn v16_auto_crank_finalizes_recovery_into_resolved_without_moving_value() {
 // exists for. The reverse direction must fail closed: a caller cannot backdate
 // now_slot to classify against a clock the market has already moved past.
 //
-// ADAPTED CONTROL: upstream pins this with
-// v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate,
-// which drives the property through first_lapsed_source_backing_for_account_at_slot.
-// That function arrives with c09d4575/0e773c77 and is not on this branch yet, so
-// the same property is driven through the other clock-driven signal we do carry,
-// expired_close.
+// SECOND CONTROL: upstream also pins this with
+// v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate, which
+// drives the property through first_lapsed_source_backing_for_account_at_slot.
+// That test landed with 0e773c77 and is now on this branch too; this one keeps the
+// property pinned through the independent clock-driven signal, expired_close, and
+// additionally covers the backdated-slot refusal that the other one does not.
 #[test]
 fn v16_auto_crank_classifies_close_expiry_at_the_authenticated_slot() {
     use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
@@ -11818,6 +11818,83 @@ fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
     assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// upstream 0e773c77: the sibling test above never certifies the account, so its
+/// cert is stale and `stale` is already set by `!cert_current`. Here the account
+/// IS certified and no epoch moves, which is exactly the case the classifier used
+/// to miss: clock-driven backing expiry must be its own classifier input.
+#[test]
+fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 23);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 100).unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
+            .unwrap();
+        market
+            .full_account_refresh_not_atomic(&mut account)
+            .unwrap();
+        assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+
+        // Advancing time at an unchanged price/funding point does not bump any
+        // certificate epoch. Expiry must therefore be an independent classifier
+        // input rather than relying on an unrelated epoch to make the cert stale.
+        market
+            .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
+            .unwrap();
+        let cert = account.header.health_cert.try_to_runtime().unwrap();
+        assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+        assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
+        assert_eq!(cert.cert_risk_epoch, market.header.risk_epoch.get());
+        assert_eq!(
+            cert.cert_asset_set_epoch,
+            market.header.asset_set_epoch.get()
+        );
+
+        let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+        assert!(summary.stale, "lapsed source backing must select Refresh");
+        let observations = [AutoCrankObservationV16 {
+            asset_index: 0,
+            effective_price: 100,
+            funding_rate_e9: 0,
+        }];
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
+            )
+        );
+        let bucket = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+        assert_eq!(bucket.fresh_unliened_backing_num, 0);
+        assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+        assert_eq!(market.header.vault.get(), 140);
+        assert_eq!(account.header.capital.get(), 100);
+        assert_eq!(account.header.pnl.get(), 40);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+    }
 }
 
 /// Negative control for joining #172 (upstream 44847fd5) with #203's public crank:
