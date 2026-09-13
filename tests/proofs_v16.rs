@@ -8,7 +8,7 @@ use percolator::v16::{
     kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
     kani_apply_resolved_payout_receipt_payment, kani_auto_crank_leg_flags,
     kani_auto_crank_lifecycle_dispatchable, kani_auto_crank_refresh_asset,
-    kani_available_backing_num_for_source_credit_state,
+    kani_available_backing_num_for_source_credit_state, kani_b_settlement_pending,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_commit_declared_liquidation_recovery, kani_decode_account_kf_settlement_plan_key,
@@ -15495,6 +15495,45 @@ fn proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation() {
         assert_eq!(selected, Some(reset_index));
     } else {
         assert_eq!(selected, None);
+    }
+}
+
+#[kani::proof]
+fn proof_v16_auto_crank_b_settlement_pending_is_exact_and_fail_closed() {
+    let cached_stale: bool = kani::any();
+    let target_b: u128 = kani::any();
+    let b_snap: u128 = kani::any();
+
+    // FORK: upstream's harness carries no covers, and this repo classifies a
+    // SUCCESSFUL harness with unreachable covers as VACUOUS. Pin every arm of
+    // the predicate as reachable, including the latent case this commit exists
+    // for (cached bit false, derived delta positive).
+    kani::cover!(
+        target_b > b_snap && !cached_stale,
+        "latent B settlement: derived target delta alone makes the leg actionable"
+    );
+    kani::cover!(
+        target_b == b_snap && cached_stale,
+        "cached stale bit alone makes the leg actionable"
+    );
+    kani::cover!(
+        target_b == b_snap && !cached_stale,
+        "settled leg is not actionable"
+    );
+    kani::cover!(
+        target_b < b_snap,
+        "impossible snapshot reversal fails closed"
+    );
+
+    match kani_b_settlement_pending(cached_stale, target_b, b_snap) {
+        Ok(pending) => {
+            assert!(target_b >= b_snap);
+            assert_eq!(pending, cached_stale || target_b > b_snap);
+        }
+        Err(error) => {
+            assert_eq!(error, V16Error::RecoveryRequired);
+            assert!(target_b < b_snap);
+        }
     }
 }
 
