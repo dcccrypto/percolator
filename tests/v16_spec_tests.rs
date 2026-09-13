@@ -3281,6 +3281,107 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
 // at av 8eb7142a and at this fork: deleting the liquidation call leaves both
 // suites fully green, so the keeper-driven route was reached but never asserted.
 // This is the liquidation analogue of the rebalance test and closes that gap.
+/// The **Flip** route of `apply_position_delta_with_lookup_inner` — the branch
+/// taken when a position reverses sign in one fill, clearing the old leg and
+/// attaching a new one on the opposite side.
+///
+/// It was reached by **zero tests and zero proofs**. Measured on `3980add64`,
+/// three steps, because a silent probe alone proves nothing:
+///   1. the enclosing function IS reached — a probe at the route classifier
+///      fires with `route=Clear`;
+///   2. the Flip line itself compiles and panics work there — a sibling
+///      `Resize` poison at the identical line fires 3x, `cargo build` rc 0;
+///   3. a `panic!` at the Flip branch fires **zero times across 288 plain and
+///      337 fuzz tests**.
+///
+/// `panic!` rather than `Err`: an `Err` can be swallowed by a caller, which
+/// makes a green suite ambiguous when the claim is "this branch is never taken".
+///
+/// This test drives a genuine reversal through the real matched-trade mutator:
+/// A is long 1 lot against B short 1 lot, then a 2-lot trade in the opposite
+/// direction takes A to -1 and B to +1. Both accounts flip on the same fill,
+/// so one fixture covers the route from both sides.
+#[test]
+fn v16_matched_trade_reversing_a_position_takes_the_flip_route() {
+    let (mut header, mut markets) = market_fixture(1, 1_000_000);
+    let mut a_header = account_fixture(1, 41);
+    let mut b_header = account_fixture(1, 42);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    {
+        let mut a = PortfolioV16ViewMut::new(&mut a_header);
+        let mut b = PortfolioV16ViewMut::new(&mut b_header);
+        market.deposit_not_atomic(&mut a, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut b, 100_000_000).unwrap();
+        // A long 1 lot / B short 1 lot.
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut a,
+                &mut b,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+    {
+        let a_leg = a_header.legs[0].try_to_runtime().unwrap();
+        let b_leg = b_header.legs[0].try_to_runtime().unwrap();
+        assert_eq!(a_leg.side, SideV16::Long, "A opens long");
+        assert_eq!(b_leg.side, SideV16::Short, "B opens short");
+        assert_eq!(a_leg.basis_pos_q, signed_q(POS_SCALE));
+        assert_eq!(b_leg.basis_pos_q, -signed_q(POS_SCALE));
+    }
+
+    // The reversal: B takes the long side for 2 lots, so A goes +1 -> -1 and
+    // B goes -1 -> +1. Both cross zero in a single fill, which is exactly the
+    // Flip route's precondition (`current.signum() != new.signum()`, neither zero).
+    {
+        let mut a = PortfolioV16ViewMut::new(&mut a_header);
+        let mut b = PortfolioV16ViewMut::new(&mut b_header);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut b,
+                &mut a,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(2 * POS_SCALE),
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .expect("the reversing fill must be accepted");
+    }
+
+    let a_leg = a_header.legs[0].try_to_runtime().unwrap();
+    let b_leg = b_header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(a_leg.side, SideV16::Short, "A flipped long -> short");
+    assert_eq!(b_leg.side, SideV16::Long, "B flipped short -> long");
+    assert_eq!(
+        a_leg.basis_pos_q,
+        -signed_q(POS_SCALE),
+        "A holds exactly the reversed remainder"
+    );
+    assert_eq!(
+        b_leg.basis_pos_q,
+        signed_q(POS_SCALE),
+        "B holds exactly the reversed remainder"
+    );
+    assert!(a_leg.active && b_leg.active, "both legs stay attached");
+    assert_eq!(
+        a_leg.asset_index, 0,
+        "the flipped leg stays on the same asset"
+    );
+    market
+        .validate_shape()
+        .expect("aggregate conservation holds across the flip");
+}
+
 #[test]
 fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
     const SURVIVOR_Q: u128 = 13 * POS_SCALE;
