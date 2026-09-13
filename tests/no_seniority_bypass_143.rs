@@ -43,7 +43,8 @@ fn market_id_bytes() -> [u8; 32] {
 
 fn market_fixture(init_price: u64) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id_bytes(), cfg, 1, 0).unwrap();
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id_bytes(), cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     header
         .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, init_price, 1)
@@ -182,9 +183,17 @@ fn matched_settle_recycles_loser_principal_as_source_backing() {
         let b = PortfolioV16ViewMut::new(&mut b_h);
         assert_eq!(a.header.pnl.get(), 0, "loser loss settled from principal");
         assert_eq!(b.header.pnl.get(), 900_000, "winner nominal gain realized");
-        assert_eq!(b.header.reserved_pnl.get(), 0, "no warmup engaged on the winner's claim");
+        assert_eq!(
+            b.header.reserved_pnl.get(),
+            0,
+            "no warmup engaged on the winner's claim"
+        );
     }
-    assert_eq!(residual(&m), 0, "the book is at total stress: residual == 0");
+    assert_eq!(
+        residual(&m),
+        0,
+        "the book is at total stress: residual == 0"
+    );
 
     m.resolve_market_not_atomic(4).unwrap();
     let _ = close_resolved_to_completion(&mut m, &mut PortfolioV16ViewMut::new(&mut a_h));
@@ -203,7 +212,11 @@ fn stressed_winner_cannot_drain_funded_senior() {
     let (mut header, mut markets, mut a_h, mut b_h) = build_settled_pair(INSURANCE);
     let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
-    assert_eq!(residual(&m), 0, "precondition: total stress (residual == 0) with the senior present");
+    assert_eq!(
+        residual(&m),
+        0,
+        "precondition: total stress (residual == 0) with the senior present"
+    );
 
     m.resolve_market_not_atomic(4).unwrap();
     let _ = close_resolved_to_completion(&mut m, &mut PortfolioV16ViewMut::new(&mut a_h));
@@ -217,8 +230,16 @@ fn stressed_winner_cannot_drain_funded_senior() {
         0,
         "#143: a junior winner must not extract any atoms from the funded senior"
     );
-    assert_eq!(m.header.insurance.get(), INSURANCE, "the senior is left byte-for-byte intact");
-    assert_eq!(m.header.vault.get(), INSURANCE, "the only atoms left in the vault are the senior's");
+    assert_eq!(
+        m.header.insurance.get(),
+        INSURANCE,
+        "the senior is left byte-for-byte intact"
+    );
+    assert_eq!(
+        m.header.vault.get(),
+        INSURANCE,
+        "the only atoms left in the vault are the senior's"
+    );
     m.validate_shape().expect("aggregate conservation holds");
 }
 
@@ -232,14 +253,23 @@ fn winner_junior_profit_is_inert_in_live_before_loser_close() {
     let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     let mut b = PortfolioV16ViewMut::new(&mut b_h);
-    assert_eq!(b.header.pnl.get(), 900_000, "winner has a realized nominal gain in Live");
+    assert_eq!(
+        b.header.pnl.get(),
+        900_000,
+        "winner has a realized nominal gain in Live"
+    );
     assert!(
-        m.convert_released_pnl_to_capital_not_atomic(&mut b).is_err(),
+        m.convert_released_pnl_to_capital_not_atomic(&mut b)
+            .is_err(),
         "junior profit is not convertible to capital in Live before the loser closes"
     );
     assert!(
         m.withdraw_not_atomic(&mut b, 1).is_err(),
         "the account cannot withdraw while its leg is open / unsettled"
     );
-    assert_eq!(m.header.insurance.get(), 500_000, "senior untouched by the Live attempts");
+    assert_eq!(
+        m.header.insurance.get(),
+        500_000,
+        "senior untouched by the Live attempts"
+    );
 }
