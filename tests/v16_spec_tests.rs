@@ -3274,6 +3274,122 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         .validate_with_market(&market.as_view())
         .unwrap();
 }
+// Coverage for the SECOND call site upstream 65e7a7cd adds. That commit places
+// begin_zero_oi_residue_resets on BOTH unilateral reduction routes -- rebalance
+// and liquidation -- but ships only a rebalance test
+// (v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue). Measured
+// at av 8eb7142a and at this fork: deleting the liquidation call leaves both
+// suites fully green, so the keeper-driven route was reached but never asserted.
+// This is the liquidation analogue of the rebalance test and closes that gap.
+#[test]
+fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
+    const SURVIVOR_Q: u128 = 13 * POS_SCALE;
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut survivor_header = account_fixture(1, 22);
+    let mut counterparty_header = account_fixture(1, 23);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut counterparty, 100).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * MATCHED_Q / SURVIVOR_Q;
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    // Survivor holds a 13-lot basis whose effective size is 10 lots (a_long =
+    // 10/13). It carries zero capital, so maintenance (100% of notional) is
+    // unmet and the engine-selected close is the whole effective leg.
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+    survivor_header.health_cert.valid = 0;
+    counterparty_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(MATCHED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_short,
+        loss_weight: MATCHED_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    counterparty_header.active_bitmap[0] = V16PodU64::new(1);
+    counterparty_header.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+    let counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
+
+    market
+        .permissionless_crank_not_atomic(
+            &mut survivor,
+            PermissionlessCrankRequestV16 {
+                now_slot: 1,
+                asset_index: 0,
+                effective_price: 1,
+                funding_rate_e9: 0,
+                action: PermissionlessCrankActionV16::Refresh,
+            },
+        )
+        .unwrap();
+    let outcome = market
+        .liquidate_account_not_atomic(&mut survivor, LiquidationRequestV16 { asset_index: 0 })
+        .unwrap();
+
+    // The close exhausts effective OI on both sides; the residue reset that
+    // 65e7a7cd adds must then arm ResetPending so the auto-crank can retire the
+    // stranded 3-lot ADL basis residue.
+    assert_eq!(outcome.closed_q, MATCHED_Q);
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
 
 #[test]
 fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
