@@ -1900,6 +1900,20 @@ impl V16Core {
         )
     }
 
+    /// A portfolio-local cache may lag a market-level B update. The canonical
+    /// work predicate therefore includes the derived target delta and rejects an
+    /// impossible snapshot reversal instead of hiding it as `NoAction`.
+    fn kernel_b_settlement_pending(
+        cached_stale: bool,
+        target_b: u128,
+        b_snap: u128,
+    ) -> V16Result<bool> {
+        if target_b < b_snap {
+            return Err(V16Error::RecoveryRequired);
+        }
+        Ok(cached_stale || target_b > b_snap)
+    }
+
     /// PRODUCTION KERNEL: classify one account leg for the bounded auto-crank
     /// scans. A prior-reset obligation remains refreshable but can never be
     /// dispatched as liquidation work because its effective OI was removed by
@@ -1913,7 +1927,7 @@ impl V16Core {
         side_mode: SideModeV16,
         asset_epoch: u64,
         leg_epoch_snap: u64,
-        leg_b_stale: bool,
+        b_settlement_pending: bool,
     ) -> (bool, bool, bool, bool) {
         let lifecycle_dispatchable = Self::kernel_auto_crank_lifecycle_dispatchable(lifecycle);
         let prior_reset_obligation =
@@ -1921,7 +1935,7 @@ impl V16Core {
         let refresh = active && lifecycle_dispatchable;
         let liquidatable = refresh && basis_pos_q != 0 && side_oi_q != 0 && !prior_reset_obligation;
         (
-            active && leg_b_stale,
+            active && b_settlement_pending,
             refresh,
             liquidatable,
             active && prior_reset_obligation,
@@ -3217,6 +3231,15 @@ pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> b
 }
 
 #[cfg(kani)]
+pub fn kani_b_settlement_pending(
+    cached_stale: bool,
+    target_b: u128,
+    b_snap: u128,
+) -> V16Result<bool> {
+    V16Core::kernel_b_settlement_pending(cached_stale, target_b, b_snap)
+}
+
+#[cfg(kani)]
 #[allow(clippy::too_many_arguments)]
 pub fn kani_auto_crank_leg_flags(
     active: bool,
@@ -3226,7 +3249,7 @@ pub fn kani_auto_crank_leg_flags(
     side_mode: SideModeV16,
     asset_epoch: u64,
     leg_epoch_snap: u64,
-    leg_b_stale: bool,
+    b_settlement_pending: bool,
 ) -> (bool, bool, bool, bool) {
     V16Core::kernel_auto_crank_leg_flags(
         active,
@@ -3236,7 +3259,7 @@ pub fn kani_auto_crank_leg_flags(
         side_mode,
         asset_epoch,
         leg_epoch_snap,
-        leg_b_stale,
+        b_settlement_pending,
     )
 }
 
@@ -14494,7 +14517,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// GATED so every flag that can be set has a currently-valid dispatch target:
     ///   stale            — Live, health cert not current or a settled prior-reset
     ///                      obligation still needs permissionless detachment
-    ///   b_stale          — Live, some active leg flagged b-stale (has_b_stale_leg)
+    ///   b_stale          — Live, some active leg has a cached or derived pending B settlement
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
@@ -14573,7 +14596,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && (!cert_current
                 || reset_obligation_asset.is_some()
                 || released_obligation_asset.is_some());
-        let b_stale = live && Self::has_b_stale_leg(account)?;
+        let b_stale = live && selected_assets.0.is_some();
         // A durable close ledger is independently actionable even after the trade
         // that created it cleared the bankrupt leg. AdvanceClose infers the asset
         // and bankrupt side from this immutable ledger, so no caller hint can
@@ -14639,7 +14662,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// dispatch target is valid in the mode that the classifier gated its flag to.
     /// ENGINE asset self-selection (engine.md): scan the account's bounded legs and
     /// return, for each asset-scoped continuation, the engine-chosen asset_index —
-    /// the FIRST active b-stale leg's asset (SettleBChunk), and the FIRST active
+    /// the FIRST active leg with pending B settlement (either a cached stale bit or
+    /// a current B target above its snapshot), and the FIRST active
     /// leg whose asset is currently accrual/reduction-dispatchable (Active or
     /// DrainOnly, used for both Liquidate and the refresh accrual target). Recovery
     /// legs remain refreshable as part of the account scan, but cannot be selected
@@ -14685,6 +14709,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // a side-local OI reading would offer a liquidation that has
                 // nothing left to match. (upstream 9ffc4749)
                 let matched_oi = asset.oi_eff_long_q.min(asset.oi_eff_short_q);
+                let b_target = Self::b_target_for_leg_from_asset(asset, leg)?;
+                let b_settlement_pending =
+                    V16Core::kernel_b_settlement_pending(leg.b_stale, b_target, leg.b_snap)?;
                 let (b_stale, refresh, liquidatable, reset_obligation) =
                     V16Core::kernel_auto_crank_leg_flags(
                         true,
@@ -14694,7 +14721,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         side_mode,
                         asset_epoch,
                         leg.epoch_snap,
-                        leg.b_stale,
+                        b_settlement_pending,
                     );
                 b_stale_flags[slot] = b_stale;
                 refresh_flags[slot] = refresh;
