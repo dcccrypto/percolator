@@ -5178,6 +5178,200 @@ fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     market.validate_shape().unwrap();
 }
 
+fn flat_source_credit_lien_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut winner_header = account_fixture(1, 10);
+    let mut counterparty_header = account_fixture(1, 11);
+    let claim = 100;
+    let claim_num = claim * BOUND_SCALE;
+    winner_header.pnl = V16PodI128::new(claim as i128);
+    winner_header.source_domains[0].domain = V16PodU32::new(0);
+    winner_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    winner_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut counterparty, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    let open = TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_q(10 * POS_SCALE),
+        exec_price: 1,
+        fee_bps: 0,
+    };
+    // This fork charges the fee to the taker only, so the trade entrypoint carries
+    // `taker_is_long_account`. fee_bps is 0 here, so the flag is economically inert
+    // and only satisfies the fork signature.
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut counterparty,
+            open,
+            true,
+        )
+        .unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut counterparty,
+            TradeRequestV16 {
+                size_q: -open.size_q,
+                ..open
+            },
+            true,
+        )
+        .unwrap();
+    drop(market);
+    drop(winner);
+    drop(counterparty);
+    (header, markets, winner_header)
+}
+
+#[test]
+fn v16_auto_crank_releases_flat_source_credit_lien_for_conversion() {
+    const CLAIM: u128 = 100;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+
+    assert!(active_bitmap_is_empty(
+        winner.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_ne!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0,
+        "the public trades must reach the flat retained-lien state"
+    );
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut winner,
+            AutoCrankWorkV16 {
+                now_slot: market.header.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("a flat funded source claim must have a bounded crank continuation");
+    assert_eq!(result.selected, AutoCrankPlanV16::ReleaseSourceLiens);
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0,
+        "the crank must release the obsolete source-credit encumbrance"
+    );
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("released source-backed PnL must become convertible"),
+        CLAIM
+    );
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+// The A6 classifier must REJECT as well as accept. fdf11670 ships only the
+// positive fixture, so every rejection arm of
+// account_source_credit_liens_are_fresh_and_releasable was uncovered: gutting the
+// whole freshness/sufficiency block left the suite green. These two arms are the
+// reachable ones for this fixture (it funds no insurance leg).
+#[test]
+fn v16_auto_crank_does_not_release_source_liens_against_stale_backing() {
+    // (a) backing that has gone through the CANONICAL expiry transition.
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let winner = PortfolioV16ViewMut::new(&mut winner_header);
+        let now = market.header.current_slot.get();
+        assert!(
+            market
+                .build_actionable_summary_at_slot(&winner.as_view(), now)
+                .unwrap()
+                .source_liens_releasable,
+            "fixture must start releasable, or the rejection below proves nothing"
+        );
+        drop(winner);
+        market
+            .expire_source_backing_bucket_not_atomic(0, 100)
+            .unwrap();
+    }
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let now = market.header.current_slot.get();
+    assert!(
+        !market
+            .build_actionable_summary_at_slot(&winner.as_view(), now)
+            .unwrap()
+            .source_liens_releasable,
+        "expired backing must not classify as releasable"
+    );
+    assert_ne!(
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: now,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .map(|r| r.selected),
+        Ok(AutoCrankPlanV16::ReleaseSourceLiens),
+        "the crank must not dispatch a release against expired backing"
+    );
+    drop(market);
+    drop(winner);
+
+    // (b) a bucket that no longer carries enough VALID LIENED backing to cover the
+    // lien it is supposed to be releasing.
+    let (mut header2, mut markets2, mut winner_header2) = flat_source_credit_lien_fixture();
+    let mut bucket = markets2[0].engine.backing_long.try_to_runtime().unwrap();
+    bucket.valid_liened_backing_num = 0;
+    markets2[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    let market2 = MarketGroupV16ViewMut::new(&mut header2, &mut markets2);
+    let winner2 = PortfolioV16ViewMut::new(&mut winner_header2);
+    let now2 = market2.header.current_slot.get();
+    assert!(
+        !market2
+            .build_actionable_summary_at_slot(&winner2.as_view(), now2)
+            .unwrap()
+            .source_liens_releasable,
+        "a lien exceeding the bucket's valid liened backing must not classify as \
+         releasable"
+    );
+}
+
 #[test]
 fn v16_residual_reward_credit_is_capped_by_available_crystallized_loss() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
@@ -7224,6 +7418,7 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
             && !summary.pending_close
             && !summary.expired_close
             && !summary.liquidatable
+            && !summary.source_liens_releasable
             && !summary.recovery_eligible
             && !summary.resolved_winner,
         "no other actionable class on a fresh empty account"
@@ -8931,6 +9126,23 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         true,
     );
 
+    // --- A6 flat source lien: release uses only the current certificate and
+    // committed source ledgers, so no oracle observation may gate the exit.
+    // now_slot is the fixture's OWN current_slot (1, advanced by the two trades),
+    // not 0: the classifier rejects a slot regression with InvalidConfig, so
+    // upstream's `0` makes both dispatches Err and its `if let Ok(..)` form passes
+    // this case VACUOUSLY. This fork's expect_committed_dispatch_ok=true refuses
+    // that, so the case is pinned at the slot where the release really dispatches.
+    assert_observation_independent(
+        "flat_source_lien",
+        flat_source_credit_lien_fixture,
+        0,
+        1,
+        AutoCrankPlanV16::ReleaseSourceLiens,
+        false,
+        true,
+    );
+
     // --- A4 expired_close: DeclareRecovery needs no price -> observation REDUNDANT.
     assert_observation_independent(
         "expired_close",
@@ -8972,7 +9184,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         true,
     );
 
-    // --- A6 terminal Recovery: the next step is a value-neutral transition to
+    // --- A7 terminal Recovery: the next step is a value-neutral transition to
     // Resolved and needs no oracle observation.
     assert_observation_independent(
         "finalize_recovery",
@@ -8992,7 +9204,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         true,
     );
 
-    // --- A7 resolved_winner: CloseResolved needs no price -> observation REDUNDANT.
+    // --- A8 resolved_winner: CloseResolved needs no price -> observation REDUNDANT.
     // (Previously only its CLASSIFICATION was tested; the empty-observation DISPATCH
     // — including a legitimate RecoveryRequired terminal — was uncovered.)
     assert_observation_independent(
