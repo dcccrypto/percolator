@@ -23097,7 +23097,6 @@ mod margin_rounding_tests {
     }
 }
 
-
 /// GH#164 tripwire: the ATTACH writer's `oi_eff` contribution must not depend
 /// on the attaching side's own `a` scale.
 ///
