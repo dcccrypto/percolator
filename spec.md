@@ -1047,8 +1047,17 @@ For account `i` with nonzero basis on side `s`:
 
 ```text
 if epoch_snap_i != epoch_s: effective_pos_q(i) = 0
-else effective_abs_pos_q = floor(abs(basis_pos_q_i) * A_s / a_basis_i)
+else effective_abs_pos_q = ceil(abs(basis_pos_q_i) * A_s / a_basis_i)
 effective_pos_q = sign(basis_pos_q_i) * effective_abs_pos_q
+```
+
+The effective quantity rounds UP, not down. `kernel_adl_effective_quantity_ceil` computes it with
+`mul_div_ceil_u128_or_wide` — the function is named for the rounding it performs. Rounding down would
+understate the quantity an ADL'd leg still economically carries, and every consumer of it (health,
+OI aggregation, liquidation sizing, full-close detection) would then size against a position smaller
+than the one that exists. Up is the conservative direction here.
+
+```text
 ```
 
 The exact bilateral trade OI after-values are:
