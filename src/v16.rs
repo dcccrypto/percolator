@@ -18977,7 +18977,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
-        if has_source_claims && self.account_has_active_source_claim_exposure(&account.as_view())? {
+        if has_source_claims
+            && (Self::account_has_source_liens(&account.as_view())
+                || self.account_has_active_source_claim_exposure(&account.as_view())?)
+        {
             return Err(V16Error::LockActive);
         }
         let converted = if has_source_claims {
@@ -18991,23 +18994,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let vault_before = self.header.vault.get();
-        let consumption = if has_source_claims {
-            self.consume_validated_account_source_credit_not_atomic(
-                account, converted, false, true,
-            )?
-            .0
+        let (consumption, preburned_source_claim_num) = if has_source_claims {
+            let (consumption, preburned_source_claim_num, _) = self
+                .consume_validated_account_source_credit_not_atomic(
+                    account, converted, true, true,
+                )?;
+            (consumption, preburned_source_claim_num)
         } else {
             let residual = self.residual();
             let junior_bound = self.junior_claim_bound();
-            SourceCreditConsumptionV16 {
-                face_burn: self.face_claim_to_burn_for_support(
-                    converted,
-                    residual,
-                    junior_bound,
-                )?,
-                counterparty_credit_consumed: 0,
-                insurance_credit_consumed: 0,
-            }
+            (
+                SourceCreditConsumptionV16 {
+                    face_burn: self.face_claim_to_burn_for_support(
+                        converted,
+                        residual,
+                        junior_bound,
+                    )?,
+                    counterparty_credit_consumed: 0,
+                    insurance_credit_consumed: 0,
+                },
+                0,
+            )
         };
         let face_i128 =
             i128::try_from(consumption.face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -19017,7 +19024,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get()
             .checked_sub(face_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_after_source_claim_burn(account, new_pnl, preburned_source_claim_num)?;
         account.header.capital = V16PodU128::new(
             account
                 .header
