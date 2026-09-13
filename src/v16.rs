@@ -15808,6 +15808,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Gated under fork-facade; the production path (None) is zero-overhead.
         #[cfg(feature = "fork-facade")] instruction_threshold_bps_opt: Option<u128>,
     ) -> V16Result<HLockLaneV16> {
+        let account_scoped = account.is_some();
+        let bankruptcy_hlock_active = decode_bool(self.header.bankruptcy_hlock_active)?;
         if let Some(account) = account {
             if decode_bool(account.header.liquidation_lock)?
                 || decode_bool(account.header.stale_state)?
@@ -15829,7 +15831,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if decode_bool(self.header.threshold_stress_active)?
-            || decode_bool(self.header.bankruptcy_hlock_active)?
+            || (!account_scoped && bankruptcy_hlock_active)
             || decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
             || instruction_bankruptcy_candidate
         {
