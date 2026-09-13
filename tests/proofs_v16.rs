@@ -17,7 +17,7 @@ use percolator::v16::{
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
     kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap,
-    kani_kernel_initial_margin_gate, kani_kernel_locked_margin_gate,
+    kani_kernel_initial_margin_gate, kani_kernel_locked_margin_gate, kani_kernel_settle_principal,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_healthy_after_close,
@@ -18718,6 +18718,108 @@ fn proof_v16_kernel_accumulate_batch_trade_exact_fold() {
             } else {
                 assert_eq!(e, V16Error::ArithmeticOverflow);
             }
+        }
+    }
+}
+
+// Upstream 99bd07cf `contract_check_kernel_settle_principal`, carried under this
+// fork's `proof_v16_*` naming. Upstream states the property as a
+// `kani::requires`/`kani::ensures` contract behind its `contracts` feature and
+// checks it with `#[kani::proof_for_contract]`; this fork has no `contracts`
+// feature and no `cfg_attr`, so the precondition is carried as the identical
+// `kani::assume` and the postcondition is asserted directly over the same
+// unconstrained (capital, c_tot, pnl) domain.
+//
+// THE PROPERTY (principal layer of the loss waterfall): the loss is paid from
+// principal FIRST, `paid == min(capital, |pnl|)`, and BOTH the account's
+// capital and the group junior total c_tot drop by EXACTLY that same `paid` -
+// the principal debit leaves the junior pool by exactly what the account loses,
+// so nothing is created, leaked or stranded - and the loss shrinks by exactly
+// `paid`, never overshooting past zero.
+//
+// FORK STRENGTHENING 1 (covers): upstream's harness body carries no assertion
+// and no `kani::cover!` at all - the property lives entirely in the `ensures`
+// attribute - so under this fork's vacuity policy it would prove nothing. The
+// cover set below pins that every lane of the waterfall is actually reachable.
+// COVERS ARE MEASURED BEFORE THE ASSERTIONS ON PURPOSE: a failed assertion
+// constrains the downstream cover checks, so covers placed after the asserts
+// collapse to UNSATISFIABLE whenever a property breaks - which is exactly how a
+// vacuous "failure" disguises itself as a counterexample. Measured first, the
+// cover count stays 8/8 under a broken property and the FAILURE is real.
+//
+// FORK STRENGTHENING 2 (exact error): upstream's contract says only
+// `Err(_) => true`, which permits ANY error on ANY input. Under upstream's own
+// precondition the three other fallible steps are unreachable (`capital - paid`
+// cannot underflow because `paid <= capital`; `i128::try_from(paid)` cannot
+// fail because `|pnl| <= i128::MAX` once `pnl > i128::MIN`; `pnl + paid` cannot
+// overflow because `pnl <= 0` and `paid >= 0`), so the failure mode is EXACTLY
+// the junior-total underflow. This harness pins that biconditional, which
+// upstream leaves unproven: Err <=> c_tot < paid, and the error is
+// CounterUnderflow.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_settle_principal_exact_paid_and_conservation() {
+    let capital: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    // upstream's kani::requires, verbatim
+    kani::assume(pnl <= 0 && pnl > i128::MIN);
+
+    // the expected settlement, recomputed independently of the kernel
+    let loss = pnl.unsigned_abs();
+    let expected_paid = if capital < loss { capital } else { loss };
+
+    match kani_kernel_settle_principal(capital, c_tot, pnl) {
+        Ok((paid, new_capital, new_c_tot, new_pnl)) => {
+            // --- reachability first (see FORK STRENGTHENING 1) ---
+            kani::cover!(true, "settlement covers a successful principal debit");
+            kani::cover!(
+                paid == capital && paid > 0,
+                "covers the capital-limited lane: principal fully consumed"
+            );
+            kani::cover!(
+                paid == loss && paid > 0,
+                "covers the loss-limited lane: loss fully paid from principal"
+            );
+            kani::cover!(
+                paid == 0,
+                "covers the zero-paid lane that raises the bankruptcy h-lock"
+            );
+            kani::cover!(
+                new_pnl < 0,
+                "covers a residual loss surviving the principal layer"
+            );
+            kani::cover!(
+                new_pnl == 0,
+                "covers the loss fully extinguished by principal"
+            );
+            kani::cover!(
+                new_c_tot < c_tot,
+                "covers the junior total strictly shrinking"
+            );
+
+            // --- the postcondition (upstream's ensures, term by term) ---
+            // Ok is reachable only when the junior total actually covers the debit
+            assert!(c_tot >= expected_paid);
+            // paid == min(capital, |pnl|)
+            assert_eq!(paid, expected_paid);
+            // exact debit of capital and the junior total by the SAME paid
+            assert_eq!(new_capital, capital - paid);
+            assert_eq!(new_c_tot, c_tot - paid);
+            // conservation: each layer drops by exactly paid (no leak)
+            assert_eq!(new_capital.wrapping_add(paid), capital);
+            assert_eq!(new_c_tot.wrapping_add(paid), c_tot);
+            // loss is reduced by exactly the principal paid, and never overshoots
+            assert_eq!(new_pnl, pnl + (paid as i128));
+            assert!(new_pnl <= 0);
+        }
+        Err(e) => {
+            kani::cover!(true, "covers the junior-total underflow rejection");
+            // FORK STRENGTHENING 2: the ONLY reachable failure is the
+            // junior-total underflow; upstream's contract permits any error.
+            assert_eq!(e, V16Error::CounterUnderflow);
+            assert!(c_tot < expected_paid);
         }
     }
 }
