@@ -16,9 +16,29 @@
 //!   2. a winner realizes only backing-limited support, so under `residual == 0` it
 //!      cannot reach atoms that back a funded senior.
 //!
-//! These tests pin that property so a future change to the settlement / source-
-//! backing / aggregate-total code that weakens either guard is caught here before it
-//! merges. Everything is driven through REAL engine mutators — deposit, the matched
+//! These tests pin that property. What they actually catch was MEASURED by mutation,
+//! not assumed, because a tripwire nobody has seen fire is not a tripwire:
+//!
+//!   * the fixture genuinely reaches #143's mechanism — a `panic!` probe inside
+//!     `account_source_realizable_support` fires in ALL THREE tests, each with
+//!     `face_claim = 900_000`, the winner's exact nominal gain;
+//!   * inverting the seniority boundary — forcing
+//!     `consume_validated_account_source_credit_not_atomic` down its insurance branch
+//!     instead of the counterparty-backing branch — turns
+//!     `stressed_winner_cannot_drain_funded_senior` RED (`close_resolved errored:
+//!     LockActive`). That branch, not the two invariants named above, is where the
+//!     seniority decision is actually taken, and it IS pinned here;
+//!   * invariant 1 is a DETECTOR, not a barrier. Deleting the `source_fresh_backing`
+//!     stage of `validate_header_aggregate_totals` leaves all three tests green,
+//!     because relaxing a validator cannot by itself move an atom. It would stop the
+//!     engine noticing a drain; it cannot cause one, so no end-state test can bite on it;
+//!   * invariant 2's backing limit is NOT pinned at these numbers. Making
+//!     `account_source_realizable_support` return `face_claim` in full also leaves all
+//!     three green, because the loser's recycled principal (900_000) exactly backs the
+//!     winner's face claim (900_000) — the haircut is non-binding in this fixture.
+//!     A case with the loser's loss SMALLER than the winner's gain would pin it; owed.
+//!
+//! Everything is driven through REAL engine mutators — deposit, the matched
 //! trade, the permissionless Refresh crank (which crashes the mark and settles
 //! lazily), deposit_domain_insurance, resolve, and close_resolved. No pnl / capital /
 //! backing / insurance field is hand-poked.
