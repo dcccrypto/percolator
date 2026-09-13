@@ -845,7 +845,7 @@ Before any OI-increasing operation rejects on `ResetPending`, it MUST call `mayb
 Let:
 
 ```text
-Residual = V - (C_tot + I + E + F)   // checked, and invariant guarantees nonnegative
+Residual = V - (C_tot + I + E + F)   // SATURATING: floors at 0, it does not error
                                      // E = backing_provider_earnings_total
                                      // F = source_fresh_backing_total (BOUND_SCALE-normalised)
 PosPNL_i = max(PNL_i, 0)
@@ -854,7 +854,10 @@ ReleasedPos_i = PosPNL_i on Resolved
 PendingWarmupTot = PNL_pos_tot - PNL_matured_pos_tot = sum R_i on Live
 ```
 
-`E` and `F` are senior and MUST be excluded from `Residual`. `E` is utilization
+`E` and `F` are senior and MUST be excluded from `Residual`. The subtraction
+and every addition inside it saturate (`saturating_sub` / `saturating_add` in `residual()`), so a
+senior stack exceeding `V` yields `Residual = 0` silently rather than a checked error — the floor is
+what guarantees nonnegativity, not an invariant that would otherwise be caught. `E` is utilization
 fees already owed to backing providers; `F` is backing earmarked to a specific
 source-backed claim, withdrawable by its provider whenever the domain is fully
 backed. Counting either in the junior pool promises the same vault atoms to two
