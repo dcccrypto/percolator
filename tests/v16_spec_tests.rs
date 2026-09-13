@@ -9208,9 +9208,11 @@ fn v16_auto_crank_finalizes_recovery_into_resolved_without_moving_value() {
 // SECOND CONTROL: upstream also pins this with
 // v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate, which
 // drives the property through first_lapsed_source_backing_for_account_at_slot.
-// That test landed with 0e773c77 and is now on this branch too; this one keeps the
-// property pinned through the independent clock-driven signal, expired_close, and
-// additionally covers the backdated-slot refusal that the other one does not.
+// That test landed with 0e773c77 and was sharpened by 867fbdc9 into its
+// !stale-at-committed / stale-at-authenticated form; both are on this branch. This
+// one keeps the property pinned through the independent clock-driven signal,
+// expired_close, and additionally covers the backdated-slot refusal that the other
+// one does not.
 #[test]
 fn v16_auto_crank_classifies_close_expiry_at_the_authenticated_slot() {
     use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
@@ -12098,18 +12100,50 @@ fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
-/// upstream 0e773c77: the sibling test above never certifies the account, so its
-/// cert is stale and `stale` is already set by `!cert_current`. Here the account
-/// IS certified and no epoch moves, which is exactly the case the classifier used
-/// to miss: clock-driven backing expiry must be its own classifier input.
+/// upstream 0e773c77 + 867fbdc9: the sibling test above never certifies the
+/// account, so its cert is stale and `stale` is already set by `!cert_current`.
+/// Here the account IS certified and no epoch moves, which is exactly the case
+/// the classifier used to miss: clock-driven backing expiry must be its own
+/// classifier input.
+///
+/// 867fbdc9 sharpened this from "expiry is a classifier input" to "expiry is
+/// classified at the AUTHENTICATED slot": the committed market slot stays BEFORE
+/// the bucket's expiry, so `build_actionable_summary` (committed clock) must
+/// report `!stale` while `build_actionable_summary_at_slot(.., 10)` reports
+/// `stale` — with no observation supplied and no mutation of the market clock.
+/// The pre-867fbdc9 form advanced the committed slot past expiry with an
+/// `accrue_asset_to_not_atomic` hint, so it passed identically whether the
+/// classifier read `now_slot` or `self.header.current_slot`; the open leg added
+/// here is what forces the first crank to be a clock catch-up (Refresh accrues
+/// the leg's asset to `now_slot`) and the second to be the actual expiry.
 #[test]
 fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 23);
+    let mut counterparty_header = account_fixture(1, 24);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        market.deposit_not_atomic(&mut account, 100).unwrap();
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut account, 10_000).unwrap();
+        market
+            .deposit_not_atomic(&mut counterparty, 10_000)
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut account,
+                &mut counterparty,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                // fork: taker-only fee needs the taker side; fee_bps is 0 here so
+                // no fee is charged either way.
+                true,
+            )
+            .unwrap();
         market
             .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
             .unwrap();
@@ -12121,12 +12155,9 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             .unwrap();
         assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
 
-        // Advancing time at an unchanged price/funding point does not bump any
-        // certificate epoch. Expiry must therefore be an independent classifier
-        // input rather than relying on an unrelated epoch to make the cert stale.
-        market
-            .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
-            .unwrap();
+        // The committed market slot remains before expiry and every certificate
+        // epoch is current. Authenticated execution time must nevertheless make
+        // the lapsed bucket actionable without an oracle hint.
         let cert = account.header.health_cert.try_to_runtime().unwrap();
         assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
         assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
@@ -12135,20 +12166,61 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             cert.cert_asset_set_epoch,
             market.header.asset_set_epoch.get()
         );
+        let committed_before = market.header.current_slot.get();
+        assert!(
+            committed_before < 5,
+            "fixture: the committed slot must sit BEFORE the bucket expiry, got {committed_before}"
+        );
 
-        let summary = market.build_actionable_summary(&account.as_view()).unwrap();
-        assert!(summary.stale, "lapsed source backing must select Refresh");
-        let observations = [AutoCrankObservationV16 {
-            asset_index: 0,
-            effective_price: 100,
-            funding_rate_e9: 0,
-        }];
+        assert!(
+            !market
+                .build_actionable_summary(&account.as_view())
+                .unwrap()
+                .stale
+        );
+        assert!(
+            market
+                .build_actionable_summary_at_slot(&account.as_view(), 10)
+                .unwrap()
+                .stale
+        );
+        assert_eq!(
+            market.header.current_slot.get(),
+            committed_before,
+            "classification is pure: the committed clock must not move"
+        );
+
+        let catchup = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            catchup.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        assert_eq!(market.header.current_slot.get(), 10);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .status,
+            BackingBucketStatusV16::Fresh
+        );
+
         let result = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
                 AutoCrankWorkV16 {
                     now_slot: 10,
-                    observations: &observations,
+                    observations: &[],
                     resolved_close_fee_rate_per_slot: 0,
                 },
             )
@@ -12167,8 +12239,8 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
         assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
         assert_eq!(bucket.fresh_unliened_backing_num, 0);
         assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
-        assert_eq!(market.header.vault.get(), 140);
-        assert_eq!(account.header.capital.get(), 100);
+        assert_eq!(market.header.vault.get(), 20_040);
+        assert_eq!(account.header.capital.get(), 10_000);
         assert_eq!(account.header.pnl.get(), 40);
         market.validate_shape().unwrap();
         account.validate_with_market(&market.as_view()).unwrap();
