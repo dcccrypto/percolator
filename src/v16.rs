@@ -1924,8 +1924,8 @@ impl V16Core {
     }
 
     /// PRODUCTION KERNEL: ordinary refresh accrual and liquidation can target
-    /// only a live or draining asset. Recovery legs remain account obligations,
-    /// but selecting one as the action asset would deterministically fail.
+    /// only a live or draining asset. Recovery uses a separate committed-state
+    /// refresh fallback and can never be selected for accrual or liquidation.
     fn kernel_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
         matches!(
             lifecycle,
@@ -14707,9 +14707,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// the FIRST active leg with pending B settlement (either a cached stale bit or
     /// a current B target above its snapshot), and the FIRST active
     /// leg whose asset is currently accrual/reduction-dispatchable (Active or
-    /// DrainOnly, used for both Liquidate and the refresh accrual target). Recovery
-    /// legs remain refreshable as part of the account scan, but cannot be selected
-    /// as the action asset because both accrual and liquidation reject them. The
+    /// DrainOnly, used for both Liquidate and the ORDINARY refresh accrual
+    /// target), falling back — for refresh only — to the FIRST Recovery leg,
+    /// which takes the committed-state refresh path instead. Recovery legs are
+    /// never selected for accrual or liquidation: both reject their lifecycle. The
     /// selection is proven in-range / actionable / first-match / complete by the
     /// first_actionable_slot contract; the slot->asset_index and lifecycle filter
     /// are bound to production state here.
@@ -14736,6 +14737,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut recovery_refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut released_obligation_asset = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -14767,6 +14769,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     );
                 b_stale_flags[slot] = b_stale;
                 refresh_flags[slot] = refresh;
+                recovery_refresh_flags[slot] = asset.lifecycle == AssetLifecycleV16::Recovery;
                 liquidation_flags[slot] = liquidatable;
                 // A legacy Normal-mode leg whose effective OI is already exhausted
                 // is a reset obligation too, or it stays uncrankable after upgrade.
@@ -14798,7 +14801,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         };
         let b_stale_asset = asset_of(V16Core::first_actionable_slot(b_stale_flags))?;
-        let refresh_asset = asset_of(V16Core::first_actionable_slot(refresh_flags))?;
+        let ordinary_refresh_asset = asset_of(V16Core::first_actionable_slot(refresh_flags))?;
+        let recovery_refresh_asset =
+            asset_of(V16Core::first_actionable_slot(recovery_refresh_flags))?;
+        let refresh_asset = V16Core::kernel_auto_crank_refresh_asset(
+            ordinary_refresh_asset,
+            recovery_refresh_asset,
+        );
         let liquidatable_asset = asset_of(V16Core::first_actionable_slot(liquidation_flags))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
@@ -15001,7 +15010,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // observation or committed state; if no active asset exists, use
                 // the first supplied observation to give the refresh a price.
                 let (ai, obs) = match asset_index {
-                    Some(i) => (i, obs_or_current_asset(self, i)?),
+                    Some(i) => {
+                        if self.asset_state(i)?.lifecycle == AssetLifecycleV16::Recovery {
+                            return Ok(AutoCrankResultV16 {
+                                selected: plan,
+                                outcome: AutoCrankOutcomeV16::Progressed(
+                                    self.refresh_recovery_account_from_committed_state_not_atomic(
+                                        account,
+                                        i,
+                                        work.now_slot,
+                                    )?,
+                                ),
+                            });
+                        }
+                        (i, obs_or_current_asset(self, i)?)
+                    }
                     None => {
                         let o = work
                             .observations
@@ -15172,6 +15195,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             protective_progress,
         )?;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    }
+
+    /// Refresh a Recovery leg from committed engine state without attempting
+    /// oracle accrual. Recovery freezes the asset's mark/funding trajectory, but
+    /// accounts must still crystallize already-committed K/F/B and source-expiry
+    /// work before their owners can submit matched risk-reducing trades.
+    fn refresh_recovery_account_from_committed_state_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.validate_unconfigured_market_tail()?;
+        if now_slot < self.header.current_slot.get()
+            || self.asset_state(asset_index)?.lifecycle != AssetLifecycleV16::Recovery
+            || Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?.is_none()
+        {
+            return Err(V16Error::NonProgress);
+        }
+
+        // Classification uses the authenticated execution slot. Normalize the
+        // same first expired source before the legacy refresh helper, which
+        // otherwise consults only the committed market slot.
+        if let Some(domain) =
+            self.first_lapsed_source_backing_for_account_at_slot(&account.as_view(), now_slot)?
+        {
+            self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
+            self.validate_shape_audit_scan()?;
+            account.validate_with_market(&self.as_view())?;
+            return Ok(PermissionlessProgressOutcomeV16::SourceBackingExpired { domain });
+        }
+
+        let outcome = match self.refresh_account_and_certify_not_atomic(
+            account,
+            None,
+            self.header.config.public_b_chunk_atoms.get(),
+            true,
+        )? {
+            AccountRefreshCertOutcomeV16::Certified(_) => {
+                PermissionlessProgressOutcomeV16::AccountCurrent
+            }
+            AccountRefreshCertOutcomeV16::BChunk(chunk) => {
+                PermissionlessProgressOutcomeV16::AccountBChunk(chunk)
+            }
+            AccountRefreshCertOutcomeV16::SourceBackingExpired(domain) => {
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain }
+            }
+        };
+        self.validate_shape_audit_scan()?;
+        account.validate_with_market(&self.as_view())?;
+        Ok(outcome)
     }
 
     fn active_leg_slot_for_asset(
