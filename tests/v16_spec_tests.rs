@@ -5440,7 +5440,7 @@ fn v16_principal_loss_crystallizes_residual_budget_monotonically() {
 }
 
 #[test]
-fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
+fn v16_source_backed_conversion_ignores_unrelated_historical_bankruptcy() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 18);
     let claim = 20u128;
@@ -5478,6 +5478,7 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(10);
     markets[0].engine.insurance_domain_spent_short = V16PodU128::new(5);
 
+    header.bankruptcy_hlock_active = 1;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     market
