@@ -10,10 +10,15 @@
 //!
 //! Coverage:
 //!   A-1  — admit-threshold (h_lock_lane threshold gate) + dual-path equivalence.
-//!   A-6  — stress-envelope writer + solvency interaction.
-//!   A-9  — fee-policy mutator: shape-only shim (bounds/persist/isolation) + DIRECT solvency harness.
+//!   A-6  — stress-envelope clear + validate_shape sentinel pairing (header fields only).
+//!   A-9  — DIRECT validate_public_user_fund solvency harness over symbolic fee fields.
 //!   A-10 — max_price_move_bps_per_slot upper bound.
-//!   A-4  — fork_facade equity/IM pub-lifts.
+//!
+//! Deleted as unreachable (#167/#168): the A-6 stress-envelope WRITER
+//! (`apply_stress_envelope_progress`), the A-9 fee-policy MUTATOR and its Kani shape twin, and
+//! the A-4 `fork_facade` alias module. No wrapper instruction ever called any of them, so their
+//! nine harnesses verified code that cannot execute on chain. The header fields they touched are
+//! unchanged, and the harnesses that pin those fields (clear, sentinel pairing, header ABI) stay.
 //!   lp_vault — LP Vault share-math (fork-facade module) + wide-math conservation.
 //!   header-abi — +48B A-6 insertion offset correctness.
 //!   lp-non-drift — production inequality gate soundness.
@@ -112,9 +117,10 @@ fn proof_v17_lp_vault_cooldown_enforcement() {
 }
 
 // ============================================================================
-// A-6 — stress envelope writer. Frozen carries the dormant `threshold_stress_active`
-// flag; the fork's writer makes it live via a consumption accumulator + slot/epoch
-// sentinels. Re-grafted onto the zero-copy ViewMut header. encode_bool maps true→1/
+// A-6 — stress envelope fields. Frozen carries the dormant `threshold_stress_active`
+// flag plus a consumption accumulator + slot/epoch sentinels. The fork's WRITER that was
+// meant to make it live had no production caller and was deleted (#167); what remains
+// live is the clear (called by resolve_market_not_atomic) and the validate_shape pairing. encode_bool maps true→1/
 // false→0, so the flag is checked as a raw u8 (codec fns are crate-private).
 // ============================================================================
 use percolator::v16::{
@@ -122,66 +128,11 @@ use percolator::v16::{
     MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, SourceCreditStateV16,
     V16Error, V16PodU128, V16PodU64,
 };
-use percolator::{CREDIT_RATE_SCALE, STRESS_ENVELOPE_TRIGGER_BPS_E9};
+use percolator::CREDIT_RATE_SCALE;
 
 fn env_header() -> MarketGroupV16HeaderAccount {
     let cfg = V16Config::public_user_fund(1, 0, 1);
     MarketGroupV16HeaderAccount::new_dynamic([7u8; 32], cfg, 1, 0).unwrap()
-}
-
-/// A-6.1: accumulator is monotonic non-decreasing within an epoch/slot.
-#[kani::proof]
-#[kani::unwind(8)]
-#[kani::solver(cadical)]
-fn proof_v17_stress_envelope_writer_monotonic() {
-    let mut header = env_header();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let c1: u128 = kani::any();
-    let c2: u128 = kani::any();
-    kani::assume(c1 <= u128::MAX / 4);
-    kani::assume(c2 <= u128::MAX / 4);
-    let now = 5u64;
-    view.apply_stress_envelope_progress(c1, now).unwrap();
-    let a1 = view.header.stress_consumption_bps_e9_since_envelope.get();
-    view.apply_stress_envelope_progress(c2, now).unwrap();
-    let a2 = view.header.stress_consumption_bps_e9_since_envelope.get();
-    assert!(a2 >= a1, "accumulator monotonic within epoch/slot");
-}
-
-/// A-6.2: flag flips true iff one accrual reaches the trigger; start slot/epoch
-/// are stamped on activation, else remain u64::MAX sentinels. OPERATIVE for the writer.
-#[kani::proof]
-#[kani::unwind(8)]
-#[kani::solver(cadical)]
-fn proof_v17_stress_envelope_activation_threshold() {
-    let mut header = env_header();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let c: u128 = kani::any();
-    kani::assume(c <= STRESS_ENVELOPE_TRIGGER_BPS_E9.saturating_add(1));
-    let now = 9u64;
-    let risk_epoch = view.header.risk_epoch.get();
-    view.apply_stress_envelope_progress(c, now).unwrap();
-    let active = view.header.threshold_stress_active == 1;
-    assert_eq!(
-        active,
-        c >= STRESS_ENVELOPE_TRIGGER_BPS_E9,
-        "flag set iff acc reached trigger"
-    );
-    if active {
-        assert_eq!(view.header.stress_envelope_start_slot.get(), now);
-        assert_eq!(
-            view.header.stress_envelope_start_credit_epoch.get(),
-            risk_epoch
-        );
-    } else {
-        assert_eq!(view.header.stress_envelope_start_slot.get(), u64::MAX);
-        assert_eq!(
-            view.header.stress_envelope_start_credit_epoch.get(),
-            u64::MAX
-        );
-    }
 }
 
 /// A-6.3: clear zeroes the accumulator, restores u64::MAX sentinels, clears the flag.
@@ -205,31 +156,6 @@ fn proof_v17_stress_envelope_clear_resets_fields() {
     assert_eq!(
         view.header.stress_envelope_start_credit_epoch.get(),
         u64::MAX
-    );
-    assert_eq!(view.header.threshold_stress_active, 0);
-}
-
-/// A-6.4: an active envelope from a PRIOR epoch is cleared (epoch advanced, different
-/// slot, not in active-close) before the new accrual — so the post-state holds only the
-/// fresh delta and the flag drops below trigger.
-#[kani::proof]
-#[kani::unwind(8)]
-#[kani::solver(cadical)]
-fn proof_v17_stress_envelope_epoch_reset() {
-    let mut header = env_header();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    view.header.threshold_stress_active = 1;
-    view.header.stress_consumption_bps_e9_since_envelope =
-        V16PodU128::new(STRESS_ENVELOPE_TRIGGER_BPS_E9);
-    view.header.stress_envelope_start_slot = V16PodU64::new(10);
-    view.header.stress_envelope_start_credit_epoch = V16PodU64::new(1);
-    view.header.risk_epoch = V16PodU64::new(2);
-    // fresh header is Live mode + loss_stale_active=0 → not active-close → epoch-advance clears.
-    view.apply_stress_envelope_progress(1, 11).unwrap();
-    assert_eq!(
-        view.header.stress_consumption_bps_e9_since_envelope.get(),
-        1
     );
     assert_eq!(view.header.threshold_stress_active, 0);
 }
@@ -269,112 +195,11 @@ fn proof_v17_stress_envelope_validate_shape_pairing() {
 }
 
 // ============================================================================
-// A-9 — dynamic fee-policy mutator (MarketGroupV16HeaderAccount::apply_fee_policy_update_not_atomic).
-// Re-expressed onto the zero-copy header. Each harness pins the vector to the
-// validate_exact_solvency_envelope EARLY-RETURN path via public_user_fund(1,0,1)
-// (maintenance_margin_bps==10_000, liquidation_fee_bps==0, min_liquidation_abs==0,
-// max_abs_funding_e9_per_slot==0) + zeroed liquidation fields, so CBMC never drives
-// the recursive interval-validation loop. V16Config/V16ConfigAccount derive PartialEq.
-// ============================================================================
-use percolator::v16::FeePolicyUpdateV16;
-
-fn a9_baseline_header() -> MarketGroupV16HeaderAccount {
-    MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], V16Config::public_user_fund(1, 0, 1), 1, 0)
-        .unwrap()
-}
-
-/// A-9.1: an out-of-range max_trading_fee_bps (> MAX_MARGIN_BPS) is REJECTED and leaves the on-account
-/// config byte-unchanged; an in-range value is accepted + persisted. OPERATIVE (straddles the bound).
-#[kani::proof]
-#[kani::unwind(20)]
-#[kani::solver(cadical)]
-fn proof_v17_apply_fee_policy_update_validates_bounds() {
-    let mut group = a9_baseline_header();
-    let before = group.config; // V16ConfigAccount POD (Copy, byte-eq)
-    let m: u64 = kani::any();
-    kani::assume(m <= MAX_MARGIN_BPS + 1);
-    let update = FeePolicyUpdateV16 {
-        max_trading_fee_bps: m,
-        liquidation_fee_bps: 0,
-        liquidation_fee_cap: 0,
-        min_liquidation_abs: 0,
-    };
-    let result = group.kani_apply_fee_policy_update_not_atomic(update);
-    if m > MAX_MARGIN_BPS {
-        assert!(result.is_err());
-        assert_eq!(
-            group.config, before,
-            "rejected update leaves config byte-unchanged"
-        );
-    } else {
-        assert!(result.is_ok());
-        assert_eq!(
-            group
-                .config
-                .try_to_runtime_shape()
-                .unwrap()
-                .max_trading_fee_bps,
-            m
-        );
-    }
-}
-
-/// A-9.2: a valid update persists exactly the four fee-policy fields.
-#[kani::proof]
-#[kani::unwind(20)]
-#[kani::solver(cadical)]
-fn proof_v17_apply_fee_policy_update_persists() {
-    let mut group = a9_baseline_header();
-    let m: u64 = kani::any();
-    kani::assume(m <= MAX_MARGIN_BPS);
-    let update = FeePolicyUpdateV16 {
-        max_trading_fee_bps: m,
-        liquidation_fee_bps: 0,
-        liquidation_fee_cap: 0,
-        min_liquidation_abs: 0,
-    };
-    group
-        .kani_apply_fee_policy_update_not_atomic(update)
-        .unwrap();
-    let cfg = group.config.try_to_runtime_shape().unwrap();
-    assert_eq!(cfg.max_trading_fee_bps, m);
-    assert_eq!(cfg.liquidation_fee_bps, 0);
-    assert_eq!(cfg.liquidation_fee_cap, 0);
-    assert_eq!(cfg.min_liquidation_abs, 0);
-}
-
-/// A-9.3: NO config field outside the four fee-policy targets is mutated (additive-surface invariant).
-/// after == baseline-with-the-4-fields-swapped (full V16Config equality).
-#[kani::proof]
-#[kani::unwind(20)]
-#[kani::solver(cadical)]
-fn proof_v17_fee_policy_update_no_other_field_mutation() {
-    let mut group = a9_baseline_header();
-    let before_cfg = group.config.try_to_runtime_shape().unwrap();
-    let m: u64 = kani::any();
-    kani::assume(m <= MAX_MARGIN_BPS);
-    let update = FeePolicyUpdateV16 {
-        max_trading_fee_bps: m,
-        liquidation_fee_bps: 0,
-        liquidation_fee_cap: 0,
-        min_liquidation_abs: 0,
-    };
-    group
-        .kani_apply_fee_policy_update_not_atomic(update)
-        .unwrap();
-    let after_cfg = group.config.try_to_runtime_shape().unwrap();
-    let mut expected = before_cfg;
-    expected.max_trading_fee_bps = update.max_trading_fee_bps;
-    expected.liquidation_fee_bps = update.liquidation_fee_bps;
-    expected.liquidation_fee_cap = update.liquidation_fee_cap;
-    expected.min_liquidation_abs = update.min_liquidation_abs;
-    assert_eq!(after_cfg, expected, "only the 4 fee-policy fields change");
-}
-
-// ============================================================================
 // A-9.SOLVENCY — direct validate_public_user_fund harness.
 //
-// The three shim-based A-9 harnesses (bounds/persists/no-other-mutation) use the
+// (#168: the A-9 mutator and its three shim-based harnesses were deleted as unreachable;
+// this harness stays because it pins the LIVE validator on the fee fields.)
+// The three shim-based A-9 harnesses (bounds/persists/no-other-mutation) used the
 // shape-only path because the full encode/decode cycle (V16ConfigAccount POD byte
 // arrays → symbolic bytes for the entire struct) OOMs on 64 GB even solo
 // (empirically: 7.7 GB RSS after 4 min, growing; killed before OOM).
@@ -533,87 +358,6 @@ fn proof_v17_admit_threshold_zero_always_lifts_hmax() {
 }
 
 // ============================================================================
-// A-4 — fork_facade equity/IM pub-lifts.
-// Proves: (A-4.1) maint_raw >= init_raw iff pnl > 0; equal otherwise.
-//         (A-4.2) account_equity_trade_open_raw with pnl_override=account.pnl
-//                 == init_raw (same lane when no counterfactual).
-// These harnesses exercise the fork_facade re-lift surface on zero-copy views.
-// ============================================================================
-use percolator::v16::fork_facade;
-use percolator::v16::{PortfolioAccountV16Account, PortfolioV16View, V16PodI128};
-
-fn a4_minimal_account(capital: u64, pnl: i64, fee_credits: i64) -> PortfolioAccountV16Account {
-    PortfolioAccountV16Account {
-        capital: V16PodU128::new(capital as u128),
-        pnl: V16PodI128::new(pnl as i128),
-        fee_credits: V16PodI128::new(fee_credits as i128),
-        ..PortfolioAccountV16Account::default()
-    }
-}
-
-/// A-4.1: maint_raw >= init_raw when pnl > 0; equal when pnl <= 0.
-/// OPERATIVE: proves the equity-lane separation is correct.
-#[kani::proof]
-#[kani::unwind(4)]
-#[kani::solver(cadical)]
-fn proof_v17_fork_facade_maint_vs_init_equity_lane_separation() {
-    let capital: u64 = kani::any();
-    let pnl: i64 = kani::any();
-    let fee_credits: i64 = kani::any();
-    // constrain to valid range (no i128::MIN, non-negative fee_debt)
-    kani::assume(pnl != i64::MIN);
-    kani::assume(fee_credits != i64::MIN);
-    kani::assume(fee_credits <= 0); // fee_credits <= 0 means a fee debt
-    let acct = a4_minimal_account(capital, pnl, fee_credits);
-    let view = PortfolioV16View::new(&acct);
-    let Ok(maint) = fork_facade::account_equity_maint_raw(&view) else {
-        return; // overflow case — not an assertion failure
-    };
-    let Ok(init) = fork_facade::account_equity_init_raw(&view) else {
-        return;
-    };
-    if (pnl as i128) > 0 {
-        // maint includes positive PnL; init clamps to 0
-        assert!(maint >= init, "maint_raw >= init_raw when pnl > 0");
-        kani::cover!(true, "A-4 maint > init (positive pnl path)");
-    } else {
-        // pnl clamped to 0 in both; equal
-        assert_eq!(maint, init, "maint_raw == init_raw when pnl <= 0");
-        kani::cover!(true, "A-4 maint == init (non-positive pnl path)");
-    }
-}
-
-/// A-4.2: account_equity_trade_open_raw with pnl_override == account.pnl
-/// equals account_equity_init_raw (same IM lane, no counterfactual).
-#[kani::proof]
-#[kani::unwind(4)]
-#[kani::solver(cadical)]
-fn proof_v17_fork_facade_trade_open_equity_matches_init_at_identity_override() {
-    let capital: u64 = kani::any();
-    let pnl: i64 = kani::any();
-    let fee_credits: i64 = kani::any();
-    kani::assume(pnl != i64::MIN);
-    kani::assume(fee_credits != i64::MIN);
-    kani::assume(fee_credits <= 0);
-    let acct = a4_minimal_account(capital, pnl, fee_credits);
-    let view = PortfolioV16View::new(&acct);
-    let Ok(init_eq) = fork_facade::account_equity_init_raw(&view) else {
-        return;
-    };
-    let Ok(trade_open_eq) = fork_facade::account_equity_trade_open_raw(&view, pnl as i128) else {
-        return;
-    };
-    assert_eq!(
-        trade_open_eq, init_eq,
-        "trade_open_raw at identity override == init_raw"
-    );
-    kani::cover!(
-        true,
-        "A-4 trade_open_raw identity override matches init_raw"
-    );
-}
-
-// ============================================================================
 // A-1 — dual-path equivalence: fork path(threshold=None) ≡ toly baseline.
 //
 // `fork_execute_batch_with_admit_threshold_not_atomic` and toly's
@@ -728,106 +472,6 @@ fn proof_v17_dual_path_h_lock_lane_none_equiv_toly_baseline() {
         toly_result == Ok(HLockLaneV16::HMax),
         "A-1.EQUIV: HMax reachable (some HMax trigger set)"
     );
-}
-
-// ============================================================================
-// A-6 — solvency interaction: stress envelope fields do NOT corrupt the
-// fields tested by `validate_shape`. The stress envelope fields
-// (`stress_consumption_bps_e9_since_envelope`, `stress_envelope_start_slot`,
-// `stress_envelope_start_credit_epoch`, `threshold_stress_active`) occupy
-// contiguous bytes IN the header. validate_shape checks the sentinel-pairing
-// invariant; apply_stress_envelope_progress mutates only those 4 fields.
-// PROOF: after any sequence of progress + clear calls the pairing invariant
-// still holds — no "solvency" counter (vault, insurance, c_tot, etc.) is
-// touched by the stress writer. Proved via field-level non-mutation check.
-// ============================================================================
-
-/// A-6.SOLVENCY: applying stress envelope progress does NOT mutate any
-/// solvency-accounting header field (vault, insurance, c_tot, pnl_pos_tot, etc.)
-/// — only the four dedicated A-6 fields change.
-#[kani::proof]
-#[kani::unwind(8)]
-#[kani::solver(cadical)]
-fn proof_v17_stress_envelope_does_not_mutate_solvency_fields() {
-    let mut header = env_header();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-
-    // snapshot solvency fields BEFORE
-    let vault_before = view.header.vault.get();
-    let insurance_before = view.header.insurance.get();
-    let c_tot_before = view.header.c_tot.get();
-    let pnl_pos_tot_before = view.header.pnl_pos_tot.get();
-    let pnl_pos_bound_before = view.header.pnl_pos_bound_tot.get();
-    let pnl_matured_before = view.header.pnl_matured_pos_tot.get();
-    let bp_earnings_before = view.header.backing_provider_earnings_total.get();
-    let source_claim_before = view.header.source_claim_bound_total_num.get();
-    let ins_credit_before = view
-        .header
-        .source_insurance_credit_reserved_total_atoms
-        .get();
-    let domain_budget_before = view.header.insurance_domain_budget_remaining_total.get();
-    let resolved_blocker_before = view.header.resolved_payout_blocker_count.get();
-
-    let c: u128 = kani::any();
-    kani::assume(c <= u128::MAX / 4);
-    let now: u64 = kani::any();
-    kani::assume(now <= u64::MAX / 2);
-    // This may return an error if mode/settings prevent it; we only check
-    // the non-mutation invariant in the success case.
-    let _ = view.apply_stress_envelope_progress(c, now);
-
-    // solvency fields UNCHANGED
-    assert_eq!(view.header.vault.get(), vault_before, "vault unchanged");
-    assert_eq!(
-        view.header.insurance.get(),
-        insurance_before,
-        "insurance unchanged"
-    );
-    assert_eq!(view.header.c_tot.get(), c_tot_before, "c_tot unchanged");
-    assert_eq!(
-        view.header.pnl_pos_tot.get(),
-        pnl_pos_tot_before,
-        "pnl_pos_tot unchanged"
-    );
-    assert_eq!(
-        view.header.pnl_pos_bound_tot.get(),
-        pnl_pos_bound_before,
-        "pnl_pos_bound unchanged"
-    );
-    assert_eq!(
-        view.header.pnl_matured_pos_tot.get(),
-        pnl_matured_before,
-        "pnl_matured unchanged"
-    );
-    assert_eq!(
-        view.header.backing_provider_earnings_total.get(),
-        bp_earnings_before,
-        "backing_provider_earnings unchanged"
-    );
-    assert_eq!(
-        view.header.source_claim_bound_total_num.get(),
-        source_claim_before,
-        "source_claim_bound unchanged"
-    );
-    assert_eq!(
-        view.header
-            .source_insurance_credit_reserved_total_atoms
-            .get(),
-        ins_credit_before,
-        "ins_credit_reserved unchanged"
-    );
-    assert_eq!(
-        view.header.insurance_domain_budget_remaining_total.get(),
-        domain_budget_before,
-        "domain_budget unchanged"
-    );
-    assert_eq!(
-        view.header.resolved_payout_blocker_count.get(),
-        resolved_blocker_before,
-        "resolved_blocker unchanged"
-    );
-    kani::cover!(true, "A-6 solvency-field non-mutation verified");
 }
 
 // ============================================================================

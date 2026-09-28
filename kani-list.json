@@ -3,6 +3,7 @@
   "file-version": "0.1",
   "standard-harnesses": {
     "tests/proofs_v16.rs": [
+      "closure_expired_counterparty_lien_cannot_remain_favorable_account_credit",
       "proof_account_kf_settlement_key_roundtrip_and_priority",
       "proof_account_kf_settlement_plan_insert_preserves_order_and_multiset",
       "proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked",
@@ -75,6 +76,7 @@
       "proof_v16_final_batch_margin_gate_accepts_only_final_certified_im",
       "proof_v16_final_impaired_source_claim_burn_clears_account_occupancy_counters",
       "proof_v16_flat_source_lien_normalization_is_total_and_fail_closed",
+      "proof_v16_forfeit_dead_leg_classifier_is_exact_with_drainonly_wind_down",
       "proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact",
       "proof_v16_fully_backed_expiry_yields_zero_realizable_support",
       "proof_v16_funding_rate_cap_rejects_before_accrual_mutation",
@@ -97,6 +99,7 @@
       "proof_v16_kernel_advance_leg_b_snap_rank_witness",
       "proof_v16_kernel_initial_margin_gate_exact_decision",
       "proof_v16_kernel_locked_margin_gate_no_positive_credit",
+      "proof_v16_kernel_normalize_social_loss_carry_clamped_and_conserved",
       "proof_v16_kernel_settle_close_ledger_principal_noop_arms_are_byte_identical",
       "proof_v16_kernel_settle_close_ledger_principal_preserves_the_ledger_validator",
       "proof_v16_kernel_settle_close_ledger_principal_rank_witness",
@@ -314,12 +317,7 @@
       "proof_v17_admit_threshold_lifts_hmax_when_acc_reaches_threshold",
       "proof_v17_admit_threshold_none_preserves_hmin_on_clean_market",
       "proof_v17_admit_threshold_zero_always_lifts_hmax",
-      "proof_v17_apply_fee_policy_update_persists",
-      "proof_v17_apply_fee_policy_update_validates_bounds",
       "proof_v17_dual_path_h_lock_lane_none_equiv_toly_baseline",
-      "proof_v17_fee_policy_update_no_other_field_mutation",
-      "proof_v17_fork_facade_maint_vs_init_equity_lane_separation",
-      "proof_v17_fork_facade_trade_open_equity_matches_init_at_identity_override",
       "proof_v17_header_abi_a6_fields_within_struct_and_slots_after_header",
       "proof_v17_lien1_counterparty_terminal_release_impaired_aware",
       "proof_v17_lp_non_drift_production_inequality_gate_sound",
@@ -333,19 +331,15 @@
       "proof_v17_lpvault359_stub_credit_delta_exact_and_guarded",
       "proof_v17_max_price_move_bps_per_slot_boundary_accepted",
       "proof_v17_max_price_move_bps_per_slot_upper_bound",
-      "proof_v17_stress_envelope_activation_threshold",
       "proof_v17_stress_envelope_clear_resets_fields",
-      "proof_v17_stress_envelope_does_not_mutate_solvency_fields",
-      "proof_v17_stress_envelope_epoch_reset",
       "proof_v17_stress_envelope_validate_shape_pairing",
-      "proof_v17_stress_envelope_writer_monotonic",
       "proof_v17_wide_mul_div_floor_stub_correct"
     ]
   },
   "contract-harnesses": {},
   "contracts": [],
   "totals": {
-    "standard-harnesses": 331,
+    "standard-harnesses": 325,
     "contract-harnesses": 0,
     "functions-under-contract": 0
   }
