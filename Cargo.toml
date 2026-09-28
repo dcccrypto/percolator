@@ -19,8 +19,10 @@ default = []
 stress = []  # Reserved for stress/audit harnesses
 fuzz = ["fork-facade"]  # Fuzzing over the production zero-copy view path (+ fork features so kani sees them).
 audit-scan = []  # Enable full account-table invariant scans on public exits
-# v17 fork features (lp_vault module, fork_facade mod, A-4 lifts, A-9 engine mutator) re-grafted onto the
+# v17 fork features (lp_vault module, A-9 fee-policy payload type) re-grafted onto the
 # frozen zero-copy core; gated so the production frozen surface stays minimal unless the wrapper opts in.
+# The A-4 fork_facade aliases, the A-9 mutator and the A-6 stress-envelope writer were deleted as
+# unreachable (#167/#168); the header fields they touched are unchanged.
 fork-facade = []
 
 [profile.release]

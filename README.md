@@ -289,24 +289,24 @@ Counted at this checkout, not carried forward from a previous one:
 
 | Class | Count | Where |
 | --- | ---: | --- |
-| `#[kani::proof]` harnesses | **328** | `tests/proofs_v16.rs` 283, `tests/proofs_v17_fork.rs` 30, `tests/proofs_v16_arithmetic.rs` 13, `tests/proofs_v16_asymmetric_a_accrual.rs` 2 |
+| `#[kani::proof]` harnesses | **325** | `tests/proofs_v16.rs` 289, `tests/proofs_v17_fork.rs` 21, `tests/proofs_v16_arithmetic.rs` 13, `tests/proofs_v16_asymmetric_a_accrual.rs` 2 |
 | `#[kani::proof_for_contract]` harnesses | **0** | this fork has no `contracts` feature and no `src/v16_proofs.rs` |
 
 ```bash
 # Reproduce both numbers. Exclude comment lines: a `#[kani::proof]` written inside a doc
-# comment is not a harness (there are 3 such lines, e.g. tests/proofs_v17_fork.rs:1078).
-grep -rn '#\[kani::proof\]' --include='*.rs' . | grep -vE ':\s*//' | wc -l   # 328
+# comment is not a harness (there are 3 such lines, e.g. tests/proofs_v17_fork.rs:722).
+grep -rn '#\[kani::proof\]' --include='*.rs' . | grep -vE ':\s*//' | wc -l   # 325
 grep -rn '#\[kani::proof_for_contract' --include='*.rs' . | grep -vE ':\s*//' | wc -l  # 0
 ```
 
-`kani-list.json` is the machine-readable form of the same census and agrees: 328
+`kani-list.json` is the machine-readable form of the same census and agrees: 325
 standard harnesses, 0 contract harnesses, `"kani-version": "0.67.0"`. Regenerate it with
 
 ```bash
 # `cargo kani list` (0.67.0) accepts no cargo flags, so the features have to reach it
 # through the manifest for the duration of the run.
 sed -i.bak 's/flags = { tests = true }/flags = { tests = true, features = ["fuzz"] }/' Cargo.toml
-cargo kani list --format json -Z stubbing    # -Z stubbing: tests/proofs_v17_fork.rs:1191 uses #[kani::stub]
+cargo kani list --format json -Z stubbing    # -Z stubbing: tests/proofs_v17_fork.rs:835 uses #[kani::stub]
 mv Cargo.toml.bak Cargo.toml
 ```
 

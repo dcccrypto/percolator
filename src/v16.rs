@@ -7838,11 +7838,14 @@ impl Default for MarketGroupV16HeaderAccount {
     }
 }
 
-/// fork feature A-9 (dynamic-trade-fee): engine-level fee-policy update payload. The wrapper-side
-/// admin auth / signer / replay-nonce checks land in Phase 3; the engine surface stays admin-agnostic.
-/// v16 already validates per-call `fee_bps` against `config.max_trading_fee_bps` in trade validation;
-/// this payload carries the four fee-policy fields an authorized admin may rewrite atomically on a live
-/// market group. Field order/types (u64,u64,u128,u128) are the engine read-side of the Phase-3 wire.
+/// fork feature A-9 (dynamic-trade-fee): engine-level fee-policy update payload.
+///
+/// ORPHANED DATA TYPE, kept on purpose (#168). Its only consumer, the A-9 mutator
+/// `apply_fee_policy_update_not_atomic` (and its Kani shape twin), was deleted because no wrapper
+/// instruction ever called it: fee policy is immutable after `InitMarket` on every deployed wrapper.
+/// The struct itself stays exported only because percolator-prog `tests/v16_baseline_smoke.rs`
+/// (smoke 3) names it; deleting it here would break that test binary's build the moment the wrapper
+/// bumps `ENGINE_CI_SIBLING`. Remove it in lockstep with that smoke test.
 #[cfg(feature = "fork-facade")]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8004,66 +8007,6 @@ impl MarketGroupV16HeaderAccount {
         self.config = V16ConfigAccount::from_runtime(&config);
         self.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
         self.risk_epoch = V16PodU64::new(next_risk_epoch);
-        Ok(())
-    }
-
-    /// fork feature A-9 (zero-copy header form): atomically rewrite the four fee-policy config fields
-    /// on a LIVE market group via decode→mutate-candidate→revalidate→re-encode (same template as
-    /// grow_asset_slot_capacity_not_atomic above). Validation runs against a candidate V16Config BEFORE
-    /// the on-account config is touched, so a rejected update leaves engine state byte-unchanged.
-    /// Admin-agnostic; the wrapper verb (Phase 3) owns signer + replay nonce. Does NOT call any
-    /// assert_public_invariants (the runtime-form mirror that did is dropped with runtime-vec; the
-    /// candidate validate_public_user_fund is the sole guarantee, identical to grow_* and the fork).
-    #[cfg(feature = "fork-facade")]
-    pub fn apply_fee_policy_update_not_atomic(
-        &mut self,
-        update: FeePolicyUpdateV16,
-    ) -> V16Result<()> {
-        if decode_market_mode(self.mode)? != MarketModeV16::Live {
-            return Err(V16Error::LockActive);
-        }
-        let mut candidate = self.config.try_to_runtime_shape()?;
-        candidate.max_trading_fee_bps = update.max_trading_fee_bps;
-        candidate.liquidation_fee_bps = update.liquidation_fee_bps;
-        candidate.liquidation_fee_cap = update.liquidation_fee_cap;
-        candidate.min_liquidation_abs = update.min_liquidation_abs;
-        candidate.validate_public_user_fund()?;
-        self.config = V16ConfigAccount::from_runtime(&candidate);
-        Ok(())
-    }
-
-    /// fork-facade (A-9): kani-only shape-only shim — proves fee-field bounds + persistence without
-    /// the solvency envelope's encode/decode byte-array symbolic explosion (which OOMs even solo on
-    /// 64GB: 7.7 GB RSS after 4min and growing — empirically confirmed 2026-06-09). The
-    /// `max_trading_fee_bps > MAX_MARGIN_BPS` bound is checked by `validate_public_user_fund_shape`
-    /// at the same line as the full validator (v16.rs:1950). Solvency envelope correctness is
-    /// separately covered by:
-    ///   (a) the frozen `proofs_v16.rs` solvency-envelope harnesses (byte-identical toly content), AND
-    ///   (b) the isolated `proof_v17_a9_validate_public_user_fund_direct` harness which calls the REAL
-    ///       `validate_public_user_fund` directly on a V16Config struct with symbolic fee fields, without
-    ///       the POD encode/decode step that causes CBMC to track symbolic bytes through all config fields.
-    /// The three A-9 harnesses (bounds, persists, no-other-mutation) do NOT exercise the solvency envelope
-    /// for their properties; they are sound over the shape-check boundary.
-    #[cfg(all(kani, feature = "fork-facade"))]
-    pub fn kani_apply_fee_policy_update_not_atomic(
-        &mut self,
-        update: FeePolicyUpdateV16,
-    ) -> V16Result<()> {
-        // Shape-only validation path: decode → mutate → validate shape (no solvency envelope).
-        // This is operationally equivalent for the A-9 invariants (fee bounds + field isolation):
-        //   - fee-bounds rejection: validated by validate_public_user_fund_shape line 1950
-        //   - field persistence: config encode/decode roundtrip is the same path
-        //   - non-mutation: same struct mutation, same from_runtime encode
-        if decode_market_mode(self.mode)? != MarketModeV16::Live {
-            return Err(V16Error::LockActive);
-        }
-        let mut candidate = self.config.try_to_runtime_shape()?;
-        candidate.max_trading_fee_bps = update.max_trading_fee_bps;
-        candidate.liquidation_fee_bps = update.liquidation_fee_bps;
-        candidate.liquidation_fee_cap = update.liquidation_fee_cap;
-        candidate.min_liquidation_abs = update.min_liquidation_abs;
-        candidate.validate_public_user_fund_shape()?;
-        self.config = V16ConfigAccount::from_runtime(&candidate);
         Ok(())
     }
 
@@ -20473,50 +20416,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    /// fork feature A-6 (zero-copy view form): advance the stress-envelope accumulator. Ported
-    /// verbatim from the fork ViewMut writer; the runtime-mirror twin is DROPPED (no runtime
-    /// MarketGroupV16 at frozen). Operates directly on the POD header. Resets a stale envelope
-    /// (epoch advanced, different slot, not in active-close) before accruing; flips
-    /// `threshold_stress_active` true when the accumulator crosses STRESS_ENVELOPE_TRIGGER_BPS_E9.
-    pub fn apply_stress_envelope_progress(
-        &mut self,
-        consumption_bps_e9: u128,
-        now_slot: u64,
-    ) -> V16Result<()> {
-        if consumption_bps_e9 == 0 {
-            return Ok(());
-        }
-        let bool_on = decode_bool(self.header.threshold_stress_active)?;
-        let active_close = decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
-            || decode_bool(self.header.loss_stale_active)?;
-        let start_epoch = self.header.stress_envelope_start_credit_epoch.get();
-        let start_slot = self.header.stress_envelope_start_slot.get();
-        if bool_on
-            && start_epoch != u64::MAX
-            && self.header.risk_epoch.get() > start_epoch
-            && start_slot != now_slot
-            && !active_close
-        {
-            self.clear_stress_envelope_v16();
-        }
-
-        let next_acc = self
-            .header
-            .stress_consumption_bps_e9_since_envelope
-            .get()
-            .saturating_add(consumption_bps_e9);
-        self.header.stress_consumption_bps_e9_since_envelope = V16PodU128::new(next_acc);
-
-        if next_acc >= STRESS_ENVELOPE_TRIGGER_BPS_E9
-            && !decode_bool(self.header.threshold_stress_active)?
-        {
-            self.header.threshold_stress_active = encode_bool(true);
-            self.header.stress_envelope_start_slot = V16PodU64::new(now_slot);
-            self.header.stress_envelope_start_credit_epoch = self.header.risk_epoch;
-        }
-        Ok(())
-    }
-
     /// fork feature A-6 (zero-copy view form): clear the envelope — zero the accumulator, restore
     /// the slot/epoch sentinels to u64::MAX, and clear the active flag.
     pub fn clear_stress_envelope_v16(&mut self) {
@@ -23720,123 +23619,6 @@ pub mod lp_vault {
         cooldown_slots: u64,
     ) -> bool {
         current_slot >= request_slot.saturating_add(cooldown_slots)
-    }
-}
-
-// ============================================================================
-// fork-port A-4: wrapper-facade aliases for the account-equity / IM family.
-// ============================================================================
-//
-// In the v17 zero-copy/sparse engine, the underlying computations are private
-// methods in the ViewMut impl (account_no_positive_credit_equity,
-// ensure_initial_margin) or standalone primitives (account_equity_from_parts).
-// This module re-lifts them as public aliases under the fork-facade feature so
-// the wrapper (Phase 3) can consume them without the old runtime heap types.
-//
-// All functions take `&PortfolioV16View<'_>` (zero-copy read view) — the v17
-// equivalent of the fork's `&PortfolioAccountV16` (deleted heap struct).
-//
-// Alias naming preserves the v12 public-API surface so downstream wrapper
-// callsites can migrate name-by-name in Phase 3 without semantic changes.
-#[cfg(feature = "fork-facade")]
-pub mod fork_facade {
-    use super::{
-        account_equity_from_parts, validate_fee_credits, validate_non_min_i128, PortfolioV16View,
-        V16Error, V16Result,
-    };
-
-    // -----------------------------------------------------------------------
-    // Maintenance-margin equity family (full equity: capital + pnl - fee_debt)
-    // -----------------------------------------------------------------------
-
-    /// alias for v12 `account_equity_maint_raw`.
-    /// Returns `capital + pnl - fee_debt` (clamp-free).
-    pub fn account_equity_maint_raw(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        account_equity_from_parts(
-            account.header.capital.get(),
-            account.header.pnl.get(),
-            account.header.fee_credits.get(),
-        )
-    }
-
-    /// alias for v12 `account_equity_net`.
-    /// `max(0, account_equity_maint_raw)` — the clamped MM lane.
-    pub fn account_equity_net(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        Ok(account_equity_maint_raw(account)?.max(0))
-    }
-
-    // -----------------------------------------------------------------------
-    // Initial-margin equity family (IM lane: capital + min(pnl,0) - fee_debt)
-    // -----------------------------------------------------------------------
-
-    /// alias for v12 `account_equity_init_raw`.
-    /// `capital + min(pnl, 0) - fee_debt` — IM-lane base equity.
-    pub fn account_equity_init_raw(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        validate_non_min_i128(account.header.pnl.get())?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(account.header.pnl.get().min(0))
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
-    }
-
-    /// alias for v12 `account_equity_init_net`.
-    /// `max(0, account_equity_init_raw)`.
-    pub fn account_equity_init_net(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        Ok(account_equity_init_raw(account)?.max(0))
-    }
-
-    /// alias for v12 `account_equity_withdraw_raw`.
-    /// Identical to `account_equity_init_raw`; preserved for withdraw-preflight callsites.
-    pub fn account_equity_withdraw_raw(account: &PortfolioV16View<'_>) -> V16Result<i128> {
-        account_equity_init_raw(account)
-    }
-
-    // -----------------------------------------------------------------------
-    // Counterfactual trade open equity (IM lane under a pnl override)
-    // -----------------------------------------------------------------------
-
-    /// alias for v12 `account_equity_trade_open_raw`.
-    /// Counterfactual IM-lane equity recomputed with `pnl_override` in place of
-    /// the account's current PnL. Callers pass `account.pnl + candidate_delta`
-    /// or any other override. The IM-lane uses `min(pnl_override, 0)`.
-    pub fn account_equity_trade_open_raw(
-        account: &PortfolioV16View<'_>,
-        pnl_override: i128,
-    ) -> V16Result<i128> {
-        validate_non_min_i128(pnl_override)?;
-        validate_fee_credits(account.header.fee_credits.get())?;
-        let capital = i128::try_from(account.header.capital.get())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(account.header.fee_credits.get().unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
-        capital
-            .checked_add(pnl_override.min(0))
-            .and_then(|v| v.checked_sub(fee_debt))
-            .ok_or(V16Error::ArithmeticOverflow)
-    }
-
-    // -----------------------------------------------------------------------
-    // IM predicate
-    // -----------------------------------------------------------------------
-
-    /// alias for v12 `is_above_initial_margin`.
-    /// `true` iff the account's current health certificate is valid AND equity
-    /// (certified_equity) covers certified_initial_req.
-    pub fn is_above_initial_margin(account: &PortfolioV16View<'_>) -> bool {
-        // Inline the frozen ensure_initial_margin body (cert valid + equity >= IM req).
-        let Ok(cert) = account.header.health_cert.try_to_runtime() else {
-            return false;
-        };
-        if !cert.valid {
-            return false;
-        }
-        let equity = cert.certified_equity;
-        equity >= 0 && (equity as u128) >= cert.certified_initial_req
     }
 }
 

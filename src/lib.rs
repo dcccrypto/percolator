@@ -103,8 +103,6 @@ pub use v16::{
 // opts in on its engine dep). Keeps the production frozen surface minimal by default. Under kani the
 // blanket `pub use v16::*` above already covers these.
 #[cfg(all(not(kani), feature = "fork-facade"))]
-pub use v16::fork_facade;
-#[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::lp_vault;
 #[cfg(all(not(kani), feature = "fork-facade"))]
 pub use v16::FeePolicyUpdateV16;
