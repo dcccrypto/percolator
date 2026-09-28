@@ -24621,3 +24621,97 @@ mod attach_writer_cross_side_oi_tripwire_tests {
         );
     }
 }
+
+/// GH#133 runtime regression. The shortfall fix (2c38570a, #160) is guarded only by
+/// the Kani proof `proof_v16_taker_only_never_overcharges_and_maker_pays_only_shortfall`,
+/// and Kani runs locally, not in CI. These tests drive the real charge path under
+/// `cargo test`, so reverting the trigger to `taker_fee == 0` turns them red in CI.
+#[cfg(test)]
+mod taker_fee_shortfall_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    const FEE: u128 = 5_000;
+
+    fn market() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+        let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+        let mut header = MarketGroupV16HeaderAccount::new_dynamic([33u8; 32], cfg, 1, 0).unwrap();
+        let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
+        header
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 0)
+            .unwrap();
+        (header, markets)
+    }
+
+    fn account(seed: u8) -> PortfolioAccountV16Account {
+        let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+            [33u8; 32], [seed; 32], [9u8; 32],
+        ));
+        let mut account = PortfolioAccountV16Account::default();
+        account.init_empty_in_place(provenance).unwrap();
+        account
+    }
+
+    /// Charge `FEE` with the taker holding `taker_capital` and a solvent maker.
+    /// Returns (taker_paid, maker_paid, insurance_gain).
+    fn charge(taker_capital: u128, taker_is_long: bool) -> (u128, u128, u128) {
+        let (mut header, mut markets) = market();
+        let mut long_h = account(1);
+        let mut short_h = account(2);
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let (taker_h, maker_h) = if taker_is_long {
+            (&mut long_h, &mut short_h)
+        } else {
+            (&mut short_h, &mut long_h)
+        };
+        if taker_capital != 0 {
+            m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(taker_h), taker_capital)
+                .unwrap();
+        }
+        m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(maker_h), 1_000_000)
+            .unwrap();
+        let insurance_before = m.header.insurance.get();
+        let mut long = PortfolioV16ViewMut::new(&mut long_h);
+        let mut short = PortfolioV16ViewMut::new(&mut short_h);
+        let (fee_a, fee_b) = m
+            .charge_trade_fee_taker_only_not_atomic(&mut long, &mut short, FEE, taker_is_long)
+            .unwrap();
+        let insurance_gain = m.header.insurance.get() - insurance_before;
+        if taker_is_long {
+            (fee_a, fee_b, insurance_gain)
+        } else {
+            (fee_b, fee_a, insurance_gain)
+        }
+    }
+
+    #[test]
+    fn dust_capital_taker_shortfall_is_charged_to_the_maker() {
+        for taker_is_long in [true, false] {
+            // The #133 row: taker pays 1 atom, the maker must cover the other 4_999.
+            assert_eq!(
+                charge(1, taker_is_long),
+                (1, FEE - 1, FEE),
+                "taker_is_long={taker_is_long}"
+            );
+            // Any partial payment: the maker pays exactly the remainder.
+            assert_eq!(
+                charge(3_000, taker_is_long),
+                (3_000, FEE - 3_000, FEE),
+                "taker_is_long={taker_is_long}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_capital_and_solvent_takers_are_unchanged() {
+        for taker_is_long in [true, false] {
+            // capital == 0: the pre-#133 N1 fallback, maker pays the whole fee.
+            assert_eq!(charge(0, taker_is_long), (0, FEE, FEE));
+            // solvent taker: taker-only, the maker is never charged.
+            assert_eq!(charge(1_000_000, taker_is_long), (FEE, 0, FEE));
+            // exactly the fee: still taker-only.
+            assert_eq!(charge(FEE, taker_is_long), (FEE, 0, FEE));
+        }
+    }
+}
