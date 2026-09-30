@@ -20250,28 +20250,44 @@ fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
     assert_eq!(support, insurance_atoms);
 }
 
-/// REVIEW (Sentinel 2026-09-30). P3 cites the two deregister proofs above for B12
-/// (permissionless resolved deregister cannot strand a claim). The rejects proof sets ONLY
-/// `capital`; removing the unfinalized-resolved-payout-receipt check from
-/// `is_empty_for_dematerialization` leaves it green (negative control). This harness covers the
-/// claim-bearing states B12's argument names: nonzero pnl, negative fee_credits, and a VALID
-/// present-but-unfinalized resolved payout receipt. Deregister must refuse all of them with no
-/// mutation of the count.
+/// D-ENG-01 (Sentinel design 2026-09-30). B12 (permissionless Resolved deregister cannot strand
+/// a claim) rests on `is_empty_for_dematerialization` (src/v16.rs:5517) refusing EVERY
+/// claim-bearing header state. The cited `..._rejects_value_state_before_mutation` sets only
+/// `capital`. This harness sets, one at a time, every header field that predicate checks
+/// (except active legs, close_progress and source domains, which need a leg/ledger fixture: see
+/// the design doc), each at a VALID value (validate_with_market's own rules: reserved_pnl <=
+/// max(pnl,0); liquidation_lock only with pnl < 0), and requires deregister to refuse with no
+/// counter change. A per-state cover on `Err(LockActive)` shows the emptiness predicate itself
+/// (not an earlier validation error) is what refuses.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
 fn proof_review_deregister_refuses_every_named_claim_state() {
     let which: u8 = kani::any();
-    kani::assume(which < 3);
+    kani::assume(which < 10);
     let v: u8 = kani::any();
     kani::assume(v > 0);
     let count_raw: u8 = kani::any();
     kani::assume(count_raw > 0);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    let x = v as i128;
     match which {
-        0 => account_header.pnl = V16PodI128::new(v as i128),
-        1 => account_header.fee_credits = V16PodI128::new(-(v as i128)),
+        0 => account_header.pnl = V16PodI128::new(x),
+        1 => account_header.pnl = V16PodI128::new(-x),
+        2 => account_header.fee_credits = V16PodI128::new(-x),
+        3 => {
+            account_header.pnl = V16PodI128::new(x);
+            account_header.reserved_pnl = V16PodU128::new(v as u128);
+        }
+        4 => account_header.cancel_deposit_escrow = V16PodU128::new(v as u128),
+        5 => account_header.stale_state = 1,
+        6 => account_header.b_stale_state = 1,
+        7 => account_header.rebalance_lock = 1,
+        8 => {
+            account_header.pnl = V16PodI128::new(-x);
+            account_header.liquidation_lock = 1;
+        }
         _ => {
             let t = v as u128;
             account_header.resolved_payout_receipt.present = 1;
@@ -20286,8 +20302,17 @@ fn proof_review_deregister_refuses_every_named_claim_state() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
     let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
-    kani::cover!(which == 0 && result == Err(V16Error::LockActive), "pnl claim refused by the emptiness predicate");
-    kani::cover!(which == 2 && result == Err(V16Error::LockActive), "unfinalized receipt refused by the emptiness predicate");
+    let by_predicate = result == Err(V16Error::LockActive);
+    kani::cover!(which == 0 && by_predicate, "positive pnl claim");
+    kani::cover!(which == 1 && by_predicate, "negative pnl (loss owed)");
+    kani::cover!(which == 2 && by_predicate, "fee debt");
+    kani::cover!(which == 3 && by_predicate, "reserved pnl");
+    kani::cover!(which == 4 && by_predicate, "cancel-deposit escrow");
+    kani::cover!(which == 5 && by_predicate, "stale state");
+    kani::cover!(which == 6 && by_predicate, "b-stale state");
+    kani::cover!(which == 7 && by_predicate, "rebalance lock");
+    kani::cover!(which == 8 && by_predicate, "liquidation lock");
+    kani::cover!(which == 9 && by_predicate, "unfinalized resolved payout receipt");
     assert!(result.is_err());
     assert_eq!(market.header.materialized_portfolio_count.get(), count_before);
 }
