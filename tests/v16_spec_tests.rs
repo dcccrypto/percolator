@@ -14132,7 +14132,6 @@ fn rz_resolved_world(
                     paid[who] += payout;
                     break;
                 }
-                Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
                 Err(e) => panic!("{label}: resolved close failed: {e:?}"),
             }
         }
