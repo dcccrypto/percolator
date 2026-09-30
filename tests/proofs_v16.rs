@@ -20321,13 +20321,25 @@ fn proof_review_deregister_refuses_every_named_claim_state() {
     kani::cover!(which == 0 && by_predicate, "positive pnl claim");
     kani::cover!(which == 1 && by_predicate, "negative pnl (loss owed)");
     kani::cover!(which == 2 && by_predicate, "fee debt");
-    kani::cover!(which == 3 && by_predicate, "reserved pnl");
+    kani::cover!(which == 3 && by_predicate, "reserved pnl (implied by the pnl clause + validation: reserved <= max(pnl,0))");
     kani::cover!(which == 4 && by_predicate, "cancel-deposit escrow");
     kani::cover!(which == 5 && by_predicate, "stale state");
     kani::cover!(which == 6 && by_predicate, "b-stale state");
     kani::cover!(which == 7 && by_predicate, "rebalance lock");
-    kani::cover!(which == 8 && by_predicate, "liquidation lock");
+    kani::cover!(which == 8 && by_predicate, "liquidation lock (implied by the pnl clause + validation: lock => pnl < 0)");
     kani::cover!(which == 9 && by_predicate, "unfinalized resolved payout receipt");
+    // DIAG covers are EXPECTED UNSATISFIED (they name any state refused before the predicate);
+    // the runner excludes `DIAG:` covers from the vacuity count.
+    kani::cover!(which == 0 && result.is_err() && !by_predicate, "DIAG: state 0 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 1 && result.is_err() && !by_predicate, "DIAG: state 1 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 2 && result.is_err() && !by_predicate, "DIAG: state 2 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 3 && result.is_err() && !by_predicate, "DIAG: state 3 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 4 && result.is_err() && !by_predicate, "DIAG: state 4 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 5 && result.is_err() && !by_predicate, "DIAG: state 5 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 6 && result.is_err() && !by_predicate, "DIAG: state 6 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 7 && result.is_err() && !by_predicate, "DIAG: state 7 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 8 && result.is_err() && !by_predicate, "DIAG: state 8 refused by validation, not by the emptiness predicate");
+    kani::cover!(which == 9 && result.is_err() && !by_predicate, "DIAG: state 9 refused by validation, not by the emptiness predicate");
     assert!(result.is_err());
     assert_eq!(market.header.materialized_portfolio_count.get(), count_before);
 }
