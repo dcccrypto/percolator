@@ -14055,7 +14055,12 @@ fn v16_conversion_releases_every_eligible_source_lien_in_one_call() {
 // losses being settled before resolution, must pay both sides their exact endpoint and
 // drain the vault. It is NOT a red->green reproduction of the upstream defects.
 
-fn rz_resolved_world(settle_before_resolve: bool, loser_first: bool, reversal: bool) {
+fn rz_resolved_world(
+    settle_before_resolve: bool,
+    loser_first: bool,
+    reversal: bool,
+    via_autocrank: bool,
+) {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut winner_h = account_fixture(1, 221);
     let mut loser_h = account_fixture(1, 222);
@@ -14094,7 +14099,34 @@ fn rz_resolved_world(settle_before_resolve: bool, loser_first: bool, reversal: b
     for who in order {
         let account = if who == 0 { &mut winner } else { &mut loser };
         for _ in 0..16 {
-            match market.close_resolved_account_not_atomic(account, 0) {
+            let result = if via_autocrank {
+                let observations = [AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: market.markets[0].engine.asset.effective_price.get(),
+                    funding_rate_e9: 0,
+                }];
+                let work = AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                };
+                match market.permissionless_auto_crank_not_atomic(account, work) {
+                    Ok(AutoCrankResultV16 {
+                        selected: AutoCrankPlanV16::CloseResolved,
+                        outcome: AutoCrankOutcomeV16::ResolvedClose(outcome),
+                    }) => Ok(outcome),
+                    // Not actionable yet for this account (it waits on the other side).
+                    Ok(AutoCrankResultV16 {
+                        selected: AutoCrankPlanV16::NoAction,
+                        ..
+                    }) => break,
+                    Ok(other) => panic!("{label}: auto-crank must select CloseResolved: {other:?}"),
+                    Err(e) => Err(e),
+                }
+            } else {
+                market.close_resolved_account_not_atomic(account, 0)
+            };
+            match result {
                 Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
                 Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
                     paid[who] += payout;
@@ -14131,7 +14163,9 @@ fn resolved_close_order_matrix_pays_exact_endpoints() {
     for settle in [false, true] {
         for loser_first in [false, true] {
             for reversal in [false, true] {
-                rz_resolved_world(settle, loser_first, reversal);
+                for via_autocrank in [false, true] {
+                    rz_resolved_world(settle, loser_first, reversal, via_autocrank);
+                }
             }
         }
     }
