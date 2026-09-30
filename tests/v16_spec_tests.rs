@@ -13477,3 +13477,113 @@ fn v16_auto_crank_close_resolved_advances_the_resolved_settlement_clock() {
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
     market.validate_shape().unwrap();
 }
+
+// ---- triage 2026-09-30: round-trip cross-domain support consumption ----
+fn rt_stock(markets: &[Market<u64>]) -> Vec<(u128, u128, u128, u128, u128)> {
+    let mut out = Vec::new();
+    for (source, backing) in [
+        (
+            &markets[0].engine.source_credit_long,
+            &markets[0].engine.backing_long,
+        ),
+        (
+            &markets[0].engine.source_credit_short,
+            &markets[0].engine.backing_short,
+        ),
+    ] {
+        let s = source.try_to_runtime().unwrap();
+        let b = backing.try_to_runtime().unwrap();
+        out.push((
+            s.positive_claim_bound_num / BOUND_SCALE,
+            s.fresh_reserved_backing_num / BOUND_SCALE,
+            b.fresh_unliened_backing_num / BOUND_SCALE,
+            b.consumed_liened_backing_num / BOUND_SCALE,
+            s.credit_rate_num,
+        ));
+    }
+    out
+}
+
+#[test]
+fn triage_roundtrip_winner_support_follows_consumed_cross_domain_backing() {
+    const DEPOSIT: u128 = 10_000;
+    const UNITS: u128 = 10;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut trader_h = account_fixture(1, 201);
+    let mut lp_h = account_fixture(1, 202);
+    let path: [u64; 5] = [40, 80, 160, 205, 205];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
+        market.deposit_not_atomic(&mut trader, DEPOSIT).unwrap();
+        market.deposit_not_atomic(&mut lp, DEPOSIT).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut trader,
+                &mut lp,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(UNITS * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+        let mut slot = market.header.current_slot.get();
+        for mark in path {
+            slot += 1;
+            market
+                .set_asset_raw_oracle_target_not_atomic(0, mark)
+                .unwrap();
+            market
+                .accrue_asset_to_not_atomic(0, slot, mark, 0, true)
+                .unwrap_or_else(|e| panic!("accrue to {mark} failed: {e:?}"));
+            market.full_account_refresh_not_atomic(&mut trader).unwrap();
+            market.full_account_refresh_not_atomic(&mut lp).unwrap();
+            println!(
+                "mark {mark}: trader cap {} pnl {} | lp cap {} pnl {}",
+                trader.header.capital.get(),
+                trader.header.pnl.get(),
+                lp.header.capital.get(),
+                lp.header.pnl.get()
+            );
+        }
+        market.validate_shape().unwrap();
+        trader.validate_with_market(&market.as_view()).unwrap();
+        lp.validate_with_market(&market.as_view()).unwrap();
+    }
+    let stock_before = rt_stock(&markets);
+    println!("stock (claim, fresh_reserved, bucket_fresh, bucket_consumed, rate) [d_long, d_short] = {stock_before:?}");
+    println!(
+        "trader claims {:?}  lp claims {:?}",
+        account_claims(&trader_h),
+        account_claims(&lp_h)
+    );
+    let converted;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
+        converted = market.convert_released_pnl_to_capital_not_atomic(&mut trader);
+        println!(
+            "trader convert -> {converted:?}; trader cap {} pnl {}; lp cap {} pnl {}",
+            trader.header.capital.get(),
+            trader.header.pnl.get(),
+            lp_h.capital.get(),
+            lp_h.pnl.get()
+        );
+    }
+    println!("stock after convert = {:?}", rt_stock(&markets));
+    let honest_gain = (205u128 - 100) * UNITS;
+    let lp_equity = lp_h.capital.get() as i128 + lp_h.pnl.get();
+    // LP is solvent: it paid the whole round-trip loss from its own capital.
+    assert_eq!(lp_equity, DEPOSIT as i128 - honest_gain as i128);
+    assert!(lp_h.capital.get() > 0, "LP must remain solvent");
+    // The winner's net gain is fully funded by the LP's paid loss, so it must convert in full.
+    assert_eq!(
+        trader_h.capital.get(),
+        DEPOSIT + honest_gain,
+        "winner under-paid after a round trip against a solvent LP"
+    );
+}
