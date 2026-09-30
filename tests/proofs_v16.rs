@@ -20264,3 +20264,45 @@ fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
     );
     assert_eq!(support, insurance_atoms);
 }
+
+/// REVIEW (Sentinel 2026-09-30). P3 cites the two deregister proofs above for B12
+/// (permissionless resolved deregister cannot strand a claim). The rejects proof sets ONLY
+/// `capital`; removing the unfinalized-resolved-payout-receipt check from
+/// `is_empty_for_dematerialization` leaves it green (negative control). This harness covers the
+/// claim-bearing states B12's argument names: nonzero pnl, negative fee_credits, and a VALID
+/// present-but-unfinalized resolved payout receipt. Deregister must refuse all of them with no
+/// mutation of the count.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_review_deregister_refuses_every_named_claim_state() {
+    let which: u8 = kani::any();
+    kani::assume(which < 3);
+    let v: u8 = kani::any();
+    kani::assume(v > 0);
+    let count_raw: u8 = kani::any();
+    kani::assume(count_raw > 0);
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    match which {
+        0 => account_header.pnl = V16PodI128::new(v as i128),
+        1 => account_header.fee_credits = V16PodI128::new(-(v as i128)),
+        _ => {
+            let t = v as u128;
+            account_header.resolved_payout_receipt.present = 1;
+            account_header.resolved_payout_receipt.finalized = 0;
+            account_header.resolved_payout_receipt.terminal_positive_claim_face = V16PodU128::new(t);
+            account_header.resolved_payout_receipt.prior_bound_contribution_num =
+                V16PodU128::new(t * BOUND_SCALE);
+            account_header.resolved_payout_receipt.paid_effective = V16PodU128::new(0);
+        }
+    }
+    let count_before = header.materialized_portfolio_count.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+    kani::cover!(which == 0 && result == Err(V16Error::LockActive), "pnl claim refused by the emptiness predicate");
+    kani::cover!(which == 2 && result == Err(V16Error::LockActive), "unfinalized receipt refused by the emptiness predicate");
+    assert!(result.is_err());
+    assert_eq!(market.header.materialized_portfolio_count.get(), count_before);
+}
