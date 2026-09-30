@@ -737,28 +737,36 @@ fn add_open_interest_for_new_position(
 ) -> V16Result<()> {
     match side {
         SideV16::Long => {
+            let oi_eff_long_q = asset
+                .oi_eff_long_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            if oi_eff_long_q > crate::MAX_OI_SIDE_Q {
+                return Err(V16Error::InvalidLeg);
+            }
             asset.stored_pos_count_long = asset
                 .stored_pos_count_long
                 .checked_add(1)
                 .ok_or(V16Error::CounterOverflow)?;
-            asset.oi_eff_long_q = asset
-                .oi_eff_long_q
-                .checked_add(abs_q)
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.oi_eff_long_q = oi_eff_long_q;
             asset.loss_weight_sum_long = asset
                 .loss_weight_sum_long
                 .checked_add(loss_weight)
                 .ok_or(V16Error::ArithmeticOverflow)?;
         }
         SideV16::Short => {
+            let oi_eff_short_q = asset
+                .oi_eff_short_q
+                .checked_add(abs_q)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            if oi_eff_short_q > crate::MAX_OI_SIDE_Q {
+                return Err(V16Error::InvalidLeg);
+            }
             asset.stored_pos_count_short = asset
                 .stored_pos_count_short
                 .checked_add(1)
                 .ok_or(V16Error::CounterOverflow)?;
-            asset.oi_eff_short_q = asset
-                .oi_eff_short_q
-                .checked_add(abs_q)
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.oi_eff_short_q = oi_eff_short_q;
             asset.loss_weight_sum_short = asset
                 .loss_weight_sum_short
                 .checked_add(loss_weight)
@@ -24665,5 +24673,49 @@ mod attach_writer_cross_side_oi_tripwire_tests {
             "a Recovery-lifecycle asset is transiently asymmetric during teardown \
              and must not be flagged by the Live matched-book conjunct",
         );
+    }
+}
+
+// upstream 394fd0bf: the attach writer rejects a side-OI cap overflow before mutating.
+#[cfg(test)]
+mod attach_side_oi_cap_tests {
+    use super::*;
+
+    fn at_cap_minus_one() -> AssetStateV16 {
+        let mut asset = AssetStateV16::default();
+        asset.a_long = ADL_ONE;
+        asset.a_short = ADL_ONE;
+        asset.oi_eff_long_q = crate::MAX_OI_SIDE_Q - 1;
+        asset.oi_eff_short_q = crate::MAX_OI_SIDE_Q - 1;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset
+    }
+
+    #[test]
+    fn attach_rejects_side_oi_cap_overflow_without_mutation() {
+        for side in [SideV16::Long, SideV16::Short] {
+            let mut asset = at_cap_minus_one();
+            let before = asset;
+            assert_eq!(
+                add_open_interest_for_new_position(&mut asset, side, 2, 1),
+                Err(V16Error::InvalidLeg),
+                "{side:?}: one atom over MAX_OI_SIDE_Q must be refused"
+            );
+            assert_eq!(asset, before, "{side:?}: a refused attach mutates nothing");
+        }
+    }
+
+    #[test]
+    fn attach_accepts_exactly_the_side_oi_cap() {
+        for side in [SideV16::Long, SideV16::Short] {
+            let mut asset = at_cap_minus_one();
+            add_open_interest_for_new_position(&mut asset, side, 1, 1).unwrap();
+            let (oi, count) = match side {
+                SideV16::Long => (asset.oi_eff_long_q, asset.stored_pos_count_long),
+                SideV16::Short => (asset.oi_eff_short_q, asset.stored_pos_count_short),
+            };
+            assert_eq!((oi, count), (crate::MAX_OI_SIDE_Q, 2));
+        }
     }
 }
