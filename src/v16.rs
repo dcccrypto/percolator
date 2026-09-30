@@ -26,6 +26,7 @@ pub const V16_ACTIVE_BITMAP_WORDS: usize = (V16_MAX_PORTFOLIO_ASSETS_N + 63) / 6
 pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
+pub const V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
 // PortfolioAccountV16Account size assertion). 18: added per-side K/F settlement
 // epochs and a per-leg epoch snapshot.
@@ -15596,7 +15597,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 {
                     return Err(V16Error::NonProgress);
                 }
-                self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)?;
+                let (_, processed) = self
+                    .release_account_source_credit_liens_if_unneeded_core_not_atomic(
+                        account,
+                        V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS,
+                    )?;
+                if processed == 0 {
+                    return Err(V16Error::NonProgress);
+                }
                 AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
             }
             AutoCrankPlanV16::RefreshAccount { asset_index } => {
@@ -20108,16 +20116,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
-        self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)
+        self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account, usize::MAX)
+            .map(|(released_effective, _)| released_effective)
     }
 
     // fdf11670: the crank dispatch calls this core directly. The fork body is kept
     // whole -- per-domain targeting, the canonical backing-expiry transition, and
     // the terminal re-certification are fork behaviour upstream does not carry.
+    /// Releases (or normalizes) at most `max_domains` liened source domains and returns
+    /// `(released_effective, processed_domains)`. The permissionless auto-crank passes
+    /// `V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS` (upstream b10b3454): each domain touches
+    /// both account-local and market-wide attribution, and releasing the full sparse
+    /// table in one SBF instruction can exceed the transaction CU meter. The #137
+    /// conversion path keeps releasing every eligible domain in one call.
     fn release_account_source_credit_liens_if_unneeded_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
+        max_domains: usize,
+    ) -> V16Result<(u128, usize)> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -20133,13 +20149,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let mut released_effective = 0u128;
+        let mut processed_domains = 0usize;
         let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && processed_domains < max_domains {
             let source_snapshot = account.header.source_domains[slot];
             if source_snapshot.has_default_sparse_tag() && !source_snapshot.is_occupied() {
                 break;
             }
             if !source_snapshot.is_occupied() {
+                slot += 1;
+                continue;
+            }
+            if source_snapshot.source_claim_liened_num.get() == 0 {
                 slot += 1;
                 continue;
             }
@@ -20207,6 +20228,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 released_effective = released_effective
                     .checked_add(impaired_effective)
                     .ok_or(V16Error::ArithmeticOverflow)?;
+                processed_domains += 1;
                 slot += 1;
                 continue;
             }
@@ -20215,6 +20237,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .checked_add(effective)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 self.release_account_source_credit_lien_for_domain_not_atomic(account, d, false)?;
+                processed_domains += 1;
             }
             slot += 1;
         }
@@ -20231,7 +20254,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
-        Ok(released_effective)
+        Ok((released_effective, processed_domains))
     }
 
     #[cfg(any(kani, feature = "fuzz"))]

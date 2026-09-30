@@ -13901,3 +13901,148 @@ fn source_reclass_same_leg_reversal_counterparty_backed_im_liened() {
 fn source_reclass_same_leg_reversal_insurance_backed_im_liened() {
     rx_same_leg_reversal(true, true);
 }
+
+/// Upstream's `flat_source_credit_lien_fixture(2)` (b10b3454): one asset, the flat winner
+/// holds a 100-atom claim on BOTH of its source domains and a 200-unit round trip leans on
+/// both as initial margin, so both carry a retained lien.
+#[allow(clippy::type_complexity)]
+fn flat_source_credit_lien_fixture_both_sides() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut winner_header = account_fixture(1, 10);
+    let mut counterparty_header = account_fixture(1, 11);
+    let claim = 100u128;
+    let claim_num = claim * BOUND_SCALE;
+    winner_header.pnl = V16PodI128::new((2 * claim) as i128);
+    for domain in 0..2usize {
+        winner_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        winner_header.source_domains[domain].source_claim_market_id = V16PodU64::new(1);
+        winner_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(2 * claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(2 * claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(2 * claim);
+    header.source_claim_bound_total_num = V16PodU128::new(2 * claim_num);
+    header.vault = V16PodU128::new(2 * claim);
+    header.source_fresh_backing_total_num = V16PodU128::new(2 * claim_num);
+    let source_credit = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let backing = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long = source_credit;
+    markets[0].engine.backing_long = backing;
+    markets[0].engine.source_credit_short = source_credit;
+    markets[0].engine.backing_short = backing;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut counterparty, 1_000).unwrap();
+    }
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    let open = TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_q(200 * POS_SCALE),
+        exec_price: 1,
+        fee_bps: 0,
+    };
+    // Taker-only fee (fork): fee_bps is 0, so `taker_is_long_account` is inert.
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut counterparty,
+            open,
+            true,
+        )
+        .unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut counterparty,
+            TradeRequestV16 {
+                size_q: -open.size_q,
+                ..open
+            },
+            true,
+        )
+        .unwrap();
+    drop(market);
+    drop(winner);
+    drop(counterparty);
+    (header, markets, winner_header)
+}
+
+/// upstream b10b3454 ("Chunk maximum-shape source lien release"): the permissionless
+/// auto-crank releases at most `V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS` liened source
+/// domains per call, and the #137 conversion path still converts the whole claim.
+#[test]
+fn v16_auto_crank_releases_source_liens_in_strict_chunks() {
+    const TOTAL_CLAIM: u128 = 200;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture_both_sides();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let lien_count = |account: &PortfolioV16ViewMut<'_>| {
+        account
+            .header
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count()
+    };
+    assert_eq!(
+        lien_count(&winner),
+        2,
+        "fixture holds two liened source domains"
+    );
+    for remaining in [1usize, 0] {
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("each source-lien chunk must make progress");
+        assert_eq!(result.selected, AutoCrankPlanV16::ReleaseSourceLiens);
+        assert_eq!(lien_count(&winner), remaining, "one domain per crank");
+    }
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("all chunks release the complete claim"),
+        TOTAL_CLAIM
+    );
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+/// The #137 conversion path is not chunked: one conversion releases every eligible lien.
+#[test]
+fn v16_conversion_releases_every_eligible_source_lien_in_one_call() {
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture_both_sides();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("conversion releases both liens itself"),
+        200
+    );
+    market.validate_shape().unwrap();
+}
