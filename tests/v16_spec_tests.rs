@@ -13478,32 +13478,99 @@ fn v16_auto_crank_close_resolved_advances_the_resolved_settlement_clock() {
     market.validate_shape().unwrap();
 }
 
-// ---- triage 2026-09-30: round-trip cross-domain support consumption ----
-fn rt_stock(markets: &[Market<u64>]) -> Vec<(u128, u128, u128, u128, u128)> {
+// ---- 2026-09-30: a loss netted against source-backed PnL must back the loss domain ----
+//
+// A negative K/F settlement first consumes the account's own source-backed positive
+// PnL (support in the claim's source domain S) and only reserves the uncovered tail
+// into the loss domain D. Before the fix the consumed atoms fell into the unowned
+// residual and D's claimants were under-backed by exactly that amount.
+
+fn rx_stock(markets: &[Market<u64>]) -> Vec<(u128, u128, u128, u128)> {
     let mut out = Vec::new();
-    for (source, backing) in [
-        (
-            &markets[0].engine.source_credit_long,
-            &markets[0].engine.backing_long,
-        ),
-        (
-            &markets[0].engine.source_credit_short,
-            &markets[0].engine.backing_short,
-        ),
-    ] {
-        let s = source.try_to_runtime().unwrap();
-        let b = backing.try_to_runtime().unwrap();
-        out.push((
-            s.positive_claim_bound_num / BOUND_SCALE,
-            s.fresh_reserved_backing_num / BOUND_SCALE,
-            b.fresh_unliened_backing_num / BOUND_SCALE,
-            b.consumed_liened_backing_num / BOUND_SCALE,
-            s.credit_rate_num,
-        ));
+    for market in markets {
+        for (source, backing) in [
+            (
+                &market.engine.source_credit_long,
+                &market.engine.backing_long,
+            ),
+            (
+                &market.engine.source_credit_short,
+                &market.engine.backing_short,
+            ),
+        ] {
+            let s = source.try_to_runtime().unwrap();
+            let b = backing.try_to_runtime().unwrap();
+            out.push((
+                s.positive_claim_bound_num / BOUND_SCALE,
+                s.fresh_reserved_backing_num / BOUND_SCALE,
+                b.consumed_liened_backing_num / BOUND_SCALE,
+                s.credit_rate_num,
+            ));
+        }
     }
     out
 }
 
+fn rx_trade(
+    market: &mut MarketGroupV16ViewMut<'_, u64>,
+    long: &mut PortfolioV16ViewMut<'_>,
+    short: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    size_q: i128,
+    exec_price: u64,
+) {
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            long,
+            short,
+            TradeRequestV16 {
+                asset_index,
+                size_q,
+                exec_price,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap_or_else(|e| {
+            panic!("trade asset {asset_index} size {size_q} @ {exec_price}: {e:?}")
+        });
+}
+
+fn rx_mark(market: &mut MarketGroupV16ViewMut<'_, u64>, asset_index: usize, slot: u64, mark: u64) {
+    market
+        .set_asset_raw_oracle_target_not_atomic(asset_index, mark)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(asset_index, slot, mark, 0, true)
+        .unwrap_or_else(|e| panic!("accrue asset {asset_index} to {mark}: {e:?}"));
+}
+
+/// Every positive source claim is fully backed and the vault holds exactly capital plus
+/// the backing of outstanding claims: no atom sits in the residual with no owner.
+fn rx_assert_backed_and_conserved(
+    header: &MarketGroupV16HeaderAccount,
+    markets: &[Market<u64>],
+    label: &str,
+) {
+    let stock = rx_stock(markets);
+    let mut fresh_total = 0u128;
+    for (d, (claim, fresh, _consumed, rate)) in stock.iter().enumerate() {
+        fresh_total += *fresh;
+        if *claim != 0 {
+            assert_eq!(
+                *rate, CREDIT_RATE_SCALE,
+                "{label}: domain {d} claim {claim} under-backed (fresh {fresh}): {stock:?}"
+            );
+        }
+    }
+    assert_eq!(
+        header.vault.get(),
+        header.c_tot.get() + header.insurance.get() + fresh_total,
+        "{label}: vault must equal capital + insurance + fresh backing (no ownerless residual): {stock:?}"
+    );
+}
+
+/// Form (b): time-separated single-asset round trip against an ordinary LP.
 #[test]
 fn triage_roundtrip_winner_support_follows_consumed_cross_domain_backing() {
     const DEPOSIT: u128 = 10_000;
@@ -13511,79 +13578,326 @@ fn triage_roundtrip_winner_support_follows_consumed_cross_domain_backing() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut trader_h = account_fixture(1, 201);
     let mut lp_h = account_fixture(1, 202);
-    let path: [u64; 5] = [40, 80, 160, 205, 205];
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
         let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
         market.deposit_not_atomic(&mut trader, DEPOSIT).unwrap();
         market.deposit_not_atomic(&mut lp, DEPOSIT).unwrap();
-        market
-            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
-                &mut trader,
-                &mut lp,
-                TradeRequestV16 {
-                    asset_index: 0,
-                    size_q: signed_q(UNITS * POS_SCALE),
-                    exec_price: 100,
-                    fee_bps: 0,
-                },
-                true,
-            )
-            .unwrap();
+        rx_trade(
+            &mut market,
+            &mut trader,
+            &mut lp,
+            0,
+            signed_q(UNITS * POS_SCALE),
+            100,
+        );
         let mut slot = market.header.current_slot.get();
-        for mark in path {
+        for mark in [40u64, 80, 160, 205] {
             slot += 1;
-            market
-                .set_asset_raw_oracle_target_not_atomic(0, mark)
-                .unwrap();
-            market
-                .accrue_asset_to_not_atomic(0, slot, mark, 0, true)
-                .unwrap_or_else(|e| panic!("accrue to {mark} failed: {e:?}"));
+            rx_mark(&mut market, 0, slot, mark);
             market.full_account_refresh_not_atomic(&mut trader).unwrap();
             market.full_account_refresh_not_atomic(&mut lp).unwrap();
-            println!(
-                "mark {mark}: trader cap {} pnl {} | lp cap {} pnl {}",
-                trader.header.capital.get(),
-                trader.header.pnl.get(),
-                lp.header.capital.get(),
-                lp.header.pnl.get()
-            );
         }
         market.validate_shape().unwrap();
         trader.validate_with_market(&market.as_view()).unwrap();
         lp.validate_with_market(&market.as_view()).unwrap();
     }
-    let stock_before = rt_stock(&markets);
-    println!("stock (claim, fresh_reserved, bucket_fresh, bucket_consumed, rate) [d_long, d_short] = {stock_before:?}");
+    // Pre-fix: [(0, 0, 600, ..), (1650, 1050, 0, 636363636363)] -> 600 ownerless atoms.
     println!(
-        "trader claims {:?}  lp claims {:?}",
-        account_claims(&trader_h),
-        account_claims(&lp_h)
+        "round-trip stock (claim, fresh, consumed, rate) = {:?}",
+        rx_stock(&markets)
     );
-    let converted;
+    rx_assert_backed_and_conserved(&header, &markets, "after round trip");
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
-        converted = market.convert_released_pnl_to_capital_not_atomic(&mut trader);
-        println!(
-            "trader convert -> {converted:?}; trader cap {} pnl {}; lp cap {} pnl {}",
-            trader.header.capital.get(),
-            trader.header.pnl.get(),
-            lp_h.capital.get(),
-            lp_h.pnl.get()
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
+        rx_trade(
+            &mut market,
+            &mut trader,
+            &mut lp,
+            0,
+            -signed_q(UNITS * POS_SCALE),
+            205,
         );
+        let converted = market
+            .convert_released_pnl_to_capital_not_atomic(&mut trader)
+            .expect("a fully backed winner converts");
+        assert_eq!(converted, 1_650);
+        market.validate_shape().unwrap();
+        trader.validate_with_market(&market.as_view()).unwrap();
+        lp.validate_with_market(&market.as_view()).unwrap();
     }
-    println!("stock after convert = {:?}", rt_stock(&markets));
     let honest_gain = (205u128 - 100) * UNITS;
-    let lp_equity = lp_h.capital.get() as i128 + lp_h.pnl.get();
-    // LP is solvent: it paid the whole round-trip loss from its own capital.
-    assert_eq!(lp_equity, DEPOSIT as i128 - honest_gain as i128);
-    assert!(lp_h.capital.get() > 0, "LP must remain solvent");
-    // The winner's net gain is fully funded by the LP's paid loss, so it must convert in full.
+    assert_eq!(
+        lp_h.capital.get(),
+        DEPOSIT - honest_gain,
+        "LP pays exactly its loss"
+    );
+    assert_eq!(lp_h.pnl.get(), 0);
     assert_eq!(
         trader_h.capital.get(),
         DEPOSIT + honest_gain,
         "winner under-paid after a round trip against a solvent LP"
     );
+    assert_eq!(trader_h.pnl.get(), 0);
+    assert_eq!(header.vault.get(), 2 * DEPOSIT);
+    assert_eq!(
+        header.c_tot.get(),
+        2 * DEPOSIT,
+        "nothing left ownerless in the vault"
+    );
+    rx_assert_backed_and_conserved(&header, &markets, "after conversion");
+}
+
+/// Form (a): the #175 cross-asset shape, in its time-separated order. The taker's gain on
+/// asset 1 is settled first (a claim on asset 1's short-loss domain, backed by the LP's
+/// loss there); a later refresh nets the taker's asset-0 loss against that claim. The LP's
+/// asset-0 gain must then be backed in asset 0's long-loss domain.
+fn rx_cross_asset(same_refresh: bool, profitable_leg_first: bool) {
+    const DEPOSIT: u128 = 1_000;
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut taker_h = account_fixture(2, 211);
+    let mut lp_h = account_fixture(2, 212);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_h);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
+        market.deposit_not_atomic(&mut taker, DEPOSIT).unwrap();
+        market.deposit_not_atomic(&mut lp, DEPOSIT).unwrap();
+        let order: [usize; 2] = if profitable_leg_first { [1, 0] } else { [0, 1] };
+        for asset in order {
+            rx_trade(
+                &mut market,
+                &mut taker,
+                &mut lp,
+                asset,
+                signed_q(POS_SCALE),
+                100,
+            );
+        }
+        let slot = market.header.current_slot.get() + 1;
+        rx_mark(&mut market, 1, slot, 110);
+        if same_refresh {
+            rx_mark(&mut market, 0, slot, 90);
+            market.full_account_refresh_not_atomic(&mut taker).unwrap();
+            market.full_account_refresh_not_atomic(&mut lp).unwrap();
+        } else {
+            rx_mark(&mut market, 0, slot, 100);
+            market.full_account_refresh_not_atomic(&mut taker).unwrap();
+            market.full_account_refresh_not_atomic(&mut lp).unwrap();
+            rx_mark(&mut market, 1, slot + 1, 110);
+            rx_mark(&mut market, 0, slot + 1, 90);
+            market.full_account_refresh_not_atomic(&mut taker).unwrap();
+            market.full_account_refresh_not_atomic(&mut lp).unwrap();
+        }
+        market.validate_shape().unwrap();
+        taker.validate_with_market(&market.as_view()).unwrap();
+        lp.validate_with_market(&market.as_view()).unwrap();
+    }
+    let label =
+        format!("cross-asset same_refresh={same_refresh} profit_first={profitable_leg_first}");
+    println!(
+        "{label}: taker cap {} pnl {} claims {:?} | lp cap {} pnl {} claims {:?} | stock {:?}",
+        taker_h.capital.get(),
+        taker_h.pnl.get(),
+        account_claims(&taker_h),
+        lp_h.capital.get(),
+        lp_h.pnl.get(),
+        account_claims(&lp_h),
+        rx_stock(&markets)
+    );
+    rx_assert_backed_and_conserved(&header, &markets, &label);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_h);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
+        rx_trade(
+            &mut market,
+            &mut taker,
+            &mut lp,
+            1,
+            -signed_q(POS_SCALE),
+            110,
+        );
+        rx_trade(
+            &mut market,
+            &mut taker,
+            &mut lp,
+            0,
+            -signed_q(POS_SCALE),
+            90,
+        );
+        for account in [&mut taker, &mut lp] {
+            if account.header.pnl.get() > 0 {
+                // A prior conversion moves the risk epoch; recertify first.
+                market.full_account_refresh_not_atomic(account).unwrap();
+                market
+                    .convert_released_pnl_to_capital_not_atomic(account)
+                    .unwrap_or_else(|e| panic!("{label}: backed claim must convert: {e:?}"));
+            }
+        }
+        market.validate_shape().unwrap();
+    }
+    // Net zero for both: +10 on one asset, -10 on the other.
+    assert_eq!(
+        (taker_h.capital.get(), taker_h.pnl.get()),
+        (DEPOSIT, 0),
+        "{label}: taker"
+    );
+    assert_eq!(
+        (lp_h.capital.get(), lp_h.pnl.get()),
+        (DEPOSIT, 0),
+        "{label}: LP"
+    );
+    assert_eq!(header.vault.get(), 2 * DEPOSIT);
+    assert_eq!(
+        header.c_tot.get(),
+        2 * DEPOSIT,
+        "{label}: nothing left ownerless"
+    );
+}
+
+#[test]
+fn source_reclass_cross_asset_time_separated_profit_leg_first() {
+    rx_cross_asset(false, true);
+}
+
+#[test]
+fn source_reclass_cross_asset_time_separated_loss_leg_first() {
+    rx_cross_asset(false, false);
+}
+
+#[test]
+fn source_reclass_cross_asset_same_refresh_profit_leg_first() {
+    rx_cross_asset(true, true);
+}
+
+#[test]
+fn source_reclass_cross_asset_same_refresh_loss_leg_first() {
+    rx_cross_asset(true, false);
+}
+
+/// Same-leg mark reversal whose positive claim is backed by an external provider
+/// (counterparty) or by reserved domain insurance. The winner (short) is owed the
+/// long's whole reversal loss in domain 0; that loss is paid partly from capital and
+/// partly by netting the long's domain-1 source claim. With `im_lien`, part of the long's
+/// claim is liened as initial margin when the reversal lands.
+#[cfg(feature = "fuzz")]
+fn rx_same_leg_reversal(insurance_backed: bool, im_lien: bool) {
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+    let reversal_loss;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        if insurance_backed {
+            market
+                .deposit_domain_insurance_not_atomic(1, 100_000)
+                .unwrap();
+            market
+                .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
+                .unwrap();
+        } else {
+            market
+                .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+                .unwrap();
+        }
+        market.deposit_not_atomic(&mut long, 52_501).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+        rx_trade(&mut market, &mut long, &mut short, 0, signed_q(OPEN_Q), 100);
+        rx_mark(&mut market, 0, 2, 105);
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        if insurance_backed {
+            // Replace the short's crystallized loss backing with the reserved insurance.
+            let fresh = market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .fresh_unliened_backing_num
+                / BOUND_SCALE;
+            market
+                .withdraw_fresh_counterparty_backing_not_atomic(1, fresh)
+                .unwrap();
+        }
+        assert_eq!(long.header.pnl.get(), 5_000);
+        let open_q = if im_lien {
+            rx_trade(
+                &mut market,
+                &mut long,
+                &mut short,
+                0,
+                signed_q(INCREASE_Q),
+                105,
+            );
+            assert!(long.header.source_domains[0].source_claim_liened_num.get() > 0);
+            OPEN_Q + INCREASE_Q
+        } else {
+            assert_eq!(
+                long.header.source_domains[0].source_claim_liened_num.get(),
+                0
+            );
+            OPEN_Q
+        };
+        reversal_loss = open_q * 5 / POS_SCALE;
+        rx_mark(&mut market, 0, 3, 100);
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert_eq!(long.header.pnl.get(), 0, "the long's claim is fully netted");
+        assert_eq!(short.header.pnl.get() as u128, reversal_loss);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+    let stock = rx_stock(&markets);
+    println!("insurance={insurance_backed} lien={im_lien} stock {stock:?}");
+    assert_eq!(
+        stock[0].1, reversal_loss,
+        "the loss domain must hold the long's whole reversal loss as backing: {stock:?}"
+    );
+    rx_assert_backed_and_conserved(&header, &markets, "same-leg reversal");
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn source_reclass_same_leg_reversal_counterparty_backed() {
+    rx_same_leg_reversal(false, false);
+}
+
+/// Decision: insurance-consumed support is reclassified like counterparty support. The
+/// insurance spend already paid the claimant's gain; the claimant used it to pay its loss.
+#[cfg(feature = "fuzz")]
+#[test]
+fn source_reclass_same_leg_reversal_insurance_backed() {
+    rx_same_leg_reversal(true, false);
+}
+
+/// KNOWN RESIDUAL (not fixed here): an IM-liened portion of the claim is unpledged back
+/// to its source domain and its face absorbs the loss one-for-one (upstream a0335e57 /
+/// 07208fb1 design), so that portion never reaches the loss domain.
+#[cfg(feature = "fuzz")]
+#[test]
+#[ignore = "known residual: liened support is unpledged, not consumed (see roundtrip-engine-fix-2026-09-30.md)"]
+fn source_reclass_same_leg_reversal_counterparty_backed_im_liened() {
+    rx_same_leg_reversal(false, true);
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+#[ignore = "known residual: liened support is unpledged, not consumed (see roundtrip-engine-fix-2026-09-30.md)"]
+fn source_reclass_same_leg_reversal_insurance_backed_im_liened() {
+    rx_same_leg_reversal(true, true);
 }

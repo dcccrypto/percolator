@@ -13440,27 +13440,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.account_source_realizable_support(account, face_claim)
     }
 
+    /// Books a settled loss into its loss domain `domain`: the part newly charged to
+    /// capital (`negative_after - negative_before`, capped by unencumbered capital) plus
+    /// `support_paid`, the part the account paid by netting the loss against its own
+    /// source-backed positive PnL. That netting consumed the support in the claim's
+    /// source domain, moving those atoms from senior backing (or insurance) into the
+    /// unowned residual; the loss is nevertheless owed to this domain's opposite-side
+    /// claimants, exactly as if the account had converted the support to capital and paid
+    /// the loss from it. Both parts land in the domain in one step.
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         domain: usize,
         negative_before: u128,
         negative_after: u128,
+        support_paid: u128,
     ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         let new_negative_loss = negative_after.saturating_sub(negative_before);
-        if new_negative_loss == 0 {
-            return Ok(());
-        }
         let capital_not_already_encumbered =
             account.header.capital.get().saturating_sub(negative_before);
         let backing = new_negative_loss.min(capital_not_already_encumbered);
-        if backing == 0 {
+        let booked = backing
+            .checked_add(support_paid)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if booked == 0 {
             return Ok(());
         }
-        let backing_num = backing
+        // Fail closed before any mutation if the booked backing cannot be represented.
+        booked
             .checked_mul(BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        if backing == 0 {
+            return self.book_realized_loss_backing_for_domain_not_atomic(domain, booked);
+        }
         let vault_before = self.header.vault.get();
         account.header.capital = V16PodU128::new(
             account
@@ -13491,18 +13504,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
+        self.book_realized_loss_backing_for_domain_not_atomic(domain, booked)?;
+        Self::record_account_residual_crystallized_loss(account, backing)?;
+        account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    /// Books `amount` atoms of loss already paid into the vault as backing of the
+    /// loss domain, whose opposite-side claimants that loss funds.
+    fn book_realized_loss_backing_for_domain_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let backing_num = amount
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let terminal_impaired = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
             && self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired;
         if terminal_impaired {
             // Once the provider bucket has defaulted, newly crystallized loss is
             // terminal junior support, not recoverable provider principal.
-            self.credit_post_snapshot_residual_not_atomic(backing)?;
+            self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
             self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         }
-        Self::record_account_residual_crystallized_loss(account, backing)?;
-        account.header.health_cert.valid = 0;
         Ok(())
     }
 
@@ -13519,6 +13549,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             domain,
             negative_before,
             negative_after,
+            0,
         )
     }
 
@@ -13774,13 +13805,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.apply_signed_kf_delta_to_pnl(account, prepared.net, Some(source_domain))?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
-                self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
+                let source_backed = Self::account_has_source_claims(&account.as_view())?;
+                let support = self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+                // Source-backed support consumed by the netting is paid loss too (the
+                // junior haircut branch spends no senior stock, so it books nothing).
+                let support_paid = if source_backed {
+                    support.support_consumed
+                } else {
+                    0
+                };
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
                     account,
                     source_domain,
                     negative_before,
                     negative_after,
+                    support_paid,
                 )?;
             }
         }
