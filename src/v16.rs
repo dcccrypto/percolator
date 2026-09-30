@@ -13532,11 +13532,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let backing_num = amount
             .checked_mul(BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let terminal_impaired = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
-            && self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired;
-        if terminal_impaired {
-            // Once the provider bucket has defaulted, newly crystallized loss is
-            // terminal junior support, not recoverable provider principal.
+        let terminal_residual = if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+        {
+            let (asset_index, loss_side) = self.domain_asset_side(domain)?;
+            let asset = self.asset_state(asset_index)?;
+            let creditor_counts = match opposite_side(loss_side) {
+                SideV16::Long => (asset.stored_pos_count_long, asset.stale_account_count_long),
+                SideV16::Short => (
+                    asset.stored_pos_count_short,
+                    asset.stale_account_count_short,
+                ),
+            };
+            self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired
+                || (self
+                    .source_credit_for_domain(domain)?
+                    .positive_claim_bound_num
+                    == 0
+                    && creditor_counts == (0, 0))
+        } else {
+            false
+        };
+        if terminal_residual {
+            // A consumed credit can outlive its creditor's final leg. With no
+            // remaining claim or creditor leg, late debt funds terminal junior
+            // claims instead of recreating ownerless source backing. Impaired
+            // provider buckets likewise leave new losses as junior support.
+            // (upstream 0b861efb)
             self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;

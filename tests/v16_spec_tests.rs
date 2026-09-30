@@ -14046,3 +14046,93 @@ fn v16_conversion_releases_every_eligible_source_lien_in_one_call() {
     );
     market.validate_shape().unwrap();
 }
+
+// ---- Resolved close-order regression matrix (upstream 0b861efb / 94979ede / 4db11a8c) ----
+//
+// Upstream pins these three Resolved-mode fixes with wrapper-level invariant suites
+// (percolator-prog inv_039 / inv_067 / row417 / row419), not engine tests. This matrix
+// is a regression net at the engine level: every close order, with and without the
+// losses being settled before resolution, must pay both sides their exact endpoint and
+// drain the vault. It is NOT a red->green reproduction of the upstream defects.
+
+fn rz_resolved_world(settle_before_resolve: bool, loser_first: bool, reversal: bool) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut winner_h = account_fixture(1, 221);
+    let mut loser_h = account_fixture(1, 222);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_h);
+    let mut loser = PortfolioV16ViewMut::new(&mut loser_h);
+    market.deposit_not_atomic(&mut winner, 1_000).unwrap();
+    market.deposit_not_atomic(&mut loser, 1_000).unwrap();
+    rx_trade(
+        &mut market,
+        &mut winner,
+        &mut loser,
+        0,
+        signed_q(POS_SCALE),
+        100,
+    );
+    let mut slot = market.header.current_slot.get();
+    let path: &[u64] = if reversal { &[40, 80, 110] } else { &[110] };
+    for &mark in path {
+        slot += 1;
+        rx_mark(&mut market, 0, slot, mark);
+        if settle_before_resolve {
+            market.full_account_refresh_not_atomic(&mut winner).unwrap();
+            market.full_account_refresh_not_atomic(&mut loser).unwrap();
+        }
+    }
+    market.resolve_market_not_atomic(slot).unwrap();
+    let label =
+        format!("settled={settle_before_resolve} loser_first={loser_first} reversal={reversal}");
+    let mut paid = [0u128; 2];
+    let order: [usize; 4] = if loser_first {
+        [1, 0, 1, 0]
+    } else {
+        [0, 1, 0, 1]
+    };
+    for who in order {
+        let account = if who == 0 { &mut winner } else { &mut loser };
+        for _ in 0..16 {
+            match market.close_resolved_account_not_atomic(account, 0) {
+                Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
+                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    paid[who] += payout;
+                    break;
+                }
+                Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+                Err(e) => panic!("{label}: resolved close failed: {e:?}"),
+            }
+        }
+        if account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+            .present
+        {
+            if let Ok(topup) = market.claim_resolved_payout_topup_not_atomic(account) {
+                paid[who] += topup;
+            }
+        }
+        market.validate_shape().unwrap();
+    }
+    assert_eq!(paid, [1_010, 990], "{label}: exact endpoints");
+    assert_eq!(market.header.vault.get(), 0, "{label}: vault drained");
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        0,
+        "{label}: no ownerless backing"
+    );
+}
+
+#[test]
+fn resolved_close_order_matrix_pays_exact_endpoints() {
+    for settle in [false, true] {
+        for loser_first in [false, true] {
+            for reversal in [false, true] {
+                rz_resolved_world(settle, loser_first, reversal);
+            }
+        }
+    }
+}
