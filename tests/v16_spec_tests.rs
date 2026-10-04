@@ -13991,3 +13991,81 @@ fn resolved_close_order_matrix_pays_exact_endpoints() {
         }
     }
 }
+
+// ---- F-5 (security review of E1, 2026-10-04): a FULLY netted loss (support only, no new
+// capital-backed tail) into a Live loss domain whose bucket cannot take an add (Fresh but past
+// its expiry, or Impaired) must not add a revert path the deployed engine did not have. ----
+
+/// Spec §3 `Residual = V - (C_tot + I + E + F)`, from public header fields.
+fn f5_residual(h: &MarketGroupV16HeaderAccount) -> u128 {
+    h.vault.get()
+        - h.c_tot.get()
+        - h.insurance.get()
+        - h.backing_provider_earnings_total.get()
+        - h.source_fresh_backing_total_num.get() / BOUND_SCALE
+}
+
+/// Returns (stock before, residual before, result of the trader's refresh, residual after,
+/// trader pnl after). The loss domain d0 is lapsed by moving only its `expiry_slot` to the current
+/// slot, the state a bucket is in between its expiry and the next expiry run.
+fn f5_fully_netted_into_lapsed_loss_domain() -> (Vec<(u128, u128, u128, u128)>, u128, Result<(), V16Error>, u128, i128) {
+    const DEPOSIT: u128 = 10_000;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut trader_h = account_fixture(1, 231);
+    let mut lp_h = account_fixture(1, 232);
+    let mut slot;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_h);
+        market.deposit_not_atomic(&mut trader, DEPOSIT).unwrap();
+        market.deposit_not_atomic(&mut lp, DEPOSIT).unwrap();
+        rx_trade(&mut market, &mut trader, &mut lp, 0, signed_q(10 * POS_SCALE), 100);
+        slot = market.header.current_slot.get();
+        // 80: the trader's 200 capital-backed loss opens d0 (the LP's +200 claim sits on it);
+        // 90: the LP's 100 loss nets half its d0 face, so d0 stays Fresh with 100 unconsumed,
+        // and the trader's +100 gain is backed in d1.
+        for mark in [80u64, 90] {
+            slot += 1;
+            rx_mark(&mut market, 0, slot, mark);
+            market.full_account_refresh_not_atomic(&mut trader).unwrap();
+            market.full_account_refresh_not_atomic(&mut lp).unwrap();
+        }
+        assert!(trader.header.pnl.get() > 0, "vacuity: the trader holds a positive face");
+    }
+    assert_eq!(
+        markets[0].engine.backing_long.try_to_runtime().unwrap().status,
+        BackingBucketStatusV16::Fresh,
+        "vacuity: the trader's loss domain d0 is open"
+    );
+    let cur = header.current_slot.get();
+    markets[0].engine.backing_long.expiry_slot = V16PodU64::new(cur);
+    let stock = rx_stock(&markets);
+    let residual_before;
+    let result;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut trader = PortfolioV16ViewMut::new(&mut trader_h);
+        residual_before = f5_residual(market.header);
+        // 85: the trader's 50 loss is netted in full against its d1-backed face (pure support).
+        slot += 1;
+        rx_mark(&mut market, 0, slot, 85);
+        result = market.full_account_refresh_not_atomic(&mut trader).map(|_| ());
+    }
+    let residual_after = f5_residual(&header);
+    (stock, residual_before, result, residual_after, trader_h.pnl.get())
+}
+
+#[test]
+fn f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert() {
+    let (stock, residual_before, result, residual_after, pnl_after) =
+        f5_fully_netted_into_lapsed_loss_domain();
+    println!("F-5 stock before {stock:?} residual {residual_before} -> {residual_after}, result {result:?}, trader pnl {pnl_after}");
+    result.expect("a fully netted loss must settle even when its loss domain cannot take an add");
+    assert_eq!(pnl_after, 50, "the trader's face fell by exactly the 50 loss (100 -> 50)");
+    assert_eq!(
+        residual_after,
+        residual_before + 50,
+        "the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)"
+    );
+}

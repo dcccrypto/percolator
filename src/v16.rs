@@ -13472,6 +13472,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if backing == 0 {
+            // F-5 (security review of E1): a FULLY netted loss must never revert where the
+            // deployed engine settled. If the loss domain's bucket cannot take an add right now
+            // (Live and Impaired, or Fresh past its expiry), the support stays in Residual
+            // exactly as on 35ddd692, a known residual like R1-R3, instead of bricking the
+            // settlement. The capital-backed case below keeps its pre-existing behaviour.
+            if !self.loss_domain_accepts_realized_backing(domain)? {
+                return Ok(());
+            }
             return self.book_realized_loss_backing_for_domain_not_atomic(domain, booked);
         }
         let vault_before = self.header.vault.get();
@@ -13508,6 +13516,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_residual_crystallized_loss(account, backing)?;
         account.header.health_cert.valid = 0;
         Ok(())
+    }
+
+    /// Whether `book_realized_loss_backing_for_domain_not_atomic` can book into `domain` now:
+    /// the Resolved-impaired branch always can (post-snapshot residual credit). Otherwise it
+    /// mirrors the status rule of `prepare_counterparty_backing_add_delta` exactly: Empty and
+    /// Expired reopen, Fresh only at the expiry the add would use (i.e. not lapsed), anything else
+    /// (Impaired) refuses. Read-only.
+    fn loss_domain_accepts_realized_backing(&self, domain: usize) -> V16Result<bool> {
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && bucket.status == BackingBucketStatusV16::Impaired
+        {
+            return Ok(true);
+        }
+        let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+        Ok(match bucket.status {
+            BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired => {
+                expiry_slot > self.header.current_slot.get()
+            }
+            BackingBucketStatusV16::Fresh => bucket.expiry_slot == expiry_slot,
+            _ => false,
+        })
     }
 
     /// Books `amount` atoms of loss already paid into the vault as backing of the
