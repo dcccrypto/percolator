@@ -1,0 +1,6 @@
+# Read-only devnet snapshot, 2026-10-05: portfolios enumerated by getProgramAccounts (dataSize 9563, memcmp market_group_id @16),
+# then slab + every portfolio fetched in ONE getMultipleAccounts call per market (commitment confirmed), so each market is a single-slot snapshot.
+# name	slab	slot	portfolio_count	program
+stonk	4EGvEGdLY2i9JeApJ8cEjkFehuSXpzfo11BBJarB7MTw	507531253	10	ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB
+percolator	9EPm8nB8Fs7WcEZgE1WGFPTGc6rAzD6GhFJyMm4dEFHn	507531253	28	ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB
+jimothy	CzKxVxPm9gpt7eyQ3xJKh57EMT6i5bep5Swu9NRcpzCh	507531255	12	ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB
