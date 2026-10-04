@@ -54,7 +54,11 @@ pub use v16::*;
 pub use v16::{
     active_bitmap_count_ones, active_bitmap_empty, active_bitmap_get, active_bitmap_is_empty,
     auto_crank_plan_requires_caller_observation, backing_domain_fee_split_for_lien_delta_num,
+    bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active, bankruptcy_hlock_is_unattributed,
+    bankruptcy_hlock_mark_domain, bankruptcy_hlock_mark_unattributed,
     canonical_accrual_price_step_v16, v16_domain_count_for_market_slots,
+    validate_bankruptcy_hlock_wire, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
+    AdlWindDownRequestV16, BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     v16_domain_pair_for_asset_index, AccrualStepV16, AccrueAssetOutcomeV16, ActionableSummaryV16,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankObservationV16,
     AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16, AutoCrankWorkV16,

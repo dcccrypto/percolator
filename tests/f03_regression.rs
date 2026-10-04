@@ -264,9 +264,12 @@ fn settled_world() -> World {
 #[test]
 fn f03_a_public_liquidation_sets_bankruptcy_hlock_and_socializes_loss() {
     let w = bankrupt_world();
+    // P2b L1: the byte now carries attribution. Bit 0 = active; this single-asset Live
+    // bankruptcy of a SHORT leg is attributed to claim-source domain 1 (asset 0, Short):
+    // 1 | (1 << (1 + 1)) == 5.
     assert_eq!(
         w.hlock(),
-        1,
+        5,
         "consume_domain_insurance_for_negative_pnl (v16.rs:11622) must latch the group byte"
     );
     let asset = w.asset();
@@ -705,5 +708,5 @@ fn f03_d_no_public_entry_lowers_the_counter() {
         w.explicit_long(),
         tried.len()
     );
-    assert_eq!(w.hlock(), 1, "and the group byte is still latched");
+    assert_eq!(w.hlock(), 5, "and the group byte is still latched (P2b L1: attributed to domain 1)");
 }

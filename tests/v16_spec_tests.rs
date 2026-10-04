@@ -1766,7 +1766,7 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
         true,
     );
 
-    assert_eq!(res, Err(V16Error::LockActive));
+    assert_eq!(res, Err(V16Error::LossStale));
 }
 
 #[test]
@@ -1820,7 +1820,7 @@ fn v16_fully_accrued_kf_cohort_blocks_fresh_risk_until_every_side_settles() {
         request,
         true,
     );
-    assert_eq!(rejected, Err(V16Error::LockActive));
+    assert_eq!(rejected, Err(V16Error::LossStale));
     assert_eq!(entrant.header.active_bitmap[0].get(), 0);
     assert_ne!(winner.header.active_bitmap[0].get(), 0);
 
@@ -2297,7 +2297,7 @@ fn v16_quantity_adl_blocks_fresh_basis_reissue_across_split_trades() {
         true,
     );
 
-    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(result, Err(V16Error::AdlReduceOnly));
 }
 
 #[test]
@@ -2809,7 +2809,7 @@ fn v16_recovery_pair_close_refuses_stale_work_beyond_effective_oi() {
     );
     assert_eq!(
         refused.map(|outcome| outcome.notional),
-        Err(V16Error::LockActive),
+        Err(V16Error::AdlReduceOnly),
         "stale Recovery work past the canonical effective OI must not land"
     );
     let untouched = market.markets[0].engine.asset.try_to_runtime().unwrap();
@@ -8092,7 +8092,7 @@ fn v16_trade_rejects_fresh_risk_when_either_side_is_recovering() {
 
         assert_eq!(
             res,
-            Err(V16Error::LockActive),
+            Err(V16Error::AdlReduceOnly),
             "fresh risk admitted with mode_long={mode_long:?} mode_short={mode_short:?}"
         );
         // Rollback-clean rejection: no partial state mutation, no fee leakage.

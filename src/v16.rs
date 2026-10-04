@@ -224,6 +224,17 @@ pub enum V16Error {
     /// conservative round-down pricing. Rejecting this in the engine prevents
     /// callers from accepting collateral while silently minting zero shares.
     LpVaultZeroSharesMinted,
+    /// P2b E7: a risk-INCREASING change was refused because the asset is in ADL
+    /// reduce-only: either side's `A` is below `ADL_ONE` (upstream 6ae709e0, "no attach,
+    /// flip or enlarge while A != ADL_ONE"), or a side is `DrainOnly` / `ResetPending`.
+    /// Reducing and closing remain allowed. Previously this surfaced as `LockActive`
+    /// (wrapper Custom 21), indistinguishable from loss-stale and the Earn backed gate.
+    AdlReduceOnly,
+    /// P2b E7: a risk-INCREASING trade was refused because the asset is loss-stale
+    /// (positions not yet refreshed after an accrual, or an asset clock behind the market
+    /// clock). It clears when the keeper refreshes the stale cohort. Previously this
+    /// surfaced as `LockActive` (wrapper Custom 21).
+    LossStale,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -6863,6 +6874,37 @@ pub struct RebalanceOutcomeV16 {
     pub reduced_q: u128,
 }
 
+/// P2b L2: which bound makes an ADL reduce-only episode eligible for a permissionless
+/// wind-down. The engine never decides time on its own: the episode-age bound is attested by
+/// the trusted caller (the wrapper persists the episode start), the dust bound is checked here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdlWindDownBoundV16 {
+    /// Engine-checked: the asset's larger side effective OI, valued at the asset's effective
+    /// price, is at or below `max_notional_atoms`.
+    DustNotional { max_notional_atoms: u128 },
+    /// Caller-attested: this reduce-only episode has lasted at least the caller's configured
+    /// maximum. The engine still enforces every state precondition.
+    EpisodeExpired,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlWindDownRequestV16 {
+    pub asset_index: usize,
+    pub bound: AdlWindDownBoundV16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdlWindDownOutcomeV16 {
+    /// Effective quantity closed at the mark.
+    pub closed_q: u128,
+    /// The asset left ADL reduce-only (both sides back at `ADL_ONE`) by this step. Any reset
+    /// survivors are stale and settle through the ordinary auto-crank Refresh before the
+    /// reset finalizes and risk-increasing trades reopen.
+    pub adl_cleared: bool,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BResidualBookingOutcomeV16 {
@@ -8310,7 +8352,12 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             self.header.config.max_market_slots.get() as usize,
         )?;
         self.header.config.try_to_runtime_shape()?;
-        decode_bool(self.header.bankruptcy_hlock_active)?;
+        // P2b L1: the hlock byte carries domain attribution (see
+        // `validate_bankruptcy_hlock_wire`); it is no longer a plain bool.
+        validate_bankruptcy_hlock_wire(
+            self.header.bankruptcy_hlock_active,
+            v16_domain_count_for_market_slots(self.header.config.max_market_slots.get())?,
+        )?;
         decode_bool(self.header.threshold_stress_active)?;
         // A-6: envelope sentinel-pairing invariant. When the flag is false AND the accumulator is
         // zero (no envelope open), both slot/epoch sentinels must be u64::MAX. Any other byte pattern
@@ -11829,7 +11876,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() >= 0 {
             return Ok(0);
         }
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_bankruptcy_hlock_event(asset_index, bankrupt_side);
         let residual = account.header.pnl.get().unsigned_abs();
         let domain_available = self.available_domain_insurance(domain)?;
         let used = residual.min(domain_available);
@@ -14640,7 +14687,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || self.header.stale_certificate_count.get() != 0
             || self.header.b_stale_account_count.get() != 0
             || self.header.negative_pnl_account_count.get() != 0
-            || decode_bool(self.header.bankruptcy_hlock_active)?
+            || bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active)
             || decode_bool(self.header.threshold_stress_active)?
             || decode_bool(self.header.loss_stale_active)?
             || self.header.recovery_reason.try_to_runtime()?.is_some()
@@ -15950,7 +15997,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset = self.asset_state(asset_index)?;
         if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
-            return Err(V16Error::LockActive);
+            // P2b E7: distinct from LockActive so clients can say "close-only (ADL)".
+            return Err(V16Error::AdlReduceOnly);
         }
         asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
     }
@@ -16558,7 +16606,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         #[cfg(feature = "fork-facade")] instruction_threshold_bps_opt: Option<u128>,
     ) -> V16Result<HLockLaneV16> {
         let account_scoped = account.is_some();
-        let bankruptcy_hlock_active = decode_bool(self.header.bankruptcy_hlock_active)?;
+        let bankruptcy_hlock_active = bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active);
         if let Some(account) = account {
             if decode_bool(account.header.liquidation_lock)?
                 || decode_bool(account.header.stale_state)?
@@ -17527,7 +17575,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         if weight_sum == 0 {
             if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                self.header.bankruptcy_hlock_active = 1;
+                self.mark_bankruptcy_hlock_unattributed();
                 return Ok(BResidualBookingOutcomeV16 {
                     booked_loss: 0,
                     explicit_loss: residual_remaining,
@@ -17547,7 +17595,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         if engine_chunk == 0 {
             if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                self.header.bankruptcy_hlock_active = 1;
+                self.mark_bankruptcy_hlock_unattributed();
                 return Ok(BResidualBookingOutcomeV16 {
                     booked_loss: 0,
                     explicit_loss: residual_remaining,
@@ -17568,11 +17616,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             residual_remaining,
         )? {
             self.set_asset_state(asset_index, asset)?;
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_bankruptcy_hlock_event(asset_index, bankrupt_side);
             return Ok(outcome);
         }
         if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_bankruptcy_hlock_unattributed();
             return Ok(BResidualBookingOutcomeV16 {
                 booked_loss: 0,
                 explicit_loss: residual_remaining,
@@ -18153,7 +18201,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(cleared_i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.set_account_pnl(account, new_pnl)?;
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_bankruptcy_hlock_event(request.asset_index, leg.side);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
@@ -18220,6 +18268,133 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_audit_scan(&account.as_view())?;
         Ok(RebalanceOutcomeV16 {
             reduced_q: reduce_q,
+        })
+    }
+
+    /// P2b L2: is `asset_index` eligible for a permissionless ADL wind-down step under `bound`?
+    ///
+    /// The asset must be Live-reducible and in ADL reduce-only (either side's `A` below
+    /// `ADL_ONE`; that is the exact condition `require_asset_risk_change_allowed` refuses opens
+    /// on). `DustNotional` additionally requires the larger side's effective OI, valued at the
+    /// effective price, to be at or below the caller's threshold.
+    pub fn adl_wind_down_eligible(
+        &self,
+        asset_index: usize,
+        bound: AdlWindDownBoundV16,
+    ) -> V16Result<bool> {
+        if self.header.mode != encode_market_mode(MarketModeV16::Live) {
+            return Ok(false);
+        }
+        self.validate_configured_asset_index(asset_index)?;
+        if self.require_asset_live_reducible(asset_index).is_err() {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        if asset.a_long == ADL_ONE && asset.a_short == ADL_ONE {
+            return Ok(false);
+        }
+        match bound {
+            AdlWindDownBoundV16::EpisodeExpired => Ok(true),
+            AdlWindDownBoundV16::DustNotional { max_notional_atoms } => {
+                let oi = asset.oi_eff_long_q.max(asset.oi_eff_short_q);
+                let notional = V16Core::mul_div_floor_u128_or_wide(
+                    oi,
+                    u128::from(asset.effective_price),
+                    POS_SCALE,
+                )?;
+                Ok(notional <= max_notional_atoms)
+            }
+        }
+    }
+
+    /// P2b L2: bounded exit from ADL reduce-only. PERMISSIONLESS (no owner signature): closes
+    /// the account's whole effective leg on `asset_index` at the mark, through the same
+    /// unilateral `reduce_position` path an owner's RebalanceReduce (tag 44) uses.
+    ///
+    /// Why this is the exit. Upstream 6ae709e0 forbids attaching, flipping or enlarging any
+    /// leg while either side's `A != ADL_ONE` (a fresh `a_basis` would reissue quantity ADL
+    /// already removed), and `A` returns to `ADL_ONE` only through a side reset, which needs
+    /// that side's effective OI at zero. A matched book has equal effective OI on both sides,
+    /// so the market reopens only when one side is flat. Today that waits on holders; this
+    /// lets anyone drive it once the caller's bound is met. Each step removes one leg; the
+    /// opposite side's quantity decays pro rata through `A` (the existing unilateral-close
+    /// socialisation), and the last leg of a side zeroes both sides and starts both resets.
+    ///
+    /// Value. The account is first fully refreshed (K/F/B settled to the current indices), so
+    /// closing at the mark moves no PnL; the opposite side's settled PnL is untouched because
+    /// `A` scales only FUTURE K/F increments. No fee is charged. A deficit is never realised
+    /// here: an account with a liquidation deficit is refused (liquidation is the path that
+    /// books bankruptcy residual through insurance/B and the hlock).
+    ///
+    /// Reopening. Nothing here attaches or enlarges a leg, and the reset/finalize path is the
+    /// existing one: reset survivors are left stale for the auto-crank Refresh, the side stays
+    /// `ResetPending` until they settle, and `require_asset_risk_change_allowed` keeps refusing
+    /// opens until both sides are back to `ADL_ONE` and `Normal`.
+    pub fn wind_down_adl_position_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: AdlWindDownRequestV16,
+    ) -> V16Result<AdlWindDownOutcomeV16> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        if request.asset_index >= self.header.config.max_market_slots.get() as usize {
+            return Err(V16Error::InvalidConfig);
+        }
+        if !self.adl_wind_down_eligible(request.asset_index, request.bound)? {
+            return Err(V16Error::NonProgress);
+        }
+        self.validate_account_scalar_preflight(&account.as_view())?;
+        Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
+        match self.refresh_account_and_certify_not_atomic(
+            account,
+            None,
+            self.header.config.public_b_chunk_atoms.get(),
+            false,
+        )? {
+            AccountRefreshCertOutcomeV16::Certified(_) => {}
+            AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
+            AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => return Err(V16Error::Stale),
+        }
+        let cert = account.header.health_cert.try_to_runtime()?;
+        if cert.certified_liq_deficit != 0 {
+            // Liquidation, not wind-down, owns deficits.
+            return Err(V16Error::LockActive);
+        }
+        let before_score = self.risk_score_unchecked(&account.as_view())?;
+        let leg = Self::active_leg_for_asset(&account.as_view(), request.asset_index)?;
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        let close_budget = self.unilateral_close_capacity(request.asset_index, leg)?;
+        let (close_q, close_delta) =
+            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_budget)?;
+        if close_q == 0 {
+            return Err(V16Error::NonProgress);
+        }
+        if self.position_delta_blocked_by_pending_domain_loss_barrier(
+            &account.as_view(),
+            request.asset_index,
+            close_delta,
+        )? {
+            return Err(V16Error::LockActive);
+        }
+        self.reduce_position(account, request.asset_index, close_q)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        if account.header.pnl.get() < 0 {
+            // Unreachable for a certified non-deficit account closed at the mark; kept as a
+            // hard stop so a wind-down can never strand an unbooked deficit.
+            return Err(V16Error::LockActive);
+        }
+        self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        self.begin_zero_oi_residue_resets(request.asset_index)?;
+        self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
+        self.validate_shape_audit_scan()?;
+        self.validate_account_audit_scan(&account.as_view())?;
+        let asset = self.asset_state(request.asset_index)?;
+        Ok(AdlWindDownOutcomeV16 {
+            closed_q: close_q,
+            adl_cleared: asset.a_long == ADL_ONE && asset.a_short == ADL_ONE,
         })
     }
 
@@ -19419,7 +19594,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // upstream 228d9b3f: resolved bad-debt wind-down is handled by the
         // resolved close itself (hlock set, PnL zeroed) rather than a terminal
         // RecoveryRequired state with no permissionless crank.
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_bankruptcy_hlock_unattributed();
         self.set_account_pnl(account, 0)?;
         account.header.health_cert.valid = 0;
         Ok(())
@@ -19441,7 +19616,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.clear_resolved_unattributed_negative_pnl(account);
         };
 
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_bankruptcy_hlock_event(asset_index, bankrupt_side);
         let gross_residual = account.header.pnl.get().unsigned_abs();
         // A close left over from an earlier bankruptcy that paid out in full is
         // finalized but still `active`, so testing `active` alone would skip the
@@ -19525,7 +19700,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             pnl,
         )?;
         if paid == 0 {
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
             return Ok(0);
         }
 
@@ -19541,7 +19716,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // down with it.
         self.credit_close_progress_principal_settlement(account, paid)?;
         if new_pnl < 0 {
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
         }
         // If settling this account's PnL brought the last negative-PnL account to
         // zero (and all other health counters are already zero), auto-clear the hlock
@@ -19559,8 +19734,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     // FIX-1 background: `bankruptcy_hlock_active` is SET on any deep-liquidation /
-    // insurance-consumption path (see every `self.header.bankruptcy_hlock_active = 1`
-    // site). It was originally never cleared, permanently trapping LP/insurance backing
+    // insurance-consumption path (see every `mark_bankruptcy_hlock_event` /
+    // `mark_bankruptcy_hlock_unattributed` / `mark_bankruptcy_hlock_for_account` site; P2b L1
+    // turned the plain `= 1` writes into attributed marks). It was originally never cleared, permanently trapping LP/insurance backing
     // withdrawals and oracle reconfig even after the bankruptcy was settled. The auto-
     // clear below re-enables those once the loss is provably absorbed.
     //
@@ -19677,18 +19853,185 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         false
     }
 
+    // P2b L1: the claim term of the hlock clear predicate.
+    //
+    // Before P2b this was `pnl_pos_tot == 0` market-wide, so ONE unconverted winner anywhere
+    // (even a flat one holding profit from before the bankruptcy, on the side the bankruptcy
+    // never touched) kept LP-backing / insurance withdrawals frozen indefinitely (9 devnet
+    // markets latched on 10-04, ~179 market-hours).
+    //
+    // Now the term is scoped to the bankrupt claim-source domains recorded in the hlock byte:
+    // every attributed domain must carry no positive claim (`positive_claim_bound_num` and
+    // `exact_positive_claim_num` both zero), i.e. every winner whose claim the bankruptcy
+    // could under-back has converted or exited. Fail-closed fallbacks to the old global
+    // predicate:
+    //   * unattributed lock (byte == 1, including every legacy slab),
+    //   * any mode other than Live (Resolved/Recovery claims may carry no source domain),
+    //   * (by construction) any cross-margin history: attribution is only ever WRITTEN while
+    //     the bankrupt asset is the only slot ever activated, so an account's deficit can only
+    //     have come from that asset (see `mark_bankruptcy_hlock_event`); a later cross-margin
+    //     deficit is written as unattributed and collapses the byte to 1,
+    //   * an attributed domain that does not map onto a configured slot.
+    // Raw POD reads only, no new error return on the settlement/liquidation paths that call
+    // try_clear with `?` (same discipline as `group_has_unabsorbed_bankruptcy_loss`).
+    fn bankruptcy_hlock_claim_term_clear(&self) -> bool {
+        let wire = self.header.bankruptcy_hlock_active;
+        let global = self.header.pnl_pos_tot.get() == 0;
+        if bankruptcy_hlock_is_unattributed(wire)
+            || self.header.mode != encode_market_mode(MarketModeV16::Live)
+        {
+            return global;
+        }
+        let mask = bankruptcy_hlock_domain_mask(wire);
+        if mask == 0 {
+            return global;
+        }
+        let mut domain = 0usize;
+        while domain < BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS {
+            if mask & (1u8 << domain) != 0 {
+                let asset_index = domain / 2;
+                if asset_index >= self.markets.len() {
+                    return global;
+                }
+                let slot = self.markets[asset_index].engine_slot();
+                let source = if domain & 1 == 0 {
+                    &slot.source_credit_long
+                } else {
+                    &slot.source_credit_short
+                };
+                if source.positive_claim_bound_num.get() != 0
+                    || source.exact_positive_claim_num.get() != 0
+                {
+                    return false;
+                }
+            }
+            domain += 1;
+        }
+        true
+    }
+
+    #[cfg(any(test, kani, feature = "fuzz"))]
+    pub fn kani_bankruptcy_hlock_claim_term_clear(&self) -> bool {
+        self.bankruptcy_hlock_claim_term_clear()
+    }
+
     fn try_clear_bankruptcy_hlock_if_healthy(&mut self) -> V16Result<()> {
-        if !decode_bool(self.header.bankruptcy_hlock_active)? {
+        if !bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active) {
             return Ok(());
         }
         if self.header.negative_pnl_account_count.get() == 0
             && self.header.stale_certificate_count.get() == 0
             && self.header.b_stale_account_count.get() == 0
-            && self.header.pnl_pos_tot.get() == 0
             && self.header.recovery_reason.try_to_runtime()?.is_none()
             && !self.group_has_unabsorbed_bankruptcy_loss()
+            && self.bankruptcy_hlock_claim_term_clear()
         {
             self.header.bankruptcy_hlock_active = 0;
+        }
+        Ok(())
+    }
+
+    /// Public, permissionless hlock re-evaluation (P2b L1). Pure predicate + clear: it moves no
+    /// value and changes nothing but the hlock byte, and only in the clearing direction.
+    pub fn try_clear_bankruptcy_hlock_not_atomic(&mut self) -> V16Result<bool> {
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
+        Ok(!bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active))
+    }
+
+    // P2b L1: record a bankruptcy event in the hlock byte.
+    //
+    // `bankrupt_side` is the side of the leg whose deficit is being absorbed. The winners
+    // against it hold claims sourced from domain (asset, bankrupt_side) (a leg on side X
+    // sources from `insurance_domain_index(asset, opposite_side(X))`), and the residual is
+    // booked into the opposite side's B index, i.e. onto exactly those winners. That domain is
+    // the one recorded.
+    //
+    // Attribution is written ONLY in Live mode while `asset_index` is the only slot ever
+    // activated in the group (every other slot `Disabled` with `market_id == 0`; nothing ever
+    // writes a slot back to Disabled, and activation of a Disabled slot requires market_id 0,
+    // so this is a durable "never used" test). Every deployed slab is like that: 14 slots
+    // configured, only asset 0 ever activated. There an account can only ever have held
+    // asset 0, so its deficit can only come from asset 0. Once a second asset has been
+    // activated, a cross-margin deficit can come from any asset the account held, so it is
+    // recorded as unattributed (today's global predicate). Every Resolved/Recovery site is
+    // unattributed as well.
+    fn bankruptcy_hlock_asset_is_sole_ever_activated(&self, asset_index: usize) -> bool {
+        let configured =
+            (self.header.config.max_market_slots.get() as usize).min(self.markets.len());
+        if asset_index >= configured {
+            return false;
+        }
+        let mut i = 0usize;
+        while i < configured {
+            if i != asset_index {
+                let other = &self.markets[i].engine_slot().asset;
+                if other.lifecycle != encode_asset_lifecycle(AssetLifecycleV16::Disabled)
+                    || other.market_id.get() != 0
+                {
+                    return false;
+                }
+            }
+            i += 1;
+        }
+        true
+    }
+
+    fn mark_bankruptcy_hlock_event(&mut self, asset_index: usize, bankrupt_side: SideV16) {
+        let wire = self.header.bankruptcy_hlock_active;
+        let attributable = self.header.mode == encode_market_mode(MarketModeV16::Live)
+            && self.bankruptcy_hlock_asset_is_sole_ever_activated(asset_index);
+        self.header.bankruptcy_hlock_active = if attributable {
+            bankruptcy_hlock_mark_domain(
+                wire,
+                asset_index * 2 + encode_side(bankrupt_side) as usize,
+            )
+        } else {
+            bankruptcy_hlock_mark_unattributed(wire)
+        };
+    }
+
+    fn mark_bankruptcy_hlock_unattributed(&mut self) {
+        self.header.bankruptcy_hlock_active =
+            bankruptcy_hlock_mark_unattributed(self.header.bankruptcy_hlock_active);
+    }
+
+    // P2b L1: a deficit surfaced by principal settlement (pnl still < 0 after capital). The
+    // account's own leg is the bankrupt side: in a single-asset group an account holds at most
+    // one leg, and a trade cannot carry a deficit through a flip (the post-trade initial-margin
+    // gate). A flat account falls back to its open close ledger, else unattributed.
+    fn mark_bankruptcy_hlock_for_account(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        let mut found: Option<(usize, SideV16)> = None;
+        let mut multiple = false;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                if found.is_some() {
+                    multiple = true;
+                }
+                found = Some((leg.asset_index as usize, leg.side));
+            }
+            slot += 1;
+        }
+        if multiple {
+            self.mark_bankruptcy_hlock_unattributed();
+            return Ok(());
+        }
+        if let Some((asset_index, side)) = found {
+            self.mark_bankruptcy_hlock_event(asset_index, side);
+            return Ok(());
+        }
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if ledger.active {
+            self.mark_bankruptcy_hlock_event(
+                ledger.asset_index as usize,
+                opposite_side(ledger.domain_side),
+            );
+        } else {
+            self.mark_bankruptcy_hlock_unattributed();
         }
         Ok(())
     }
@@ -20118,6 +20461,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             ReleasedPnlConversionDispositionV16::ConsumeHaircutFace,
         )?;
         if converted != 0 {
+            // P2b L1: a conversion is what retires a bankrupt domain's last claim, so
+            // re-evaluate the (domain-scoped) hlock here instead of waiting for the next
+            // refresh. Clearing-direction only; moves no value.
+            self.try_clear_bankruptcy_hlock_if_healthy()?;
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
         }
@@ -22660,16 +23007,101 @@ fn trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
     next.unsigned_abs() >= current.unsigned_abs()
 }
 
+// ---------------------------------------------------------------------------------------
+// P2b L1: bankruptcy hlock attribution, encoded in the EXISTING header byte
+// `MarketGroupV16HeaderAccount::bankruptcy_hlock_active` (no layout change).
+//
+//   0                      inactive
+//   1                      active, UNATTRIBUTED. This is also every legacy slab's value, so
+//                          a legacy latch keeps exactly today's global clear predicate
+//                          (`pnl_pos_tot == 0`).
+//   1 | (mask << 1), mask != 0
+//                          active, every event since the last clear attributed to the claim
+//                          SOURCE domains in `mask` (bit d = domain d = asset*2 + side, the
+//                          domain a winner against the bankrupt side sources its claim from).
+//
+// Bit 0 is set whenever the lock is active, so "active" is `wire != 0` and any consumer that
+// tests `& 1` or `!= 0` keeps working. A byte with bit 0 clear but other bits set is invalid.
+// Attribution is written at EVENT time and is sticky until the whole byte clears; it is never
+// inferred from mutable state (upstream aeyakovenko/percolator#120 rejects inference as unsound
+// in both directions: B baselines are erased by reset finalization while claims survive).
+// An unattributed event collapses the byte to 1, which subsumes every domain bit.
+// ---------------------------------------------------------------------------------------
+
+/// Bit 0 of the hlock byte: set whenever the lock is active.
+pub const BANKRUPTCY_HLOCK_ACTIVE_BIT: u8 = 0x01;
+/// The byte has 7 attribution bits, so domains 0..=6 can be attributed. A domain beyond that
+/// is recorded as unattributed (fail closed to the global predicate).
+pub const BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS: usize = 7;
+
+#[inline]
+pub fn bankruptcy_hlock_is_active(wire: u8) -> bool {
+    wire != 0
+}
+
+#[inline]
+pub fn bankruptcy_hlock_is_unattributed(wire: u8) -> bool {
+    wire == BANKRUPTCY_HLOCK_ACTIVE_BIT
+}
+
+/// The attributed claim-source domain mask (bit d = domain d). Zero for inactive or unattributed.
+#[inline]
+pub fn bankruptcy_hlock_domain_mask(wire: u8) -> u8 {
+    if wire & BANKRUPTCY_HLOCK_ACTIVE_BIT == 0 {
+        0
+    } else {
+        wire >> 1
+    }
+}
+
+/// Wire value after an UNATTRIBUTED bankruptcy event: always 1, whatever came before.
+#[inline]
+pub fn bankruptcy_hlock_mark_unattributed(_wire: u8) -> u8 {
+    BANKRUPTCY_HLOCK_ACTIVE_BIT
+}
+
+/// Wire value after a bankruptcy event attributed to claim-source `domain`. An already
+/// unattributed lock stays unattributed; a domain the byte cannot represent makes it
+/// unattributed.
+#[inline]
+pub fn bankruptcy_hlock_mark_domain(wire: u8, domain: usize) -> u8 {
+    if bankruptcy_hlock_is_unattributed(wire) || domain >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS
+    {
+        return BANKRUPTCY_HLOCK_ACTIVE_BIT;
+    }
+    wire | BANKRUPTCY_HLOCK_ACTIVE_BIT | (1u8 << (domain + 1))
+}
+
+/// Shape check for the hlock byte: 0, or bit 0 set with no attributed domain at or beyond the
+/// market's configured domain count.
+pub fn validate_bankruptcy_hlock_wire(wire: u8, configured_domains: usize) -> V16Result<()> {
+    if wire == 0 {
+        return Ok(());
+    }
+    if wire & BANKRUPTCY_HLOCK_ACTIVE_BIT == 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    let mask = wire >> 1;
+    if configured_domains < BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS
+        && (mask >> configured_domains) != 0
+    {
+        return Err(V16Error::InvalidConfig);
+    }
+    Ok(())
+}
+
 fn trade_preflight_risk_gate(
     risk_increasing: bool,
     asset_loss_stale: bool,
     target_effective_lag: bool,
     touches_pending_domain_barrier: bool,
 ) -> V16Result<()> {
-    if touches_pending_domain_barrier
-        || (risk_increasing && (asset_loss_stale || target_effective_lag))
-    {
+    if touches_pending_domain_barrier || (risk_increasing && target_effective_lag) {
         return Err(V16Error::LockActive);
+    }
+    if risk_increasing && asset_loss_stale {
+        // P2b E7: distinct from LockActive so clients can say "refreshing positions".
+        return Err(V16Error::LossStale);
     }
     Ok(())
 }
@@ -22720,11 +23152,13 @@ fn asset_risk_increase_gate(
     mode_long: SideModeV16,
     mode_short: SideModeV16,
 ) -> V16Result<()> {
-    if lifecycle != AssetLifecycleV16::Active
-        || mode_long != SideModeV16::Normal
-        || mode_short != SideModeV16::Normal
-    {
+    if lifecycle != AssetLifecycleV16::Active {
         return Err(V16Error::LockActive);
+    }
+    if mode_long != SideModeV16::Normal || mode_short != SideModeV16::Normal {
+        // P2b E7: a DrainOnly side (A fell under MIN_A_SIDE) or a side still in its
+        // post-ADL reset is part of the ADL reduce-only state.
+        return Err(V16Error::AdlReduceOnly);
     }
     Ok(())
 }
