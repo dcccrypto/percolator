@@ -693,6 +693,9 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 

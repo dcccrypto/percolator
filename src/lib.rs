@@ -37,6 +37,8 @@ pub const MAX_WARMUP_SLOTS: u64 = u64::MAX;
 pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
 pub const MAX_RECOVERY_FALLBACK_DEVIATION_BPS: u64 = MAX_RESOLVE_PRICE_DEVIATION_BPS;
 
+/// v2.2 Phase 4 items 1 + 2: pure band / rent arithmetic (see module docs).
+pub mod band_rent;
 #[cfg(kani)]
 pub mod v16;
 #[cfg(not(kani))]
@@ -56,13 +58,13 @@ pub use v16::{
     auto_crank_plan_requires_caller_observation, backing_domain_fee_split_for_lien_delta_num,
     bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active, bankruptcy_hlock_is_unattributed,
     bankruptcy_hlock_mark_domain, bankruptcy_hlock_mark_unattributed,
-    canonical_accrual_price_step_v16, v16_domain_count_for_market_slots,
-    validate_bankruptcy_hlock_wire, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
-    AdlWindDownRequestV16, BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
-    v16_domain_pair_for_asset_index, AccrualStepV16, AccrueAssetOutcomeV16, ActionableSummaryV16,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankObservationV16,
-    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16, AutoCrankWorkV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BackingDomainFeeSplitV16,
+    canonical_accrual_price_step_v16, canonical_band_accrual_price_step_v16,
+    v16_domain_count_for_market_slots, v16_domain_pair_for_asset_index,
+    validate_bankruptcy_hlock_wire, AccrualStepV16, AccrueAssetOutcomeV16, ActionableSummaryV16,
+    AdlWindDownBoundV16, AdlWindDownOutcomeV16, AdlWindDownRequestV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankObservationV16, AutoCrankOutcomeV16,
+    AutoCrankPlanV16, AutoCrankResultV16, AutoCrankWorkV16, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BackingDomainFeeSplitV16, BandStepContextV16,
     BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
     DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
     InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, LiquidationOutcomeV16,
@@ -77,6 +79,7 @@ pub use v16::{
     SourceCreditStateV16, SourceCreditStateV16Account, TerminalSlabOutcomeV16, TradeRequestV16,
     V16ActiveBitmap, V16Config, V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount,
     V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
+    BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION,
     V16_EMPTY_ACTIVE_BITMAP, V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS,
     V16_MAX_PORTFOLIO_ASSETS_N,
