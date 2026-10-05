@@ -12386,7 +12386,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let next_insurance = insurance.checked_sub(x).ok_or(V16Error::CounterUnderflow)?;
         let next_c_tot = c_tot.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
         let next_capital = capital.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
-        let next_rent_unrouted = (rent_unrouted - x).min(next_insurance);
+        let next_rent_unrouted = rent_unrouted
+            .checked_sub(x)
+            .ok_or(V16Error::CounterUnderflow)?
+            .min(next_insurance);
         Ok((x, next_rent_unrouted, next_insurance, next_c_tot, next_capital))
     }
 
@@ -15704,6 +15707,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Rent-carrying form of `accrue_asset_to_not_atomic` (v2.2 item 2). The
     /// per-side rent rates are computed by the wrapper from state (never caller
     /// input, spec §9.1) and bounded here by `config.rent_max_e9_per_slot`.
+    #[allow(clippy::too_many_arguments)]
     pub fn accrue_asset_to_with_rent_not_atomic(
         &mut self,
         asset_index: usize,
@@ -15983,7 +15987,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let steps = (now_slot - asset.slot_last)
             .min(config.max_accrual_dt_slots)
             .min(V16_MAX_ACCRUAL_PATH_STEPS as u64);
-        self.band_accrual_preview(asset_index, asset.slot_last + steps)
+        let segment_end_slot = asset
+            .slot_last
+            .checked_add(steps)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.band_accrual_preview(asset_index, segment_end_slot)
     }
 
     /// Read-only preview of the band gate for an accrual of `asset_index` whose
@@ -16010,6 +16018,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Rent-carrying form of `accrue_asset_path_to_not_atomic` (v2.2 item 2).
     /// The rates apply to every non-pinned step of the path.
+    #[allow(clippy::too_many_arguments)]
     pub fn accrue_asset_path_with_rent_to_not_atomic(
         &mut self,
         asset_index: usize,

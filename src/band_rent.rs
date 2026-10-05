@@ -67,7 +67,7 @@ pub fn band_bounds(anchor: u64, band_bps: u64) -> Result<(u64, u64), BandRentErr
     let d = band_bps as u128;
     // anchor <= 1e12 and (BPS + d) <= 12_000, so the products fit in u128 easily.
     let lo_num = a * (BPS - d);
-    let lo = lo_num / BPS + u128::from(lo_num % BPS != 0);
+    let lo = lo_num / BPS + u128::from(!lo_num.is_multiple_of(BPS));
     let hi = (a * (BPS + d)) / BPS;
     let hi = hi.min(MAX_ORACLE_PRICE as u128);
     // lo >= 1: a >= 1 and BPS - d >= 8_000, so lo_num > 0 and the ceiling is >= 1.
@@ -97,7 +97,7 @@ pub fn band_worst_adverse_bps(band_bps: u64) -> Result<u64, BandRentError> {
     let d = band_bps as u128;
     let num = (BPS + d) * (BPS + d);
     let den = BPS - d;
-    let ratio_bps = num / den + u128::from(num % den != 0);
+    let ratio_bps = num / den + u128::from(!num.is_multiple_of(den));
     Ok((ratio_bps - BPS) as u64)
 }
 
