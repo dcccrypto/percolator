@@ -919,6 +919,48 @@ fn band_off_keeps_every_band_field_zero_through_a_full_lifecycle() {
     }
 }
 
+/// Fail closed: a band-configured market whose asset was never armed (a wrapper that builds
+/// genesis state without `band_initialize_asset`) must refuse to accrue rather than run as if
+/// the band were off. Found by the BPF suite (the wrapper genesis path bypassed activation).
+#[test]
+fn band_unarmed_asset_on_a_band_market_fails_closed() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    let mut a = w.asset();
+    a.band_epoch = 0;
+    a.band_anchor_price = 0;
+    a.band_anchor_slot = 0;
+    w.markets[0].engine.asset = percolator::AssetStateV16Account::from_runtime(&a);
+    w.now = 2;
+    let r = w.market(|m| m.accrue_asset_to_not_atomic(0, 2, P0, 0, true));
+    assert_eq!(r, Err(V16Error::InvalidConfig));
+    // Control: the armed asset accrues.
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    w.now = 2;
+    assert!(w
+        .market(|m| m.accrue_asset_to_not_atomic(0, 2, P0, 0, true))
+        .is_ok());
+}
+
+/// A rent move invalidates certificates like funding (the auto-crank then settles it).
+#[test]
+fn rent_move_invalidates_certificates_like_funding() {
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    let fe0 = w.header.funding_epoch.get();
+    w.now += 3;
+    w.accrue(0, 20, 0).unwrap();
+    assert!(w.asset().rent_index_long_num > 0);
+    assert!(
+        w.header.funding_epoch.get() > fe0,
+        "rent bumps the funding epoch"
+    );
+    // Control: a no-rent, no-funding accrual does not.
+    let fe1 = w.header.funding_epoch.get();
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap();
+    assert_eq!(w.header.funding_epoch.get(), fe1);
+}
+
 // ---------------------------------------------------------------------------
 // Rent (item 2)
 // ---------------------------------------------------------------------------
@@ -970,6 +1012,36 @@ fn rent_accrues_settles_floor_exact_routes_and_conserves() {
     w.assert_conservation();
     // Mutants: "ceil instead of floor" breaks the due equality; "routing without
     // zeroing rent_unrouted" breaks the last-but-one assert.
+}
+
+/// A relabel of insurance into a reserved domain budget (the wrapper's fee-crediting paths
+/// once did this to rent atoms) cannot erase the LP's claim: the route moves what is
+/// unreserved now and keeps the rest as a claim, capped at the insurance physically there.
+#[test]
+fn rent_route_never_erases_the_claim_on_a_relabel() {
+    let mut w = World::new(band_cfg(130), 3, 10_000_000);
+    open_book(&mut w, 1, 10 * POS_SCALE);
+    for _ in 0..33 {
+        w.now += 3;
+        w.accrue(0, 20, 0).unwrap();
+    }
+    w.refresh(0).unwrap();
+    let claim = w.asset().rent_unrouted_atoms;
+    assert!(claim > 0);
+    // Relabel every unbudgeted insurance atom into domain 0's budget.
+    let ins = w.header.insurance.get();
+    w.market(|m| m.credit_domain_insurance_budget_not_atomic(0, ins))
+        .unwrap();
+    let x = w
+        .with(2, |m, a| m.route_rent_to_account_not_atomic(0, a))
+        .unwrap();
+    assert_eq!(x, 0, "nothing unreserved to route");
+    assert_eq!(
+        w.asset().rent_unrouted_atoms,
+        claim,
+        "the claim survives the relabel"
+    );
+    w.assert_conservation();
 }
 
 #[test]

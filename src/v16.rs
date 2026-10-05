@@ -8018,8 +8018,10 @@ pub struct EngineAssetSlotV16Account {
 
 /// v2.2 band: a freshly activated / restarted asset on a band market starts in
 /// epoch 1 anchored at its authenticated price. Off markets keep every band field
-/// at 0 (I-B7).
-fn band_initialize_asset(asset: &mut AssetStateV16, band_bps: u64, price: u64, slot: u64) {
+/// at 0 (I-B7). Public so a wrapper that builds genesis asset state itself (instead
+/// of through `activate_empty_*`) arms the band identically; the accrual gate
+/// refuses a band-configured live asset that was never armed (fail closed).
+pub fn band_initialize_asset(asset: &mut AssetStateV16, band_bps: u64, price: u64, slot: u64) {
     if band_bps == 0 {
         return;
     }
@@ -12366,24 +12368,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     /// v2.2 rent (item 2): pure routing step. Moves `x = min(rent_unrouted,
-    /// unbudgeted insurance)` from insurance to the LP's capital (I-R3:
-    /// `dI = -x`, `dC_LP = +x`, `x <= rent_unrouted`). Unrouted rent that loss
-    /// absorption already consumed (insurance short of the claim) is forfeited:
-    /// the LP is the next absorber anyway. Returns
-    /// `(x, next_insurance, next_c_tot, next_capital)`.
+    /// unreserved insurance)` from insurance to the LP's capital (I-R3:
+    /// `dI = -x`, `dC_LP = +x`, `x <= rent_unrouted`). Whatever cannot be routed
+    /// now stays an LP claim, capped at the insurance physically left: only loss
+    /// absorption (which may use these atoms, the LP being the next absorber)
+    /// can shrink the claim; a relabel into a reserved budget cannot erase it.
+    /// Returns `(x, next_rent_unrouted, next_insurance, next_c_tot, next_capital)`.
     pub(crate) fn rent_route_delta(
         rent_unrouted: u128,
         insurance: u128,
         reserved: u128,
         c_tot: u128,
         capital: u128,
-    ) -> V16Result<(u128, u128, u128, u128)> {
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
         let available = insurance.saturating_sub(reserved);
         let x = rent_unrouted.min(available);
         let next_insurance = insurance.checked_sub(x).ok_or(V16Error::CounterUnderflow)?;
         let next_c_tot = c_tot.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
         let next_capital = capital.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
-        Ok((x, next_insurance, next_c_tot, next_capital))
+        let next_rent_unrouted = (rent_unrouted - x).min(next_insurance);
+        Ok((x, next_rent_unrouted, next_insurance, next_c_tot, next_capital))
     }
 
     #[cfg(kani)]
@@ -12393,14 +12397,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         reserved: u128,
         c_tot: u128,
         capital: u128,
-    ) -> V16Result<(u128, u128, u128, u128)> {
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
         Self::rent_route_delta(rent_unrouted, insurance, reserved, c_tot, capital)
     }
 
     /// v2.2 rent (item 2): route `asset_index`'s unrouted rent to `lp_account`
-    /// (the wrapper passes only the bound vault-LP portfolio). The claim is
-    /// zeroed afterwards (routed in full, or the shortfall forfeited, see
-    /// `rent_route_delta`). Returns the atoms credited to the LP.
+    /// (the wrapper passes only the bound vault-LP portfolio). See
+    /// `rent_route_delta` for what remains a claim. Returns the atoms credited.
     pub fn route_rent_to_account_not_atomic(
         &mut self,
         asset_index: usize,
@@ -12424,7 +12427,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .get(),
             )
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let (x, next_insurance, next_c_tot, next_capital) = Self::rent_route_delta(
+        let (x, next_rent_unrouted, next_insurance, next_c_tot, next_capital) = Self::rent_route_delta(
             asset.rent_unrouted_atoms,
             self.header.insurance.get(),
             reserved,
@@ -12436,7 +12439,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.c_tot = V16PodU128::new(next_c_tot);
         lp_account.header.capital = V16PodU128::new(next_capital);
         lp_account.header.health_cert.valid = 0;
-        asset.rent_unrouted_atoms = 0;
+        asset.rent_unrouted_atoms = next_rent_unrouted;
         self.set_asset_state(asset_index, asset)?;
         TokenValueFlowProofV16::insurance_capital_to_account_capital(x, vault, vault)?
             .validate()?;
@@ -15618,8 +15621,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         config: &V16Config,
         segment_end_slot: u64,
     ) -> V16Result<(AssetStateV16, BandAccrualGateV16)> {
-        if !config.band_enabled() || asset.band_epoch == 0 {
+        if !config.band_enabled() {
             return Ok((asset, BandAccrualGateV16::default()));
+        }
+        // Fail closed: a band market whose asset was never armed (epoch 0) must not
+        // accrue as if the band were off.
+        if asset.band_epoch == 0 {
+            return Err(V16Error::InvalidConfig);
         }
         let positioned = asset.stored_pos_count_long != 0
             || asset.stored_pos_count_short != 0
@@ -15892,7 +15900,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterOverflow)?,
             );
         }
-        if activity.funding_active {
+        // v2.2 rent is the twin of F: a rent move invalidates certificates exactly like
+        // funding (the next touch must settle it before any health-sensitive check).
+        if activity.funding_active || rent_delta_long != 0 || rent_delta_short != 0 {
             self.header.funding_epoch = V16PodU64::new(
                 self.header
                     .funding_epoch
@@ -16186,7 +16196,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(u64::from(activity.price_move_active))
                 .ok_or(V16Error::CounterOverflow)?;
             funding_count = funding_count
-                .checked_add(u64::from(activity.funding_active))
+                .checked_add(u64::from(
+                    activity.funding_active || rent_delta_long != 0 || rent_delta_short != 0,
+                ))
                 .ok_or(V16Error::CounterOverflow)?;
         }
 
