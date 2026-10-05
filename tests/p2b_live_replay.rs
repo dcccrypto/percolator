@@ -47,9 +47,15 @@ fn load(name: &'static str) -> LiveMarket {
     let slab = fs::read(dir.join("slab.bin")).expect("slab fixture");
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
     let slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
-    let stride = ASSET_ORACLE_WRAPPER_LEN + slot_len;
+    // fix/v21-funding-scale appended 160 bytes of K/F drift-generation state
+    // (`kf_drift_long/short`) to the END of each engine asset slot. These fixtures are live pre-change slabs: read the legacy slot length and
+    // zero-extend (a fresh slab starts with exactly these zeros; an old slab can never be
+    // loaded by the new program in place because the stride changed, so this is test-only).
+    const KF_DRIFT_APPENDED: usize = 160;
+    let legacy_slot_len = slot_len - KF_DRIFT_APPENDED;
+    let stride = ASSET_ORACLE_WRAPPER_LEN + legacy_slot_len;
     let trailing = slab.len() - MARKET_GROUP_OFF - header_len;
-    assert_eq!(trailing % stride, 0, "{name}: slab length must be header + N slots (layout unchanged by P2b)");
+    assert_eq!(trailing % stride, 0, "{name}: slab length must be header + N legacy slots");
     let capacity = trailing / stride;
     let header: MarketGroupV16HeaderAccount =
         bytemuck::pod_read_unaligned(&slab[MARKET_GROUP_OFF..MARKET_GROUP_OFF + header_len]);
@@ -57,8 +63,10 @@ fn load(name: &'static str) -> LiveMarket {
     let mut markets = Vec::with_capacity(capacity);
     for i in 0..capacity {
         let engine_off = MARKET_GROUP_OFF + header_len + i * stride + ASSET_ORACLE_WRAPPER_LEN;
-        let engine: EngineAssetSlotV16Account =
-            bytemuck::pod_read_unaligned(&slab[engine_off..engine_off + slot_len]);
+        // The appended drift state is the LAST field of the engine slot: zero tail.
+        let mut bytes = vec![0u8; slot_len];
+        bytes[..legacy_slot_len].copy_from_slice(&slab[engine_off..engine_off + legacy_slot_len]);
+        let engine: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&bytes);
         markets.push(Market::new(i as u64, engine));
     }
 

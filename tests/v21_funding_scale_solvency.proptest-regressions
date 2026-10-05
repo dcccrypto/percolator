@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5dc97f76c3cde92f4f2e236ccf050a79385fb5b9dac2be57dd2b10d961662908 # shrinks to traders = [(105000, true, 1), (315000, true, 3), (315000, true, 3), (210000, true, 2)], ins_long = 119117, ins_short = 274868, ops = [Open(false, 1), Accrue(100, 0), Open(true, 3), Accrue(0, 0)]
