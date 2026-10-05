@@ -720,6 +720,74 @@ fn band_liq_pending_blocks_advance_until_liquidated_then_no_bad_debt() {
     // Mutant "re-anchor without the liq_pending == 0 check" turns the blocks assert red.
 }
 
+/// The liquidation-pending cohort's own job (design §1.1, "mandatory per-epoch
+/// liquidation"): a leg that was certified healthy EARLIER in the epoch and then
+/// turns liquidatable blocks the advance in that same epoch, even though every
+/// leg is certified. (For the loss <= capital bound alone the uncertified cohort
+/// suffices one epoch later; this is the stricter, design-mandated timing.)
+#[test]
+fn band_liq_pending_blocks_advance_even_after_the_leg_was_certified() {
+    let mut w = World::new(band_cfg(130), 4, 1_000_000);
+    // 0: near-IM long (the victim). 1: its short. 2/3: a second pair whose long
+    // (2) the keeper certifies last, so the epoch stays open while price moves.
+    w.trade(0, 1, 9 * POS_SCALE).unwrap();
+    w.trade(2, 3, POS_SCALE).unwrap();
+    w.set_target(P0 / 2);
+    let mut isolated = false;
+    for _ in 0..400 {
+        // Certify everyone except 2, then move the price inside the epoch.
+        for i in [0usize, 1, 3] {
+            if w.positioned(i) {
+                w.refresh(i).unwrap();
+            }
+        }
+        let e = w.asset().band_epoch;
+        let c0 = w.accounts[0].legs[0].try_to_runtime().unwrap();
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        assert_eq!(w.asset().band_epoch, e, "2 is uncertified: no advance");
+        if !w.positioned(0) {
+            break;
+        }
+        let cert = w.refresh(0).unwrap();
+        if cert.certified_liq_deficit != 0 && c0.band_epoch_snap == e {
+            // 0 was certified in e and is liquidatable in e. Certify 2: now no leg
+            // is uncertified, only 0 is liquidation-pending. The advance must wait.
+            w.refresh(2).unwrap();
+            let a = w.asset();
+            assert_eq!((a.band_uncertified_long, a.band_uncertified_short), (0, 0));
+            assert_eq!(a.band_liq_pending_long, 1);
+            w.now += 3;
+            w.accrue(0, 0, 0).unwrap();
+            assert_eq!(
+                w.asset().band_epoch,
+                e,
+                "a liquidation-pending leg blocks the advance"
+            );
+            let out = w
+                .with(0, |m, a| {
+                    m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+                })
+                .unwrap();
+            assert_eq!(
+                (out.insurance_used, out.residual_booked, out.explicit_loss),
+                (0, 0, 0)
+            );
+            w.assert_census();
+            isolated = true;
+            break;
+        }
+        w.refresh(2).unwrap();
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+    }
+    assert!(
+        isolated,
+        "non-vacuity: reached a certified-then-liquidatable leg in one epoch"
+    );
+    // Mutant M1 "re-anchor without the liq_pending check" advances here.
+}
+
 #[test]
 fn band_pin_expired_declares_recovery_after_pmax() {
     let mut w = World::new(band_cfg(130), 2, 10_000_000);
