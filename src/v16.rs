@@ -1311,6 +1311,7 @@ impl V16Core {
             band_epoch_snap: 0,
             band_liq_pending: false,
             rent_snap,
+            rent_carry: 0,
         };
         Ok((asset, leg))
     }
@@ -5899,6 +5900,9 @@ pub struct PortfolioLegV16 {
     pub band_liq_pending: bool,
     /// v2.2 rent: the side rent index this leg has paid up to.
     pub rent_snap: u128,
+    /// v2.2 rent: sub-atom remainder of the last settle (< `RENT_INDEX_DEN`), so
+    /// the charged total is exact under any settle schedule.
+    pub rent_carry: u64,
 }
 
 impl PortfolioLegV16 {
@@ -5922,6 +5926,7 @@ impl PortfolioLegV16 {
         band_epoch_snap: 0,
         band_liq_pending: false,
         rent_snap: 0,
+        rent_carry: 0,
     };
 
     pub fn is_empty(self) -> bool {
@@ -5944,6 +5949,7 @@ impl PortfolioLegV16 {
             && self.band_epoch_snap == 0
             && !self.band_liq_pending
             && self.rent_snap == 0
+            && self.rent_carry == 0
     }
 }
 
@@ -14549,9 +14555,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, *leg)?;
-        let due = crate::band_rent::rent_due_atoms(effective_abs_q, index, leg.rent_snap)
-            .map_err(|_| V16Error::InvalidLeg)?;
+        let (due, carry) = crate::band_rent::rent_due_with_carry(
+            effective_abs_q,
+            index,
+            leg.rent_snap,
+            leg.rent_carry,
+        )
+        .map_err(|_| V16Error::InvalidLeg)?;
         leg.rent_snap = index;
+        leg.rent_carry = carry;
         self.charge_account_rent_current_not_atomic(account, due)
     }
 
@@ -15961,10 +15973,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let steps = (now_slot - asset.slot_last)
             .min(config.max_accrual_dt_slots)
             .min(V16_MAX_ACCRUAL_PATH_STEPS as u64);
-        let segment_end_slot = asset
-            .slot_last
-            .checked_add(steps)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.band_accrual_preview(asset_index, asset.slot_last + steps)
+    }
+
+    /// Read-only preview of the band gate for an accrual of `asset_index` whose
+    /// committed segment ends at `segment_end_slot`: `Some((anchor_price,
+    /// band_bps, governing_anchor_slot, max_epoch_slots))` after any re-anchor
+    /// the accrual would perform, or `None` when the band will not constrain it.
+    /// The accrual's price must lie in `band(anchor_price)`, and it must be
+    /// no-move when `segment_end_slot - governing_anchor_slot > max_epoch_slots`.
+    pub fn band_accrual_preview(
+        &self,
+        asset_index: usize,
+        segment_end_slot: u64,
+    ) -> V16Result<Option<(u64, u64, u64, u64)>> {
+        let config = self.header.config.try_to_runtime_shape()?;
+        let asset = self.asset_state(asset_index)?;
         let (_, gate) = self.band_prepare_accrual(asset_index, asset, &config, segment_end_slot)?;
         Ok(gate.active.then_some((
             gate.anchor_price,
@@ -23665,6 +23689,7 @@ pub struct PortfolioLegV16Account {
     pub band_epoch_snap: V16PodU64,
     pub band_liq_pending: u8,
     pub rent_snap: V16PodU128,
+    pub rent_carry: V16PodU64,
 }
 
 impl PortfolioLegV16Account {
@@ -23689,6 +23714,7 @@ impl PortfolioLegV16Account {
             band_epoch_snap: V16PodU64::new(value.band_epoch_snap),
             band_liq_pending: encode_bool(value.band_liq_pending),
             rent_snap: V16PodU128::new(value.rent_snap),
+            rent_carry: V16PodU64::new(value.rent_carry),
         }
     }
 
@@ -23713,6 +23739,7 @@ impl PortfolioLegV16Account {
             band_epoch_snap: self.band_epoch_snap.get(),
             band_liq_pending: decode_bool(self.band_liq_pending)?,
             rent_snap: self.rent_snap.get(),
+            rent_carry: self.rent_carry.get(),
         };
         if out.active {
             validate_active_leg(out)?;
@@ -24024,7 +24051,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9819);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9947);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -25148,6 +25175,7 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         || leg.loss_weight > SOCIAL_LOSS_DEN
         || leg.b_rem >= SOCIAL_LOSS_DEN
         || leg.b_epoch_snap != leg.epoch_snap
+        || leg.rent_carry as u128 >= crate::band_rent::RENT_INDEX_DEN
     {
         return Err(V16Error::InvalidLeg);
     }
@@ -25933,6 +25961,7 @@ mod close_drift_scope_tests {
             band_epoch_snap: 0,
             band_liq_pending: false,
             rent_snap: 0,
+            rent_carry: 0,
         });
         account.active_bitmap[0] = V16PodU64::new(1);
         account

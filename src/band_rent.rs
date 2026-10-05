@@ -162,28 +162,50 @@ pub fn rent_index_delta(price: u64, rate_e9_per_slot: u64, dt: u64) -> Result<u1
 }
 
 /// Rent owed by a leg of effective size `abs_q` whose snapshot is `snap` when the
-/// side index is `index`: `floor(abs_q * (index - snap) / RENT_INDEX_DEN)`.
+/// side index is `index`, with the leg's sub-atom carry `carry` (< RENT_INDEX_DEN):
 ///
-/// `snap > index` is impossible for a well-formed leg (snapshots are only ever
-/// set to the current index, which is monotone) and fails closed. A quotient
-/// above `u128::MAX` saturates: the charge is capped at capital anyway.
-pub fn rent_due_atoms(abs_q: u128, index: u128, snap: u128) -> Result<u128, BandRentError> {
-    if snap > index {
+/// ```text
+/// total = abs_q * (index - snap) + carry
+/// due   = floor(total / RENT_INDEX_DEN)      carry' = total mod RENT_INDEX_DEN
+/// ```
+///
+/// Carrying the remainder makes rent exact under any settle schedule: the atoms
+/// charged over many settles equal one settle over the whole interval (a keeper
+/// that certifies every epoch cannot round a small position's rent to zero, and
+/// splitting a settle never over- or under-charges by more than the final carry).
+/// The carry is < 1 atom, so it stays meaningful across a resize of the leg.
+///
+/// `snap > index` or `carry >= RENT_INDEX_DEN` is impossible for a well-formed leg
+/// and fails closed. A due above `u128::MAX` saturates (the charge is capped at
+/// capital anyway).
+pub fn rent_due_with_carry(
+    abs_q: u128,
+    index: u128,
+    snap: u128,
+    carry: u64,
+) -> Result<(u128, u64), BandRentError> {
+    if snap > index || carry as u128 >= RENT_INDEX_DEN {
         return Err(BandRentError::InvalidInput);
     }
     let delta = index - snap;
-    if abs_q == 0 || delta == 0 {
-        return Ok(0);
+    if let Some(total) = abs_q
+        .checked_mul(delta)
+        .and_then(|v| v.checked_add(carry as u128))
+    {
+        return Ok((total / RENT_INDEX_DEN, (total % RENT_INDEX_DEN) as u64));
     }
-    if let Some(product) = abs_q.checked_mul(delta) {
-        return Ok(product / RENT_INDEX_DEN);
-    }
-    let (q, _) = mul_div_floor_u256_with_rem(
-        U256::from_u128(abs_q),
-        U256::from_u128(delta),
-        U256::from_u128(RENT_INDEX_DEN),
-    );
-    Ok(q.try_into_u128().unwrap_or(u128::MAX))
+    let product = U256::from_u128(abs_q)
+        .checked_mul(U256::from_u128(delta))
+        .and_then(|v| v.checked_add(U256::from_u128(carry as u128)))
+        .ok_or(BandRentError::Overflow)?;
+    let (q, r) = mul_div_floor_u256_with_rem(product, U256::ONE, U256::from_u128(RENT_INDEX_DEN));
+    let carry_out = r.try_into_u128().ok_or(BandRentError::Overflow)? as u64;
+    Ok((q.try_into_u128().unwrap_or(u128::MAX), carry_out))
+}
+
+/// Carry-free form: `floor(abs_q * (index - snap) / RENT_INDEX_DEN)`.
+pub fn rent_due_atoms(abs_q: u128, index: u128, snap: u128) -> Result<u128, BandRentError> {
+    rent_due_with_carry(abs_q, index, snap, 0).map(|(due, _)| due)
 }
 
 /// The chargeable rent for an account: `min(due, capital - max(-pnl, 0))`.

@@ -167,6 +167,7 @@ fn drain_only_holdout(
         band_epoch_snap: 0,
         band_liq_pending: false,
         rent_snap: 0,
+        rent_carry: 0,
     });
     acct.active_bitmap[0] = V16PodU64::new(1);
 
