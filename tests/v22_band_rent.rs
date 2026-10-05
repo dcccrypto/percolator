@@ -1335,3 +1335,42 @@ fn band_liveness_30pct_gap_10x_catch_up() {
     // is the same, and each sweep refreshes more portfolios.
     assert_eq!(epochs, epochs_sybil);
 }
+
+/// v2.2 CU fast path: `PortfolioLegV16Account::try_to_runtime` recognises the
+/// empty-leg encoding with one byte compare. The constant must be exactly the
+/// encoding of `PortfolioLegV16::EMPTY`, and every other byte pattern must keep
+/// the full decode (and its errors).
+#[test]
+fn v22_empty_leg_fast_path_is_exactly_the_empty_encoding() {
+    use percolator::{
+        PortfolioLegV16, PortfolioLegV16Account, V16Error, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT,
+    };
+    let encoded = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    assert_eq!(encoded, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT);
+    assert!(encoded.is_empty_encoding());
+    assert_eq!(encoded.try_to_runtime().unwrap(), PortfolioLegV16::EMPTY);
+    // Every single-byte perturbation leaves the fast path and decodes exactly as before:
+    // an inactive leg with any stray byte is a hidden leg or an invalid encoding.
+    let base = bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT).to_vec();
+    for i in 0..base.len() {
+        for v in [1u8, 2, 0x80, 0xff] {
+            if base[i] == v {
+                continue;
+            }
+            let mut bytes = base.clone();
+            bytes[i] = v;
+            let leg: PortfolioLegV16Account = *bytemuck::from_bytes(&bytes);
+            assert!(!leg.is_empty_encoding(), "byte {i}={v} must leave the fast path");
+            match leg.try_to_runtime() {
+                Ok(out) => assert!(out.active, "byte {i}={v}: an Ok decode must be an active leg"),
+                Err(e) => assert!(
+                    matches!(
+                        e,
+                        V16Error::HiddenLeg | V16Error::InvalidConfig | V16Error::InvalidLeg
+                    ),
+                    "byte {i}={v}: unexpected {e:?}"
+                ),
+            }
+        }
+    }
+}

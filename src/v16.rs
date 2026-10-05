@@ -12390,7 +12390,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_sub(x)
             .ok_or(V16Error::CounterUnderflow)?
             .min(next_insurance);
-        Ok((x, next_rent_unrouted, next_insurance, next_c_tot, next_capital))
+        Ok((
+            x,
+            next_rent_unrouted,
+            next_insurance,
+            next_c_tot,
+            next_capital,
+        ))
     }
 
     #[cfg(kani)]
@@ -12430,13 +12436,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .get(),
             )
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let (x, next_rent_unrouted, next_insurance, next_c_tot, next_capital) = Self::rent_route_delta(
-            asset.rent_unrouted_atoms,
-            self.header.insurance.get(),
-            reserved,
-            self.header.c_tot.get(),
-            lp_account.header.capital.get(),
-        )?;
+        let (x, next_rent_unrouted, next_insurance, next_c_tot, next_capital) =
+            Self::rent_route_delta(
+                asset.rent_unrouted_atoms,
+                self.header.insurance.get(),
+                reserved,
+                self.header.c_tot.get(),
+                lp_account.header.capital.get(),
+            )?;
         let vault = self.header.vault.get();
         self.header.insurance = V16PodU128::new(next_insurance);
         self.header.c_tot = V16PodU128::new(next_c_tot);
@@ -17777,7 +17784,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         #[cfg(feature = "fork-facade")] instruction_threshold_bps_opt: Option<u128>,
     ) -> V16Result<HLockLaneV16> {
         let account_scoped = account.is_some();
-        let bankruptcy_hlock_active = bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active);
+        let bankruptcy_hlock_active =
+            bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active);
         if let Some(account) = account {
             if decode_bool(account.header.liquidation_lock)?
                 || decode_bool(account.header.stale_state)?
@@ -19566,11 +19574,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // that side first would strand it (weight 0 => Recovery). Refuse while either side of
         // the asset carries a barrier; the close ledger's own progress path clears it first.
         if self.position_delta_blocked_by_pending_domain_loss_barrier(
-                &account.as_view(),
-                request.asset_index,
-                close_delta,
-            )?
-        {
+            &account.as_view(),
+            request.asset_index,
+            close_delta,
+        )? {
             return Err(V16Error::LockActive);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
@@ -21143,7 +21150,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// value and changes nothing but the hlock byte, and only in the clearing direction.
     pub fn try_clear_bankruptcy_hlock_not_atomic(&mut self) -> V16Result<bool> {
         self.try_clear_bankruptcy_hlock_if_healthy()?;
-        Ok(!bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active))
+        Ok(!bankruptcy_hlock_is_active(
+            self.header.bankruptcy_hlock_active,
+        ))
     }
 
     // P2b L1: record a bankruptcy event in the hlock byte.
@@ -23713,7 +23722,43 @@ pub struct PortfolioLegV16Account {
     pub rent_carry: V16PodU64,
 }
 
+/// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
+/// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
+/// field-by-field decode; any other bytes still take the full decode below,
+/// so every decode error is unchanged.
+pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLegV16Account {
+    active: 0,
+    asset_index: V16PodU32 { bytes: [0; 4] },
+    market_id: V16PodU64 { bytes: [0; 8] },
+    side: 0,
+    basis_pos_q: V16PodI128 { bytes: [0; 16] },
+    a_basis: V16PodU128 {
+        bytes: ADL_ONE.to_le_bytes(),
+    },
+    k_snap: V16PodI128 { bytes: [0; 16] },
+    f_snap: V16PodI128 { bytes: [0; 16] },
+    kf_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    epoch_snap: V16PodU64 { bytes: [0; 8] },
+    loss_weight: V16PodU128 { bytes: [0; 16] },
+    b_snap: V16PodU128 { bytes: [0; 16] },
+    b_rem: V16PodU128 { bytes: [0; 16] },
+    b_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    b_stale: 0,
+    stale: 0,
+    band_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    band_liq_pending: 0,
+    rent_snap: V16PodU128 { bytes: [0; 16] },
+    rent_carry: V16PodU64 { bytes: [0; 8] },
+};
+
 impl PortfolioLegV16Account {
+    /// Whether this slot holds exactly the empty-leg encoding (one byte compare).
+    #[inline(always)]
+    pub fn is_empty_encoding(&self) -> bool {
+        self.active == 0
+            && bytemuck::bytes_of(self) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
+    }
+
     pub fn from_runtime(value: &PortfolioLegV16) -> Self {
         Self {
             active: encode_bool(value.active),
@@ -23740,6 +23785,9 @@ impl PortfolioLegV16Account {
     }
 
     pub fn try_to_runtime(&self) -> V16Result<PortfolioLegV16> {
+        if self.is_empty_encoding() {
+            return Ok(PortfolioLegV16::EMPTY);
+        }
         let out = PortfolioLegV16 {
             active: decode_bool(self.active)?,
             asset_index: self.asset_index.get(),
@@ -24298,8 +24346,7 @@ pub fn bankruptcy_hlock_mark_unattributed(_wire: u8) -> u8 {
 /// unattributed.
 #[inline]
 pub fn bankruptcy_hlock_mark_domain(wire: u8, domain: usize) -> u8 {
-    if bankruptcy_hlock_is_unattributed(wire) || domain >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS
-    {
+    if bankruptcy_hlock_is_unattributed(wire) || domain >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS {
         return BANKRUPTCY_HLOCK_ACTIVE_BIT;
     }
     wire | BANKRUPTCY_HLOCK_ACTIVE_BIT | (1u8 << (domain + 1))
