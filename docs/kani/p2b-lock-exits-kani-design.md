@@ -288,9 +288,14 @@ Over every asset-state writer (`kernel_begin_full_drain_reset`, the unilateral-c
 branch, `restart_empty_asset_preserving_insurance_budget_not_atomic`, activation): if
 `market_id` is unchanged then `epoch_long'` ≥ `epoch_long` and `epoch_short'` ≥ `epoch_short`, and
 any write of `a_side := ADL_ONE` strictly increases `epoch_side`. Restart/activation (which zero
-the epochs) change `market_id`. The wrapper side (review L-1): restart/activation zero the episode
-record and the N override, and the episode key carries the low 32 bits of `market_id`, so an old
-`since` can never be inherited. Mutation: drop the market_id from the key and skip the clear →
+the epochs) change `market_id`. The wrapper side (review L-1 / L-1b): every path that starts a new
+market on a slot -- `RestartAssetOracle`, the permissionless reuse of a retired slot, the
+append activation, and the market-authority re-activation of a RETIRED slot
+(`handle_update_asset_lifecycle_privileged`) -- zeroes the episode record and the N override, and
+the episode key carries the low **16** bits of `market_id` (`adl_episode_market_id_lo: u16`), so
+an old `since` can never be inherited. Harness covers each of the four writers; tests:
+`p2b_restart_asset_oracle_clears_the_adl_episode_record`,
+`p2b_privileged_reactivation_of_a_retired_slot_clears_the_adl_episode_record`. Mutation: drop the market_id from the key and skip the clear →
 the composition cover fails.
 
 ### C5 `proof_p2b_tag104_never_closes_at_a_lagging_or_pending_mark`
@@ -299,8 +304,12 @@ effective_price` (`reject_exposed_target_effective_lag_view`), no price-managed 
 for any of the portfolio's legs (`reject_portfolio_pending_price_managed_mark_view`), the
 account's per-leg health observations are complete
 (`reject_incomplete_account_health_observations_view`), and, for AUTH_MARK / EWMA_MARK, the
-pushed mark is no older than the bound (`mark_ewma_last_slot + ADL_WIND_DOWN_MAX_MARK_AGE_SLOTS
->= now`). Engine mirror: `wind_down_adl_position_not_atomic` returns `LockActive` while
+pushed mark is no older than the bound:
+`max(last_good_oracle_slot, mark_ewma_last_slot) + ADL_WIND_DOWN_MAX_MARK_AGE_SLOTS (150) >= now`
+(PushAuthMark advances `last_good_oracle_slot` on every push and `mark_ewma_last_slot` only when
+the mark changes; PushEwmaMark advances `mark_ewma_last_slot`; the crank advances neither for
+these modes). Also: the dust bound is `10^decimals` of the market's OWN collateral mint (account
+[3] must equal `cfg.collateral_mint`, review I-5). Engine mirror: `wind_down_adl_position_not_atomic` returns `LockActive` while
 `asset_has_target_effective_lag`. Covers each refusal and the pass.
 
 ### B2 (extended)
