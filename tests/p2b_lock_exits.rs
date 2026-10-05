@@ -988,3 +988,86 @@ proptest! {
         );
     }
 }
+
+// ================================ security-review follow-ups (M-1 engine half, L-3) ===
+
+#[test]
+fn m1_wind_down_refuses_while_the_mark_lags_the_oracle_target() {
+    let (mut header, mut markets, _l1, mut l2, _s1, _s2) = adl_world();
+    // Oracle target moved, effective price has not caught up yet: refused.
+    markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(101);
+    assert_eq!(
+        wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired),
+        Err(V16Error::LockActive),
+        "no forced close at a lagging mark"
+    );
+    assert!(l2.legs[0].try_to_runtime().unwrap().active);
+    // NEGATIVE CONTROL: target == effective, the same call closes.
+    markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(100);
+    wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired)
+        .expect("fresh mark: wind-down proceeds");
+}
+
+#[test]
+fn l3_mh_wind_down_refuses_while_a_domain_loss_barrier_is_pending() {
+    for side_short in [false, true] {
+        let (mut header, mut markets, _l1, mut l2, _s1, _s2) = adl_world();
+        if side_short {
+            markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+        } else {
+            markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+        }
+        assert_eq!(
+            wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired),
+            Err(V16Error::LockActive),
+            "a forced close must not run over an in-flight bankruptcy close (short={side_short})"
+        );
+    }
+    // NEGATIVE CONTROL: no barrier, same world, closes.
+    let (mut header, mut markets, _l1, mut l2, _s1, _s2) = adl_world();
+    wind_down(&mut header, &mut markets, &mut l2, AdlWindDownBoundV16::EpisodeExpired)
+        .expect("no barrier: wind-down proceeds");
+}
+
+#[test]
+fn l3_mg_flat_account_without_a_close_ledger_stays_unattributed() {
+    // Single-asset Live group (attribution would otherwise be written). A FLAT account with a
+    // deficit and no open close ledger has no bankrupt side to name: it must be recorded
+    // unattributed (byte 1, global predicate), never guessed onto a domain.
+    let (mut header, mut markets) = market_fixture_slots(1, 100);
+    let mut a = account_fixture(1, 66);
+    a.pnl = percolator::V16PodI128::new(-50);
+    header.negative_pnl_account_count =
+        V16PodU64::new(header.negative_pnl_account_count.get() + 1);
+    assert!(!a.legs[0].try_to_runtime().unwrap().active);
+    assert!(!a.close_progress.try_to_runtime().unwrap().active);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut a);
+        let _ = market.full_account_refresh_not_atomic(&mut v);
+    }
+    assert_eq!(
+        header.bankruptcy_hlock_active, 1,
+        "flat, no ledger: unattributed (not domain 0 or 1)"
+    );
+    // NEGATIVE CONTROL: the same deficit on an account WITH a short leg is attributed to
+    // domain 1 (asset 0, Short) -- the mark helper is not simply always-unattributed.
+    let (mut header, mut markets) = market_fixture_slots(1, 100);
+    let mut l = account_fixture(1, 67);
+    let mut s = account_fixture(1, 68);
+    deposit(&mut header, &mut markets, &mut l, 10_000);
+    deposit(&mut header, &mut markets, &mut s, 10_000);
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(POS_SCALE), 100).unwrap();
+    s.capital = percolator::V16PodU128::new(0);
+    header.c_tot = percolator::V16PodU128::new(header.c_tot.get() - 10_000);
+    header.vault = percolator::V16PodU128::new(header.vault.get() - 10_000);
+    s.pnl = percolator::V16PodI128::new(-50);
+    header.negative_pnl_account_count =
+        V16PodU64::new(header.negative_pnl_account_count.get() + 1);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut v = PortfolioV16ViewMut::new(&mut s);
+        let _ = market.full_account_refresh_not_atomic(&mut v);
+    }
+    assert_eq!(header.bankruptcy_hlock_active, 0b101, "short leg: attributed to domain 1");
+}

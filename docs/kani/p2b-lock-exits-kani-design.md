@@ -250,3 +250,61 @@ Covers both branches, and the "armed, not eligible" early return that commits on
 Mutation checks: arm with `expired = true` (C1 fails); key on one epoch only (C2's composition
 cover becomes unsatisfiable on a one-sided reset); tag 105 accepting `n > N_eff` (C3 fails);
 tag 93 writing zeros over 44..64 (C3 fails).
+
+---
+
+## Part D. Security-review additions (review 2026-10-05, SHIP-WITH-CHANGES)
+
+### A2-L `lemma_p2b_live_claim_coverage` (the assumption A2 rests on)
+A2 assumes `pnl_pos_tot == 0 ⇔ every domain's positive claims == 0`. Prove the direction A2
+needs as an inductive lemma over the single writer: in Live mode `set_account_pnl_inner` never
+raises `pnl_pos_tot` without raising exactly one domain's `positive_claim_bound_num` and
+`exact_positive_claim_num` by `bound_num_from_amount(increase)` (the `source_domain.is_none() &&
+Live ⇒ InvalidLeg` arm), and every decrease burns the account's source claim by the same bound
+(`burn_account_source_claim_bound_num`). Symbolic old/new pnl (u64-bounded), symbolic source
+domain present/absent, Live/Resolved. Covers: increase with domain; increase without domain in
+Live refused; decrease burns. Stated as a function contract so A2 can `stub_verified` it.
+
+### A5 `proof_p2b_every_mark_site_passes_the_bankrupt_leg_side` (promoted to its own harness)
+Per write site, a cheap wiring harness over the site's own inputs (not the whole liquidation):
+`consume_domain_insurance_for_negative_pnl(asset, S, ·)`, `liquidate_account_not_atomic` (the
+`leg.side` it passes), the Live arm of `book_bankruptcy_residual_chunk_internal`,
+`settle_resolved_bankruptcy_negative_pnl`, and `mark_bankruptcy_hlock_for_account` (one leg →
+its side; none + ledger → `opposite(domain_side)`; none + no ledger → unattributed; two legs →
+unattributed). Assert the written byte is `mark_domain(prior, 2·asset + S)` or 1. Covers each
+site; the flat-no-ledger case is the review's mutant MG (also killed by
+`l3_mg_flat_account_without_a_close_ledger_stays_unattributed`).
+
+### A6 `proof_p2b_bankruptcy_leaves_the_other_domain_reservations_and_rate`
+The side-scope safety argument (review L-2). For a bankruptcy of side S on asset a, across
+`consume_domain_insurance_for_negative_pnl` and the B booking: the non-attributed domain
+`(a, opp S)`'s `insurance_credit_reserved_num`, `fresh_reserved_backing_num`,
+`valid_liened_*`, and `credit_rate_num` are bit-identical before and after; the draw is bounded
+by `available_domain_insurance`, which excludes reserved insurance. Symbolic budgets, spent,
+reservations, residual. Covers: draw > 0; draw capped by availability; draw == 0.
+
+### C2 (extended) `proof_p2b_epochs_never_decrease_without_a_market_id_change`
+Over every asset-state writer (`kernel_begin_full_drain_reset`, the unilateral-close zero-OI
+branch, `restart_empty_asset_preserving_insurance_budget_not_atomic`, activation): if
+`market_id` is unchanged then `epoch_long'` ≥ `epoch_long` and `epoch_short'` ≥ `epoch_short`, and
+any write of `a_side := ADL_ONE` strictly increases `epoch_side`. Restart/activation (which zero
+the epochs) change `market_id`. The wrapper side (review L-1): restart/activation zero the episode
+record and the N override, and the episode key carries the low 32 bits of `market_id`, so an old
+`since` can never be inherited. Mutation: drop the market_id from the key and skip the clear →
+the composition cover fails.
+
+### C5 `proof_p2b_tag104_never_closes_at_a_lagging_or_pending_mark`
+Wrapper harness: tag 104 reaches the engine call only if `raw_oracle_target_price ==
+effective_price` (`reject_exposed_target_effective_lag_view`), no price-managed mark is pending
+for any of the portfolio's legs (`reject_portfolio_pending_price_managed_mark_view`), the
+account's per-leg health observations are complete
+(`reject_incomplete_account_health_observations_view`), and, for AUTH_MARK / EWMA_MARK, the
+pushed mark is no older than the bound (`mark_ewma_last_slot + ADL_WIND_DOWN_MAX_MARK_AGE_SLOTS
+>= now`). Engine mirror: `wind_down_adl_position_not_atomic` returns `LockActive` while
+`asset_has_target_effective_lag`. Covers each refusal and the pass.
+
+### B2 (extended)
+Add: every OPPOSITE-side account's stored `pnl`, `capital`, `k_snap`, `f_snap`, `b_snap` are
+unchanged by the step (the wind-down touches only the target account and the asset's OI/A), and
+its value when next settled equals its value settled immediately before (A scales only future
+K/F increments).

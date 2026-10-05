@@ -18347,6 +18347,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !self.adl_wind_down_eligible(request.asset_index, request.bound)? {
             return Err(V16Error::NonProgress);
         }
+        // Security review M-1: never force-close at a lagging mark. While the oracle target
+        // and the effective price differ, the effective price is still stepping toward the
+        // target (rate-limited), and a close now would crystallise the lag in the opposite
+        // side's favour at a time the caller chose. Liquidation tolerates this because it
+        // prices the lag into margin; a forced close of a HEALTHY leg must not.
+        if self.asset_has_target_effective_lag(request.asset_index)? {
+            return Err(V16Error::LockActive);
+        }
         self.validate_account_scalar_preflight(&account.as_view())?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
         match self.refresh_account_and_certify_not_atomic(
@@ -18375,11 +18383,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if close_q == 0 {
             return Err(V16Error::NonProgress);
         }
-        if self.position_delta_blocked_by_pending_domain_loss_barrier(
-            &account.as_view(),
-            request.asset_index,
-            close_delta,
-        )? {
+        // Security review L-3 (MH): STRICTER than the voluntary-reduce rule. A voluntary
+        // same-side reduce may proceed past a pending domain-loss barrier
+        // (`pending_domain_loss_barrier_blocks_position_change` exempts reductions), but a
+        // FORCED close must not drain either side while a bankruptcy close still has residual
+        // to book: that residual is booked onto the loss-bearing side's weight, and flattening
+        // that side first would strand it (weight 0 => Recovery). Refuse while either side of
+        // the asset carries a barrier; the close ledger's own progress path clears it first.
+        if self.has_pending_domain_loss_barrier(request.asset_index, SideV16::Long)?
+            || self.has_pending_domain_loss_barrier(request.asset_index, SideV16::Short)?
+            || self.position_delta_blocked_by_pending_domain_loss_barrier(
+                &account.as_view(),
+                request.asset_index,
+                close_delta,
+            )?
+        {
             return Err(V16Error::LockActive);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
