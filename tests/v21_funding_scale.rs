@@ -103,6 +103,10 @@ fn asset(slab: &Slab) -> percolator::AssetStateV16 {
     slab.1[0].engine.asset.try_to_runtime().unwrap()
 }
 
+fn drift_long(slab: &Slab) -> percolator::KfDriftSideV16 {
+    slab.1[0].engine.kf_drift_long.to_runtime()
+}
+
 fn validate(slab: &mut Slab, accounts: &mut [&mut PortfolioAccountV16Account]) {
     let m = MarketGroupV16ViewMut::new(&mut slab.0, &mut slab.1);
     m.validate_shape().unwrap();
@@ -195,7 +199,7 @@ fn v21_insurance_cover_admits_entrant_at_exact_boundary_without_refreshing_60_ac
     assert!(recognized <= bound);
     let a = asset(&slab);
     assert_eq!(a.stale_account_count_long, 0);
-    assert_eq!(a.kf_gen_laggard_count_long, 0);
+    assert_eq!(drift_long(&slab).laggard_count, 0);
     let mut all: Vec<&mut PortfolioAccountV16Account> = traders.iter_mut().collect();
     all.push(&mut maker);
     all.push(&mut entrant);
@@ -304,8 +308,9 @@ fn v21_generation_rotation_tracks_laggards_across_repeated_funding_accruals() {
             next += 1;
         }
         let a = asset(&slab);
-        assert!(a.kf_gen_laggard_count_long <= a.stale_account_count_long);
-        assert!(a.kf_gen_epoch_long <= a.kf_epoch_long);
+        let d = drift_long(&slab);
+        assert!(d.laggard_count <= a.stale_account_count_long);
+        assert!(d.gen_epoch <= a.kf_epoch_long);
     }
     // Real hidden loss = sum over stale longs of 10 atoms per slot since its snapshot.
     let mut hidden = 0u128;
@@ -316,24 +321,19 @@ fn v21_generation_rotation_tracks_laggards_across_repeated_funding_accruals() {
             hidden += 10 * u128::from(a.slot_last - leg.kf_epoch_snap);
         }
     }
+    let d = drift_long(&slab);
     let den = SOCIAL_WEIGHT_SCALE * POS_SCALE;
-    let prior_term = if a.kf_gen_laggard_count_long == 0 {
+    let prior_term = if d.laggard_count == 0 {
         0
     } else {
-        (a.kf_gen_laggard_weight_long * a.kf_drift_prior_long).div_ceil(den)
+        (d.laggard_weight * d.drift_prior).div_ceil(den)
     };
-    let bound = (a.kf_stale_weight_long * a.kf_drift_gen_long).div_ceil(den)
+    let bound = (d.stale_weight * d.drift_gen).div_ceil(den)
         + prior_term
         + 2 * u128::from(a.stale_account_count_long);
     // The stale weight is exactly one unit of weight per stale long.
-    assert_eq!(
-        a.kf_stale_weight_long,
-        u128::from(a.stale_account_count_long) * POS_SCALE
-    );
-    assert_eq!(
-        a.kf_gen_laggard_weight_long,
-        u128::from(a.kf_gen_laggard_count_long) * POS_SCALE
-    );
+    assert_eq!(d.stale_weight, u128::from(a.stale_account_count_long) * POS_SCALE);
+    assert_eq!(d.laggard_weight, u128::from(d.laggard_count) * POS_SCALE);
     assert!(hidden > 0);
     assert!(
         hidden <= bound,

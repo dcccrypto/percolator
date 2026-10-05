@@ -302,35 +302,22 @@ fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Acco
 }
 
 /// Independent re-implementation of the hidden-loss bound.
-fn bound(asset: &percolator::AssetStateV16, side: SideV16) -> u128 {
-    let (stale, lag, gen, prior, ws, wl) = match side {
-        SideV16::Long => (
-            asset.stale_account_count_long,
-            asset.kf_gen_laggard_count_long,
-            asset.kf_drift_gen_long,
-            asset.kf_drift_prior_long,
-            asset.kf_stale_weight_long,
-            asset.kf_gen_laggard_weight_long,
-        ),
-        SideV16::Short => (
-            asset.stale_account_count_short,
-            asset.kf_gen_laggard_count_short,
-            asset.kf_drift_gen_short,
-            asset.kf_drift_prior_short,
-            asset.kf_stale_weight_short,
-            asset.kf_gen_laggard_weight_short,
-        ),
+fn bound(w: &World, side: SideV16) -> u128 {
+    let asset = w.asset();
+    let (stale, d) = match side {
+        SideV16::Long => (asset.stale_account_count_long, w.markets[0].engine.kf_drift_long.to_runtime()),
+        SideV16::Short => (asset.stale_account_count_short, w.markets[0].engine.kf_drift_short.to_runtime()),
     };
     if stale == 0 {
         return 0;
     }
     let den = SOCIAL_WEIGHT_SCALE * POS_SCALE;
     // weights <= 1e21; drift here stays far below 1e17, so u128 products are exact.
-    let g = ws.checked_mul(gen).expect("test worlds stay in u128").div_ceil(den);
-    let p = if lag == 0 {
+    let g = d.stale_weight.checked_mul(d.drift_gen).expect("test worlds stay in u128").div_ceil(den);
+    let p = if d.laggard_count == 0 {
         0
     } else {
-        wl.checked_mul(prior).expect("test worlds stay in u128").div_ceil(den)
+        d.laggard_weight.checked_mul(d.drift_prior).expect("test worlds stay in u128").div_ceil(den)
     };
     g + p + 2 * u128::from(stale)
 }
@@ -395,7 +382,7 @@ fn check_admission(w: &World, entrant: &PortfolioAccountV16Account, stats: &mut 
         stats.hidden_deficit_admissions += 1;
     }
     for (i, side) in [SideV16::Long, SideV16::Short].into_iter().enumerate() {
-        let b = bound(&asset, side);
+        let b = bound(w, side);
         let mut header = w.header;
         let mut markets = w.markets.clone();
         let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -621,11 +608,11 @@ fn v21_hidden_deficit_is_absorbed_by_cover_not_by_entrant() {
         }
     }
     assert!(hidden_deficit > 0, "the slide must leave unrecognized bankruptcies");
-    let b_long = bound(&asset, SideV16::Long);
+    let b_long = bound(&w, SideV16::Long);
     assert!(b_long > 0);
 
     // The maker's short is stale too but only gained: its bound is the floor allowance.
-    let b_short = bound(&asset, SideV16::Short);
+    let b_short = bound(&w, SideV16::Short);
     assert_eq!(b_short, 2, "favourable travel adds nothing beyond rounding");
     // Insure the domain that absorbs long bankruptcies (the short domain, 1) to the bound,
     // and the long domain for the maker's rounding allowance.

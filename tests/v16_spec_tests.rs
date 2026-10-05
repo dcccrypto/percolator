@@ -659,33 +659,7 @@ fn v16_canonical_accrual_path_matches_every_complete_transaction_partition() {
 
     let (fragmented_header, fragmented_asset) = run(true);
     let (delayed_header, delayed_asset) = run(false);
-    // fix/v21-funding-scale: the K/F drift-generation bookkeeping is per accrual CALL (each
-    // call is one cohort event), so it legitimately differs between partitions. It only feeds
-    // the hidden-loss admission bound, which is sound under any partition
-    // (tests/v21_funding_scale*.rs); every value-bearing field must still match exactly.
-    let strip = |mut a: AssetStateV16Account| {
-        for (gen_epoch, lag, gen, prior, stale_w, lag_w) in [
-            (&mut a.kf_gen_epoch_long, &mut a.kf_gen_laggard_count_long, &mut a.kf_drift_gen_long, &mut a.kf_drift_prior_long, &mut a.kf_stale_weight_long, &mut a.kf_gen_laggard_weight_long),
-            (&mut a.kf_gen_epoch_short, &mut a.kf_gen_laggard_count_short, &mut a.kf_drift_gen_short, &mut a.kf_drift_prior_short, &mut a.kf_stale_weight_short, &mut a.kf_gen_laggard_weight_short),
-        ] {
-            *gen_epoch = V16PodU64::default();
-            *lag = V16PodU64::default();
-            *gen = V16PodU128::default();
-            *prior = V16PodU128::default();
-            *stale_w = V16PodU128::default();
-            *lag_w = V16PodU128::default();
-        }
-        a
-    };
-    assert_eq!(strip(delayed_asset), strip(fragmented_asset));
-    assert_eq!(
-        delayed_asset.kf_stale_weight_long.get(),
-        fragmented_asset.kf_stale_weight_long.get()
-    );
-    assert_eq!(
-        delayed_asset.kf_stale_weight_short.get(),
-        fragmented_asset.kf_stale_weight_short.get()
-    );
+    assert_eq!(delayed_asset, fragmented_asset);
     assert_eq!(delayed_asset.effective_price.get(), 1_100_000);
     assert_eq!(delayed_asset.fund_px_last.get(), INITIAL_PRICE);
     assert_eq!(delayed_header.current_slot, fragmented_header.current_slot);
