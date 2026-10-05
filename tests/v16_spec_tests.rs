@@ -928,12 +928,19 @@ fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let a_short = ADL_ONE * 3 / 4;
     let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
-    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    // fix/v21-funding-precision (upstream a74b81b2 rule "MUST NOT first floor by
+    // FUNDING_DEN"): F moves by the exact `rate * price * A / 1e9`, the paying side rounded
+    // up and the receiving side down. At this step's price (1.01e6) that is 10.1 units, which
+    // the old pre-floor truncated to 10.
+    let n = step.funding_rate_e9 * i128::from(step.effective_price);
+    assert!(n > 0, "this fixture's first step has longs paying");
+    let exact_long = n * ADL_ONE as i128 / 1_000_000_000; // ADL_ONE % 1e9 == 0: exact
+    let short_num = n * a_short as i128;
     assert_eq!(asset.a_short, a_short);
     assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
     assert_eq!(asset.k_short, -(price_delta * a_short as i128));
-    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
-    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+    assert_eq!(asset.f_long_num, -exact_long);
+    assert_eq!(asset.f_short_num, short_num.div_euclid(1_000_000_000));
 }
 
 #[test]
@@ -2368,14 +2375,12 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
     let scaled = (ADL_ONE * 3 / 4) as i128;
     assert_eq!(asset.k_long, ADL_ONE as i128);
     assert_eq!(asset.k_short, -scaled);
-    assert_eq!(
-        asset.f_long_num,
-        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
-    );
-    assert_eq!(
-        asset.f_short_num,
-        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
-    );
+    // fix/v21-funding-precision: exact funding at the accrual price (FUNDING_COUNTER_PRICE + 1),
+    // payer (long) rounded up, receiver (short, A = 3/4) rounded down; the old pre-floor gave
+    // exactly FUNDING_COUNTER_ATOMS_PER_SLOT units and dropped the 1e-5 unit.
+    let n = FUNDING_COUNTER_RATE_E9 * i128::from(FUNDING_COUNTER_PRICE + 1);
+    assert_eq!(asset.f_long_num, -(n * ADL_ONE as i128 / 1_000_000_000));
+    assert_eq!(asset.f_short_num, (n * scaled).div_euclid(1_000_000_000));
 
     let total_value = |long: &PortfolioAccountV16Account,
                        short: &PortfolioAccountV16Account|
@@ -2401,7 +2406,14 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
             )
             .unwrap();
     }
-    assert_eq!(total_value(&long_header, &short_header), value_before);
+    // fix/v21-funding-precision: funding is now exact, so this step's funding is fractional
+    // (90.00009 atoms on the long). Settlement floors each leg's K/F pnl (pre-existing rule), so
+    // the payer is charged the ceiling and the receiver gets the floor: the pair may lose at most
+    // one atom per settled leg to rounding and can never gain (no value created). Removing even
+    // this residual needs per-leg K/F remainders (upstream a74b81b2), a portfolio layout change.
+    let value_after = total_value(&long_header, &short_header);
+    assert!(value_after <= value_before, "rounding must never create value");
+    assert!(value_before - value_after <= 2, "at most one atom per settled leg");
 
     let reduced_asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(reduced_asset.oi_eff_long_q, 6 * POS_SCALE);
@@ -2435,10 +2447,13 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
         market.full_account_refresh_not_atomic(&mut long).unwrap();
         market.full_account_refresh_not_atomic(&mut short).unwrap();
     }
-    assert_eq!(
-        total_value(&long_header, &short_header),
-        value_before_continuation,
-        "future price/funding accrual must remain zero-sum after the partial ADL reduction"
+    // fix/v21-funding-precision: same rule as above -- exact (fractional) funding, settlement
+    // floors per leg: never value-creating, at most one atom per settled leg.
+    let value_after_continuation = total_value(&long_header, &short_header);
+    assert!(
+        value_after_continuation <= value_before_continuation
+            && value_before_continuation - value_after_continuation <= 2,
+        "future price/funding accrual must remain zero-sum (up to settlement floor) after the partial ADL reduction"
     );
 }
 

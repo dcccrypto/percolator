@@ -1776,6 +1776,73 @@ impl V16Core {
         Ok((k_long, k_short, f_long, f_short))
     }
 
+    /// fix/v21-funding-precision: per-side F index deltas for one accrual segment, computed
+    /// from the UNFLOORED funding numerator `funding_num = funding_rate_e9 * dt * price`.
+    ///
+    /// The previous form floored `funding_num / FUNDING_DEN` to whole price units BEFORE
+    /// scaling by A, so any segment worth less than one price unit per position unit lost all
+    /// positive funding (longs never paid) and charged a full unit for negative funding (shorts
+    /// overpaid by up to ~1e6x on low-priced assets, far above the solvency envelope's exact
+    /// `rate * dt` funding budget). Upstream wrote the same precision rule on an unmerged branch
+    /// (`a74b81b2`, spec: "it MUST NOT first floor by FUNDING_DEN").
+    ///
+    /// Rounding is sign-symmetric and conservative per side: the PAYING side's index moves by
+    /// `ceil(|n| * a_payer / FUNDING_DEN)`, the RECEIVING side's by
+    /// `floor(|n| * a_recv / FUNDING_DEN)`. With `a == ADL_ONE` both are exactly `|n| * 1e6`
+    /// (ADL_ONE % FUNDING_DEN == 0), so balanced books move by equal and opposite amounts, and
+    /// negating the rate mirrors the two sides exactly. Payers never pay less than receivers
+    /// receive (no value is created by rounding), and the residual is below one index unit
+    /// (1e-15 price units per position unit) per segment.
+    pub(crate) fn kernel_funding_index_deltas(
+        funding_num: i128,
+        a_long: u128,
+        a_short: u128,
+    ) -> V16Result<(i128, i128)> {
+        if funding_num == 0 {
+            return Ok((0, 0));
+        }
+        let mag = funding_num.unsigned_abs();
+        if funding_num > 0 {
+            // rate > 0: longs pay shorts.
+            let f_long = Self::funding_scaled_magnitude(mag, a_long, true)?
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let f_short = Self::funding_scaled_magnitude(mag, a_short, false)?;
+            Ok((f_long, f_short))
+        } else {
+            // rate < 0: shorts pay longs.
+            let f_long = Self::funding_scaled_magnitude(mag, a_long, false)?;
+            let f_short = Self::funding_scaled_magnitude(mag, a_short, true)?
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            Ok((f_long, f_short))
+        }
+    }
+
+    /// `ceil` or `floor` of `mag * a / FUNDING_DEN`, as a non-negative i128.
+    fn funding_scaled_magnitude(mag: u128, a: u128, round_up: bool) -> V16Result<i128> {
+        let (q, r) = match mag.checked_mul(a) {
+            Some(p) => (p / FUNDING_DEN, p % FUNDING_DEN),
+            None => {
+                let (q, r) = mul_div_floor_u256_with_rem(
+                    U256::from_u128(mag),
+                    U256::from_u128(a),
+                    U256::from_u128(FUNDING_DEN),
+                );
+                (
+                    q.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+                    r.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+                )
+            }
+        };
+        let v = if round_up && r != 0 {
+            q.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?
+        } else {
+            q
+        };
+        i128::try_from(v).map_err(|_| V16Error::ArithmeticOverflow)
+    }
+
     #[inline]
     pub(crate) fn kernel_position_route_requires_unit_adl(
         route: PositionRouteV16,
@@ -15131,22 +15198,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // book (a_long == a_short == ADL_ONE) this is byte-identical to the old flat code.
         // The old flat path minted value on an asymmetric-a book because the low-A side
         // over-realized by ADL_ONE/a_side (see issue #114).
-        let funding_index_delta = if activity.funding_active {
-            let n = funding_rate_e9
+        // fix/v21-funding-precision: keep the funding numerator unfloored; the per-side F
+        // deltas are rounded once, in `kernel_funding_index_deltas`.
+        let funding_num = if activity.funding_active {
+            funding_rate_e9
                 .checked_mul(segment_dt as i128)
                 .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                .ok_or(V16Error::ArithmeticOverflow)?
         } else {
             0
         };
-        let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
-            V16Core::kernel_adl_scaled_accrual_index_deltas(
-                price_delta,
-                funding_index_delta,
-                old.a_long,
-                old.a_short,
-            )?;
+        let (k_delta_long, k_delta_short, _, _) = V16Core::kernel_adl_scaled_accrual_index_deltas(
+            price_delta,
+            0,
+            old.a_long,
+            old.a_short,
+        )?;
+        let (funding_delta_long, funding_delta_short) =
+            V16Core::kernel_funding_index_deltas(funding_num, old.a_long, old.a_short)?;
 
         let long_kf_changed = k_delta_long != 0 || funding_delta_long != 0;
         let short_kf_changed = k_delta_short != 0 || funding_delta_short != 0;
@@ -15322,22 +15391,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
-            let funding_index_delta = if activity.funding_active {
-                let n = step
-                    .funding_rate_e9
+            // fix/v21-funding-precision: unfloored numerator (see `kernel_funding_index_deltas`).
+            let funding_num = if activity.funding_active {
+                step.funding_rate_e9
                     .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                    .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
-            let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
+            let (k_delta_long, k_delta_short, _, _) =
                 V16Core::kernel_adl_scaled_accrual_index_deltas(
                     price_delta,
-                    funding_index_delta,
+                    0,
                     asset.a_long,
                     asset.a_short,
                 )?;
+            let (funding_delta_long, funding_delta_short) =
+                V16Core::kernel_funding_index_deltas(funding_num, asset.a_long, asset.a_short)?;
 
             kf_travel_long =
                 kf_travel_long.saturating_add(kf_adverse_travel(k_delta_long, funding_delta_long));
@@ -23690,6 +23760,15 @@ pub fn kani_raw_basis_for_adl_effective_quantity(
     current_a: u128,
 ) -> V16Result<u128> {
     V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_funding_index_deltas(
+    funding_num: i128,
+    a_long: u128,
+    a_short: u128,
+) -> V16Result<(i128, i128)> {
+    V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
 }
 
 #[cfg(kani)]
