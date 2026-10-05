@@ -991,6 +991,12 @@ impl V16Core {
         if stale == 0 {
             return Some(0);
         }
+        // Security review S1: every stale leg carries `loss_weight >= 1`, so a tracker whose
+        // stale weight is below the stale count is not describing this cohort (e.g. a zeroed
+        // drift tail under a live cohort). Fail CLOSED instead of collapsing to `2 * stale`.
+        if drift.stale_weight < u128::from(stale) {
+            return None;
+        }
         let den = U256::from_u128(SOCIAL_WEIGHT_SCALE.checked_mul(POS_SCALE)?);
         let gen_term = checked_mul_div_ceil_u256(
             U256::from_u128(drift.stale_weight),
@@ -1014,17 +1020,26 @@ impl V16Core {
     }
 
     /// fix/v21-funding-scale: laggards are a subset of the stale cohort and a generation
-    /// never starts after the side's current KF epoch.
-    #[cfg(any(test, kani, feature = "audit-scan"))]
+    /// never starts after the side's current KF epoch. On a `Normal` side (where the drift
+    /// weights are exact) every stale leg / laggard carries `loss_weight >= 1`, so the weights
+    /// can never be below the counts (security review S1). Used by the audit-scan shape walk
+    /// AND by production admission/withdrawal, which fail closed when it does not hold.
     fn validate_kf_drift_shape(
         asset: AssetStateV16,
         long: KfDriftSideV16,
         short: KfDriftSideV16,
     ) -> V16Result<()> {
+        let weights_undercount = |mode: SideModeV16, stale: u64, d: KfDriftSideV16| {
+            mode == SideModeV16::Normal
+                && (d.stale_weight < u128::from(stale)
+                    || d.laggard_weight < u128::from(d.laggard_count))
+        };
         if long.laggard_count > asset.stale_account_count_long
             || short.laggard_count > asset.stale_account_count_short
             || long.gen_epoch > asset.kf_epoch_long
             || short.gen_epoch > asset.kf_epoch_short
+            || weights_undercount(asset.mode_long, asset.stale_account_count_long, long)
+            || weights_undercount(asset.mode_short, asset.stale_account_count_short, short)
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -17026,7 +17041,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// into it; loss absorption may.
     fn domain_hidden_kf_loss_reservation(&self, domain: usize) -> V16Result<u128> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
-        self.asset_hidden_kf_loss_bound(asset_index, opposite_side(side))
+        let bankrupt_side = opposite_side(side);
+        // Security review S2: the drift weights are exact only on a `Normal` side and only when
+        // the tracker is well-formed. Otherwise a stale cohort's hidden loss is unbounded here:
+        // reserve everything (withdrawal blocked until the cohort settles).
+        let asset = self.asset_state(asset_index)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let (stale, mode) = match bankrupt_side {
+            SideV16::Long => (asset.stale_account_count_long, asset.mode_long),
+            SideV16::Short => (asset.stale_account_count_short, asset.mode_short),
+        };
+        if stale != 0
+            && (mode != SideModeV16::Normal
+                || V16Core::validate_kf_drift_shape(
+                    asset,
+                    slot.kf_drift_long.to_runtime(),
+                    slot.kf_drift_short.to_runtime(),
+                )
+                .is_err())
+        {
+            return Ok(u128::MAX);
+        }
+        self.asset_hidden_kf_loss_bound(asset_index, bankrupt_side)
     }
 
     /// fix/v21-funding-scale: a loss-stale asset may still admit risk-increasing trades when
@@ -17064,6 +17100,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(false);
         }
         let slot = self.markets[asset_index].engine_slot();
+        // Security review S1: a malformed tracker never admits (production check, not only
+        // the audit-scan walk).
+        if V16Core::validate_kf_drift_shape(
+            asset,
+            slot.kf_drift_long.to_runtime(),
+            slot.kf_drift_short.to_runtime(),
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
         for side in [SideV16::Long, SideV16::Short] {
             let Some(bound) = Self::kf_hidden_loss_bound_for(&asset, slot, side) else {
                 return Ok(false);
