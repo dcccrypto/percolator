@@ -13,6 +13,7 @@ Code under proof (engine `feat/p2b-lock-exits`):
 | attribution | `mark_bankruptcy_hlock_event`, `mark_bankruptcy_hlock_for_account`, `bankruptcy_hlock_asset_is_sole_ever_activated` | `src/v16.rs` (next to `try_clear_bankruptcy_hlock_if_healthy`) |
 | clear predicate | `bankruptcy_hlock_claim_term_clear`, `try_clear_bankruptcy_hlock_if_healthy` | same |
 | wind-down | `adl_wind_down_eligible`, `wind_down_adl_position_not_atomic` | `src/v16.rs` (after `rebalance_reduce_position_not_atomic`) |
+| episode storage (wrapper) | `adl_episode_step`, `handle_adl_wind_down`, `handle_set_adl_wind_down_max_slots`, tag-93 preservation | percolator-prog `src/v16_program.rs` (Part C) |
 
 All harnesses go in `tests/proofs_v16.rs` (engine `#[cfg(kani)]` test file) and are added to
 `kani-list.json`. Fixtures reuse `one_market_view_fixture()` / `one_market_only_fixture()`.
@@ -208,3 +209,44 @@ cargo kani --tests --harness proof_v16_adl_position_change_gate_is_route_complet
 Expected cost: A1, A3, A4, B3, B4 seconds each; A2 under a minute (scalar); B1 minutes (one
 mul-div lemma); B2 is the expensive one, budget it on its own and stop at the first verdict.
 Record per-harness checks, covers and seconds in `kani-list.json` and the ledger.
+
+---
+
+## Part C. Episode-expiry storage (wrapper `feat/p2b-lock-exits-wrapper`, tags 104/105)
+
+The `EpisodeExpired` bound is no longer "attested by a trusted caller": the wrapper derives it
+trustlessly from on-chain state. These harnesses go in the wrapper's Kani crate (next to the
+growth-v19 set), run with the same once-locally rule.
+
+Storage: `AssetRiskLimitsV17` bytes 44..64 (asset-slot bytes 652..672), carved from the former
+`_reserved: [u8; 22]` with compile-time offset asserts: `adl_max_episode_slots: u32` (0 = default
+9,000), `adl_episode_since_slot: u64` (0 = none), `adl_episode_epoch_long/short: u32`.
+
+### C1 `proof_p2b_episode_step_never_expires_on_the_arming_call`
+Symbolic stored limits, epochs, `now`. `adl_episode_step`:
+- missing record (`since == 0`) or a key mismatch ⇒ returns `expired == false` and stores
+  `since = max(now, 1)` and the current key;
+- matching key ⇒ never moves `since`, and `expired ⇔ now - since >= N_eff`.
+Covers: arm; re-call before N; expiry at exactly N; key mismatch re-arms.
+
+### C2 `proof_p2b_episode_key_changes_only_through_a_reset` (engine-side lemma)
+For every engine transition that can set `a_side := ADL_ONE` (`kernel_begin_full_drain_reset`,
+the zero-OI branch of `reduce_matching_open_interest_for_unilateral_close`), `epoch_side`
+strictly increases. Together with C1: an episode can never be "inherited" by a later one, so
+a stored start slot always belongs to the current reduce-only stretch (no early expiry).
+Covers: each writer reached.
+
+### C3 `proof_p2b_tag105_is_tighten_only` and `proof_p2b_tag93_preserves_episode`
+- Tag 105 accepts `n` iff `1 <= n <= N_eff(stored)`, and writes only `adl_max_episode_slots`.
+- Tag 93 (non-growth form) writes the P1 fields and leaves bytes 44..64 bit-identical.
+- `validate_asset_risk_limits` rejects `adl_max_episode_slots > 9,000` and a nonzero `_reserved`.
+
+### C4 `proof_p2b_tag104_force_close_requires_bound` (wiring)
+With the engine's `wind_down_adl_position_not_atomic` stubbed by contract (requires
+`adl_wind_down_eligible(asset, bound)`), the handler only ever passes `EpisodeExpired` when C1
+returned `expired`, and otherwise `DustNotional { ADL_WIND_DOWN_DUST_NOTIONAL_ATOMS }`.
+Covers both branches, and the "armed, not eligible" early return that commits only the record.
+
+Mutation checks: arm with `expired = true` (C1 fails); key on one epoch only (C2's composition
+cover becomes unsatisfiable on a one-sided reset); tag 105 accepting `n > N_eff` (C3 fails);
+tag 93 writing zeros over 44..64 (C3 fails).

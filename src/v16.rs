@@ -6883,7 +6883,10 @@ pub enum AdlWindDownBoundV16 {
     /// price, is at or below `max_notional_atoms`.
     DustNotional { max_notional_atoms: u128 },
     /// Caller-attested: this reduce-only episode has lasted at least the caller's configured
-    /// maximum. The engine still enforces every state precondition.
+    /// maximum. The engine still enforces every state precondition. The wrapper (tag 104)
+    /// derives it trustlessly: the episode start is recorded on chain keyed by the asset's
+    /// side-reset epochs, and expiry is `now - since >= N` on the authenticated clock
+    /// (N tighten-only via tag 105). No signer or authority supplies it.
     EpisodeExpired,
 }
 
