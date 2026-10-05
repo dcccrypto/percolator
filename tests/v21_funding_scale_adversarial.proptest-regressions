@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2bd979df7a61c83811d2df0124aafcadf861e020feb16484ca225ab31fa95e79 # shrinks to pairs = [(105000, 105000, 1), (105000, 105000, 1), (105000, 105000, 1)], il = 0, is = 0, ops = [Accrue(0, 0), Accrue(0, 0), Accrue(0, 0), Accrue(0, 1000), Accrue(0, 0), Accrue(0, 0)]
