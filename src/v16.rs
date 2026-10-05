@@ -923,6 +923,147 @@ impl V16Core {
         Ok((asset, epoch))
     }
 
+    /// fix/v21-funding-scale: record the adverse K+F index travel of an accrual on each
+    /// changed side BEFORE `kernel_mark_kf_stale_cohorts` resets that side's cohort.
+    ///
+    /// Generation rotation: when no leg is older than the current generation start
+    /// (`laggard == 0`), every stored leg's snapshot is at or after it, so a new
+    /// generation can begin at the side's present KF epoch. The legs that are stale at
+    /// that moment (snapshot older than the present epoch) become the new laggards, the
+    /// finished generation's travel becomes `prior`, and `gen` restarts at zero. Then
+    /// this accrual's travel is added to `gen`.
+    ///
+    /// Invariant kept: each stored leg's unsettled index travel is at most `gen` when
+    /// its snapshot is at or after `kf_gen_epoch`, and at most `gen + prior` otherwise
+    /// (a laggard), because rotation only happens once every leg has reached the old
+    /// generation start.
+    pub(crate) fn kernel_track_kf_cohort_drift(
+        mut asset: AssetStateV16,
+        long_changed: bool,
+        short_changed: bool,
+        long_adverse: u128,
+        short_adverse: u128,
+    ) -> V16Result<AssetStateV16> {
+        if long_changed {
+            if asset.kf_gen_laggard_count_long == 0 {
+                asset.kf_gen_epoch_long = asset.kf_epoch_long;
+                asset.kf_gen_laggard_count_long = asset.stale_account_count_long;
+                asset.kf_gen_laggard_weight_long = asset.kf_stale_weight_long;
+                asset.kf_drift_prior_long = asset.kf_drift_gen_long;
+                asset.kf_drift_gen_long = 0;
+            }
+            asset.kf_drift_gen_long = asset.kf_drift_gen_long.saturating_add(long_adverse);
+            // `kernel_mark_kf_stale_cohorts` makes every stored leg stale next.
+            asset.kf_stale_weight_long = asset.loss_weight_sum_long;
+        }
+        if short_changed {
+            if asset.kf_gen_laggard_count_short == 0 {
+                asset.kf_gen_epoch_short = asset.kf_epoch_short;
+                asset.kf_gen_laggard_count_short = asset.stale_account_count_short;
+                asset.kf_gen_laggard_weight_short = asset.kf_stale_weight_short;
+                asset.kf_drift_prior_short = asset.kf_drift_gen_short;
+                asset.kf_drift_gen_short = 0;
+            }
+            asset.kf_drift_gen_short = asset.kf_drift_gen_short.saturating_add(short_adverse);
+            asset.kf_stale_weight_short = asset.loss_weight_sum_short;
+        }
+        Ok(asset)
+    }
+
+    /// fix/v21-funding-scale: discharge a settling leg from the stale weight and, when it
+    /// predates the generation start, from the laggard set. Call with the pre-settlement
+    /// asset, alongside `kernel_settle_kf_stale_cohort`. Counts are exact (checked); weights
+    /// saturate because a drain reset can leave them under-counted outside `Normal` mode,
+    /// where the bound is never consulted (see the field docs).
+    pub(crate) fn kernel_settle_kf_laggard(
+        mut asset: AssetStateV16,
+        side: SideV16,
+        leg_kf_epoch_snap: u64,
+        leg_loss_weight: u128,
+    ) -> V16Result<AssetStateV16> {
+        let (kf_epoch, gen_epoch, stale_weight, lag_count, lag_weight) = match side {
+            SideV16::Long => (
+                asset.kf_epoch_long,
+                asset.kf_gen_epoch_long,
+                &mut asset.kf_stale_weight_long,
+                &mut asset.kf_gen_laggard_count_long,
+                &mut asset.kf_gen_laggard_weight_long,
+            ),
+            SideV16::Short => (
+                asset.kf_epoch_short,
+                asset.kf_gen_epoch_short,
+                &mut asset.kf_stale_weight_short,
+                &mut asset.kf_gen_laggard_count_short,
+                &mut asset.kf_gen_laggard_weight_short,
+            ),
+        };
+        if leg_kf_epoch_snap < kf_epoch {
+            *stale_weight = stale_weight.saturating_sub(leg_loss_weight);
+        }
+        if leg_kf_epoch_snap < gen_epoch {
+            *lag_count = lag_count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?;
+            *lag_weight = lag_weight.saturating_sub(leg_loss_weight);
+        }
+        Ok(asset)
+    }
+
+    /// fix/v21-funding-scale: an upper bound, in quote atoms, on the K/F loss that the
+    /// still-stale legs of `side` could recognize when they settle. `None` means the bound
+    /// does not fit in u128 (treat as uncovered).
+    ///
+    /// A leg settles `floor(basis * dK / (a_basis * POS_SCALE)) + floor(basis * dF / ...)`
+    /// and its `loss_weight = ceil(|basis| * SOCIAL_WEIGHT_SCALE / a_basis)`, so its loss is
+    /// at most `loss_weight * max(0, -(dK + dF)) / (SOCIAL_WEIGHT_SCALE * POS_SCALE) + 2` (one
+    /// atom of floor per term), and `max(0, -(sum of step moves))` is at most the sum of the
+    /// per-step adverse moves the drift accumulators hold. `kf_stale_weight` is the exact weight of the stale legs and
+    /// `kf_gen_laggard_weight` of the laggards among them. Only valid while the side is in
+    /// `Normal` mode (callers check), where both weights are exact.
+    pub(crate) fn kernel_kf_hidden_loss_bound(asset: AssetStateV16, side: SideV16) -> Option<u128> {
+        let (stale, laggard, gen, prior, stale_weight, laggard_weight) = match side {
+            SideV16::Long => (
+                asset.stale_account_count_long,
+                asset.kf_gen_laggard_count_long,
+                asset.kf_drift_gen_long,
+                asset.kf_drift_prior_long,
+                asset.kf_stale_weight_long,
+                asset.kf_gen_laggard_weight_long,
+            ),
+            SideV16::Short => (
+                asset.stale_account_count_short,
+                asset.kf_gen_laggard_count_short,
+                asset.kf_drift_gen_short,
+                asset.kf_drift_prior_short,
+                asset.kf_stale_weight_short,
+                asset.kf_gen_laggard_weight_short,
+            ),
+        };
+        if stale == 0 {
+            return Some(0);
+        }
+        // Every stale leg travelled at most `gen`; a laggard (a subset of the stale legs)
+        // additionally travelled at most `prior`. Ceil each term separately (conservative).
+        let den = U256::from_u128(SOCIAL_WEIGHT_SCALE.checked_mul(POS_SCALE)?);
+        let gen_term = checked_mul_div_ceil_u256(
+            U256::from_u128(stale_weight),
+            U256::from_u128(gen),
+            den,
+        )?
+        .try_into_u128()?;
+        let prior_term = if laggard == 0 {
+            0
+        } else {
+            checked_mul_div_ceil_u256(
+                U256::from_u128(laggard_weight),
+                U256::from_u128(prior),
+                den,
+            )?
+            .try_into_u128()?
+        };
+        gen_term
+            .checked_add(prior_term)?
+            .checked_add(u128::from(stale).checked_mul(2)?)
+    }
+
     /// PRODUCTION KERNEL: cap unilateral close work by the account's effective
     /// quantity and by matched effective OI. Liquidation and owner rebalance
     /// share this bound so neither can subtract more OI than any participant
@@ -3812,6 +3953,27 @@ pub fn kani_prepare_source_credit_domain_recompute_for_epoch_steps(
 }
 
 #[cfg(kani)]
+pub fn kani_track_kf_cohort_drift(
+    asset: AssetStateV16,
+    long_changed: bool,
+    short_changed: bool,
+    long_adverse: u128,
+    short_adverse: u128,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_track_kf_cohort_drift(asset, long_changed, short_changed, long_adverse, short_adverse)
+}
+
+#[cfg(kani)]
+pub fn kani_settle_kf_laggard(
+    asset: AssetStateV16,
+    side: SideV16,
+    leg_kf_epoch_snap: u64,
+    leg_loss_weight: u128,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_settle_kf_laggard(asset, side, leg_kf_epoch_snap, leg_loss_weight)
+}
+
+#[cfg(kani)]
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
@@ -4719,6 +4881,31 @@ pub struct AssetStateV16 {
     pub epoch_short: u64,
     pub mode_long: SideModeV16,
     pub mode_short: SideModeV16,
+    /// fix/v21-funding-scale: per-side K/F drift generations. `kf_gen_epoch_*` is the
+    /// KF epoch at which the current generation started; `kf_gen_laggard_count_*` counts
+    /// stored legs whose `kf_epoch_snap` is older than it. `kf_drift_gen_*` sums, per
+    /// accrual step, the part of the side's combined K+F index move that is adverse to
+    /// its legs, since the generation began; `kf_drift_prior_*` the same for the
+    /// generation before. Every stored leg has `kf_epoch_snap` at or after the PRIOR
+    /// generation's start, so the loss its unsettled K/F can realize is driven by at most
+    /// `gen` (non-laggard) or `gen + prior` (laggard) of adverse travel.
+    /// Saturating: a saturated drift only makes the hidden-loss bound larger.
+    pub kf_gen_epoch_long: u64,
+    pub kf_gen_epoch_short: u64,
+    pub kf_gen_laggard_count_long: u64,
+    pub kf_gen_laggard_count_short: u64,
+    pub kf_drift_gen_long: u128,
+    pub kf_drift_gen_short: u128,
+    pub kf_drift_prior_long: u128,
+    pub kf_drift_prior_short: u128,
+    /// Sum of `loss_weight` over the side's stale legs (reset to `loss_weight_sum` with the
+    /// cohort, reduced as each stale leg settles) and over its laggards. Exact while the side
+    /// is `Normal`; a drain reset zeroes `loss_weight_sum` under stored prior-epoch legs, so
+    /// outside `Normal` these may under-count and are never used (decrements saturate there).
+    pub kf_stale_weight_long: u128,
+    pub kf_stale_weight_short: u128,
+    pub kf_gen_laggard_weight_long: u128,
+    pub kf_gen_laggard_weight_short: u128,
 }
 
 impl Default for AssetStateV16 {
@@ -4767,6 +4954,18 @@ impl Default for AssetStateV16 {
             epoch_short: 0,
             mode_long: SideModeV16::Normal,
             mode_short: SideModeV16::Normal,
+            kf_gen_epoch_long: 0,
+            kf_gen_epoch_short: 0,
+            kf_gen_laggard_count_long: 0,
+            kf_gen_laggard_count_short: 0,
+            kf_drift_gen_long: 0,
+            kf_drift_gen_short: 0,
+            kf_drift_prior_long: 0,
+            kf_drift_prior_short: 0,
+            kf_stale_weight_long: 0,
+            kf_stale_weight_short: 0,
+            kf_gen_laggard_weight_long: 0,
+            kf_gen_laggard_weight_short: 0,
         }
     }
 }
@@ -7457,6 +7656,19 @@ pub struct AssetStateV16Account {
     pub epoch_short: V16PodU64,
     pub mode_long: u8,
     pub mode_short: u8,
+    // fix/v21-funding-scale: appended (layout grows by 96 bytes; rides the re-seed).
+    pub kf_gen_epoch_long: V16PodU64,
+    pub kf_gen_epoch_short: V16PodU64,
+    pub kf_gen_laggard_count_long: V16PodU64,
+    pub kf_gen_laggard_count_short: V16PodU64,
+    pub kf_drift_gen_long: V16PodU128,
+    pub kf_drift_gen_short: V16PodU128,
+    pub kf_drift_prior_long: V16PodU128,
+    pub kf_drift_prior_short: V16PodU128,
+    pub kf_stale_weight_long: V16PodU128,
+    pub kf_stale_weight_short: V16PodU128,
+    pub kf_gen_laggard_weight_long: V16PodU128,
+    pub kf_gen_laggard_weight_short: V16PodU128,
 }
 
 impl AssetStateV16Account {
@@ -7505,6 +7717,18 @@ impl AssetStateV16Account {
             epoch_short: V16PodU64::new(value.epoch_short),
             mode_long: encode_side_mode(value.mode_long),
             mode_short: encode_side_mode(value.mode_short),
+            kf_gen_epoch_long: V16PodU64::new(value.kf_gen_epoch_long),
+            kf_gen_epoch_short: V16PodU64::new(value.kf_gen_epoch_short),
+            kf_gen_laggard_count_long: V16PodU64::new(value.kf_gen_laggard_count_long),
+            kf_gen_laggard_count_short: V16PodU64::new(value.kf_gen_laggard_count_short),
+            kf_drift_gen_long: V16PodU128::new(value.kf_drift_gen_long),
+            kf_drift_gen_short: V16PodU128::new(value.kf_drift_gen_short),
+            kf_drift_prior_long: V16PodU128::new(value.kf_drift_prior_long),
+            kf_drift_prior_short: V16PodU128::new(value.kf_drift_prior_short),
+            kf_stale_weight_long: V16PodU128::new(value.kf_stale_weight_long),
+            kf_stale_weight_short: V16PodU128::new(value.kf_stale_weight_short),
+            kf_gen_laggard_weight_long: V16PodU128::new(value.kf_gen_laggard_weight_long),
+            kf_gen_laggard_weight_short: V16PodU128::new(value.kf_gen_laggard_weight_short),
         }
     }
 
@@ -7553,6 +7777,18 @@ impl AssetStateV16Account {
             epoch_short: self.epoch_short.get(),
             mode_long: decode_side_mode(self.mode_long)?,
             mode_short: decode_side_mode(self.mode_short)?,
+            kf_gen_epoch_long: self.kf_gen_epoch_long.get(),
+            kf_gen_epoch_short: self.kf_gen_epoch_short.get(),
+            kf_gen_laggard_count_long: self.kf_gen_laggard_count_long.get(),
+            kf_gen_laggard_count_short: self.kf_gen_laggard_count_short.get(),
+            kf_drift_gen_long: self.kf_drift_gen_long.get(),
+            kf_drift_gen_short: self.kf_drift_gen_short.get(),
+            kf_drift_prior_long: self.kf_drift_prior_long.get(),
+            kf_drift_prior_short: self.kf_drift_prior_short.get(),
+            kf_stale_weight_long: self.kf_stale_weight_long.get(),
+            kf_stale_weight_short: self.kf_stale_weight_short.get(),
+            kf_gen_laggard_weight_long: self.kf_gen_laggard_weight_long.get(),
+            kf_gen_laggard_weight_short: self.kf_gen_laggard_weight_short.get(),
         };
         validate_non_min_i128(out.k_long)?;
         validate_non_min_i128(out.k_short)?;
@@ -8660,6 +8896,12 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.stale_account_count_long > asset.stored_pos_count_long
             || asset.stale_account_count_short > asset.stored_pos_count_short
+            // fix/v21-funding-scale: laggards are a subset of the stale cohort, and a
+            // generation never starts after the side's current KF epoch.
+            || asset.kf_gen_laggard_count_long > asset.stale_account_count_long
+            || asset.kf_gen_laggard_count_short > asset.stale_account_count_short
+            || asset.kf_gen_epoch_long > asset.kf_epoch_long
+            || asset.kf_gen_epoch_short > asset.kf_epoch_short
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
             || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)
@@ -11646,6 +11888,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         amount: u128,
     ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
+        // fix/v21-funding-scale: the hidden K/F loss cover stays put for loss absorption.
+        let hidden = self.domain_hidden_kf_loss_reservation(domain)?;
+        if hidden != 0
+            && amount
+                > self
+                    .available_domain_insurance(domain)?
+                    .saturating_sub(hidden)
+        {
+            return Err(V16Error::LockActive);
+        }
         let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
         let domain_reserved_atoms = V16Core::amount_from_bound_num(
             self.insurance_reservation_for_domain(domain)?
@@ -11866,6 +12118,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.domain_asset_side(domain)?;
         Ok(self
             .available_domain_insurance(domain)?
+            .saturating_sub(self.domain_hidden_kf_loss_reservation(domain)?)
             .min(self.header.vault.get()))
     }
 
@@ -13906,7 +14159,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         let (settled_asset, kf_epoch_snap) =
-            V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
+            V16Core::kernel_settle_kf_stale_cohort(
+                // fix/v21-funding-scale: laggard discharge rides the same settlement.
+                V16Core::kernel_settle_kf_laggard(
+                    asset,
+                    leg.side,
+                    leg.kf_epoch_snap,
+                    leg.loss_weight,
+                )?,
+                leg.side,
+                leg.kf_epoch_snap,
+            )?;
         asset = settled_asset;
         leg.k_snap = prepared.k_now;
         leg.f_snap = prepared.f_now;
@@ -14931,6 +15194,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .slot_last
             .checked_add(segment_dt)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        asset = V16Core::kernel_track_kf_cohort_drift(
+            asset,
+            long_kf_changed,
+            short_kf_changed,
+            kf_adverse_travel(k_delta_long, funding_delta_long),
+            kf_adverse_travel(k_delta_short, funding_delta_short),
+        )?;
         asset = V16Core::kernel_mark_kf_stale_cohorts(
             asset,
             long_kf_changed,
@@ -15034,6 +15304,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let mut price_move_count = 0u64;
         let mut funding_count = 0u64;
+        // fix/v21-funding-scale: per-side ADVERSE K+F index travel summed step by step (a
+        // favourable step never offsets an adverse one; the bound must be path-wide).
+        let mut kf_travel_long = 0u128;
+        let mut kf_travel_short = 0u128;
         let mut expected_remainder = steps
             .first()
             .map(|step| step.price_move_remainder_before_bps_num)
@@ -15090,6 +15364,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     asset.a_short,
                 )?;
 
+            kf_travel_long = kf_travel_long
+                .saturating_add(kf_adverse_travel(k_delta_long, funding_delta_long));
+            kf_travel_short = kf_travel_short
+                .saturating_add(kf_adverse_travel(k_delta_short, funding_delta_short));
             asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
             asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
             asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
@@ -15114,6 +15392,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let long_kf_changed = asset.k_long != k_long_before || asset.f_long_num != f_long_before;
         let short_kf_changed =
             asset.k_short != k_short_before || asset.f_short_num != f_short_before;
+        asset = V16Core::kernel_track_kf_cohort_drift(
+            asset,
+            long_kf_changed,
+            short_kf_changed,
+            kf_travel_long,
+            kf_travel_short,
+        )?;
         asset = V16Core::kernel_mark_kf_stale_cohorts(
             asset,
             long_kf_changed,
@@ -16687,6 +16972,94 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
+    /// fix/v21-funding-scale: hidden K/F loss bound of `side` on `asset_index` (see
+    /// `kernel_kf_hidden_loss_bound`); `u128::MAX` when it does not fit.
+    fn asset_hidden_kf_loss_bound(&self, asset_index: usize, side: SideV16) -> V16Result<u128> {
+        let asset = self.asset_state(asset_index)?;
+        Ok(V16Core::kernel_kf_hidden_loss_bound(asset, side).unwrap_or(u128::MAX))
+    }
+
+    /// fix/v21-funding-scale: insurance that must stay in a domain to absorb the hidden
+    /// K/F loss of the opposite side's stale legs (a bankrupt side draws on the domain of
+    /// the opposite side, `consume_domain_insurance_for_negative_pnl`). Withdrawals may
+    /// not dip into it; loss absorption may.
+    fn domain_hidden_kf_loss_reservation(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        self.asset_hidden_kf_loss_bound(asset_index, opposite_side(side))
+    }
+
+    /// fix/v21-funding-scale: a loss-stale asset may still admit risk-increasing trades when
+    /// the only staleness is unsettled K/F on other accounts AND the worst case loss those
+    /// accounts could recognize is fully covered by the insurance that would absorb it.
+    ///
+    /// Then no deficit that existed before the trade can reach B-socialization onto the
+    /// entrant: the waterfall is capital -> insurance -> B, insurance only leaves a domain
+    /// to absorb losses or through a withdrawal that cannot dip into this cover, so the B
+    /// booked after admission is at most the deficits that arise after it (plus known,
+    /// already-recognized deficits, which the baseline gate admits entrants against too).
+    /// The entrant's own legs are settled by the trade itself, and because the asset stays
+    /// loss-stale its account is in the HMax lane, so it must meet initial margin without
+    /// positive credit (`ensure_no_positive_credit_initial_margin`).
+    ///
+    /// Conservative preconditions, each falling back to the baseline gate:
+    /// - single-asset market (multi-asset deficit attribution is not domain-local);
+    /// - asset `Active`, both sides `Normal` (every stored leg is a current-epoch leg, so
+    ///   `loss_weight_sum` covers it), no pending obligations or domain-loss barriers;
+    /// - the asset is accrued to the market clock (the `slot_last < current_slot` clause of
+    ///   loss-stale is never relaxed: unaccrued travel has no bound).
+    fn asset_hidden_kf_loss_is_insurance_covered(&self, asset_index: usize) -> V16Result<bool> {
+        if self.header.config.max_market_slots.get() != 1 {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        if asset.lifecycle != AssetLifecycleV16::Active
+            || asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
+            || asset.pending_obligation_count_long != 0
+            || asset.pending_obligation_count_short != 0
+            || asset.slot_last < self.header.current_slot.get()
+            || self.pending_domain_loss_barrier_count(asset_index, SideV16::Long)? != 0
+            || self.pending_domain_loss_barrier_count(asset_index, SideV16::Short)? != 0
+        {
+            return Ok(false);
+        }
+        for side in [SideV16::Long, SideV16::Short] {
+            let Some(bound) = V16Core::kernel_kf_hidden_loss_bound(asset, side) else {
+                return Ok(false);
+            };
+            if bound != 0 {
+                let domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+                if bound > self.available_domain_insurance(domain)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// fix/v21-funding-scale: the trade-preflight loss-stale predicate.
+    fn asset_loss_stale_blocks_risk_increase(&self, asset_index: usize) -> V16Result<bool> {
+        Ok(self.asset_is_loss_stale(asset_index)?
+            && !self.asset_hidden_kf_loss_is_insurance_covered(asset_index)?)
+    }
+
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn fuzz_asset_hidden_kf_loss_bound(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<u128> {
+        self.asset_hidden_kf_loss_bound(asset_index, side)
+    }
+
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn fuzz_asset_hidden_kf_loss_is_insurance_covered(
+        &self,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        self.asset_hidden_kf_loss_is_insurance_covered(asset_index)
+    }
+
     fn account_has_loss_stale_live_leg(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
         let mut slot = 0usize;
@@ -16836,7 +17209,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             );
         trade_preflight_risk_gate(
             risk_increasing,
-            self.asset_is_loss_stale(request.asset_index)?,
+            self.asset_loss_stale_blocks_risk_increase(request.asset_index)?,
             target_effective_lag,
             blocked_by_pending_domain_barrier,
         )?;
@@ -21735,6 +22108,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.k_epoch_start_short = 0;
         asset.f_epoch_start_long_num = 0;
         asset.f_epoch_start_short_num = 0;
+        asset.kf_gen_epoch_long = 0;
+        asset.kf_gen_epoch_short = 0;
+        asset.kf_gen_laggard_count_long = 0;
+        asset.kf_gen_laggard_count_short = 0;
+        asset.kf_drift_gen_long = 0;
+        asset.kf_drift_gen_short = 0;
+        asset.kf_drift_prior_long = 0;
+        asset.kf_drift_prior_short = 0;
+        asset.kf_stale_weight_long = 0;
+        asset.kf_stale_weight_short = 0;
+        asset.kf_gen_laggard_weight_long = 0;
+        asset.kf_gen_laggard_weight_short = 0;
     }
 
     fn clear_terminal_source_spent_audit(&mut self, asset_index: usize) -> V16Result<()> {
@@ -22094,7 +22479,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         let asset = self.asset_state(asset_index)?;
         let (asset, kf_epoch_snap) =
-            V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
+            V16Core::kernel_settle_kf_stale_cohort(
+                // fix/v21-funding-scale: laggard discharge rides the same settlement.
+                V16Core::kernel_settle_kf_laggard(
+                    asset,
+                    leg.side,
+                    leg.kf_epoch_snap,
+                    leg.loss_weight,
+                )?,
+                leg.side,
+                leg.kf_epoch_snap,
+            )?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
         leg.kf_epoch_snap = kf_epoch_snap;
@@ -23484,6 +23879,18 @@ pub fn kani_eq_asset_state_v16_account(a: &AssetStateV16Account, b: &AssetStateV
         && a.epoch_short.get() == b.epoch_short.get()
         && a.mode_long == b.mode_long
         && a.mode_short == b.mode_short
+        && a.kf_gen_epoch_long.get() == b.kf_gen_epoch_long.get()
+        && a.kf_gen_epoch_short.get() == b.kf_gen_epoch_short.get()
+        && a.kf_gen_laggard_count_long.get() == b.kf_gen_laggard_count_long.get()
+        && a.kf_gen_laggard_count_short.get() == b.kf_gen_laggard_count_short.get()
+        && a.kf_drift_gen_long.get() == b.kf_drift_gen_long.get()
+        && a.kf_drift_gen_short.get() == b.kf_drift_gen_short.get()
+        && a.kf_drift_prior_long.get() == b.kf_drift_prior_long.get()
+        && a.kf_drift_prior_short.get() == b.kf_drift_prior_short.get()
+        && a.kf_stale_weight_long.get() == b.kf_stale_weight_long.get()
+        && a.kf_stale_weight_short.get() == b.kf_stale_weight_short.get()
+        && a.kf_gen_laggard_weight_long.get() == b.kf_gen_laggard_weight_long.get()
+        && a.kf_gen_laggard_weight_short.get() == b.kf_gen_laggard_weight_short.get()
 }
 
 #[cfg(kani)]
@@ -23924,6 +24331,18 @@ fn signed_position(leg: PortfolioLegV16) -> i128 {
             SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
             SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
         }
+    }
+}
+
+/// fix/v21-funding-scale: the part of one accrual step's K+F index move that is adverse to
+/// a side's legs (a leg realizes `|basis| * (dK + dF) / (a_basis * POS_SCALE)`, so only a
+/// negative combined move can create loss). Falls back to the absolute travel if the sum does
+/// not fit, which is only ever larger.
+fn kf_adverse_travel(k_delta: i128, f_delta: i128) -> u128 {
+    match k_delta.checked_add(f_delta) {
+        Some(n) if n < 0 => n.unsigned_abs(),
+        Some(_) => 0,
+        None => k_delta.unsigned_abs().saturating_add(f_delta.unsigned_abs()),
     }
 }
 
