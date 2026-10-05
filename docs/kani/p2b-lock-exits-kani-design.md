@@ -218,7 +218,7 @@ The `EpisodeExpired` bound is no longer "attested by a trusted caller": the wrap
 trustlessly from on-chain state. These harnesses go in the wrapper's Kani crate (next to the
 growth-v19 set), run with the same once-locally rule.
 
-Storage: `AssetRiskLimitsV17` bytes 44..64 (asset-slot bytes 652..672), carved from the former
+Storage: `AssetRiskLimitsV17` bytes 44..64 (asset-slot bytes 652..672; 42..44 = 650..652 is Builder C's senior floor), carved from the former
 `_reserved: [u8; 22]` with compile-time offset asserts: `adl_max_episode_slots: u32` (0 = default
 9,000), `adl_episode_since_slot: u64` (0 = none), `adl_episode_epoch_long/short: u32`.
 
@@ -292,8 +292,13 @@ the epochs) change `market_id`. The wrapper side (review L-1 / L-1b): every path
 market on a slot -- `RestartAssetOracle`, the permissionless reuse of a retired slot, the
 append activation, and the market-authority re-activation of a RETIRED slot
 (`handle_update_asset_lifecycle_privileged`) -- zeroes the episode record and the N override, and
-the episode key carries the low **16** bits of `market_id` (`adl_episode_market_id_lo: u16`), so
-an old `since` can never be inherited. Harness covers each of the four writers; tests:
+the episode key also binds `market_id`: since wrapper cdbc1b2e (record bytes 42..44 handed to
+Builder C's senior floor) the key is folded into the two stored epoch words,
+`key = (epoch_side as u32) XOR mix(market_id)` with `mix = (lo32 ^ hi32) * 0x9E3779B1` (short side
+rotated left 16), `processor::adl_episode_key`. So an old `since` can never be inherited. The
+harness asserts: for `market_id' != market_id` and epochs reset to 0, the stored key differs
+unless `old_epoch == mix(old) ^ mix(new)`, which C2's epoch bound excludes in practice; the clear
+on every new-market path is the primary guarantee and is what C2 proves. Harness covers each of the four writers; tests:
 `p2b_restart_asset_oracle_clears_the_adl_episode_record`,
 `p2b_privileged_reactivation_of_a_retired_slot_clears_the_adl_episode_record`. Mutation: drop the market_id from the key and skip the clear →
 the composition cover fails.
