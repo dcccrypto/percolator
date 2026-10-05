@@ -4073,7 +4073,13 @@ fn proof_v16_trade_preflight_risk_gate_blocks_only_unsafe_risk_increase() {
     assert_eq!(short_next, short_current.checked_add(short_delta).unwrap());
     assert_eq!(result.is_ok(), !expected_blocked);
     if expected_blocked {
-        assert_eq!(result, Err(V16Error::LockActive));
+        // P2b E7: a pending barrier or target/effective lag stays LockActive; a risk
+        // increase refused ONLY for loss-staleness is the distinct LossStale.
+        if pending_barrier || (risk_increasing && target_effective_lag) {
+            assert_eq!(result, Err(V16Error::LockActive));
+        } else {
+            assert_eq!(result, Err(V16Error::LossStale));
+        }
     } else {
         assert_eq!(result, Ok(()));
     }
@@ -14915,7 +14921,15 @@ fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes()
 
     assert_eq!(result.is_ok(), expected_ok);
     if !expected_ok {
-        assert_eq!(result, Err(V16Error::LockActive));
+        // P2b E7: the ADL factor and the side modes are ADL reduce-only; only the asset
+        // lifecycle keeps LockActive. The A check runs first.
+        if a_long != ADL_ONE || a_short != ADL_ONE {
+            assert_eq!(result, Err(V16Error::AdlReduceOnly));
+        } else if lifecycle != AssetLifecycleV16::Active {
+            assert_eq!(result, Err(V16Error::LockActive));
+        } else {
+            assert_eq!(result, Err(V16Error::AdlReduceOnly));
+        }
     }
 }
 
@@ -15450,7 +15464,8 @@ fn proof_v16_adl_position_change_gate_is_route_complete_and_exit_live() {
     if expected_ok {
         assert_eq!(result, Ok(()));
     } else {
-        assert_eq!(result, Err(V16Error::LockActive));
+        // P2b E7: the unit-ADL refusal is AdlReduceOnly.
+        assert_eq!(result, Err(V16Error::AdlReduceOnly));
     }
 }
 
