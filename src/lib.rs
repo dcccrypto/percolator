@@ -90,7 +90,10 @@ pub use v16::kani_active_bitmap_set;
 
 // ADL effective-quantity kernels for the fuzz targets (kani builds get them from the blanket re-export).
 #[cfg(all(not(kani), feature = "fuzz"))]
-pub use v16::{kani_adl_effective_quantity_ceil, kani_raw_basis_for_adl_effective_quantity};
+pub use v16::{
+    kani_adl_effective_quantity_ceil, kani_funding_index_deltas,
+    kani_raw_basis_for_adl_effective_quantity,
+};
 
 // Bounded source-credit mul-div kernels + fused claim-burn deltas for the
 // rounding-residue differential fuzz target (upstream 4c4dfb20).
