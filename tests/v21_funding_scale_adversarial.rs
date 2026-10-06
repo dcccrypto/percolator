@@ -7,7 +7,8 @@
 //! and that the real hidden K/F loss never exceeds the bound. Any accrual site or merge that
 //! marks a cohort without updating the drift tracker fails here.
 //!
-//! The F6 funding-rounding reproduction lives with its fix (fix/v21-funding-precision).
+//! F6 (funding rounding) regression: `sec_f6_funding_rounding_low_price` (inverted from the
+//! reviewer's reproduction: it now pins the INTENDED rate).
 //! Sentinel adversarial harness (review only).
 #![allow(dead_code, unused_imports)]
 use percolator::{
@@ -666,4 +667,37 @@ fn sec_s2_withdraw_reservation_blocks_outside_normal_mode() {
     let mut markets = w.markets.clone();
     let m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(m.domain_insurance_withdraw_capacity(1).unwrap(), 0, "S2: fully reserved outside Normal");
+}
+
+/// F6 regression (security review F6, reproduction inverted). Before: per-accrual funding was
+/// floored to whole price units, so at price e6 = 30,000 and the v2.1 cap (111e-9/slot) positive
+/// funding was 0 for 49 slots and ONE slot of negative funding charged a short 1,000 atoms
+/// (intended 3.33). Now F integrates the exact numerator: equal and opposite, path-independent
+/// (49 one-slot calls == 49 x one slot exactly; the remainder is identically zero because
+/// ADL_ONE % FUNDING_DEN == 0 and A == ADL_ONE in Normal), and the payer pays the intended rate.
+#[test]
+fn sec_f6_funding_rounding_low_price() {
+    let px = 30_000u64;
+    let mut w = World::new_pairs_at(&[(10_000_000_000, 10_000_000_000, 1_000)], 0, 0, px, 111);
+    let f0 = (w.asset().f_long_num, w.asset().f_short_num);
+    let mut l = w.traders[0];
+    let le0 = equity(&l);
+    for _ in 0..49 { assert!(w.accrue(0, 111)); }
+    let a = w.asset();
+    let per_slot = 111i128 * px as i128 * (ADL_ONE / 1_000_000_000) as i128; // exact index units
+    assert_eq!(a.f_long_num - f0.0, -49 * per_slot, "longs pay exactly, every slot (no floor to 0)");
+    assert_eq!(a.f_short_num - f0.1, 49 * per_slot, "shorts receive exactly the same");
+    assert!(w.refresh(&mut l));
+    let paid = le0 - equity(&l);
+    let intended = 49.0 * 111.0 * 1_000.0 * 30_000.0 / 1e9; // 163.17 atoms
+    assert!((paid as f64 - intended).abs() <= 1.0, "long paid {paid}, intended {intended:.2}");
+    // one slot of negative funding: shorts pay ~3.33 atoms, not a full price unit (1,000)
+    let mut sh = w.traders[1];
+    assert!(w.refresh(&mut sh));
+    let se0 = equity(&sh);
+    assert!(w.accrue(0, -111));
+    assert!(w.refresh(&mut sh));
+    let paid = se0 - equity(&sh);
+    let intended1 = 111.0 * 1_000.0 * 30_000.0 / 1e9;
+    assert!((paid as f64 - intended1).abs() <= 1.0, "short paid {paid} in one slot, intended {intended1:.2}");
 }

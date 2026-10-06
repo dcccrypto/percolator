@@ -135,6 +135,27 @@ fn v21_low_price_funding_pays_the_intended_rate_both_signs() {
     }
 }
 
+/// Long/short parity at v2.2 Wave A per-LOT prices (`lot_exp`: a lot of 10^k tokens, launch
+/// floor $10/lot = 1e7 e6) and at the raw token prices those lots come from: the long pays what the
+/// short receives (within the per-leg settlement floor), at the intended rate, for both signs.
+#[test]
+fn v21_funding_parity_with_lot_exp_prices() {
+    // (token price e6, lot_exp): PENGU-like $0.0097 x 10^4, PUTIN-like $0.000005 x 10^7, $10 floor.
+    for &(token_px, lot_exp) in &[(9_738u64, 4u32), (5, 7), (10_000_000, 0), (3_086, 4)] {
+        let lot_px = token_px * 10u64.pow(lot_exp);
+        for &px in &[token_px, lot_px] {
+            for &rate in &[111i128, -111, 11, -11] {
+                let (units, slots) = (1_000u128, 900u64);
+                let got = run(px, rate, units, slots);
+                check(px, rate, units, slots, got)
+                    .unwrap_or_else(|e| panic!("price {px} (lot_exp {lot_exp}) rate {rate}: {e}"));
+                // parity: |long paid| and |short received| differ by at most the two settlement floors
+                assert!((got.0 + got.1).abs() <= 2, "parity at {px}: {} vs {}", got.0, got.1);
+            }
+        }
+    }
+}
+
 #[test]
 fn v21_funding_sign_mirrors_exactly() {
     for &price in &[3_086u64, 1_000_000] {
