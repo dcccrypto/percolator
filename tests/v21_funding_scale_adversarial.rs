@@ -203,6 +203,34 @@ impl World {
         true
     }
 
+    /// Rent-ONLY canonical path accrual: `n` one-slot steps at the SAME price with zero funding, so
+    /// only the rent index moves (the path-accrual mark site; `accrue` above drives the
+    /// single-step site).
+    fn accrue_path_rent_only(&mut self, n: u8) -> bool {
+        let a = self.asset();
+        let price = a.effective_price;
+        let n = n.clamp(1, 2) as u64;
+        let steps: Vec<percolator::AccrualStepV16> = (0..n)
+            .map(|_| percolator::AccrualStepV16 {
+                effective_price: price,
+                funding_rate_e9: 0,
+                price_move_remainder_before_bps_num: 0,
+                price_move_remainder_after_bps_num: 0,
+            })
+            .collect();
+        let now = self.slot + n;
+        let (h, mk) = (self.header, self.markets.clone());
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        if m.accrue_asset_path_with_rent_to_not_atomic(0, now, price, &steps, rent_e9(), rent_e9() / 2, true).is_err() {
+            self.header = h;
+            self.markets = mk;
+            return false;
+        }
+        m.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(price);
+        self.slot = now;
+        true
+    }
+
     fn crank(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
         let ok = self.crank_raw(acct);
@@ -761,5 +789,25 @@ fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
     let a = w.asset();
     assert!(a.rent_index_long_num != 0, "rent accrued");
     assert!(a.stale_account_count_long + a.stale_account_count_short > 0, "rent alone marked a cohort stale");
+    RENT_E9.with(|c| c.set(0));
+}
+
+
+/// The PATH-accrual mark site (`accrue_asset_path_with_rent_to_not_atomic`): rent-only steps (same
+/// price, zero funding) must keep the K/F tracker exact. Discriminates the merge hunk that passes
+/// the rent-aware `changed` flags into `track_kf_drift` at that site (negative control in the
+/// ledger: dropping the rent flags there makes this test fail).
+#[test]
+fn sec_adv_rent_only_path_accrual_keeps_the_tracker_exact() {
+    RENT_E9.with(|c| c.set(5_000));
+    let traders: Vec<(u128, u128, u128)> = (0..5).map(|_| (105_000u128, 10_000_000u128, 1u128)).collect();
+    let mut w = World::new_pairs(&traders, 0, 0);
+    for step in 0..6 {
+        assert!(w.accrue_path_rent_only(2), "rent-only path accrue {step} must be accepted (non-vacuity)");
+        check_state(&w, &[], &format!("rent-only path {step}")).unwrap();
+    }
+    let a = w.asset();
+    assert!(a.rent_index_long_num != 0, "rent accrued on the path route");
+    assert!(a.stale_account_count_long + a.stale_account_count_short > 0, "rent alone marked a cohort stale on the path route");
     RENT_E9.with(|c| c.set(0));
 }
