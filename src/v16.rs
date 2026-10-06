@@ -1821,6 +1821,14 @@ impl V16Core {
 
     /// `ceil` or `floor` of `mag * a / FUNDING_DEN`, as a non-negative i128.
     fn funding_scaled_magnitude(mag: u128, a: u128, round_up: bool) -> V16Result<i128> {
+        // Exact fast path: A == ADL_ONE always holds on a Normal side, and ADL_ONE is a
+        // multiple of FUNDING_DEN, so no rounding and no division is needed.
+        if a == ADL_ONE {
+            let v = mag
+                .checked_mul(ADL_ONE / FUNDING_DEN)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return i128::try_from(v).map_err(|_| V16Error::ArithmeticOverflow);
+        }
         let (q, r) = match mag.checked_mul(a) {
             Some(p) => (p / FUNDING_DEN, p % FUNDING_DEN),
             None => {
