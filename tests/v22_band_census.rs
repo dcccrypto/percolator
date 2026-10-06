@@ -260,6 +260,7 @@ fn band_cfg() -> V16Config {
     c.band_max_epoch_slots = 600;
     c.band_max_pin_slots = 9_000;
     c.band_max_positions_per_side = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE;
+    c.band_min_leg_notional = 1;
     c
 }
 

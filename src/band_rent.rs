@@ -94,6 +94,50 @@ pub fn band_width_ok(anchor: u64, band_bps: u64) -> Result<bool, BandRentError> 
     Ok(hi - lo >= MIN_BAND_WIDTH_TICKS)
 }
 
+/// Re-review N-2: a band market's GENESIS price must be at least this multiple of the
+/// smallest anchor whose band is `MIN_BAND_WIDTH_TICKS` wide, so the narrow-band floor (where
+/// re-anchoring stops) is only reachable after a >99% collapse.
+pub const BAND_GENESIS_FLOOR_MULTIPLE: u64 = 100;
+
+/// The smallest anchor `a` such that every anchor in `a..=a+8` has a band at least
+/// `MIN_BAND_WIDTH_TICKS` wide (`None` if there is none below `MAX_ORACLE_PRICE`). The search
+/// starts just below the real-valued threshold `16e4 / d`; rounding moves it by a few ticks.
+pub fn band_min_wide_anchor(band_bps: u64) -> Result<Option<u64>, BandRentError> {
+    if band_bps == 0 || band_bps > MAX_BAND_BPS {
+        return Err(BandRentError::InvalidInput);
+    }
+    let start = (MIN_BAND_WIDTH_TICKS as u128 * BPS / (2 * band_bps as u128)).saturating_sub(4);
+    let mut a = (start as u64).max(1);
+    let mut run = 0u64;
+    let mut first = a;
+    for _ in 0..256 {
+        if a > MAX_ORACLE_PRICE {
+            return Ok(None);
+        }
+        if band_width_ok(a, band_bps)? {
+            if run == 0 {
+                first = a;
+            }
+            run += 1;
+            if run > 8 {
+                return Ok(Some(first));
+            }
+        } else {
+            run = 0;
+        }
+        a += 1;
+    }
+    Ok(None)
+}
+
+/// Re-review N-2: genesis rule for a band market: `price >= 100 x band_min_wide_anchor(d)`.
+pub fn band_genesis_price_ok(price: u64, band_bps: u64) -> Result<bool, BandRentError> {
+    let Some(min) = band_min_wide_anchor(band_bps)? else {
+        return Ok(false);
+    };
+    Ok(price as u128 >= min as u128 * BAND_GENESIS_FLOOR_MULTIPLE as u128)
+}
+
 /// True iff `price` lies inside the band around `anchor`.
 pub fn price_in_band(price: u64, anchor: u64, band_bps: u64) -> Result<bool, BandRentError> {
     let (lo, hi) = band_bounds(anchor, band_bps)?;

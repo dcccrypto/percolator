@@ -253,6 +253,10 @@ pub enum V16Error {
     /// than `MIN_BAND_WIDTH_TICKS`, so no new exposure may attach (a near
     /// zero-width band could never move). Wrapper maps it to 112.
     BandTooNarrow,
+    /// v2.2 band (re-review N-1): a trade on a band market would leave a positioned leg
+    /// below `band_min_leg_notional` (open bigger, or close the leg fully). Wrapper maps it
+    /// to 113.
+    BandLegBelowMinNotional,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -4369,6 +4373,13 @@ pub struct V16Config {
     /// from holding an epoch hostage. `1..=BAND_MAX_POSITIONS_PER_SIDE` iff band
     /// on, 0 iff band off. Enforced at attach (`kernel_band_attach`).
     pub band_max_positions_per_side: u64,
+    /// v2.2 band (re-review N-1): smallest notional (collateral atoms, at `P_last`) a
+    /// positioned leg may be left at by a TRADE on a band market. Without it 256 one-atom
+    /// pairs fill `band_max_positions_per_side` and lock every newcomer out for free; with it
+    /// every slot-holding leg locks real margin. The wrapper floors it at a whole-token
+    /// amount from the collateral decimals. `>= 1` iff band on, 0 iff band off. Liquidation,
+    /// ADL and price moves can still leave a smaller leg (never refused: exits stay open).
+    pub band_min_leg_notional: u64,
 }
 
 impl V16Config {
@@ -4430,6 +4441,7 @@ impl V16Config {
             band_max_pin_slots: 0,
             rent_max_e9_per_slot: 0,
             band_max_positions_per_side: 0,
+            band_min_leg_notional: 0,
         }
     }
 
@@ -4907,6 +4919,7 @@ impl V16Config {
             if self.band_max_epoch_slots != 0
                 || self.band_max_pin_slots != 0
                 || self.band_max_positions_per_side != 0
+                || self.band_min_leg_notional != 0
             {
                 return Err(V16Error::InvalidConfig);
             }
@@ -4921,6 +4934,8 @@ impl V16Config {
                     .saturating_mul(crate::band_rent::BAND_MIN_PIN_EPOCHS)
             // Review E-M1: the per-side position cap bounds the per-epoch sweep.
             || self.band_max_positions_per_side == 0
+            // Re-review N-1: a band market must price a slot-holding leg.
+            || self.band_min_leg_notional == 0
             || self.band_max_positions_per_side > crate::band_rent::BAND_MAX_POSITIONS_PER_SIDE
             // The Band Safety Law is a per-single-asset-account law: it does not
             // extend to cross-asset portfolios without a per-account sum.
@@ -7586,6 +7601,7 @@ pub struct V16ConfigAccount {
     pub band_max_pin_slots: V16PodU64,
     pub rent_max_e9_per_slot: V16PodU64,
     pub band_max_positions_per_side: V16PodU64,
+    pub band_min_leg_notional: V16PodU64,
 }
 
 impl V16ConfigAccount {
@@ -7653,6 +7669,7 @@ impl V16ConfigAccount {
             band_max_pin_slots: V16PodU64::new(value.band_max_pin_slots),
             rent_max_e9_per_slot: V16PodU64::new(value.rent_max_e9_per_slot),
             band_max_positions_per_side: V16PodU64::new(value.band_max_positions_per_side),
+            band_min_leg_notional: V16PodU64::new(value.band_min_leg_notional),
         }
     }
 
@@ -7712,6 +7729,7 @@ impl V16ConfigAccount {
             band_max_pin_slots: self.band_max_pin_slots.get(),
             rent_max_e9_per_slot: self.rent_max_e9_per_slot.get(),
             band_max_positions_per_side: self.band_max_positions_per_side.get(),
+            band_min_leg_notional: self.band_min_leg_notional.get(),
         };
         Ok(out)
     }
@@ -8822,6 +8840,14 @@ impl MarketGroupV16HeaderAccount {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
+        // Re-review N-2: a band asset launches far above the width floor (>= 100x), so the
+        // narrow-band floor needs a >99% collapse to reach.
+        if config.band_bps != 0
+            && !crate::band_rent::band_genesis_price_ok(authenticated_price, config.band_bps)
+                .map_err(|_| V16Error::InvalidConfig)?
+        {
+            return Err(V16Error::BandTooNarrow);
+        }
         band_initialize_asset(&mut asset, config.band_bps, authenticated_price, now_slot)?;
         *slot = EngineAssetSlotV16Account {
             asset: AssetStateV16Account::from_runtime(&asset),
@@ -17201,6 +17227,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    /// v2.2 band (re-review N-1): after a trade on a band market, each traded asset's leg on
+    /// either account (if any) has a notional at `P_last` of at least `band_min_leg_notional`
+    /// (effective quantity, floor). A trade that closes the leg fully passes.
+    fn require_band_legs_min_notional(
+        &self,
+        long_account: &PortfolioV16ViewMut<'_>,
+        short_account: &PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> V16Result<()> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(());
+        }
+        let min = self.header.config.band_min_leg_notional.get() as u128;
+        let mut i = 0usize;
+        while i < requests.len() {
+            let asset_index = requests[i].asset_index;
+            let asset = self.asset_state(asset_index)?;
+            for account in [long_account.as_view(), short_account.as_view()] {
+                let leg = Self::active_leg_for_asset(&account, asset_index)?;
+                if !leg.active {
+                    continue;
+                }
+                let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+                let notional = q
+                    .checked_mul(asset.effective_price as u128)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    / POS_SCALE;
+                if notional < min {
+                    return Err(V16Error::BandLegBelowMinNotional);
+                }
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
@@ -20689,6 +20751,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims,
             short_has_source_claims,
         )?;
+        // v2.2 band (re-review N-1): a trade may not leave a dust leg on a band market.
+        self.require_band_legs_min_notional(long_account, short_account, requests)?;
         // ADL can leave stored basis larger than effective OI. Start resets only after final margin
         // checks so the reset's risk-epoch advance leaves each affected account certificate stale;
         // the public auto-crank then selects Refresh and clears the economically exhausted residue.
@@ -20813,6 +20877,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims,
             short_has_source_claims,
         )?;
+        // v2.2 band (re-review N-1): a trade may not leave a dust leg on a band market.
+        self.require_band_legs_min_notional(long_account, short_account, requests)?;
         // ADL can leave stored basis larger than effective OI. Start resets only after final margin
         // checks so the reset's risk-epoch advance leaves each affected account certificate stale;
         // the public auto-crank then selects Refresh and clears the economically exhausted residue.

@@ -60,6 +60,8 @@ fn band_cfg(band_bps: u64) -> V16Config {
         c.band_max_epoch_slots = 600;
         c.band_max_pin_slots = 9_000;
         c.band_max_positions_per_side = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE;
+        // Engine minimum (the wrapper floors it at whole tokens): fixture trades stay valid.
+        c.band_min_leg_notional = 1;
     }
     c
 }
@@ -76,6 +78,19 @@ impl World {
         Self::new_at(cfg, n_accounts, deposit, P0)
     }
 
+    /// A World launched at `P0` whose (still empty) asset is then moved to `price` by a state
+    /// poke, bypassing the N-2 genesis rule: for tests that need a book near the width floor.
+    fn new_poked_at(cfg: V16Config, n_accounts: usize, deposit: u128, price: u64) -> Self {
+        let mut w = Self::new(cfg, n_accounts, deposit);
+        let mut a = w.asset();
+        a.effective_price = price;
+        a.raw_oracle_target_price = price;
+        a.fund_px_last = price;
+        a.band_anchor_price = price;
+        w.markets[0].engine.asset = percolator::AssetStateV16Account::from_runtime(&a);
+        w
+    }
+
     fn new_at(cfg: V16Config, n_accounts: usize, deposit: u128, price: u64) -> Self {
         cfg.validate_public_user_fund()
             .expect("fixture config validates");
@@ -88,7 +103,13 @@ impl World {
         for i in 0..n_accounts {
             let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
                 MARKET_ID,
-                [i as u8 + 1; 32],
+                {
+                    // > 255 accounts (re-review cap tests): two key bytes.
+                    let mut k = [1u8; 32];
+                    k[0] = (i % 256) as u8;
+                    k[1] = (i / 256) as u8 + 1;
+                    k
+                },
                 OWNER,
             ));
             let mut a = PortfolioAccountV16Account::default();
@@ -626,7 +647,7 @@ fn band_never_zero_width() {
     // 1,300 ticks (width 32 at d = 130) with the keeper certifying every epoch. The
     // anchor follows down to 1,236 (band [1220, 1252]); 1,220 would be 30 wide, so
     // the anchor stays and the book pins at the edge (recovery is BandPinExpired).
-    let mut w = World::new_at(band_cfg(130), 2, 10_000_000, 1_300);
+    let mut w = World::new_poked_at(band_cfg(130), 2, 10_000_000, 1_300);
     w.trade(0, 1, 1_000 * POS_SCALE).unwrap();
     w.set_target(1);
     let mut anchors = vec![];
@@ -2123,4 +2144,182 @@ fn sec_band_collapses_at_tiny_prices() {
         p = band_bounds(p, 130).unwrap().0;
     }
     eprintln!("SEC price floor reachable by walking down at d=130: {p}");
+}
+// ---------------------------------------------------------------------------
+// Re-review of 30b2ec20: cap griefing, narrow-band trap
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sec2_dust_fills_the_position_cap_and_blocks_honest_opens() {
+    let cap = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE as usize;
+    let n = 2 * cap + 2;
+    let mut w = World::new(band_cfg(130), n, 2_000_000);
+    for k in 0..cap {
+        w.trade(2 * k, 2 * k + 1, 1)
+            .unwrap_or_else(|e| panic!("dust pair {k}: {e:?}"));
+    }
+    let a = w.asset();
+    assert_eq!(
+        (a.stored_pos_count_long, a.stored_pos_count_short),
+        (cap as u64, cap as u64)
+    );
+    // honest pair is refused on BOTH sides
+    let snap = (w.header, w.markets.clone(), w.accounts.clone());
+    let r = w.trade(2 * cap, 2 * cap + 1, 5 * POS_SCALE);
+    eprintln!("SEC2 honest open with {cap} dust legs per side: {r:?}");
+    assert_eq!(r, Err(V16Error::BandPositionCap));
+    (w.header, w.markets, w.accounts) = snap;
+    // an existing dust leg can still GROW (no attach), and a close frees a slot
+    w.trade(0, 1, 1).expect("existing leg grows");
+    w.trade(1, 0, 2)
+        .expect("attacker closes pair 0 (both legs)");
+    // one slot per side is free again: the honest pair now lands
+    w.trade(2 * cap, 2 * cap + 1, 5 * POS_SCALE)
+        .expect("slot freed");
+    // sweep cost per epoch: every positioned leg must certify before the anchor advances
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap();
+    let a = w.asset();
+    eprintln!(
+        "SEC2 uncertified after reanchor: long {} short {}",
+        a.band_uncertified_long, a.band_uncertified_short
+    );
+    assert!(a.band_uncertified_long as usize >= cap && a.band_uncertified_short as usize >= cap);
+}
+
+#[test]
+fn sec2_price_floor_trap_near_the_narrow_band_threshold() {
+    let mut w = World::new(band_cfg(130), 2, 50_000_000);
+    w.trade(0, 1, 5 * POS_SCALE).unwrap();
+    w.set_target(1);
+    let mut last = w.asset().effective_price;
+    let mut still = 0;
+    for _ in 0..20_000 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        for i in 0..2 {
+            if w.positioned(i) {
+                let _ = w.refresh(i);
+            }
+        }
+        let p = w.asset().effective_price;
+        if p == last {
+            still += 1
+        } else {
+            still = 0
+        }
+        last = p;
+        if still > 400 {
+            break;
+        }
+    }
+    let a = w.asset();
+    let (lo, hi) = band_bounds(a.band_anchor_price, 130).unwrap();
+    eprintln!("SEC2 target=1: P_last={} anchor={} band=[{lo},{hi}] width={} epoch={} pin_since={} liq_pending=({},{}) positioned={:?}",
+        a.effective_price, a.band_anchor_price, hi - lo, a.band_epoch, a.band_pin_since_slot,
+        a.band_liq_pending_long, a.band_liq_pending_short, (w.positioned(0), w.positioned(1)));
+    // the price stops where the next anchor would be narrower than MIN_BAND_WIDTH_TICKS
+    assert!(
+        a.effective_price > 1_000,
+        "price froze far above the true target 1: {}",
+        a.effective_price
+    );
+}
+
+/// Re-review N-1 regression: with a minimum leg notional the cap can no longer be filled with
+/// dust. A sub-floor open is refused (`BandLegBelowMinNotional`), a partial reduce that would
+/// leave a sub-floor leg is refused while the full close lands, and filling the 256-per-side
+/// cap now locks at least `2 * 256 * min_notional * IMR` of real margin.
+#[test]
+fn sec2_cap_grief() {
+    const MIN: u64 = 100_000_000; // 100 whole tokens of a 6-decimal collateral
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let cap = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE;
+    let mut w = World::new(cfg, 6, 2_000_000_000);
+    // The reviewer's attack: one-atom pairs. Refused. (Engine `_not_atomic` calls may leave
+    // partial state on Err; the wrapper's transaction reverts it, so restore the snapshot.)
+    let before = (w.header, w.markets.clone(), w.accounts.clone());
+    assert_eq!(w.trade(0, 1, 1), Err(V16Error::BandLegBelowMinNotional));
+    (w.header, w.markets, w.accounts) = before.clone();
+    assert_eq!(
+        w.trade(0, 1, (MIN as u128 * POS_SCALE / P0 as u128) - 1),
+        Err(V16Error::BandLegBelowMinNotional)
+    );
+    (w.header, w.markets, w.accounts) = before;
+    // Exactly the floor is accepted.
+    let q_min = MIN as u128 * POS_SCALE / P0 as u128;
+    w.trade(0, 1, q_min).expect("a leg at the floor");
+    w.trade(2, 3, 3 * q_min).expect("a bigger leg");
+    // A partial reduce that would leave dust is refused; reducing to >= floor or to 0 lands.
+    let snap = (w.header, w.markets.clone(), w.accounts.clone());
+    assert_eq!(
+        w.trade(3, 2, 3 * q_min - 1),
+        Err(V16Error::BandLegBelowMinNotional)
+    );
+    (w.header, w.markets, w.accounts) = snap;
+    w.trade(3, 2, q_min).expect("reduce to 2x the floor");
+    w.trade(1, 0, q_min)
+        .expect("full close of a floor-sized leg");
+    assert!(!w.positioned(0) && !w.positioned(1));
+    w.assert_census();
+    // Cost of filling the cap: every slot-holding leg locks at least min * IMR.
+    let imr = w.header.config.initial_margin_bps.get() as u128;
+    let lower_bound = 2 * cap as u128 * MIN as u128 * imr / 10_000;
+    eprintln!("SEC2 cap-fill now locks >= {lower_bound} atoms of margin (was ~0)");
+    assert!(
+        lower_bound >= 2 * cap as u128 * 10_000_000,
+        "at least 10 whole tokens per slot"
+    );
+}
+
+/// Re-review N-2: genesis rule. `band_min_wide_anchor` is the exact first anchor of a run of
+/// width-ok anchors (checked against a brute-force scan), and genesis needs 100x it.
+#[test]
+fn band_genesis_price_rule() {
+    use percolator::band_rent::{
+        band_genesis_price_ok, band_min_wide_anchor, band_width_ok, BAND_GENESIS_FLOOR_MULTIPLE,
+    };
+    for d in [1u64, 7, 60, 100, 130, 145, 250, 1_000, MAX_BAND_BPS] {
+        let min = band_min_wide_anchor(d).unwrap().unwrap();
+        // brute force: every anchor from `min` for 10k ticks is width-ok, `min - 1` is not
+        assert!(
+            !band_width_ok(min - 1, d).unwrap(),
+            "d={d}: {} is already wide",
+            min - 1
+        );
+        for a in min..min + 10_000 {
+            assert!(
+                band_width_ok(a, d).unwrap(),
+                "d={d}: {a} >= min {min} is narrow"
+            );
+        }
+        let g = min * BAND_GENESIS_FLOOR_MULTIPLE;
+        assert!(band_genesis_price_ok(g, d).unwrap());
+        assert!(!band_genesis_price_ok(g - 1, d).unwrap());
+    }
+    assert_eq!(band_min_wide_anchor(130).unwrap(), Some(1_231));
+    // The engine's own activation refuses a band genesis below the rule.
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(MARKET_ID, band_cfg(130), 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    assert_eq!(
+        header.activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 123_099, 1),
+        Err(V16Error::BandTooNarrow)
+    );
+    assert!(header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 123_100, 1)
+        .is_ok());
+}
+
+/// Re-review N-1 config: a band market needs a nonzero minimum leg notional, an off-band
+/// market encodes 0.
+#[test]
+fn band_config_min_leg_notional_shape() {
+    let mut c = band_cfg(130);
+    c.band_min_leg_notional = 0;
+    assert!(c.validate_public_user_fund().is_err());
+    let mut c = band_cfg(0);
+    c.band_min_leg_notional = 1;
+    assert!(c.validate_public_user_fund().is_err());
 }
