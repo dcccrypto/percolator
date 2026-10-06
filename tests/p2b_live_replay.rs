@@ -51,7 +51,7 @@ fn load(name: &'static str) -> LiveMarket {
     // (`kf_drift_long/short`) to the END of each engine asset slot. These fixtures are live pre-change slabs: read the legacy slot length and
     // zero-extend (a fresh slab starts with exactly these zeros; an old slab can never be
     // loaded by the new program in place because the stride changed, so this is test-only).
-    const KF_DRIFT_APPENDED: usize = 160;
+    const KF_DRIFT_APPENDED: usize = 160 + 32;
     let legacy_slot_len = slot_len - KF_DRIFT_APPENDED;
     let stride = ASSET_ORACLE_WRAPPER_LEN + legacy_slot_len;
     let trailing = slab.len() - MARKET_GROUP_OFF - header_len;
