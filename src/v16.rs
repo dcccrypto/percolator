@@ -3501,6 +3501,56 @@ impl V16Core {
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
     }
 
+    /// `source_credit_state_realizable_support_for_claim_num` evaluated at `rate_num` instead of
+    /// the state's stored rate. The available-backing cap is the state's own, so an overriding
+    /// rate can never extract more support than the domain actually holds.
+    fn source_credit_state_realizable_support_for_claim_num_at_rate(
+        state: SourceCreditStateV16,
+        claim_num: u128,
+        rate_num: u128,
+    ) -> V16Result<u128> {
+        if claim_num == 0 || state.positive_claim_bound_num == 0 {
+            return Ok(0);
+        }
+        let credited_num =
+            Self::mul_div_floor_u128_or_wide(claim_num, rate_num, CREDIT_RATE_SCALE)?;
+        Ok((credited_num / BOUND_SCALE)
+            .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+    }
+
+    /// R1: the credit rate of a source domain as it will stand once `booked_loss` atoms of loss
+    /// have been booked into it as fresh backing, i.e. `min(1, (available + booked) / claims)`.
+    ///
+    /// A loss that nets against the loser's own positive claim in the SAME domain it is then
+    /// booked into must burn that claim's face at this rate, not at the rate of the instant
+    /// before the booking. The two differ exactly when a winning counterparty has already been
+    /// credited (its claim is in `positive_claim_bound_num`) while this loser's loss, which is
+    /// what backs that credit, has not yet been booked. Pricing the burn at the transient rate
+    /// destroys `loss * (1/r - 1)` of the loser's face for no reason: the rate returns to the
+    /// value computed here the moment the booking lands, but the face is already gone. Never
+    /// below the stored rate; never above 1.
+    fn source_credit_neutral_rate_for_booked_loss(
+        state: SourceCreditStateV16,
+        booked_loss: u128,
+    ) -> V16Result<u128> {
+        if state.positive_claim_bound_num == 0 {
+            return Ok(state.credit_rate_num);
+        }
+        let available = Self::available_backing_num_for_source_credit_state(state)?;
+        let with_booking = available
+            .checked_add(Self::bound_num_from_amount(booked_loss)?)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let neutral = U256::from_u128(with_booking)
+            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
+            .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(core::cmp::min(
+            CREDIT_RATE_SCALE,
+            core::cmp::max(state.credit_rate_num, neutral),
+        ))
+    }
+
     fn source_credit_state_realizable_support_for_face(
         state: SourceCreditStateV16,
         face_claim: u128,
@@ -12534,6 +12584,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         burn_account_claims: bool,
         require_full: bool,
     ) -> V16Result<(SourceCreditConsumptionV16, u128, u128)> {
+        self.consume_validated_account_source_credit_for_loss_not_atomic(
+            account,
+            effective_credit,
+            burn_account_claims,
+            require_full,
+            None,
+        )
+    }
+
+    /// `loss_booking = Some((domain, loss))` declares that `loss` atoms are about to be booked as
+    /// fresh backing into `domain` by the same settlement (R1). Claims of that domain are then
+    /// priced at the post-booking rate (see `source_credit_neutral_rate_for_booked_loss`).
+    fn consume_validated_account_source_credit_for_loss_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        effective_credit: u128,
+        burn_account_claims: bool,
+        require_full: bool,
+        loss_booking: Option<(usize, u128)>,
+    ) -> V16Result<(SourceCreditConsumptionV16, u128, u128)> {
         if effective_credit == 0 {
             return Ok((
                 SourceCreditConsumptionV16 {
@@ -12576,7 +12646,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Err(V16Error::Stale);
             }
-            let rate = source_credit.credit_rate_num;
+            let rate = match loss_booking {
+                Some((loss_domain, booked_loss)) if loss_domain == d => {
+                    V16Core::source_credit_neutral_rate_for_booked_loss(source_credit, booked_loss)?
+                }
+                _ => source_credit.credit_rate_num,
+            };
             let locked = source
                 .source_claim_liened_num
                 .get()
@@ -12588,10 +12663,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_sub(locked)
                 .ok_or(V16Error::CounterUnderflow)?;
             if rate != 0 && unliened != 0 {
-                let consumable = V16Core::source_credit_state_realizable_support_for_claim_num(
-                    source_credit,
-                    unliened,
-                )?;
+                let consumable =
+                    V16Core::source_credit_state_realizable_support_for_claim_num_at_rate(
+                        source_credit,
+                        unliened,
+                        rate,
+                    )?;
                 let take = remaining.min(consumable);
                 if take != 0 {
                     let (face_num, backing_num) =
@@ -13596,6 +13673,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
     ) -> V16Result<SupportLossApplicationV16> {
+        self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(account, loss_abs, None)
+    }
+
+    /// R1: whether the support-netting of `loss_abs` may price the loss domain's claims at the
+    /// post-booking rate. True only when this settlement will really book the whole loss into
+    /// `loss_domain`: Live, the domain's bucket takes a booking right now, and the account's
+    /// free capital plus its positive face can cover `loss_abs`. Anything else (a Resolved
+    /// market, a lapsed or impaired bucket, a loss that outruns the account) keeps the stored
+    /// rate, i.e. the pre-R1 behaviour.
+    fn loss_domain_booking_is_certain(
+        &self,
+        account: &PortfolioV16ViewMut<'_>,
+        loss_domain: usize,
+        loss_abs: u128,
+        old_positive_face: u128,
+    ) -> V16Result<bool> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Ok(false);
+        }
+        if !self.loss_domain_accepts_realized_backing(loss_domain)? {
+            return Ok(false);
+        }
+        let negative_before = account.header.pnl.get().min(0).unsigned_abs();
+        let capital_free = account.header.capital.get().saturating_sub(negative_before);
+        Ok(capital_free.saturating_add(old_positive_face) >= loss_abs)
+    }
+
+    /// `loss_domain` is the source domain the caller books the settled loss into afterwards
+    /// (`reserve_new_capital_backed_loss_for_source_domain_not_atomic`); `None` for callers that
+    /// do not book (forfeit, kani shims).
+    fn apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        loss_abs: u128,
+        loss_domain: Option<usize>,
+    ) -> V16Result<SupportLossApplicationV16> {
         if loss_abs == 0 {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
@@ -13621,12 +13734,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (support_consumed, support_face_burned, preburned_source_claim_num) =
             if has_source_claims {
                 let source_support_limit = loss_abs.min(old_positive_face);
+                let loss_booking = match loss_domain {
+                    Some(domain)
+                        if self.loss_domain_booking_is_certain(
+                            account,
+                            domain,
+                            loss_abs,
+                            old_positive_face,
+                        )? =>
+                    {
+                        Some((domain, loss_abs))
+                    }
+                    _ => None,
+                };
                 let (consumption, preburned_source_claim_num, support_consumed) = self
-                    .consume_validated_account_source_credit_not_atomic(
+                    .consume_validated_account_source_credit_for_loss_not_atomic(
                         account,
                         source_support_limit,
                         true,
                         false,
+                        loss_booking,
                     )?;
                 (
                     support_consumed,
@@ -14255,7 +14382,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
                 let source_backed = Self::account_has_source_claims(&account.as_view())?;
-                let support = self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
+                validate_non_min_i128(prepared.net)?;
+                let support = self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+                    account,
+                    prepared.net.unsigned_abs(),
+                    Some(source_domain),
+                )?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 // Source-backed support consumed by the netting is paid loss too (the
                 // junior haircut branch spends no senior stock, so it books nothing).
