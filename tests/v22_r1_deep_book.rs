@@ -384,3 +384,102 @@ fn deep_book_dump() {
     }
     println!("DEEP ran {ran} rows_with_lien {with_lien}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// S8: multi-claimant liened books. One liened (poor) flipping victim, 2-6 rich unliened claimants
+// that only win, ONE maker. The liened victim makes the DOMAIN locked, so the pricing branch
+// must not depend on the pricing account's own entry.
+// ---------------------------------------------------------------------------------------------
+
+/// Equity change per account (victim, claimants..., maker last) for one settle permutation.
+fn claimants_scenario(seed: u64, perm: &[usize]) -> Vec<i128> {
+    let mut s = seed | 1;
+    let nl = 2 + (rng(&mut s) % 5) as usize;
+    let vcap: u128 = 330_000;
+    let cap = 1_000_000_000_000_000u128;
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut accts: Vec<PortfolioAccountV16Account> = (0..=nl).map(|i| account(100 + i as u32)).collect();
+    w.deposit(&mut accts[0], vcap);
+    for i in 1..=nl { let mut a = accts[i]; w.deposit(&mut a, cap); accts[i] = a; }
+    let mut m = w.maker;
+    let sizes: Vec<u128> = (0..=nl).map(|i| if i == 0 { 3 } else { 1 + (rng(&mut s) % 4) as u128 }).collect();
+    for i in 0..=nl { let mut a = accts[i]; if w.trade(&mut a, &mut m, sizes[i] * POS_SCALE).is_err() { return vec![]; } accts[i] = a; }
+    let up1 = 40 + (rng(&mut s) % 80) as i64;
+    let st1 = 3 + (rng(&mut s) % 4) as usize;
+    for _ in 0..st1 {
+        if !w.accrue(up1, 0) { return vec![]; }
+        for i in 0..=nl { let mut a = accts[i]; if !w.settle(&mut a) { return vec![]; } accts[i] = a; }
+        let mut mm = m; if !w.settle(&mut mm) { return vec![]; } m = mm;
+    }
+    let mut v = accts[0];
+    if w.trade(&mut m, &mut v, 7 * POS_SCALE).is_err() { return vec![]; }
+    accts[0] = v;
+    let up2 = 30 + (rng(&mut s) % 100) as i64;
+    let st2 = 1 + (rng(&mut s) % 4) as usize;
+    for _ in 0..st2 { if !w.accrue(up2, 0) { return vec![]; } }
+    for &k in perm {
+        if k == nl + 1 { let mut mm = m; if !w.settle(&mut mm) { return vec![]; } m = mm; }
+        else { let mut a = accts[k]; if !w.settle(&mut a) { return vec![]; } accts[k] = a; }
+    }
+    let mut out = vec![];
+    for i in 0..=nl { let mut a = accts[i]; out.push(effective_equity(&mut w, &mut a) - if i == 0 { vcap as i128 } else { cap as i128 }); }
+    let mut mm = m;
+    out.push(effective_equity(&mut w, &mut mm) - cap as i128);
+    out
+}
+
+struct Claimants {
+    worlds: u64,
+    sum_maker_min: i128,
+    sum_claimant_min: i128,
+    sum_total_spread: i128,
+    maker_order_dependent: u64,
+    gains: u64,
+}
+
+fn claimants_sweep(worlds: u64, seed0: u64) -> Claimants {
+    let mut c = Claimants { worlds: 0, sum_maker_min: 0, sum_claimant_min: 0, sum_total_spread: 0, maker_order_dependent: 0, gains: 0 };
+    for i in 0..worlds {
+        let seed = seed0 * 7919 + i;
+        let mut t = seed | 1;
+        let nl = 2 + (rng(&mut t) % 5) as usize;
+        let mut s2 = seed ^ 0x1234;
+        let ps = perms(nl + 2, 8, &mut s2);
+        let rows: Vec<Vec<i128>> = ps.iter().map(|p| claimants_scenario(seed, p)).take_while(|r| !r.is_empty()).collect();
+        if rows.len() != ps.len() { continue; }
+        c.worlds += 1;
+        let n = rows[0].len();
+        c.sum_maker_min += rows.iter().map(|r| r[n - 1]).min().unwrap();
+        let mmax = rows.iter().map(|r| r[n - 1]).max().unwrap();
+        if mmax - rows.iter().map(|r| r[n - 1]).min().unwrap() > 8 { c.maker_order_dependent += 1; }
+        for i in 1..n - 1 { c.sum_claimant_min += rows.iter().map(|r| r[i]).min().unwrap(); }
+        let tot: Vec<i128> = rows.iter().map(|r| r.iter().sum()).collect();
+        c.sum_total_spread += tot.iter().max().unwrap() - tot.iter().min().unwrap();
+        if *tot.iter().max().unwrap() > 8 { c.gains += 1; }
+    }
+    c
+}
+
+/// Measured on 874fe33a over the same sweep (constants below). Claimants may sit at most 0.05% under
+/// the base worst in aggregate (S8: the
+/// best achievable result, a deterministic liened-domain rule cannot reconstruct the base's
+/// victim-first state in every interleaving), the order spread of the total is 3.6x smaller.
+#[test]
+fn liened_domain_multi_claimant_ratchets() {
+    let c = claimants_sweep(400, 3);
+    println!("CLAIMANTS worlds {} sum_maker_min {} sum_claimant_min {} sum_total_spread {} maker_order_dependent {} gains {}", c.worlds, c.sum_maker_min, c.sum_claimant_min, c.sum_total_spread, c.maker_order_dependent, c.gains);
+    assert!(c.worlds >= 200);
+    assert_eq!(c.gains, 0);
+    assert!(c.sum_maker_min >= PRE_R1_CLAIMANTS_SUM_MAKER_MIN, "maker's worst order fell below the pre-R1 worst");
+    assert!(c.sum_claimant_min >= PRE_R1_CLAIMANTS_SUM_CLAIMANT_MIN - CLAIMANT_SLACK, "claimants fell further below the pre-R1 worst than the ratchet allows");
+    assert!(c.sum_total_spread <= CLAIMANTS_SPREAD_RATCHET, "order spread regressed");
+    assert_eq!(c.maker_order_dependent, 0, "the maker's equity must not depend on settle order here (pre-R1: 8 worlds)");
+}
+
+/// Σ over the 400-world sweep (256 ran) of the maker's worst order, computed on 874fe33a.
+const PRE_R1_CLAIMANTS_SUM_MAKER_MIN: i128 = -183_346_414;
+/// Σ of every unliened claimant's worst order on 874fe33a (the head sits 38,786 below: 0.024%).
+const PRE_R1_CLAIMANTS_SUM_CLAIMANT_MIN: i128 = 161_167_373;
+const CLAIMANT_SLACK: i128 = 40_000;
+/// pre-R1 1,577,772; head 444,312.
+const CLAIMANTS_SPREAD_RATCHET: i128 = 460_000;
