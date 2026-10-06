@@ -753,7 +753,7 @@ fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
     for step in 0..6 {
         assert!(w.accrue(0, 0), "rent-only accrue {step}");
         check_state(&w, &[], &format!("rent-only {step}")).unwrap();
-        assert!(w.accrue_path(0, 2, 0, false) || true);
+        let _ = w.accrue_path(0, 2, 0, false); // best effort: a zero-move path may be refused
         check_state(&w, &[], &format!("rent-only path {step}")).unwrap();
     }
     let a = w.asset();
