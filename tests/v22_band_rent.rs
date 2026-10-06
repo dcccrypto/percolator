@@ -2337,9 +2337,13 @@ fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
     let q = MIN as u128 * POS_SCALE / P0 as u128;
     w.trade(0, 1, q).expect("open at the floor");
     let dust = |w: &mut World, i: usize| {
-        w.with(i, |m, a| m.band_leg_is_dust(&a.as_view(), 0)).unwrap()
+        w.with(i, |m, a| m.band_leg_is_dust(&a.as_view(), 0))
+            .unwrap()
     };
-    assert!(!dust(&mut w, 0) && !dust(&mut w, 1), "a fresh minimum leg is not dust");
+    assert!(
+        !dust(&mut w, 0) && !dust(&mut w, 1),
+        "a fresh minimum leg is not dust"
+    );
     w.set_target(P0 / 3);
     let mut guard = 0;
     let mut checked_mid = false;
@@ -2347,7 +2351,10 @@ fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
         if !checked_mid && w.asset().effective_price * 10 <= P0 * 7 {
             // A 30% fall leaves 0.7x the minimum: below the trade floor but NOT dust (the
             // half-minimum margin keeps an ordinary dip from making a leg sweepable).
-            assert!(!dust(&mut w, 0) && !dust(&mut w, 1), "0.7x the minimum is not dust");
+            assert!(
+                !dust(&mut w, 0) && !dust(&mut w, 1),
+                "0.7x the minimum is not dust"
+            );
             checked_mid = true;
         }
         w.now += 3;
@@ -2360,12 +2367,19 @@ fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
     }
     assert!(checked_mid, "the mid-fall control ran");
     assert!(w.asset().effective_price * 2 < P0);
-    assert!(dust(&mut w, 0) && dust(&mut w, 1), "below half the minimum: dust");
+    assert!(
+        dust(&mut w, 0) && dust(&mut w, 1),
+        "below half the minimum: dust"
+    );
     let before = w.asset().stored_pos_count_long;
     w.with(0, |m, a| {
         m.rebalance_reduce_position_not_atomic(
             a,
-            percolator::RebalanceRequestV16 { asset_index: 0, reduce_q: q },
+            // u128::MAX: exactly what wrapper tag 111 sends (the engine clamps to the leg).
+            percolator::RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: u128::MAX,
+            },
         )
     })
     .expect("sweep closes the dust leg");
