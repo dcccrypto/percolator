@@ -2323,3 +2323,54 @@ fn band_config_min_leg_notional_shape() {
     c.band_min_leg_notional = 1;
     assert!(c.validate_public_user_fund().is_err());
 }
+
+/// Re-review N-1, dust sweep (engine half of wrapper tag 111): a leg opened at the minimum
+/// notional is NOT dust; after a >50% price fall it is (notional below HALF the minimum), and
+/// the unilateral reduce at P_last closes it, freeing its per-side slot. Census and
+/// conservation hold.
+#[test]
+fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
+    const MIN: u64 = 100_000_000;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let mut w = World::new(cfg, 2, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    w.trade(0, 1, q).expect("open at the floor");
+    let dust = |w: &mut World, i: usize| {
+        w.with(i, |m, a| m.band_leg_is_dust(&a.as_view(), 0)).unwrap()
+    };
+    assert!(!dust(&mut w, 0) && !dust(&mut w, 1), "a fresh minimum leg is not dust");
+    w.set_target(P0 / 3);
+    let mut guard = 0;
+    let mut checked_mid = false;
+    while w.asset().effective_price * 2 >= P0 - P0 / 50 {
+        if !checked_mid && w.asset().effective_price * 10 <= P0 * 7 {
+            // A 30% fall leaves 0.7x the minimum: below the trade floor but NOT dust (the
+            // half-minimum margin keeps an ordinary dip from making a leg sweepable).
+            assert!(!dust(&mut w, 0) && !dust(&mut w, 1), "0.7x the minimum is not dust");
+            checked_mid = true;
+        }
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        for i in 0..2 {
+            let _ = w.refresh(i);
+        }
+        guard += 1;
+        assert!(guard < 5_000, "price did not walk down");
+    }
+    assert!(checked_mid, "the mid-fall control ran");
+    assert!(w.asset().effective_price * 2 < P0);
+    assert!(dust(&mut w, 0) && dust(&mut w, 1), "below half the minimum: dust");
+    let before = w.asset().stored_pos_count_long;
+    w.with(0, |m, a| {
+        m.rebalance_reduce_position_not_atomic(
+            a,
+            percolator::RebalanceRequestV16 { asset_index: 0, reduce_q: q },
+        )
+    })
+    .expect("sweep closes the dust leg");
+    assert!(!w.positioned(0));
+    assert_eq!(w.asset().stored_pos_count_long, before - 1, "slot freed");
+    w.assert_census();
+    w.assert_conservation();
+}

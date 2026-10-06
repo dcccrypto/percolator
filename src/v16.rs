@@ -17263,6 +17263,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// v2.2 band (re-review N-1, dust sweep): the account's leg on `asset_index` is DUST: a
+    /// band market, an active leg, and its notional at `P_last` (effective quantity, floor)
+    /// below HALF of `band_min_leg_notional`. A trade can never leave such a leg (the trade
+    /// floor is the full minimum); only price moves, liquidation and ADL can, and the half
+    /// margin keeps an ordinary price dip from making a fresh minimum-size leg sweepable.
+    pub fn band_leg_is_dust(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(false);
+        }
+        let leg = Self::active_leg_for_asset(account, asset_index)?;
+        if !leg.active {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let notional = q
+            .checked_mul(asset.effective_price as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / POS_SCALE;
+        let min = self.header.config.band_min_leg_notional.get() as u128;
+        Ok(notional.saturating_mul(2) < min)
+    }
+
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
