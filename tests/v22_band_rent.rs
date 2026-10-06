@@ -2324,7 +2324,7 @@ fn band_config_min_leg_notional_shape() {
     assert!(c.validate_public_user_fund().is_err());
 }
 
-/// Re-review N-1, dust sweep (engine half of wrapper tag 111): a leg opened at the minimum
+/// Re-review N-1, dust sweep (engine half of wrapper tag 118): a leg opened at the minimum
 /// notional is NOT dust; after a >50% price fall it is (notional below HALF the minimum), and
 /// the unilateral reduce at P_last closes it, freeing its per-side slot. Census and
 /// conservation hold.
@@ -2375,7 +2375,7 @@ fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
     w.with(0, |m, a| {
         m.rebalance_reduce_position_not_atomic(
             a,
-            // u128::MAX: exactly what wrapper tag 111 sends (the engine clamps to the leg).
+            // u128::MAX: exactly what wrapper tag 118 sends (the engine clamps to the leg).
             percolator::RebalanceRequestV16 {
                 asset_index: 0,
                 reduce_q: u128::MAX,

@@ -88,7 +88,7 @@ that can neither certify nor liquidate.
   makes it cost at least `512 x min_leg_notional x IMR` of locked (refundable) margin (at the
   10-token program floor and 10x leverage, 512 tokens; at the SDK default of 100 tokens, 5,120)
   plus price exposure on each side. A leg that later falls below HALF the minimum (price
-  moves, liquidation, ADL) can be swept by anyone (wrapper tag 111, a unilateral close at
+  moves, liquidation, ADL) can be swept by anyone (wrapper tag 118, a unilateral close at
   `P_last`, refused while the mark lags), so dust cannot keep holding a slot; a leg at or
   above half the minimum cannot be evicted.
 
