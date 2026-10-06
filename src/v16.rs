@@ -26660,6 +26660,10 @@ mod empty_leg_image_tests {
             b_epoch_snap: leg.b_epoch_snap.get(),
             b_stale: decode_bool(leg.b_stale)?,
             stale: decode_bool(leg.stale)?,
+            band_epoch_snap: leg.band_epoch_snap.get(),
+            band_liq_pending: decode_bool(leg.band_liq_pending)?,
+            rent_snap: leg.rent_snap.get(),
+            rent_carry: leg.rent_carry.get(),
         };
         if out.active {
             validate_active_leg(out)?;
