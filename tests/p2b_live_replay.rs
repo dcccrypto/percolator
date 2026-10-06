@@ -85,9 +85,11 @@ fn load(name: &'static str) -> LiveMarket {
     entries.sort();
     for p in entries {
         let data = fs::read(&p).unwrap();
-        let account: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(
-            &data[PORTFOLIO_STATE_OFF..PORTFOLIO_STATE_OFF + state_len],
-        );
+        // The captures are v2.1 portfolios (152-byte legs, discriminator 18). This layout inserts
+        // the K/F remainders (32 B, zero for a leg that never carried a fraction) after `f_snap`
+        // in every leg and renumbers the layout; nothing else moves inside a leg.
+        let upgraded = upgrade_v21_portfolio(&data[PORTFOLIO_STATE_OFF..]);
+        let account: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&upgraded[..state_len]);
         // Keep only portfolios provenance-bound to this market group.
         if account.provenance_header.market_group_id != header.market_group_id {
             continue;
@@ -465,4 +467,34 @@ fn zero_domain_claims(m: &mut LiveMarket, d: usize) {
     h.pnl_pos_tot = percolator::V16PodU128::new(h.pnl_pos_tot.get() - retired_pnl);
     h.c_tot = percolator::V16PodU128::new(h.c_tot.get() + retired_pnl);
     let _ = removed;
+}
+
+/// v2.1 engine portfolio image -> this layout's (see the call site).
+fn upgrade_v21_portfolio(old: &[u8]) -> Vec<u8> {
+    use core::mem::{offset_of, size_of};
+    use percolator::{PortfolioLegV16Account, ProvenanceHeaderV16Account, V16_LAYOUT_DISCRIMINATOR, V16_MAX_PORTFOLIO_ASSETS_N};
+    const V21_LEG_LEN: usize = 152;
+    const V21_STATE_LEN: usize = 9419;
+    const V21_DISCRIMINATOR: u16 = 18;
+    let new_leg = size_of::<PortfolioLegV16Account>();
+    let inserted = new_leg - V21_LEG_LEN;
+    let cut = offset_of!(PortfolioLegV16Account, k_rem_num);
+    assert_eq!(inserted, 32, "this upgrade knows exactly the two remainder fields");
+    assert_eq!(offset_of!(PortfolioLegV16Account, f_rem_num), cut + 16);
+    assert_eq!(size_of::<PortfolioAccountV16Account>(), V21_STATE_LEN + inserted * V16_MAX_PORTFOLIO_ASSETS_N);
+    assert!(old.len() >= V21_STATE_LEN);
+    let legs = offset_of!(PortfolioAccountV16Account, legs);
+    let mut out = old[..legs].to_vec();
+    for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+        let leg = &old[legs + i * V21_LEG_LEN..legs + (i + 1) * V21_LEG_LEN];
+        out.extend_from_slice(&leg[..cut]);
+        out.extend_from_slice(&[0u8; 32]);
+        out.extend_from_slice(&leg[cut..]);
+    }
+    out.extend_from_slice(&old[legs + V16_MAX_PORTFOLIO_ASSETS_N * V21_LEG_LEN..V21_STATE_LEN]);
+    assert_eq!(out.len(), size_of::<PortfolioAccountV16Account>());
+    let disc = offset_of!(PortfolioAccountV16Account, provenance_header) + offset_of!(ProvenanceHeaderV16Account, layout_discriminator);
+    assert_eq!(u16::from_le_bytes([out[disc], out[disc + 1]]), V21_DISCRIMINATOR, "capture is a v2.1 portfolio");
+    out[disc..disc + 2].copy_from_slice(&V16_LAYOUT_DISCRIMINATOR.to_le_bytes());
+    out
 }

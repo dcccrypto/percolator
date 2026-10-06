@@ -297,7 +297,9 @@ fn stale_leg_loss(asset: &percolator::AssetStateV16, a: &PortfolioAccountV16Acco
     }
     let basis = leg.basis_pos_q.unsigned_abs() as i128;
     let den = (leg.a_basis * POS_SCALE) as i128;
-    let net = floor_div(basis * (k - leg.k_snap), den) + floor_div(basis * (f - leg.f_snap), den);
+    // per-leg persistent remainders (upstream a74b81b2) carry into the settlement numerators
+    let net = floor_div(leg.k_rem_num as i128 + basis * (k - leg.k_snap), den)
+        + floor_div(leg.f_rem_num as i128 + basis * (f - leg.f_snap), den);
     Some((leg.side, if net < 0 { net.unsigned_abs() } else { 0 }))
 }
 
