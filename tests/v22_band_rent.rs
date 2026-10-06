@@ -147,6 +147,45 @@ impl World {
         self.markets[0].engine.asset.try_to_runtime().unwrap()
     }
 
+    /// A fill whose MAKER (the non-taker account) is exempt from the band minimum-leg check:
+    /// the engine entry the wrapper uses for matcher-LP fills, the dust sweep and eviction.
+    fn trade_maker_exempt(
+        &mut self,
+        long: usize,
+        short: usize,
+        q: u128,
+        taker_is_long: bool,
+    ) -> Result<(), V16Error> {
+        let price = self.asset().effective_price;
+        let (lo, hi) = if long < short {
+            (long, short)
+        } else {
+            (short, long)
+        };
+        let (left, right) = self.accounts.split_at_mut(hi);
+        let (a_lo, a_hi) = (&mut left[lo], &mut right[0]);
+        let (l, s) = if long < short {
+            (a_lo, a_hi)
+        } else {
+            (a_hi, a_lo)
+        };
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut lv = PortfolioV16ViewMut::new(l);
+        let mut sv = PortfolioV16ViewMut::new(s);
+        m.execute_trade_band_maker_exempt_not_atomic(
+            &mut lv,
+            &mut sv,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: q as i128,
+                exec_price: price,
+                fee_bps: 0,
+            },
+            taker_is_long,
+        )
+        .map(|_| ())
+    }
+
     fn trade(&mut self, long: usize, short: usize, q: u128) -> Result<(), V16Error> {
         assert_ne!(long, short);
         let price = self.asset().effective_price;
@@ -568,14 +607,16 @@ fn band_position_cap_bounds_the_sweep_so_dust_cannot_hold_the_epoch() {
     }
     let a = w.asset();
     assert_eq!((a.stored_pos_count_long, a.stored_pos_count_short), (K, K));
-    // ... and the (K+1)-th leg on either side is refused, state untouched.
+    // ... and the (K+1)-th leg on either side is refused. The cap is an end-of-trade rule
+    // (so the one exempt standing LP can always take the other side); the engine's
+    // `_not_atomic` Err leaves partial state that the wrapper's transaction reverts.
     let before = (w.header, w.markets.clone(), w.accounts.clone());
     let k = K as usize;
     assert_eq!(
         w.trade(2 * k, 2 * k + 1, POS_SCALE / 1_000),
         Err(V16Error::BandPositionCap)
     );
-    assert_eq!((w.header, w.markets.clone()), (before.0, before.1));
+    (w.header, w.markets, w.accounts) = before;
     // Adding to an EXISTING leg is not a new position: still allowed.
     w.trade(0, 1, POS_SCALE / 1_000)
         .expect("increase an existing leg");
@@ -2385,6 +2426,417 @@ fn band_dust_leg_becomes_sweepable_only_below_half_the_minimum() {
     .expect("sweep closes the dust leg");
     assert!(!w.positioned(0));
     assert_eq!(w.asset().stored_pos_count_long, before - 1, "slot freed");
+    w.assert_census();
+    w.assert_conservation();
+}
+
+// ---------------------------------------------------------------------------
+// Re-review round 2 (575ce248): sweep side effects, floor-stuck, lag frequency
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sec3_dust_sweep_scales_the_opposite_side_and_flips_the_market_reduce_only() {
+    const MIN: u64 = 100_000_000;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let mut w = World::new(cfg, 8, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    w.trade(0, 1, q).expect("min pair"); // victim pair: 0 long, 1 short
+    w.trade(2, 3, 100 * q).expect("honest pair"); // honest pair: 2 long, 3 short
+    let a0 = w.asset();
+    eprintln!(
+        "SEC3 before: a_long={} a_short={} oi_l={} oi_s={}",
+        a0.a_long, a0.a_short, a0.oi_eff_long_q, a0.oi_eff_short_q
+    );
+    // make account 0's leg dust (test shortcut for a >50% fall): raise the floor
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN * 3);
+    let dust = w
+        .with(0, |m, a| m.band_leg_is_dust(&a.as_view(), 0))
+        .unwrap();
+    assert!(dust);
+    // the permissionless sweep (tag 118 body): unilateral reduce of the dust LONG
+    w.with(0, |m, a| {
+        m.rebalance_reduce_position_not_atomic(
+            a,
+            percolator::RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: u128::MAX,
+            },
+        )
+    })
+    .expect("sweep");
+    let a1 = w.asset();
+    eprintln!(
+        "SEC3 after : a_long={} a_short={} oi_l={} oi_s={}",
+        a1.a_long, a1.a_short, a1.oi_eff_long_q, a1.oi_eff_short_q
+    );
+    // honest newcomers now?
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN);
+    let r = w.trade(4, 5, q);
+    eprintln!("SEC3 honest open after the sweep: {r:?}");
+    // the counterparty (account 1, the victim's short) was scaled by A too: effective qty
+    let eff1 = w.accounts[1].legs[0].try_to_runtime().unwrap();
+    eprintln!(
+        "SEC3 victim counterparty leg basis={} (A_short now {})",
+        eff1.basis_pos_q, a1.a_short
+    );
+}
+
+#[test]
+fn sec3_does_an_ordinary_liquidation_also_scale_a() {
+    let mut w = World::new(band_cfg(130), 6, 2_000_000);
+    // victim pair near max leverage + honest pair
+    let (mut qlo, mut qhi, mut best) = (1u128, 4_000u128 * POS_SCALE, 0u128);
+    while qlo <= qhi {
+        let q = (qlo + qhi) / 2;
+        let snap = (w.header, w.markets.clone(), w.accounts.clone());
+        let ok = w.trade(0, 1, q).is_ok();
+        (w.header, w.markets, w.accounts) = snap;
+        if ok {
+            best = q;
+            qlo = q + 1
+        } else {
+            qhi = q - 1
+        }
+    }
+    w.trade(0, 1, best).unwrap();
+    w.trade(2, 3, best / 50 + 1).unwrap();
+    w.set_target(P0 * 9 / 10);
+    for _ in 0..60 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        for i in 0..4 {
+            let _ = w.refresh(i);
+        }
+    }
+    let cert = w.accounts[0].health_cert.try_to_runtime().unwrap();
+    eprintln!(
+        "SEC3 liq: victim deficit {} P={}",
+        cert.certified_liq_deficit,
+        w.asset().effective_price
+    );
+    if cert.certified_liq_deficit != 0 {
+        let out = w
+            .with(0, |m, a| {
+                m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+            })
+            .unwrap();
+        let a = w.asset();
+        eprintln!(
+            "SEC3 liq: closed {} a_long={} a_short={}",
+            out.closed_q, a.a_long, a.a_short
+        );
+        for i in 0..6 {
+            if w.positioned(i) {
+                let _ = w.refresh(i);
+            }
+        }
+        w.set_target(w.asset().effective_price);
+        let r = w.trade(4, 5, POS_SCALE);
+        eprintln!("SEC3 liq: honest open after an ordinary liquidation (all refreshed, no lag): {r:?}; hlock={}", w.header.bankruptcy_hlock_active);
+    }
+}
+
+#[test]
+fn sec3_cap_fill_cost_with_min_leg_notional() {
+    const MIN: u64 = 10_000_000; // 10 tokens @ 6 decimals (program floor)
+    let cap = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE as usize;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let mut w = World::new(cfg, 2 * cap + 2, 3_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128 + 1;
+    for k in 0..cap {
+        w.trade(2 * k, 2 * k + 1, q)
+            .unwrap_or_else(|e| panic!("pair {k}: {e:?}"));
+    }
+    // a sub-minimum dust pair is refused now
+    let r = w.trade(2 * cap, 2 * cap + 1, 1);
+    eprintln!("SEC3 1-atom pair into a FULL side (cap check runs first): {r:?}");
+    let r = w.trade(2 * cap, 2 * cap + 1, 5 * POS_SCALE);
+    eprintln!("SEC3 honest 5-unit pair into a full side: {r:?}");
+    let mut im = 0u128;
+    for i in 0..2 * cap {
+        let c = w.accounts[i].health_cert.try_to_runtime().unwrap();
+        im += c.certified_initial_req;
+    }
+    let fees = w.header.insurance.get();
+    eprintln!(
+        "SEC3 cap-fill: {} legs, sum certified IM = {} atoms (= {} tokens), insurance (fees) {}",
+        2 * cap,
+        im,
+        im / 1_000_000,
+        fees
+    );
+}
+
+#[test]
+fn sec3_floor_stuck_price_can_still_move_up() {
+    let mut w = World::new(band_cfg(130), 2, 50_000_000);
+    w.trade(0, 1, 5 * POS_SCALE).unwrap();
+    w.set_target(1);
+    let mut last = w.asset().effective_price;
+    let mut still = 0;
+    for _ in 0..20_000 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        for i in 0..2 {
+            if w.positioned(i) {
+                let _ = w.refresh(i);
+            }
+        }
+        let p = w.asset().effective_price;
+        if p == last {
+            still += 1
+        } else {
+            still = 0
+        }
+        last = p;
+        if still > 400 {
+            break;
+        }
+    }
+    let a = w.asset();
+    let (lo, hi) = band_bounds(a.effective_price, 130).unwrap();
+    eprintln!(
+        "SEC3 floor: P_last={} width_at_P_last={} (<32 => predicate 'stuck')",
+        a.effective_price,
+        hi - lo
+    );
+    // now the target jumps way up
+    w.set_target(a.effective_price * 50);
+    let mut moved_at = None;
+    for s in 0..400 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        for i in 0..2 {
+            if w.positioned(i) {
+                let _ = w.refresh(i);
+            }
+        }
+        let p = w.asset().effective_price;
+        if p > a.effective_price {
+            moved_at = Some((s, p));
+            break;
+        }
+    }
+    eprintln!(
+        "SEC3 floor: price moved up after target 50x: {:?} (final P_last={}, epoch={})",
+        moved_at,
+        w.asset().effective_price,
+        w.asset().band_epoch
+    );
+}
+
+/// Q3: how often does ordinary (non-band) lag occur: fraction of accrual steps with
+/// exposed && target != P_last, band OFF, random-walk oracle.
+#[test]
+fn sec3_ordinary_lag_frequency_on_a_band_off_market() {
+    for &cap in &[1u64, 4, 100] {
+        for &sigma_bps in &[5u64, 10, 30] {
+            let mut c = band_cfg(0);
+            c.max_price_move_bps_per_slot = cap;
+            c.rent_max_e9_per_slot = 0;
+            let mut w = World::new(c, 2, 50_000_000);
+            w.trade(0, 1, 5 * POS_SCALE).unwrap();
+            let mut rng = Rng(0xABCDEF ^ (cap << 8) ^ sigma_bps);
+            let mut target = P0 as i128;
+            let (mut lagged, mut total, mut longest, mut run) = (0u64, 0u64, 0u64, 0u64);
+            for _ in 0..20_000 {
+                let d = (rng.below(2 * sigma_bps + 1) as i128) - sigma_bps as i128; // uniform +-sigma bps
+                target = (target + target * d / 10_000)
+                    .max(1_000_000 / 2)
+                    .min(2_000_000);
+                w.set_target(target as u64);
+                w.now += 3;
+                if w.accrue(0, 0, 0).is_err() {
+                    break;
+                }
+                let a = w.asset();
+                total += 1;
+                if a.raw_oracle_target_price != a.effective_price {
+                    lagged += 1;
+                    run += 1;
+                    longest = longest.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+            eprintln!("SEC3 lag cap={cap}bps/slot oracle step +-{sigma_bps}bps per 3 slots: lagged {:.1}% of steps, longest run {} steps ({} slots)", 100.0 * lagged as f64 / total as f64, longest, longest * 3);
+        }
+    }
+}
+
+#[test]
+fn sec3_how_does_reduce_only_clear_after_a_unilateral_close() {
+    const MIN: u64 = 100_000_000;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let mut w = World::new(cfg, 8, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    w.trade(0, 1, q).unwrap();
+    w.trade(2, 3, 100 * q).unwrap();
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN * 3);
+    w.with(0, |m, a| {
+        m.rebalance_reduce_position_not_atomic(
+            a,
+            percolator::RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: u128::MAX,
+            },
+        )
+    })
+    .unwrap();
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN);
+    let a = w.asset();
+    eprintln!("SEC3 reduce-only? a_short={} (ONE=1e15)", a.a_short);
+    // can the book that remains trade WITHIN itself (reduce) and can new risk ever return without draining the short side?
+    let r1 = w.trade(4, 5, q);
+    // close the honest pair fully, then the victim's counterparty
+    let r2 = w.trade(3, 2, 100 * q); // short buys back = reduces both
+    let r3 = w.trade(1, 0, 1); // account 1 (victim's short) cannot reduce vs a flat acct: expected to fail
+    let a2 = w.asset();
+    eprintln!("SEC3 open before drain {r1:?}; honest pair unwind {r2:?}; leftover short leg {r3:?}; oi=({}, {}) a_short={}", a2.oi_eff_long_q, a2.oi_eff_short_q, a2.a_short);
+    // is the leftover short (account 1) now orphaned? (its counterparty leg was swept)
+    let leg1 = w.accounts[1].legs[0].try_to_runtime().unwrap();
+    eprintln!(
+        "SEC3 account1 leg active={} basis={}",
+        leg1.active, leg1.basis_pos_q
+    );
+    let r4 = w.trade(4, 5, q);
+    eprintln!("SEC3 open after honest unwind: {r4:?}");
+}
+
+/// Round-2 re-review N-6 (fixed): the dust sweep is a BILATERAL close against the standing LP
+/// (maker exempt from the minimum-leg check), not a unilateral reduce. `A` stays `ADL_ONE` on
+/// both sides, no other leg is scaled, and an honest open still lands. The control is the
+/// reviewer's `sec3_dust_sweep_scales_the_opposite_side_and_flips_the_market_reduce_only`
+/// (the old unilateral body: A_short falls and the honest open is refused).
+#[test]
+fn band_bilateral_dust_sweep_leaves_a_unchanged_and_the_market_open() {
+    const MIN: u64 = 100_000_000;
+    const LP: usize = 6;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    let mut w = World::new(cfg, 8, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    w.trade(0, 1, q).expect("min pair");
+    w.trade(2, 3, 100 * q).expect("honest pair");
+    let honest_before = w.accounts[3].legs[0].try_to_runtime().unwrap();
+    // account 0's long becomes dust (test shortcut for a >50% fall: raise the floor)
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN * 3);
+    assert!(w
+        .with(0, |m, a| m.band_leg_is_dust(&a.as_view(), 0))
+        .unwrap());
+    // Without the maker exemption the LP could not absorb a sub-minimum fill.
+    let snap = (w.header, w.markets.clone(), w.accounts.clone());
+    assert_eq!(w.trade(LP, 0, q), Err(V16Error::BandLegBelowMinNotional));
+    (w.header, w.markets, w.accounts) = snap;
+    // The sweep: the dust LONG sells its whole leg to the LP at P_last, fee 0.
+    let equity_before = {
+        let a = &w.accounts[0];
+        a.capital.get() as i128 + a.pnl.get()
+    };
+    w.trade_maker_exempt(LP, 0, q, false)
+        .expect("bilateral sweep");
+    assert!(!w.positioned(0), "the dust leg is closed");
+    let a = w.asset();
+    assert_eq!(
+        (a.a_long, a.a_short),
+        (percolator::ADL_ONE, percolator::ADL_ONE),
+        "A unchanged on both sides"
+    );
+    assert_eq!(
+        w.accounts[3].legs[0].try_to_runtime().unwrap(),
+        honest_before,
+        "no other leg was scaled"
+    );
+    let equity_after = {
+        let a = &w.accounts[0];
+        a.capital.get() as i128 + a.pnl.get()
+    };
+    assert_eq!(
+        equity_after, equity_before,
+        "the swept account keeps its mark-to-market equity"
+    );
+    // The market is still open: an honest minimum-size pair lands.
+    w.header.config.band_min_leg_notional = percolator::V16PodU64::new(MIN);
+    w.trade(4, 5, q).expect("honest open after the sweep");
+    w.assert_census();
+    w.assert_conservation();
+}
+
+/// Round-2 re-review N-1b: replace-smallest eviction. Both sides are filled to the cap with
+/// self-hedged minimum-size pairs (the near-free cap-fill). An honest trader who brings at
+/// least 2x the smallest leg gets in: the smallest leg on that side is closed bilaterally
+/// against the standing LP at P_last (fee 0, A untouched), which frees its slot, and the
+/// newcomer's own fill then lands. The evicted account loses nothing but the position.
+/// The LP is the one cap-exempt counterparty (at most `cap + 1` legs per side).
+#[test]
+fn band_replace_smallest_eviction_lets_an_honest_trader_in() {
+    const MIN: u64 = 100_000_000;
+    const K: u64 = 4;
+    const LP: usize = 10;
+    const NEW: usize = 8;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    cfg.band_max_positions_per_side = K;
+    let mut w = World::new(cfg, 12, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    for k in 0..K as usize {
+        w.trade(2 * k, 2 * k + 1, q)
+            .expect("self-hedged filler pair");
+    }
+    let a = w.asset();
+    assert_eq!(
+        (a.stored_pos_count_long, a.stored_pos_count_short),
+        (K, K),
+        "both sides full"
+    );
+    // Without eviction the newcomer is locked out (the LP itself is cap-exempt, the taker is not).
+    let snap = (w.header, w.markets.clone(), w.accounts.clone());
+    assert_eq!(
+        w.trade_maker_exempt(NEW, LP, 2 * q, true),
+        Err(V16Error::BandPositionCap),
+        "a full side refuses a new taker leg"
+    );
+    (w.header, w.markets, w.accounts) = snap;
+    // Evict the smallest long (account 0): it sells its whole leg to the LP at P_last.
+    let equity =
+        |w: &World, i: usize| w.accounts[i].capital.get() as i128 + w.accounts[i].pnl.get();
+    let victim_before = equity(&w, 0);
+    w.trade_maker_exempt(LP, 0, q, false)
+        .expect("bilateral eviction");
+    assert!(!w.positioned(0));
+    assert_eq!(
+        equity(&w, 0),
+        victim_before,
+        "the evicted account keeps its exact equity"
+    );
+    let a = w.asset();
+    assert_eq!(
+        (a.a_long, a.a_short),
+        (percolator::ADL_ONE, percolator::ADL_ONE)
+    );
+    // The newcomer's own fill (>= 2x the evicted leg) now lands against the LP.
+    w.trade_maker_exempt(NEW, LP, 2 * q, true)
+        .expect("the honest trader gets in");
+    assert!(w.positioned(NEW));
+    let a = w.asset();
+    assert_eq!(
+        a.stored_pos_count_long, K,
+        "users on the long side: 3 fillers + the newcomer"
+    );
+    assert!(
+        a.stored_pos_count_short <= K + 1,
+        "the LP is the one leg above the cap"
+    );
+    // A second non-exempt leg on the full long side is still refused.
+    let snap = (w.header, w.markets.clone(), w.accounts.clone());
+    assert_eq!(
+        w.trade_maker_exempt(9, LP, 2 * q, true),
+        Err(V16Error::BandPositionCap)
+    );
+    (w.header, w.markets, w.accounts) = snap;
     w.assert_census();
     w.assert_conservation();
 }
