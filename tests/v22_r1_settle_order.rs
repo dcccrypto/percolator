@@ -6,8 +6,11 @@
 //! and a winning counterparty has already been credited, the rate is transiently `< 1` (the
 //! winner's claim is in `positive_claim_bound_num`, the loser's loss that backs it is not yet
 //! booked). The burn then costs `loss / r` face, the booking lands, the rate returns to 1, and
-//! the surplus face is gone. The fix prices the burn at the post-booking rate
-//! (`source_credit_neutral_rate_for_booked_loss`).
+//! the surplus face is gone. Round 1 priced the burn at the victim's own post-booking rate;
+//! round 2 (`source_credit_netting_rate`, fed by the per-domain `kf_pending_credit`) also removes
+//! the credit of OTHER winners whose losers have not settled. Measured, not assumed: the
+//! scenarios here are order independent; bankrupt losers in a multi-claimant domain are not
+//! (see `v22_r1_multi_claimant.rs`).
 //!
 //! Test shape: two traders; `L` earns a long claim, flips short, the price rises, and the new
 //! winner `S` is settled BEFORE or AFTER the victim `L`. Effective equity (the certified
@@ -472,4 +475,180 @@ fn r1_effective_equity_is_cadence_and_order_invariant() {
     eprintln!("R1DIFF worlds {worlds}: worst per-account equity gap across arms {worst_acct}, worst pair deficit {worst_pair} (seed {worst_seed})");
     assert!(worst_acct <= 8, "effective equity differs by cadence/order by up to {worst_acct} atoms");
     assert!(worst_pair >= -64, "pair deficit {worst_pair} atoms exceeds the floor budget");
+}
+
+/// S2: a victim whose claim is partly LIENED (the lien backs margin for its flipped, larger
+/// position; reached through the public trade flow with a poor account). The liened part cannot
+/// be consumed, so the tail of the loss eats retained face 1:1 and is not booked as support.
+/// Returns (victim, winner) effective equity and the victim's liened claim num after the flip.
+fn liened_scenario(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: usize) -> (i128, i128, u128) {
+    let mut w = World::new_pairs(&[(cap, 1_000_000_000_000_000, 3)], 0, 0);
+    let mut l = w.traders[0];
+    let mut s = w.traders[1];
+    for _ in 0..5 {
+        assert!(w.accrue(100, 0));
+        assert!(w.settle(&mut l) && w.settle(&mut s));
+    }
+    w.trade(&mut s, &mut l, sell * POS_SCALE).expect("flip");
+    let liened: u128 = l.source_domains.iter().map(|d| d.source_claim_liened_num.get()).sum();
+    for _ in 0..steps2 {
+        assert!(w.accrue(up2, 0));
+    }
+    let show = |tag: &str, a: &PortfolioAccountV16Account| {
+        if std::env::var("LDBG").is_ok() {
+            let bound: u128 = a.source_domains.iter().map(|d| d.source_claim_bound_num.get()).sum();
+            let li: u128 = a.source_domains.iter().map(|d| d.source_claim_liened_num.get()).sum();
+            eprintln!("  {tag}: cap {} pnl {} reserved {} bound {} liened {}", a.capital.get() as i128 - cap as i128, a.pnl.get(), a.reserved_pnl.get(), bound / 1_000_000_000_000, li / 1_000_000_000_000);
+        }
+    };
+    show("pre-settle victim", &l);
+    if winner_first {
+        assert!(w.settle(&mut s) && w.settle(&mut l));
+    } else {
+        assert!(w.settle(&mut l) && w.settle(&mut s));
+    }
+    show("post victim", &l);
+    show("post winner", &s);
+    let mut e: [PortfolioAccountV16Account; 0] = [];
+    w.traders[0] = l;
+    w.traders[1] = s;
+    w.validate(&mut e);
+    let el = effective_equity(&mut w, &mut l) - cap as i128;
+    let es = effective_equity(&mut w, &mut s) - 1_000_000_000_000_000;
+    (el, es, liened)
+}
+
+#[test]
+fn r1_liened_victim_is_order_independent_and_pinned() {
+    let mut saw_lien = 0;
+    let mut order_dep = vec![];
+    for &(cap, sell, up2, st2) in &[(330_000u128, 7u128, 100i64, 1usize), (330_000, 7, 100, 2), (330_000, 7, 50, 3), (300_000, 7, 100, 2), (400_000, 8, 100, 2), (400_000, 7, 150, 2)] {
+        let wf = liened_scenario(true, cap, sell, up2, st2);
+        let lf = liened_scenario(false, cap, sell, up2, st2);
+        if wf.2 > 0 {
+            saw_lien += 1;
+        }
+        eprintln!("R1LIEN cap {cap} sell {sell} {up2}x{st2}: liened {} winner-first (victim {}, winner {}) victim-first (victim {}, winner {})", wf.2, wf.0, wf.1, lf.0, lf.1);
+        for r in [wf, lf] {
+            assert!(r.0 + r.1 <= 4, "pair gained {} atoms", r.0 + r.1);
+        }
+        if wf != lf {
+            order_dep.push((cap, sell, up2, st2));
+        }
+        let idx = [(330_000u128, 7u128, 100i64, 1usize), (330_000, 7, 100, 2), (330_000, 7, 50, 3), (300_000, 7, 100, 2), (400_000, 8, 100, 2), (400_000, 7, 150, 2)]
+            .iter()
+            .position(|x| *x == (cap, sell, up2, st2))
+            .unwrap();
+        const PINNED: [(i128, i128); 6] = [
+            (81_966, -128_939),
+            (38_927, -74_914),
+            (63_279, -108_122),
+            (44_868, -82_382),
+            (25_738, -50_679),
+            (16_304, -31_853),
+        ];
+        assert_eq!((wf.0, wf.1), PINNED[idx], "liened victim: pinned neutral-rate result moved");
+    }
+    assert!(order_dep.is_empty(), "liened victim: settle order changes effective equity in {order_dep:?}");
+    assert!(saw_lien >= 3, "the scenarios must actually carry a lien");
+}
+
+fn liened_scenario_try(winner_first: bool, cap: u128, sell: u128, up2: i64, steps2: usize) -> Option<(i128, i128)> {
+    let mut w = World::new_pairs(&[(cap, 1_000_000_000_000_000, 3)], 0, 0);
+    let mut l = w.traders[0];
+    let mut s = w.traders[1];
+    for _ in 0..5 {
+        assert!(w.accrue(100, 0));
+        assert!(w.settle(&mut l) && w.settle(&mut s));
+    }
+    w.trade(&mut s, &mut l, sell * POS_SCALE).ok()?;
+    for _ in 0..steps2 {
+        if !w.accrue(up2, 0) { return None; }
+    }
+    let ok = if winner_first { w.settle(&mut s) && w.settle(&mut l) } else { w.settle(&mut l) && w.settle(&mut s) };
+    if !ok { return None; }
+    let el = effective_equity(&mut w, &mut l) - cap as i128;
+    let es = effective_equity(&mut w, &mut s) - 1_000_000_000_000_000;
+    Some((el, es))
+}
+
+/// A victim whose loss outruns its capital and face (bad debt). The bad debt never books, so the
+/// neutral rate must not assume it does (it would over-credit the victim). Both orders agree and
+/// the numbers are pinned: dropping the bad-debt term moves the victim by ~+20,000 atoms.
+#[test]
+fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
+    // (victim, winner) effective equity, pinned from the verified neutral-rate run. Dropping the
+    // bad-debt term (assuming the whole loss books) moves these by tens of thousands of atoms.
+    const PINNED: [(i128, i128); 5] = [
+        (-398_254, 329_999),
+        (-598_644, 329_999),
+        (-803_677, 329_999),
+        (-764_679, 399_999),
+        (-1_276_064, 399_999),
+    ];
+    for (n, &(cap, sell, up2, st2)) in [(330_000u128, 7u128, 200i64, 6usize), (330_000, 7, 200, 8), (330_000, 7, 200, 10), (400_000, 8, 200, 8), (400_000, 8, 200, 12)].iter().enumerate() {
+        let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
+        let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
+        eprintln!("R1BANKRUPT cap {cap} sell {sell} {up2}x{st2}: {wf:?} {lf:?}");
+        assert_eq!(wf, lf, "bankrupt victim: settle order changes effective equity");
+        assert_eq!(wf, PINNED[n], "bankrupt victim: pinned neutral-rate result moved");
+        assert!(wf.0 + wf.1 <= 4, "pair gained {}", wf.0 + wf.1);
+    }
+}
+
+/// Resolved and forfeit paths keep the stored rate: the same flip scenario, but the market is
+/// resolved with the loss still unsettled and both accounts are closed in either order. The
+/// payouts must equal the pre-R1 engine's (pinned below; computed on 874fe33a). Forcing the Live
+/// booking predicate true changes them.
+fn resolved_payouts(winner_first: bool) -> (u128, u128) {
+    let mut w = World::new_pairs(&[(1_000_000_000_000_000, 1_000_000_000_000_000, 3)], 0, 0);
+    let mut l = w.traders[0];
+    let mut s = w.traders[1];
+    for _ in 0..5 {
+        assert!(w.accrue(100, 0));
+        assert!(w.settle(&mut l) && w.settle(&mut s));
+    }
+    w.trade(&mut s, &mut l, 6 * POS_SCALE).expect("flip");
+    for _ in 0..3 {
+        assert!(w.accrue(100, 0));
+    }
+    let slot = w.slot + 1;
+    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    m.resolve_market_not_atomic(slot).unwrap();
+    let mut paid = [0u128; 2];
+    let mut closed = [false; 2];
+    let order: [usize; 2] = if winner_first { [1, 0] } else { [0, 1] };
+    for _round in 0..40 {
+        for &i in &order {
+            if closed[i] {
+                continue;
+            }
+            let a = if i == 0 { &mut l } else { &mut s };
+            for d in 0..2 {
+                let _ = m.expire_source_backing_bucket_not_atomic(d, slot);
+            }
+            if let Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) =
+                m.close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(a), 0)
+            {
+                paid[i] = payout;
+                closed[i] = true;
+            }
+        }
+        if closed[0] && closed[1] {
+            break;
+        }
+    }
+    assert!(closed[0] && closed[1], "both accounts close");
+    (paid[0], paid[1])
+}
+
+#[test]
+fn r1_resolved_close_is_unchanged() {
+    let wf = resolved_payouts(true);
+    let lf = resolved_payouts(false);
+    eprintln!("R1RESOLVED winner-first {wf:?} victim-first {lf:?}");
+    // pre-R1 values (874fe33a). Resolved close is itself order dependent (pre-existing, not R1);
+    // this test only pins that the R1 change does not touch it.
+    assert_eq!(wf, (999_999_999_998_674, 999_999_999_942_508));
+    assert_eq!(lf, (1_000_000_000_057_492, 999_999_999_942_508));
 }
