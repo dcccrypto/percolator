@@ -67,17 +67,27 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&[0u8; V22_CONFIG_EXTRA]);
     out.extend_from_slice(&header[old_config_end..]);
     let rest = &old[MARKET_GROUP_OFF + old_header_len..];
+    // The live fixtures are DEPLOYED-layout slabs: they also lack the funding-scale drift tail
+    // (`kf_drift_long/short`, KF_DRIFT_APPENDED bytes at the END of each engine slot). A fresh
+    // slab starts with exactly those zeros, so insert them while widening (test-only: an old slab
+    // is never loaded in place because the stride changed). v2.1 + tail input is also accepted.
+    const KF_DRIFT_APPENDED: usize = 160;
+    let bare = rest.len() % old_stride != 0;
+    let stride = if bare { old_stride - KF_DRIFT_APPENDED } else { old_stride };
     assert_eq!(
-        rest.len() % old_stride,
+        rest.len() % stride,
         0,
-        "v2.1 slab length must be header + N slots"
+        "v2.1 slab length must be header + N slots (with or without the drift tail)"
     );
-    for slot in rest.chunks(old_stride) {
+    for slot in rest.chunks(stride) {
         out.extend_from_slice(&slot[..ASSET_ORACLE_WRAPPER_LEN]);
         let engine = &slot[ASSET_ORACLE_WRAPPER_LEN..];
         out.extend_from_slice(&engine[..old_asset_len]);
         out.extend_from_slice(&[0u8; V22_ASSET_EXTRA]);
         out.extend_from_slice(&engine[old_asset_len..]);
+        if bare {
+            out.extend_from_slice(&[0u8; KF_DRIFT_APPENDED]);
+        }
     }
     out
 }
@@ -114,15 +124,10 @@ fn load(name: &'static str) -> LiveMarket {
     let slab = upgrade_v21_slab(&fs::read(dir.join("slab.bin")).expect("slab fixture"));
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
     let slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
-    // fix/v21-funding-scale appended 160 bytes of K/F drift-generation state
-    // (`kf_drift_long/short`) to the END of each engine asset slot. These fixtures are live pre-change slabs: read the legacy slot length and
-    // zero-extend (a fresh slab starts with exactly these zeros; an old slab can never be
-    // loaded by the new program in place because the stride changed, so this is test-only).
-    const KF_DRIFT_APPENDED: usize = 160;
-    let legacy_slot_len = slot_len - KF_DRIFT_APPENDED;
-    let stride = ASSET_ORACLE_WRAPPER_LEN + legacy_slot_len;
+    // `upgrade_v21_slab` already produced the CURRENT layout (drift tail + band/rent words).
+    let stride = ASSET_ORACLE_WRAPPER_LEN + slot_len;
     let trailing = slab.len() - MARKET_GROUP_OFF - header_len;
-    assert_eq!(trailing % stride, 0, "{name}: slab length must be header + N legacy slots");
+    assert_eq!(trailing % stride, 0, "{name}: slab length must be header + N slots");
     let capacity = trailing / stride;
     let header: MarketGroupV16HeaderAccount =
         bytemuck::pod_read_unaligned(&slab[MARKET_GROUP_OFF..MARKET_GROUP_OFF + header_len]);
@@ -130,10 +135,8 @@ fn load(name: &'static str) -> LiveMarket {
     let mut markets = Vec::with_capacity(capacity);
     for i in 0..capacity {
         let engine_off = MARKET_GROUP_OFF + header_len + i * stride + ASSET_ORACLE_WRAPPER_LEN;
-        // The appended drift state is the LAST field of the engine slot: zero tail.
-        let mut bytes = vec![0u8; slot_len];
-        bytes[..legacy_slot_len].copy_from_slice(&slab[engine_off..engine_off + legacy_slot_len]);
-        let engine: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&bytes);
+        let engine: EngineAssetSlotV16Account =
+            bytemuck::pod_read_unaligned(&slab[engine_off..engine_off + slot_len]);
         markets.push(Market::new(i as u64, engine));
     }
 

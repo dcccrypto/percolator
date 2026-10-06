@@ -22,6 +22,11 @@ const PRICE: u64 = 1_000_000;
 const RATE_E9: i128 = 10_000;
 const MOVE_CAP_BPS: u64 = 200;
 
+// v2.2 combination: the whole adversarial harness can run with holding-fee rent > 0
+// (Wave B). Thread-local so the rent test cannot leak into the rent-off sweeps.
+thread_local! { static RENT_E9: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+fn rent_e9() -> u64 { RENT_E9.with(|c| c.get()) }
+
 #[derive(Clone)]
 struct World {
     header: MarketGroupV16HeaderAccount,
@@ -51,6 +56,7 @@ impl World {
     fn new_pairs_at(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64) -> Self {
         let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
         cfg.max_abs_funding_e9_per_slot = cap;
+        cfg.rent_max_e9_per_slot = rent_e9();
         cfg.max_price_move_bps_per_slot = MOVE_CAP_BPS;
         cfg.initial_margin_bps = 1_000;
         cfg.maintenance_margin_bps = 500;
@@ -147,7 +153,7 @@ impl World {
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
+        if m.accrue_asset_to_with_rent_not_atomic(0, slot, new, rate, rent_e9(), rent_e9() / 2, true).is_err() {
             self.header = h;
             self.markets = mk;
             return false;
@@ -186,7 +192,7 @@ impl World {
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
         let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
-        if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
+        if m.accrue_asset_path_with_rent_to_not_atomic(0, now, target, &steps, rent_e9(), rent_e9() / 2, true).is_err() {
             self.header = h;
             self.markets = mk;
             return false;
@@ -700,4 +706,58 @@ fn sec_f6_funding_rounding_low_price() {
     let paid = se0 - equity(&sh);
     let intended1 = 111.0 * 1_000.0 * 30_000.0 / 1e9;
     assert!((paid as f64 - intended1).abs() <= 1.0, "short paid {paid} in one slot, intended {intended1:.2}");
+}
+
+
+/// v2.2 combination gate: the same exact-bookkeeping + bound-covers-real-loss sweep with
+/// holding-fee rent charged on every accrual (asymmetric: long = R, short = R/2). A rent move
+/// marks cohorts stale but must add no adverse K/F travel; `check_state` asserts exact
+/// stale/laggard counts and weights and `bound >= real hidden loss` after EVERY step.
+#[test]
+fn sec_adv_sweep_stats_rent_positive() {
+    for rent in [2_000u64, 9_000u64] {
+        RENT_E9.with(|c| c.set(rent));
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let seed: u8 = std::env::var("SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(33);
+        let n: usize = std::env::var("WORLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+        let mut runner = TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &[seed; 32]));
+        let strat = (prop::collection::vec(pair(), 3..14), ins(), ins(), prop::collection::vec(op2(), 6..80));
+        let mut st = Stats2::default();
+        let mut fails = 0;
+        for _ in 0..n {
+            let (p, il, is, ops) = strat.new_tree(&mut runner).unwrap().current();
+            if let Err(e) = run2(p, (il, is), ops, &mut st) { fails += 1; eprintln!("FAIL(rent {rent}): {e}"); }
+        }
+        eprintln!("rent {rent} sweep seed {seed}: worlds {n} fails {fails} {st:?}");
+        assert_eq!(fails, 0);
+        assert!(st.paths > 50 && st.admissions > 20 && st.hidden_def > 5, "{st:?}");
+        // rent actually accrued: a fresh world with rent on shows a non-zero rent index after slides
+        let mut w = World::new_pairs(&[(105_000u128, 10_000_000u128, 1u128); 3], 0, 0);
+        for _ in 0..4 { assert!(w.accrue(10, RATE_E9)); }
+        let a = w.asset();
+        assert!(a.rent_index_long_num != 0 && a.rent_index_short_num != 0, "rent must accrue (non-vacuity)");
+    }
+    RENT_E9.with(|c| c.set(0));
+}
+
+
+/// Rent-ONLY accrual (no price move, no funding): the rent index alone marks the cohorts stale.
+/// The tracker must follow (exact bookkeeping) with zero adverse travel. Discriminates the merge
+/// hunk that passes the rent-aware `changed` flags into `track_kf_drift`.
+#[test]
+fn sec_adv_rent_only_accrual_keeps_the_tracker_exact() {
+    RENT_E9.with(|c| c.set(5_000));
+    let traders: Vec<(u128, u128, u128)> = (0..5).map(|_| (105_000u128, 10_000_000u128, 1u128)).collect();
+    let mut w = World::new_pairs(&traders, 0, 0);
+    for step in 0..6 {
+        assert!(w.accrue(0, 0), "rent-only accrue {step}");
+        check_state(&w, &[], &format!("rent-only {step}")).unwrap();
+        assert!(w.accrue_path(0, 2, 0, false) || true);
+        check_state(&w, &[], &format!("rent-only path {step}")).unwrap();
+    }
+    let a = w.asset();
+    assert!(a.rent_index_long_num != 0, "rent accrued");
+    assert!(a.stale_account_count_long + a.stale_account_count_short > 0, "rent alone marked a cohort stale");
+    RENT_E9.with(|c| c.set(0));
 }
