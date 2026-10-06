@@ -685,6 +685,8 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
         a_basis: ADL_ONE,
         k_snap: 10 * ADL_ONE as i128,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POSITION_Q,
