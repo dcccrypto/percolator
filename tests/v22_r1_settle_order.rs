@@ -18,7 +18,7 @@
 //! pair must be zero-sum up to the floor atoms. All markets here use a freshness horizon far
 //! longer than the world (`h_max` 100_000), which isolates this mechanism from backing-bucket
 //! lapse (an intended, separate decay of unconverted claims).
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code, unused_imports, clippy::type_complexity)]
 use percolator::{
     AutoCrankWorkV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioV16ViewMut, ProvenanceHeaderV16,
@@ -539,15 +539,20 @@ fn r1_liened_victim_is_order_independent_and_pinned() {
             .iter()
             .position(|x| *x == (cap, sell, up2, st2))
             .unwrap();
+        // S5 (option B, protect the counterparty): equal to the pre-R1 engine's LOSER-FIRST result,
+        // which is the base's WORST order for the counterparty in all six scenarios.
         const PINNED: [(i128, i128); 6] = [
-            (81_966, -128_939),
-            (38_927, -74_914),
-            (63_279, -108_122),
-            (44_868, -82_382),
-            (25_738, -50_679),
-            (16_304, -31_853),
+            (73_993, -124_395),
+            (31_533, -68_530),
+            (52_661, -98_213),
+            (42_863, -79_939),
+            (24_834, -49_238),
+            (8_282, -25_966),
         ];
-        assert_eq!((wf.0, wf.1), PINNED[idx], "liened victim: pinned neutral-rate result moved");
+        // the pre-R1 engine's worst counterparty equity over both orders (874fe33a)
+        const BASE_WORST_COUNTERPARTY: [i128; 6] = [-124_395, -68_530, -98_213, -79_939, -49_238, -25_966];
+        assert!(wf.1 >= BASE_WORST_COUNTERPARTY[idx], "counterparty below the pre-R1 worst order");
+        assert_eq!((wf.0, wf.1), PINNED[idx], "liened victim: pinned result moved");
     }
     assert!(order_dep.is_empty(), "liened victim: settle order changes effective equity in {order_dep:?}");
     assert!(saw_lien >= 3, "the scenarios must actually carry a lien");
@@ -580,18 +585,18 @@ fn r1_bankrupt_victim_is_order_independent_and_not_over_credited() {
     // (victim, winner) effective equity, pinned from the verified neutral-rate run. Dropping the
     // bad-debt term (assuming the whole loss books) moves these by tens of thousands of atoms.
     const PINNED: [(i128, i128); 5] = [
-        (-398_254, 329_999),
-        (-598_644, 329_999),
-        (-803_677, 329_999),
-        (-764_679, 399_999),
-        (-1_276_064, 399_999),
+        (-414_343, 329_999),
+        (-605_611, 329_999),
+        (-804_603, 329_999),
+        (-771_596, 399_999),
+        (-1_279_126, 399_999),
     ];
     for (n, &(cap, sell, up2, st2)) in [(330_000u128, 7u128, 200i64, 6usize), (330_000, 7, 200, 8), (330_000, 7, 200, 10), (400_000, 8, 200, 8), (400_000, 8, 200, 12)].iter().enumerate() {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
         let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
         eprintln!("R1BANKRUPT cap {cap} sell {sell} {up2}x{st2}: {wf:?} {lf:?}");
         assert_eq!(wf, lf, "bankrupt victim: settle order changes effective equity");
-        assert_eq!(wf, PINNED[n], "bankrupt victim: pinned neutral-rate result moved");
+        assert_eq!(wf, PINNED[n], "bankrupt victim: pinned result moved");
         assert!(wf.0 + wf.1 <= 4, "pair gained {}", wf.0 + wf.1);
     }
 }
@@ -651,4 +656,27 @@ fn r1_resolved_close_is_unchanged() {
     // this test only pins that the R1 change does not touch it.
     assert_eq!(wf, (999_999_999_998_674, 999_999_999_942_508));
     assert_eq!(lf, (1_000_000_000_057_492, 999_999_999_942_508));
+}
+
+/// A NON-liened victim whose loss outruns its capital and face. This is the class the neutral
+/// rate (not the S5 protective rate) prices, so it pins the booked-amount, bad-debt and extra-claims
+/// terms. Order dependence REMAINS here by construction: victim-first sees a fully backed domain
+/// (stored rate 1) while winner-first sees the in-flight credit, and the bad debt will not book.
+/// The victim is never worse than the pre-R1 engine in either order and the counterparty is untouched.
+#[test]
+fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
+    // (cap, sell, up2, st2) -> (fix winner-first, fix victim-first, pre-R1 winner-first, pre-R1 victim-first)
+    const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 4] = [
+        ((330_000, 5, 200, 14), (-553_486, -518_502, -643_128, -518_502)),
+        ((330_000, 5, 200, 18), (-807_740, -747_130, -877_922, -747_130)),
+        ((330_000, 5, 200, 12), (-428_054, -410_804, -531_165, -410_804)),
+        ((300_000, 6, 200, 10), (-580_525, -537_447, -662_711, -537_447)),
+    ];
+    for &((cap, sell, up2, st2), (fwf, flf, bwf, blf)) in &CASES {
+        let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
+        let lf = liened_scenario_try(false, cap, sell, up2, st2).expect("scenario runs");
+        assert_eq!((wf.0, lf.0), (fwf, flf), "pinned neutral-rate result moved: {cap} {sell} {up2}x{st2}");
+        assert!(wf.0 >= bwf && lf.0 >= blf, "victim worse than the pre-R1 engine");
+        assert_eq!((wf.1, lf.1), (cap as i128 - 1, cap as i128 - 1), "the counterparty is untouched");
+    }
 }

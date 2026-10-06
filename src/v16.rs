@@ -3790,6 +3790,32 @@ impl V16Core {
         ))
     }
 
+    /// S5: `min(1, max(stored, available / (claims - pending)))`. The rate a loser-first
+    /// settlement sees: the credited-but-unbacked winner claims are taken out of the
+    /// denominator and nothing else is assumed.
+    fn source_credit_protective_rate(
+        state: SourceCreditStateV16,
+        pending_num: u128,
+    ) -> V16Result<u128> {
+        if state.positive_claim_bound_num == 0 {
+            return Ok(state.credit_rate_num);
+        }
+        let available = Self::available_backing_num_for_source_credit_state(state)?;
+        let denominator = state.positive_claim_bound_num.saturating_sub(pending_num);
+        if denominator == 0 || available >= denominator {
+            return Ok(CREDIT_RATE_SCALE);
+        }
+        let rate = U256::from_u128(available)
+            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
+            .and_then(|v| v.checked_div(U256::from_u128(denominator)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(core::cmp::min(
+            CREDIT_RATE_SCALE,
+            core::cmp::max(state.credit_rate_num, rate),
+        ))
+    }
+
     fn source_credit_state_realizable_support_for_face(
         state: SourceCreditStateV16,
         face_claim: u128,
@@ -13410,10 +13436,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Err(V16Error::Stale);
             }
+            let locked = source
+                .source_claim_liened_num
+                .get()
+                .checked_add(source.source_claim_impaired_num.get())
+                .ok_or(V16Error::ArithmeticOverflow)?;
             let rate = match netting {
                 Some(ctx) => {
                     let pending = self.kf_pending_credit_num(d)?;
-                    if ctx.loss_domain == Some(d) {
+                    if locked != 0 {
+                        // S5: a LIENED (or impaired) claim sits in this domain. Its backing is
+                        // excluded from `available` while the claim stays in `claims`, so the
+                        // domain's stored rate already understates every unliened claim. The
+                        // neutral rate would move that structural haircut from the flipping
+                        // account onto its counterparty (the maker/LP). Price the burn at the
+                        // canonical stored rate with the in-flight credit removed from the
+                        // denominator: exactly what the pre-R1 engine charged when the loser
+                        // settled FIRST, for every order and every claimant count.
+                        V16Core::source_credit_protective_rate(source_credit, pending)?
+                    } else if ctx.loss_domain == Some(d) {
                         // The part of THIS loss whose winner is already credited here (`own`)
                         // sits in `claims` and in `pending`; the rest of the loss will be
                         // credited to its winner once that winner settles.
@@ -13447,11 +13488,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 None => source_credit.credit_rate_num,
             };
-            let locked = source
-                .source_claim_liened_num
-                .get()
-                .checked_add(source.source_claim_impaired_num.get())
-                .ok_or(V16Error::ArithmeticOverflow)?;
             let unliened = source
                 .source_claim_bound_num
                 .get()
@@ -27941,6 +27977,20 @@ mod r1_netting_rate_tests {
                 assert!(rate(s, 5, 40, 0) <= rate(s, 5, 0, 0));
             }
         }
+    }
+
+    #[test]
+    fn protective_rate_is_the_loser_first_rate() {
+        let s = domain(150, 100);
+        // nothing in flight: the stored rate
+        assert_eq!(V16Core::source_credit_protective_rate(s, 0).unwrap(), ONE * 100 / 150);
+        // 30 of the claims are credited-but-unbacked winner credit: 100 / (150 - 30)
+        assert_eq!(V16Core::source_credit_protective_rate(s, 30 * BOUND_SCALE).unwrap(), ONE * 100 / 120);
+        // the protective rate never exceeds the neutral one for the same pending credit
+        assert!(V16Core::source_credit_protective_rate(s, 30 * BOUND_SCALE).unwrap() <= rate(s, 0, 0, 30) + ONE / 1000);
+        // all claims in flight: fully backed once they land
+        assert_eq!(V16Core::source_credit_protective_rate(s, 150 * BOUND_SCALE).unwrap(), ONE);
+        assert_eq!(V16Core::source_credit_protective_rate(SourceCreditStateV16::EMPTY, 5).unwrap(), ONE);
     }
 
     #[test]
