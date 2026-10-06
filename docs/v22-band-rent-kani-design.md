@@ -174,3 +174,15 @@ Every harness must be SUCCESSFUL with every cover satisfied.
   `rent_max` whenever `rent_rate_e9` is `None`.
 
 Same rule as §6: designed here, run once on the final code.
+
+## 8. Round-2 re-review changes (2026-10-06)
+
+- The per-side cap is now an END-OF-TRADE rule (`require_band_trade_shape`) with a hard bound
+  of `cap + 1` in `kernel_band_attach`. `kani_band_attach_respects_position_cap` becomes: `Ok`
+  iff `stored_pos_count_side <= cap + 1` (and the width rule). Add
+  `kani_band_trade_shape_cap`: after a non-exempt attach on side S, `count_S <= cap`; with the
+  maker exempt, `count_S <= cap + 1`; a leg that did not change side never trips the cap.
+- `kani_band_min_notional_exempt`: the exempt account is never checked; the non-exempt account
+  with an active leg satisfies `notional >= band_min_leg_notional` on `Ok`.
+- `kani_band_bilateral_close_preserves_a`: a full close of one leg against a counterparty
+  (maker exempt) leaves `a_long`, `a_short` unchanged and both OI sides reduced by the same q.

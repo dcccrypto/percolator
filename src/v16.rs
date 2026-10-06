@@ -1356,7 +1356,12 @@ impl V16Core {
             SideV16::Long => asset.stored_pos_count_long,
             SideV16::Short => asset.stored_pos_count_short,
         };
-        if positions > band_max_positions_per_side {
+        // Hard bound `cap + 1`: the per-side cap itself is enforced at the end of the trade
+        // (`require_band_trade_shape`), where the wrapper may exempt ONE standing counterparty
+        // (the bound vault LP) so that it can always take the other side, including of a dust
+        // sweep or a slot eviction. No attach path can exceed `cap + 1` legs on a side, so the
+        // per-epoch certification sweep stays bounded by `2 * (cap + 1)`.
+        if positions > band_max_positions_per_side.saturating_add(1) {
             return Err(V16Error::BandPositionCap);
         }
         let count = match side {
@@ -17230,21 +17235,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// v2.2 band (re-review N-1): after a trade on a band market, each traded asset's leg on
     /// either account (if any) has a notional at `P_last` of at least `band_min_leg_notional`
     /// (effective quantity, floor). A trade that closes the leg fully passes.
-    fn require_band_legs_min_notional(
+    /// v2.2 band, end-of-trade shape rules on a band market, for each traded asset and each
+    /// of the two accounts unless it is EXEMPT (the wrapper exempts only the bound vault LP):
+    ///
+    /// * re-review N-1: a leg left by the trade has a notional at `P_last` (effective
+    ///   quantity, floor) of at least `band_min_leg_notional` (a full close passes);
+    /// * review E-M1: an account that ATTACHED a leg on a side (none there before the trade)
+    ///   needs that side's positioned-leg count to be within `band_max_positions_per_side`.
+    ///
+    /// `before[i]` is the side each account held on request `i`'s asset before the trade.
+    fn require_band_trade_shape(
         &self,
         long_account: &PortfolioV16ViewMut<'_>,
         short_account: &PortfolioV16ViewMut<'_>,
         requests: &[TradeRequestV16],
+        before: &[(Option<SideV16>, Option<SideV16>)],
+        exempt_long: bool,
+        exempt_short: bool,
     ) -> V16Result<()> {
         if self.header.config.band_bps.get() == 0 {
             return Ok(());
         }
         let min = self.header.config.band_min_leg_notional.get() as u128;
+        let cap = self.header.config.band_max_positions_per_side.get();
         let mut i = 0usize;
         while i < requests.len() {
             let asset_index = requests[i].asset_index;
             let asset = self.asset_state(asset_index)?;
-            for account in [long_account.as_view(), short_account.as_view()] {
+            for (account, exempt, side_before) in [
+                (long_account.as_view(), exempt_long, before[i].0),
+                (short_account.as_view(), exempt_short, before[i].1),
+            ] {
+                if exempt {
+                    continue;
+                }
                 let leg = Self::active_leg_for_asset(&account, asset_index)?;
                 if !leg.active {
                     continue;
@@ -17257,10 +17281,78 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if notional < min {
                     return Err(V16Error::BandLegBelowMinNotional);
                 }
+                if side_before != Some(leg.side) {
+                    let count = match leg.side {
+                        SideV16::Long => asset.stored_pos_count_long,
+                        SideV16::Short => asset.stored_pos_count_short,
+                    };
+                    if count > cap {
+                        return Err(V16Error::BandPositionCap);
+                    }
+                }
             }
             i += 1;
         }
         Ok(())
+    }
+
+    /// The side each account holds on each request's asset (before a trade).
+    fn band_sides_before(
+        &self,
+        long_account: &PortfolioV16ViewMut<'_>,
+        short_account: &PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> V16Result<[(Option<SideV16>, Option<SideV16>); V16_MAX_PORTFOLIO_ASSETS_N]> {
+        let mut out = [(None, None); V16_MAX_PORTFOLIO_ASSETS_N];
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(out);
+        }
+        let mut i = 0usize;
+        while i < requests.len() && i < V16_MAX_PORTFOLIO_ASSETS_N {
+            let side = |account: &PortfolioV16View<'_>| -> V16Result<Option<SideV16>> {
+                let leg = Self::active_leg_for_asset(account, requests[i].asset_index)?;
+                Ok(if leg.active { Some(leg.side) } else { None })
+            };
+            out[i] = (side(&long_account.as_view())?, side(&short_account.as_view())?);
+            i += 1;
+        }
+        Ok(out)
+    }
+
+    /// v2.2 band (round-2 re-review N-1b): the side and the notional at `P_last` (effective
+    /// quantity, floor) of the account's leg on `asset_index`, or `None` if it has none.
+    pub fn band_leg_side_and_notional(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<Option<(SideV16, u128)>> {
+        let leg = Self::active_leg_for_asset(account, asset_index)?;
+        if !leg.active {
+            return Ok(None);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let notional = q
+            .checked_mul(asset.effective_price as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / POS_SCALE;
+        Ok(Some((leg.side, notional)))
+    }
+
+    /// v2.2 band (round-2 re-review N-1b): `side` of `asset_index` holds
+    /// `band_max_positions_per_side` positioned legs, so a new leg there is refused
+    /// (`BandPositionCap`). False on a band-off market.
+    pub fn band_side_is_full(&self, asset_index: usize, side: SideV16) -> V16Result<bool> {
+        let cap = self.header.config.band_max_positions_per_side.get();
+        if self.header.config.band_bps.get() == 0 || cap == 0 {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let count = match side {
+            SideV16::Long => asset.stored_pos_count_long,
+            SideV16::Short => asset.stored_pos_count_short,
+        };
+        Ok(count >= cap)
     }
 
     /// v2.2 band (re-review N-1, dust sweep): the account's leg on `asset_index` is DUST: a
@@ -20550,6 +20642,67 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         requests: &[TradeRequestV16],
         taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
+        self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            taker_is_long_account,
+            false,
+        )
+    }
+
+    /// v2.2 band (round-2 re-review N-6 / N-1): the same batch fill, with the MAKER (the
+    /// non-taker account) exempt from the band minimum-leg-notional check. The wrapper uses it
+    /// when the maker is a matcher LP: an LP's leg is the NET of its takers and is legitimately
+    /// small (or dust) while every taker leg is at least the minimum, so the LP must be able to
+    /// absorb any fill, including the bilateral dust sweep and the slot eviction. The taker's
+    /// leg is always checked.
+    pub fn execute_batch_band_maker_exempt_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
+    ) -> V16Result<BatchTradeOutcomeV16> {
+        self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            taker_is_long_account,
+            true,
+        )
+    }
+
+    /// Single-trade form of `execute_batch_band_maker_exempt_not_atomic`.
+    pub fn execute_trade_band_maker_exempt_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        request: TradeRequestV16,
+        taker_is_long_account: bool,
+    ) -> V16Result<TradeOutcomeV16> {
+        let outcome = self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            core::slice::from_ref(&request),
+            taker_is_long_account,
+            true,
+        )?;
+        Ok(TradeOutcomeV16 {
+            fee_a: outcome.fee_a,
+            fee_b: outcome.fee_b,
+            notional: outcome.notional,
+        })
+    }
+
+    fn execute_batch_band_scoped_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
+        maker_exempt: bool,
+    ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
             decode_bool(self.header.loss_stale_active)? && !requests.is_empty();
@@ -20571,6 +20724,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
+        let band_before = self.band_sides_before(long_account, short_account, requests)?;
         let result = self.execute_batch_with_fee_after_tail_validation_not_atomic(
             long_account,
             short_account,
@@ -20581,6 +20735,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
         let outcome = result?;
+        // v2.2 band: minimum leg notional (N-1) and per-side position cap (E-M1).
+        self.require_band_trade_shape(
+            long_account,
+            short_account,
+            requests,
+            &band_before,
+            maker_exempt && !taker_is_long_account,
+            maker_exempt && taker_is_long_account,
+        )?;
         self.validate_shape()?;
         long_account.validate_with_market(&self.as_view())?;
         short_account.validate_with_market(&self.as_view())?;
@@ -20653,6 +20816,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
+        let band_before = self.band_sides_before(long_account, short_account, requests)?;
         let result = self.fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
             long_account,
             short_account,
@@ -20664,6 +20828,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
         let outcome = result?;
+        // v2.2 band: minimum leg notional (N-1) and per-side position cap (E-M1).
+        self.require_band_trade_shape(
+            long_account,
+            short_account,
+            requests,
+            &band_before,
+            false,
+            false,
+        )?;
         self.validate_shape()?;
         long_account.validate_with_market(&self.as_view())?;
         short_account.validate_with_market(&self.as_view())?;
@@ -20778,8 +20951,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims,
             short_has_source_claims,
         )?;
-        // v2.2 band (re-review N-1): a trade may not leave a dust leg on a band market.
-        self.require_band_legs_min_notional(long_account, short_account, requests)?;
         // ADL can leave stored basis larger than effective OI. Start resets only after final margin
         // checks so the reset's risk-epoch advance leaves each affected account certificate stale;
         // the public auto-crank then selects Refresh and clears the economically exhausted residue.
@@ -20904,8 +21075,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims,
             short_has_source_claims,
         )?;
-        // v2.2 band (re-review N-1): a trade may not leave a dust leg on a band market.
-        self.require_band_legs_min_notional(long_account, short_account, requests)?;
         // ADL can leave stored basis larger than effective OI. Start resets only after final margin
         // checks so the reset's risk-epoch advance leaves each affected account certificate stale;
         // the public auto-crank then selects Refresh and clears the economically exhausted residue.
