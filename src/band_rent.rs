@@ -74,6 +74,26 @@ pub fn band_bounds(anchor: u64, band_bps: u64) -> Result<(u64, u64), BandRentErr
     Ok((lo as u64, hi as u64))
 }
 
+/// Review E-M1: largest per-side position cap a band market may configure (the
+/// design's `cfg_max_active_positions_per_side`). The keeper must certify every
+/// positioned leg each epoch, so this bounds the sweep at `2 * cap` refreshes.
+pub const BAND_MAX_POSITIONS_PER_SIDE: u64 = 256;
+/// Review E-M2: floor on `E` (`band_max_epoch_slots`). ~1 minute at 400 ms slots:
+/// one missed keeper pass must not pin the book.
+pub const BAND_MIN_EPOCH_SLOTS: u64 = 150;
+/// Review E-M2: `Pmax >= BAND_MIN_PIN_EPOCHS * E`: a pinned book gets at least
+/// this many epochs of keeper time before `BandPinExpired` opens recovery.
+pub const BAND_MIN_PIN_EPOCHS: u64 = 8;
+/// Review E-L1: minimum band width `hi - lo` in price ticks. Below it the
+/// integer band degenerates (at d = 130 every price <= 76 has `lo == hi`).
+pub const MIN_BAND_WIDTH_TICKS: u64 = 32;
+
+/// True iff the band around `anchor` is at least `MIN_BAND_WIDTH_TICKS` wide.
+pub fn band_width_ok(anchor: u64, band_bps: u64) -> Result<bool, BandRentError> {
+    let (lo, hi) = band_bounds(anchor, band_bps)?;
+    Ok(hi - lo >= MIN_BAND_WIDTH_TICKS)
+}
+
 /// True iff `price` lies inside the band around `anchor`.
 pub fn price_in_band(price: u64, anchor: u64, band_bps: u64) -> Result<bool, BandRentError> {
     let (lo, hi) = band_bounds(anchor, band_bps)?;

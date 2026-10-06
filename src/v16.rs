@@ -246,6 +246,13 @@ pub enum V16Error {
     /// otherwise pinned) and the accrual was not a no-move accrual (`price ==
     /// P_last`, funding and rent 0) (I-B4). Wrapper maps it to 104.
     BandPinned,
+    /// v2.2 band (review E-M1): a new leg would exceed the side's
+    /// `band_max_positions_per_side`. Wrapper maps it to 111.
+    BandPositionCap,
+    /// v2.2 band (review E-L1): the band around the current anchor is narrower
+    /// than `MIN_BAND_WIDTH_TICKS`, so no new exposure may attach (a near
+    /// zero-width band could never move). Wrapper maps it to 112.
+    BandTooNarrow,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -1250,6 +1257,8 @@ impl V16Core {
         basis_pos_q: i128,
         loss_weight: u128,
         asset_index_u32: u32,
+        band_bps: u64,
+        band_max_positions_per_side: u64,
     ) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
         let (a_basis, k_snap, f_snap, kf_epoch_snap, b_snap, epoch_snap) = match side {
             SideV16::Long => (
@@ -1285,7 +1294,7 @@ impl V16Core {
         // is a separate, explicit health event (V16Core::kernel_band_certify_leg),
         // so a missed certification hook can only cost liveness (the anchor
         // cannot advance), never the loss <= capital guarantee.
-        asset = V16Core::kernel_band_attach(asset, side)?;
+        asset = V16Core::kernel_band_attach(asset, side, band_bps, band_max_positions_per_side)?;
         // v2.2 rent: a leg owes nothing for time before it existed (I-R5).
         let rent_snap = match side {
             SideV16::Long => asset.rent_index_long_num,
@@ -1318,13 +1327,33 @@ impl V16Core {
 
     /// v2.2 band (I-B2): a newly attached leg joins its side's uncertified
     /// cohort. No-op when the band is off for the asset (`band_epoch == 0`,
-    /// I-B7: counters untouched).
+    /// I-B7: counters untouched). Called after the side's `stored_pos_count`
+    /// counted the new leg, so the cap check is on the post-attach count.
+    ///
+    /// Review E-M1: refused (`BandPositionCap`) beyond the per-side cap, so the
+    /// per-epoch certification sweep is bounded by `2 * cap` legs.
+    /// Review E-L1: refused (`BandTooNarrow`) while the band around the anchor is
+    /// narrower than `MIN_BAND_WIDTH_TICKS`: no exposure on a band that cannot move.
     pub(crate) fn kernel_band_attach(
         mut asset: AssetStateV16,
         side: SideV16,
+        band_bps: u64,
+        band_max_positions_per_side: u64,
     ) -> V16Result<AssetStateV16> {
         if asset.band_epoch == 0 {
             return Ok(asset);
+        }
+        if !crate::band_rent::band_width_ok(asset.band_anchor_price, band_bps)
+            .map_err(|_| V16Error::InvalidConfig)?
+        {
+            return Err(V16Error::BandTooNarrow);
+        }
+        let positions = match side {
+            SideV16::Long => asset.stored_pos_count_long,
+            SideV16::Short => asset.stored_pos_count_short,
+        };
+        if positions > band_max_positions_per_side {
+            return Err(V16Error::BandPositionCap);
         }
         let count = match side {
             SideV16::Long => &mut asset.band_uncertified_long,
@@ -4334,6 +4363,12 @@ pub struct V16Config {
     /// v2.2 rent (item 2): ceiling on the per-side holding-fee rate, in 1e-9 of
     /// notional per slot. Priced into the §1.6 envelope and the Band Safety Law.
     pub rent_max_e9_per_slot: u64,
+    /// v2.2 band (review E-M1): cap on positioned legs per side on a band market.
+    /// Every positioned leg must be certified each epoch before the anchor can
+    /// advance, so this bounds the keeper's per-epoch sweep and stops dust legs
+    /// from holding an epoch hostage. `1..=BAND_MAX_POSITIONS_PER_SIDE` iff band
+    /// on, 0 iff band off. Enforced at attach (`kernel_band_attach`).
+    pub band_max_positions_per_side: u64,
 }
 
 impl V16Config {
@@ -4394,6 +4429,7 @@ impl V16Config {
             band_max_epoch_slots: 0,
             band_max_pin_slots: 0,
             rent_max_e9_per_slot: 0,
+            band_max_positions_per_side: 0,
         }
     }
 
@@ -4868,12 +4904,24 @@ impl V16Config {
             return Err(V16Error::InvalidConfig);
         }
         if self.band_bps == 0 {
-            if self.band_max_epoch_slots != 0 || self.band_max_pin_slots != 0 {
+            if self.band_max_epoch_slots != 0
+                || self.band_max_pin_slots != 0
+                || self.band_max_positions_per_side != 0
+            {
                 return Err(V16Error::InvalidConfig);
             }
         } else if self.band_bps > crate::band_rent::MAX_BAND_BPS
-            || self.band_max_epoch_slots == 0
-            || self.band_max_pin_slots < self.band_max_epoch_slots
+            // Review E-M2: floors. A tiny E pins the book on one missed
+            // certification (and loosens the BSL time term); Pmax must leave the
+            // keeper several epochs to recover before BandPinExpired opens.
+            || self.band_max_epoch_slots < crate::band_rent::BAND_MIN_EPOCH_SLOTS
+            || self.band_max_pin_slots
+                < self
+                    .band_max_epoch_slots
+                    .saturating_mul(crate::band_rent::BAND_MIN_PIN_EPOCHS)
+            // Review E-M1: the per-side position cap bounds the per-epoch sweep.
+            || self.band_max_positions_per_side == 0
+            || self.band_max_positions_per_side > crate::band_rent::BAND_MAX_POSITIONS_PER_SIDE
             // The Band Safety Law is a per-single-asset-account law: it does not
             // extend to cross-asset portfolios without a per-account sum.
             || self.max_market_slots != 1
@@ -7537,6 +7585,7 @@ pub struct V16ConfigAccount {
     pub band_max_epoch_slots: V16PodU64,
     pub band_max_pin_slots: V16PodU64,
     pub rent_max_e9_per_slot: V16PodU64,
+    pub band_max_positions_per_side: V16PodU64,
 }
 
 impl V16ConfigAccount {
@@ -7603,6 +7652,7 @@ impl V16ConfigAccount {
             band_max_epoch_slots: V16PodU64::new(value.band_max_epoch_slots),
             band_max_pin_slots: V16PodU64::new(value.band_max_pin_slots),
             rent_max_e9_per_slot: V16PodU64::new(value.rent_max_e9_per_slot),
+            band_max_positions_per_side: V16PodU64::new(value.band_max_positions_per_side),
         }
     }
 
@@ -7661,6 +7711,7 @@ impl V16ConfigAccount {
             band_max_epoch_slots: self.band_max_epoch_slots.get(),
             band_max_pin_slots: self.band_max_pin_slots.get(),
             rent_max_e9_per_slot: self.rent_max_e9_per_slot.get(),
+            band_max_positions_per_side: self.band_max_positions_per_side.get(),
         };
         Ok(out)
     }
@@ -8021,9 +8072,19 @@ pub struct EngineAssetSlotV16Account {
 /// at 0 (I-B7). Public so a wrapper that builds genesis asset state itself (instead
 /// of through `activate_empty_*`) arms the band identically; the accrual gate
 /// refuses a band-configured live asset that was never armed (fail closed).
-pub fn band_initialize_asset(asset: &mut AssetStateV16, band_bps: u64, price: u64, slot: u64) {
+pub fn band_initialize_asset(
+    asset: &mut AssetStateV16,
+    band_bps: u64,
+    price: u64,
+    slot: u64,
+) -> V16Result<()> {
     if band_bps == 0 {
-        return;
+        return Ok(());
+    }
+    // Review E-L1: a band market's genesis price must leave a band at least
+    // MIN_BAND_WIDTH_TICKS wide.
+    if !crate::band_rent::band_width_ok(price, band_bps).map_err(|_| V16Error::InvalidConfig)? {
+        return Err(V16Error::BandTooNarrow);
     }
     asset.band_anchor_price = price;
     asset.band_anchor_slot = slot;
@@ -8033,6 +8094,7 @@ pub fn band_initialize_asset(asset: &mut AssetStateV16, band_bps: u64, price: u6
     asset.band_liq_pending_long = 0;
     asset.band_liq_pending_short = 0;
     asset.band_pin_since_slot = 0;
+    Ok(())
 }
 
 fn asset_contributes_to_loss_stale_summary(asset: AssetStateV16) -> bool {
@@ -8760,7 +8822,7 @@ impl MarketGroupV16HeaderAccount {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
-        band_initialize_asset(&mut asset, config.band_bps, authenticated_price, now_slot);
+        band_initialize_asset(&mut asset, config.band_bps, authenticated_price, now_slot)?;
         *slot = EngineAssetSlotV16Account {
             asset: AssetStateV16Account::from_runtime(&asset),
             insurance_domain_budget_long: V16PodU128::default(),
@@ -15654,11 +15716,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let governing_anchor_slot = asset.band_anchor_slot;
         let slot = self.markets[asset_index].engine_slot();
-        if V16Core::kernel_band_reanchor_ready(
-            asset,
-            slot.pending_domain_loss_barrier_long.get(),
-            slot.pending_domain_loss_barrier_short.get(),
-        ) {
+        // Review E-L1: never re-anchor onto a band narrower than the minimum width
+        // (the book stays on the old anchor, pins, and recovers via BandPinExpired).
+        let new_band_wide_enough =
+            crate::band_rent::band_width_ok(asset.effective_price, config.band_bps)
+                .map_err(|_| V16Error::InvalidConfig)?;
+        if new_band_wide_enough
+            && V16Core::kernel_band_reanchor_ready(
+                asset,
+                slot.pending_domain_loss_barrier_long.get(),
+                slot.pending_domain_loss_barrier_short.get(),
+            )
+        {
             asset = V16Core::kernel_band_reanchor(asset, segment_end_slot)?;
         }
         Ok((
@@ -18078,7 +18147,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let loss_weight = loss_weight_for_basis(basis_pos_q.unsigned_abs(), a_basis)?;
         let (asset, new_leg) =
-            V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index as u32)?;
+            V16Core::kernel_attach_leg(
+                asset,
+                side,
+                basis_pos_q,
+                loss_weight,
+                asset_index as u32,
+                self.header.config.band_bps.get(),
+                self.header.config.band_max_positions_per_side.get(),
+            )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
@@ -23025,7 +23102,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             now_slot,
         );
         let mut restarted = slot.asset.try_to_runtime()?;
-        band_initialize_asset(&mut restarted, band_bps, authenticated_price, now_slot);
+        band_initialize_asset(&mut restarted, band_bps, authenticated_price, now_slot)?;
         slot.asset = AssetStateV16Account::from_runtime(&restarted);
 
         self.header.next_market_id = V16PodU64::new(next_market_id);

@@ -46,7 +46,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 // fixtures are v2.1 (discriminator 18) bytes from band-off markets, whose exact v2.2
 // encoding is the same bytes with the new words zeroed (I-B7). These upgraders insert
 // exactly those zero words, so the replays keep exercising the live v2.1 state.
-const V22_CONFIG_EXTRA: usize = 4 * 8; // band_bps, band_max_epoch_slots, band_max_pin_slots, rent_max
+const V22_CONFIG_EXTRA: usize = 5 * 8; // band_bps, band_max_epoch_slots, band_max_pin_slots, rent_max, band_max_positions_per_side
 const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16; // 8 band u64 words + 3 rent u128 words
 const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pending, rent_snap, rent_carry
 

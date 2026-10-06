@@ -153,3 +153,24 @@ on it.
 `--harness 'kani_rent_rate.*|kani_band_lambda.*|kani_graduation.*|kani_c_launch.*'` in the
 wrapper, after review of this design, on the commit that goes to the v2.2 security review.
 Every harness must be SUCCESSFUL with every cover satisfied.
+
+## 7. Additions after the security review (2026-10-06)
+
+- `kani_band_attach_respects_position_cap` (E-M1): for any asset with `band_epoch != 0`, any
+  side and any `cap in 1..=256`, `kernel_band_attach` after `add_open_interest_for_new_position`
+  returns `Ok` iff `stored_pos_count_side <= cap` and the band at the anchor is at least
+  `MIN_BAND_WIDTH_TICKS` wide; on `Ok` the uncertified counter grew by exactly 1, on `Err` the
+  asset is unchanged. Covers: Ok, `BandPositionCap`, `BandTooNarrow`.
+- `kani_band_position_cap_census` (E-M1, the reviewer's request): over a bounded sequence of
+  attach / detach / certify steps, `stored_pos_count_side <= cap` always, so the per-epoch
+  sweep is at most `2 * cap` legs.
+- `kani_band_width_ok_exact` (E-L1): for `d in 1..=2000` and `anchor in 1..=MAX_ORACLE_PRICE`,
+  `band_width_ok(anchor, d) => lo < anchor < hi` (the band moves both ways); and
+  `kani_band_reanchor_never_narrow`: `band_prepare_accrual` never produces an anchor with
+  `band_width_ok == false`.
+- `kani_band_config_floors` (E-M2): `validate_public_user_fund` accepts a band config only if
+  `E >= 150`, `Pmax >= 8E` and `cap in 1..=256` (bounded over the shape fields).
+- Wrapper `kani_rent_rate_fail_closed`: `rent_rate_e9_fail_closed <= rent_max` and equals
+  `rent_max` whenever `rent_rate_e9` is `None`.
+
+Same rule as §6: designed here, run once on the final code.

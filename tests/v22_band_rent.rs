@@ -59,6 +59,7 @@ fn band_cfg(band_bps: u64) -> V16Config {
     if band_bps != 0 {
         c.band_max_epoch_slots = 600;
         c.band_max_pin_slots = 9_000;
+        c.band_max_positions_per_side = percolator::band_rent::BAND_MAX_POSITIONS_PER_SIDE;
     }
     c
 }
@@ -72,12 +73,16 @@ struct World {
 
 impl World {
     fn new(cfg: V16Config, n_accounts: usize, deposit: u128) -> Self {
+        Self::new_at(cfg, n_accounts, deposit, P0)
+    }
+
+    fn new_at(cfg: V16Config, n_accounts: usize, deposit: u128, price: u64) -> Self {
         cfg.validate_public_user_fund()
             .expect("fixture config validates");
         let mut header = MarketGroupV16HeaderAccount::new_dynamic(MARKET_ID, cfg, 1, 0).unwrap();
         let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
         header
-            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, P0, 1)
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, price, 1)
             .unwrap();
         let mut accounts = Vec::new();
         for i in 0..n_accounts {
@@ -486,6 +491,173 @@ fn band_config_shape_rules() {
     let mut c = band_cfg(130);
     c.band_bps = MAX_BAND_BPS + 1;
     assert!(c.validate_public_user_fund().is_err());
+}
+
+/// Review E-M1 / E-M2: the per-side position cap and the E / Pmax floors are
+/// config-shape rules, each boundary pinned on both sides.
+#[test]
+fn band_config_floors_and_position_cap() {
+    use percolator::band_rent::{
+        BAND_MAX_POSITIONS_PER_SIDE, BAND_MIN_EPOCH_SLOTS, BAND_MIN_PIN_EPOCHS,
+    };
+    let ok = |c: &V16Config| c.validate_public_user_fund().is_ok();
+    let mut c = band_cfg(130);
+    c.band_max_epoch_slots = BAND_MIN_EPOCH_SLOTS;
+    c.band_max_pin_slots = BAND_MIN_EPOCH_SLOTS * BAND_MIN_PIN_EPOCHS;
+    assert!(ok(&c), "E and Pmax exactly at their floors");
+    c.band_max_epoch_slots = BAND_MIN_EPOCH_SLOTS - 1;
+    c.band_max_pin_slots = 20 * BAND_MIN_EPOCH_SLOTS;
+    assert!(
+        !ok(&c),
+        "E below the floor (E = 1 pinned on one missed sweep)"
+    );
+    let mut c = band_cfg(130);
+    c.band_max_pin_slots = c.band_max_epoch_slots * BAND_MIN_PIN_EPOCHS - 1;
+    assert!(!ok(&c), "Pmax below 8E");
+    let mut c = band_cfg(130);
+    c.band_max_epoch_slots = 1;
+    c.band_max_pin_slots = 1;
+    assert!(!ok(&c), "the review's E = 1, Pmax = 1 example");
+    let mut c = band_cfg(130);
+    c.band_max_positions_per_side = 0;
+    assert!(!ok(&c), "band on needs a cap");
+    c.band_max_positions_per_side = BAND_MAX_POSITIONS_PER_SIDE + 1;
+    assert!(!ok(&c), "cap above 256");
+    c.band_max_positions_per_side = 1;
+    assert!(ok(&c));
+    let mut c = band_cfg(0);
+    c.band_max_positions_per_side = 1;
+    assert!(!ok(&c), "band off encodes cap 0");
+}
+
+/// Review E-M1: dust legs cannot hold the epoch. With a per-side cap K the
+/// (K+1)-th leg on a side is refused, so the keeper's per-epoch sweep is at most
+/// 2K refreshes and the anchor advances once they are done.
+#[test]
+fn band_position_cap_bounds_the_sweep_so_dust_cannot_hold_the_epoch() {
+    const K: u64 = 4;
+    let mut cfg = band_cfg(130);
+    cfg.band_max_positions_per_side = K;
+    let n = 2 * (K as usize + 2);
+    let mut w = World::new(cfg, n, 10_000_000);
+    // K dust pairs fill both sides to the cap ...
+    for k in 0..K as usize {
+        w.trade(2 * k, 2 * k + 1, POS_SCALE / 1_000)
+            .expect("open within cap");
+    }
+    let a = w.asset();
+    assert_eq!((a.stored_pos_count_long, a.stored_pos_count_short), (K, K));
+    // ... and the (K+1)-th leg on either side is refused, state untouched.
+    let before = (w.header, w.markets.clone(), w.accounts.clone());
+    let k = K as usize;
+    assert_eq!(
+        w.trade(2 * k, 2 * k + 1, POS_SCALE / 1_000),
+        Err(V16Error::BandPositionCap)
+    );
+    assert_eq!((w.header, w.markets.clone()), (before.0, before.1));
+    // Adding to an EXISTING leg is not a new position: still allowed.
+    w.trade(0, 1, POS_SCALE / 1_000)
+        .expect("increase an existing leg");
+    // The epoch advances after one bounded sweep of every positioned leg.
+    w.set_target(2 * P0);
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap();
+    let e = w.asset().band_epoch;
+    for _ in 0..5 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+    }
+    assert_eq!(
+        w.asset().band_epoch,
+        e,
+        "uncertified dust holds the epoch ..."
+    );
+    let mut swept = 0;
+    for i in 0..n {
+        if w.positioned(i) {
+            w.refresh(i).unwrap();
+            swept += 1;
+        }
+    }
+    assert!(
+        swept as u64 <= 2 * K,
+        "... for at most 2K refreshes ({swept})"
+    );
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap();
+    assert_eq!(w.asset().band_epoch, e + 1, "... and then advances");
+    // Closing a leg frees its slot for a new account.
+    let q = w.accounts[0].legs[0]
+        .try_to_runtime()
+        .unwrap()
+        .basis_pos_q
+        .unsigned_abs();
+    w.trade(1, 0, q).ok();
+    w.assert_census();
+}
+
+/// Review E-L1: the band can never be (near) zero-width. Genesis below the width
+/// floor is refused, an asset whose anchor has drifted below it accepts no new
+/// exposure, and re-anchoring never lands on a too-narrow band.
+#[test]
+fn band_never_zero_width() {
+    use percolator::band_rent::{band_width_ok, MIN_BAND_WIDTH_TICKS};
+    // Every anchor the width rule accepts has hi - lo >= 32 (exhaustive over small prices).
+    for d in [1u64, 130, 145, MAX_BAND_BPS] {
+        for a in 1..20_000u64 {
+            let (lo, hi) = band_bounds(a, d).unwrap();
+            assert_eq!(
+                band_width_ok(a, d).unwrap(),
+                hi - lo >= MIN_BAND_WIDTH_TICKS
+            );
+            if band_width_ok(a, d).unwrap() {
+                assert!(lo < a && a < hi, "a width-ok band moves both ways");
+            }
+        }
+    }
+    // Genesis at a tiny price is refused.
+    let mut asset = percolator::AssetStateV16::default();
+    assert_eq!(
+        percolator::band_initialize_asset(&mut asset, 130, 76, 1),
+        Err(V16Error::BandTooNarrow)
+    );
+    assert!(percolator::band_initialize_asset(&mut asset, 130, P0, 1).is_ok());
+    // Re-anchoring never lands on a too-narrow band: walk a certified book down from
+    // 1,300 ticks (width 32 at d = 130) with the keeper certifying every epoch. The
+    // anchor follows down to 1,236 (band [1220, 1252]); 1,220 would be 30 wide, so
+    // the anchor stays and the book pins at the edge (recovery is BandPinExpired).
+    let mut w = World::new_at(band_cfg(130), 2, 10_000_000, 1_300);
+    w.trade(0, 1, 1_000 * POS_SCALE).unwrap();
+    w.set_target(1);
+    let mut anchors = vec![];
+    for _ in 0..40 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+        let a = w.asset();
+        assert!(
+            band_width_ok(a.band_anchor_price, 130).unwrap(),
+            "anchor {} has a band narrower than {MIN_BAND_WIDTH_TICKS}",
+            a.band_anchor_price
+        );
+        anchors.push(a.band_anchor_price);
+        for i in 0..2 {
+            w.refresh(i).unwrap();
+        }
+    }
+    let a = w.asset();
+    assert_eq!(
+        a.band_anchor_price, 1_236,
+        "followed down to the last wide-enough anchor"
+    );
+    assert_eq!(a.effective_price, 1_220, "pinned at lo of the last band");
+    assert!(
+        anchors.contains(&1_284),
+        "the anchor did advance before the floor"
+    );
+    // A live asset whose anchor sits below the floor refuses new exposure.
+    let mut w = World::new(band_cfg(130), 2, 10_000_000);
+    w.markets[0].engine.asset.band_anchor_price = percolator::V16PodU64::new(76);
+    assert_eq!(w.trade(0, 1, POS_SCALE), Err(V16Error::BandTooNarrow));
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,9 +1532,15 @@ fn v22_empty_leg_fast_path_is_exactly_the_empty_encoding() {
             let mut bytes = base.clone();
             bytes[i] = v;
             let leg: PortfolioLegV16Account = *bytemuck::from_bytes(&bytes);
-            assert!(!leg.is_empty_encoding(), "byte {i}={v} must leave the fast path");
+            assert!(
+                !leg.is_empty_encoding(),
+                "byte {i}={v} must leave the fast path"
+            );
             match leg.try_to_runtime() {
-                Ok(out) => assert!(out.active, "byte {i}={v}: an Ok decode must be an active leg"),
+                Ok(out) => assert!(
+                    out.active,
+                    "byte {i}={v}: an Ok decode must be an active leg"
+                ),
                 Err(e) => assert!(
                     matches!(
                         e,
@@ -1373,4 +1551,576 @@ fn v22_empty_leg_fast_path_is_exactly_the_empty_encoding() {
             }
         }
     }
+}
+
+// ===========================================================================
+// SENTINEL adversarial additions (review of PR #279). Tests named sec_*.
+// ===========================================================================
+
+fn sec_cfg(mmr: u64, fee: u64, fund: u64, rent: u64, e: u64, d: u64) -> V16Config {
+    let mut c = band_cfg(d);
+    c.maintenance_margin_bps = mmr;
+    c.initial_margin_bps = 2 * mmr;
+    c.liquidation_fee_bps = fee;
+    c.max_abs_funding_e9_per_slot = fund;
+    c.rent_max_e9_per_slot = rent;
+    if d != 0 {
+        c.band_max_epoch_slots = e;
+        c.band_max_pin_slots = 20 * e;
+    }
+    c
+}
+
+/// widest d accepted by the BSL validator for this config shape, or None.
+fn sec_widest(mmr: u64, fee: u64, fund: u64, rent: u64, e: u64) -> Option<u64> {
+    let mut best = None;
+    for d in 1..=MAX_BAND_BPS {
+        if sec_cfg(mmr, fee, fund, rent, e, d)
+            .validate_public_user_fund()
+            .is_ok()
+        {
+            best = Some(d);
+        } else if best.is_some() {
+            break;
+        }
+    }
+    best
+}
+
+#[derive(Default, Debug)]
+struct SecStats {
+    cfgs: u64,
+    liqs: u64,
+    min_slack: Option<i128>,
+    reanchors: u64,
+    errs: Vec<String>,
+}
+
+/// Directed worst-case adversary AT the BSL boundary: widest valid d, max funding and max
+/// rent every non-pinned accrual, all accounts at ~max leverage, the keeper certifies the
+/// victim LAST in each epoch and the liquidation is delayed to the end of the window.
+fn sec_run(cfg: V16Config, seed: u64, stats: &mut SecStats) {
+    let e = cfg.band_max_epoch_slots;
+    let fund = cfg.max_abs_funding_e9_per_slot as i128;
+    let rent = cfg.rent_max_e9_per_slot;
+    let n = 8usize;
+    let mut w = World::new(cfg, n, 2_000_000);
+    let mut rng = Rng(seed | 1);
+    let mut dir_down = rng.below(2) == 0;
+    for epoch in 0..80u64 {
+        // (re)open the book: pairs at near max leverage (q chosen so IM ~ capital).
+        if epoch % 5 == 0 {
+            for k in 0..n / 2 {
+                let q = (15 + rng.below(5)) as u128 * POS_SCALE + rng.below(1_000_000) as u128;
+                let (a, b) = if rng.below(2) == 0 {
+                    (2 * k, 2 * k + 1)
+                } else {
+                    (2 * k + 1, 2 * k)
+                };
+                let snap = (w.header, w.markets.clone(), w.accounts.clone());
+                if w.trade(a, b, q).is_err() {
+                    (w.header, w.markets, w.accounts) = snap;
+                }
+            }
+        }
+        if rng.below(4) == 0 {
+            dir_down = !dir_down;
+        }
+        let t = w.asset().raw_oracle_target_price;
+        w.set_target(if dir_down {
+            (t / 3).max(1)
+        } else {
+            t.saturating_mul(3).min(MAX_ORACLE_PRICE)
+        });
+        // accrue up to (just under) the window with adverse funding + max rent
+        let steps = (e / 3).saturating_sub(1).max(1);
+        for _ in 0..steps {
+            w.now += 3;
+            let f = if rng.below(2) == 0 { fund } else { -fund };
+            let before = w.asset().band_epoch;
+            if let Err(err) = w.accrue(f, rent, rent) {
+                stats.errs.push(format!("accrue {err:?}"));
+                return;
+            }
+            if w.asset().band_epoch > before {
+                stats.reanchors += 1;
+            }
+        }
+        // keeper: certify every positioned account, victims (the ones at/near MM) last
+        let mut order: Vec<usize> = (0..n).filter(|&i| w.positioned(i)).collect();
+        order.sort_by_key(|&i| {
+            let c = w.accounts[i].health_cert.try_to_runtime().unwrap();
+            std::cmp::Reverse(
+                c.certified_maintenance_req
+                    .saturating_sub(c.certified_equity.max(0) as u128),
+            )
+        });
+        order.reverse();
+        for i in order {
+            let snap = (w.header, w.markets.clone(), w.accounts.clone());
+            match w.refresh(i) {
+                Ok(cert) => {
+                    assert!(
+                        cert.certified_equity >= 0,
+                        "loss > capital, seed {seed} epoch {epoch}"
+                    );
+                    if cert.certified_liq_deficit != 0 {
+                        // delayed liquidation, then assert D == 0 and equity >= fee
+                        let snap2 = (w.header, w.markets.clone(), w.accounts.clone());
+                        match w.with(i, |m, a| {
+                            m.liquidate_account_not_atomic(
+                                a,
+                                LiquidationRequestV16 { asset_index: 0 },
+                            )
+                        }) {
+                            Ok(out) => {
+                                assert_eq!(
+                                    (out.insurance_used, out.residual_booked, out.explicit_loss),
+                                    (0, 0, 0),
+                                    "BAD DEBT seed {seed} epoch {epoch}"
+                                );
+                                let slack = cert.certified_equity - out.fee_charged as i128;
+                                stats.min_slack =
+                                    Some(stats.min_slack.map_or(slack, |m| m.min(slack)));
+                                assert!(
+                                    slack >= 0,
+                                    "BSL: equity {} < fee {} seed {seed}",
+                                    cert.certified_equity,
+                                    out.fee_charged
+                                );
+                                stats.liqs += 1;
+                            }
+                            Err(err) => {
+                                stats.errs.push(format!("liq {err:?}"));
+                                (w.header, w.markets, w.accounts) = snap2;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    stats.errs.push(format!("refresh {err:?}"));
+                    (w.header, w.markets, w.accounts) = snap;
+                }
+            }
+        }
+        w.assert_census();
+        w.assert_conservation();
+        assert_eq!(
+            w.header.bankruptcy_hlock_active, 0,
+            "hlock set seed {seed} epoch {epoch}"
+        );
+    }
+}
+
+#[test]
+fn sec_bsl_boundary_adversary_with_max_funding_rent_and_delayed_liquidation() {
+    let mut stats = SecStats::default();
+    for &mmr in &[250u64, 500, 1000] {
+        for &fee in &[10u64, 50, 100] {
+            for &fund in &[0u64, 111, 2_000, 10_000] {
+                for &rent in &[0u64, 23, 1_000, 10_000] {
+                    // v2.2 review E-M2: E >= 150 (was 30 / 300 before the floor).
+                    for &e in &[150u64, 300] {
+                        let Some(d) = sec_widest(mmr, fee, fund, rent, e) else {
+                            continue;
+                        };
+                        stats.cfgs += 1;
+                        for seed in 1..=3u64 {
+                            sec_run(
+                                sec_cfg(mmr, fee, fund, rent, e, d),
+                                seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                    ^ (mmr << 8)
+                                    ^ fee
+                                    ^ (fund << 20)
+                                    ^ (rent << 32)
+                                    ^ e,
+                                &mut stats,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut kinds: std::collections::BTreeMap<String, u64> = Default::default();
+    for e in &stats.errs {
+        *kinds.entry(e.clone()).or_default() += 1;
+    }
+    eprintln!(
+        "SEC cfgs={} liqs={} min_slack={:?} reanchors={} errs={:?}",
+        stats.cfgs, stats.liqs, stats.min_slack, stats.reanchors, kinds
+    );
+    assert!(stats.cfgs > 20 && stats.liqs > 50, "vacuous: {stats:?}");
+}
+
+/// Empty-leg fast path: EVERY single-byte mutation of the empty encoding must still be
+/// rejected by the full decode (HiddenLeg / bad bool / bad side / invalid active leg).
+#[test]
+fn sec_empty_leg_fast_path_no_single_byte_bypass() {
+    use percolator::{PortfolioLegV16, PortfolioLegV16Account, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT};
+    let base = bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT).to_vec();
+    assert_eq!(
+        PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY),
+        PORTFOLIO_LEG_V16_EMPTY_ACCOUNT
+    );
+    assert_eq!(
+        PORTFOLIO_LEG_V16_EMPTY_ACCOUNT.try_to_runtime(),
+        Ok(PortfolioLegV16::EMPTY)
+    );
+    let mut n = 0u64;
+    for i in 0..base.len() {
+        for v in 0..=255u8 {
+            if v == base[i] {
+                continue;
+            }
+            let mut b = base.clone();
+            b[i] = v;
+            let leg: PortfolioLegV16Account = *bytemuck::from_bytes(&b);
+            assert!(!leg.is_empty_encoding());
+            let r = leg.try_to_runtime();
+            assert!(r.is_err(), "byte {i}={v} decoded Ok: {r:?}");
+            n += 1;
+        }
+    }
+    // random multi-byte mutations: result is Ok only if it round-trips to a canonical leg
+    let mut rng = Rng(0xDEAD_BEEF_1234_5678);
+    for _ in 0..200_000 {
+        let mut b = base.clone();
+        for _ in 0..(1 + rng.below(4)) {
+            let i = rng.below(b.len() as u64) as usize;
+            b[i] = rng.below(256) as u8;
+        }
+        let leg: PortfolioLegV16Account = *bytemuck::from_bytes(&b);
+        if let Ok(rt) = leg.try_to_runtime() {
+            // accepted => canonical: re-encoding gives the identical bytes (no hidden state)
+            assert_eq!(
+                bytemuck::bytes_of(&PortfolioLegV16Account::from_runtime(&rt)),
+                &b[..],
+                "non-canonical leg accepted"
+            );
+        }
+    }
+    eprintln!("SEC empty-leg: {n} single-byte mutations all rejected");
+}
+
+/// Engine layer does NOT itself refuse risk-increasing trades while the asset is pinned
+/// (the lag gate is the wrapper's). Documents the reliance (reported in the review).
+#[test]
+fn sec_engine_refuses_open_while_pinned_lag_gate_is_in_the_engine() {
+    let mut w = World::new(band_cfg(130), 4, 10_000_000);
+    w.trade(0, 1, 5 * POS_SCALE).unwrap();
+    w.set_target(P0 * 2);
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap();
+    // refresh nobody: the anchor cannot advance, price is pinned at hi(A)
+    let a = w.asset();
+    let (_, hi) = band_bounds(a.band_anchor_price, 130).unwrap();
+    assert_eq!(a.effective_price, hi);
+    assert!(a.band_pin_since_slot != 0);
+    let r = w.trade(2, 3, 5 * POS_SCALE);
+    eprintln!("SEC engine open while pinned (target 2x, P_last at hi): {r:?}");
+}
+
+/// The G-lunge (design §1.1 proof sketch's worst case). A blocker leg that is liq-pending
+/// (underwater at the victim's favourable edge, never refreshed again) holds epoch e open
+/// while the victim opens at lo(A_e) at the minimum initial margin (IM = MM + 1 bp); the
+/// price runs lo(A_e) -> hi(A_e); the blocker is then certified, the anchor advances, and
+/// the price runs on to hi(A_{e+1}) (3d), with max funding + rent throughout. The victim is
+/// certified last. Must stay D == 0 and equity >= liquidation fee.
+fn sec_lunge(
+    mmr: u64,
+    imr: u64,
+    fee: u64,
+    fund: u64,
+    rent: u64,
+    e: u64,
+    d: u64,
+    long_victim: bool,
+) -> Result<Option<i128>, String> {
+    let mut cfg = sec_cfg(mmr, fee, fund, rent, e, d);
+    cfg.initial_margin_bps = imr;
+    if cfg.validate_public_user_fund().is_err() {
+        return Err("cfg".into());
+    }
+    let mut w = World::new(cfg, 4, 2_000_000);
+    let max_q = |w: &mut World, l: usize, s: usize| -> u128 {
+        let (mut qlo, mut qhi, mut best) = (1u128, 4_000u128 * POS_SCALE, 0u128);
+        while qlo <= qhi {
+            let q = (qlo + qhi) / 2;
+            let snap = (w.header, w.markets.clone(), w.accounts.clone());
+            let ok = w.trade(l, s, q).is_ok();
+            (w.header, w.markets, w.accounts) = snap;
+            if ok {
+                best = q;
+                qlo = q + 1
+            } else {
+                qhi = q - 1
+            }
+        }
+        best
+    };
+    // blockers: 2 long / 3 short at P0, max size (IM = MM + 1 bp => underwater after a 1bp+ move)
+    let qb = max_q(&mut w, 2, 3);
+    if qb == 0 {
+        return Err("qb".into());
+    }
+    w.trade(2, 3, qb)
+        .map_err(|e| format!("open blockers {e:?}"))?;
+    w.now += 3;
+    w.accrue(0, 0, 0).map_err(|e| format!("reanchor {e:?}"))?;
+    let a = w.asset();
+    let (lo, hi) = band_bounds(a.band_anchor_price, d).unwrap();
+    let (fav_edge, adv_edge, blocker, other) = if long_victim {
+        (hi, lo, 3usize, 2usize)
+    } else {
+        (lo, hi, 2usize, 3usize)
+    };
+    // favourable edge, then keeper refreshes the blockers: `blocker` goes liq-pending
+    w.set_target(fav_edge);
+    for _ in 0..3 {
+        w.now += 3;
+        w.accrue(0, 0, 0).map_err(|e| format!("to fav {e:?}"))?;
+    }
+    if w.asset().effective_price != fav_edge {
+        return Err("not at fav edge".into());
+    }
+    for i in [blocker, other] {
+        w.refresh(i)
+            .map_err(|e| format!("refresh blockers {e:?}"))?;
+    }
+    let pend = if blocker == 2 {
+        w.asset().band_liq_pending_long
+    } else {
+        w.asset().band_liq_pending_short
+    };
+    if pend == 0 {
+        return Err("blocker not liq-pending".into());
+    }
+    // victim opens at the favourable edge at the thinnest margin
+    let (vl, vs) = if long_victim { (0, 1) } else { (1, 0) };
+    let qv = max_q(&mut w, vl, vs);
+    if qv == 0 {
+        return Err("qv".into());
+    }
+    w.trade(vl, vs, qv)
+        .map_err(|e| format!("open victim {e:?}"))?;
+    // lunge to the adverse edge of band(A_e), blocker never refreshed meanwhile
+    w.set_target(if long_victim {
+        1
+    } else {
+        MAX_ORACLE_PRICE.min(a.band_anchor_price * 4)
+    });
+    let f = if long_victim {
+        fund as i128
+    } else {
+        -(fund as i128)
+    };
+    let mut guard = 0;
+    while w.asset().effective_price != adv_edge {
+        w.now += 3;
+        w.accrue(f, rent, rent)
+            .map_err(|e| format!("lunge1 {e:?}"))?;
+        guard += 1;
+        if guard > 200 {
+            return Err("no edge".into());
+        }
+    }
+    let e1 = w.asset().band_epoch;
+    // epoch e exhausted: certify blocker + other (everyone but the victim) => anchor may advance
+    for i in [blocker, other] {
+        if !w.positioned(i) {
+            continue;
+        }
+        let cert = w.refresh(i).map_err(|e| format!("cert blockers {e:?}"))?;
+        if cert.certified_liq_deficit != 0 {
+            let out = w
+                .with(i, |m, a| {
+                    m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+                })
+                .map_err(|e| format!("liq blocker {e:?}"))?;
+            assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, 0, 0),
+                "BAD DEBT liquidating the blocker mmr={mmr} fee={fee} fund={fund} rent={rent} e={e} d={d}");
+            assert!(
+                cert.certified_equity - out.fee_charged as i128 >= 0,
+                "BSL violated on blocker"
+            );
+        }
+    }
+    // second leg: epoch e+1 (victim uncertified), run to hi(A_{e+1}) just before the window ends
+    let steps = (e / 3).saturating_sub(2).max(2);
+    for _ in 0..steps {
+        w.now += 3;
+        w.accrue(f, rent, rent)
+            .map_err(|e| format!("lunge2 {e:?}"))?;
+    }
+    if w.asset().band_epoch <= e1 {
+        let a = w.asset();
+        if std::env::var("SEC_DBG").is_ok() {
+            eprintln!(
+                "DBG long={long_victim} unc=({},{}) lp=({},{}) pin={} snaps={:?}",
+                a.band_uncertified_long,
+                a.band_uncertified_short,
+                a.band_liq_pending_long,
+                a.band_liq_pending_short,
+                a.band_pin_since_slot,
+                (0..4)
+                    .map(|i| {
+                        let l = w.accounts[i].legs[0].try_to_runtime().unwrap();
+                        (l.active, l.band_epoch_snap, l.band_liq_pending)
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        return Err("anchor did not advance".into());
+    }
+    let cert = w
+        .refresh(vl.min(vs).min(if long_victim { 0 } else { 0 }))
+        .map_err(|e| format!("refresh victim {e:?}"))?;
+    assert!(cert.certified_equity >= 0, "LOSS > CAPITAL in lunge mmr={mmr} imr={imr} fee={fee} fund={fund} rent={rent} e={e} d={d} long={long_victim}");
+    let mut slack = None;
+    if cert.certified_liq_deficit != 0 {
+        let out = w
+            .with(0, |m, a| {
+                m.liquidate_account_not_atomic(a, LiquidationRequestV16 { asset_index: 0 })
+            })
+            .map_err(|e| format!("liq {e:?}"))?;
+        assert_eq!((out.insurance_used, out.residual_booked, out.explicit_loss), (0, 0, 0),
+            "BAD DEBT in lunge mmr={mmr} imr={imr} fee={fee} fund={fund} rent={rent} e={e} d={d} long={long_victim}");
+        let sl = cert.certified_equity - out.fee_charged as i128;
+        assert!(
+            sl >= 0,
+            "BSL violated: eq {} fee {}",
+            cert.certified_equity,
+            out.fee_charged
+        );
+        slack = Some(sl);
+    }
+    Ok(slack)
+}
+
+#[test]
+fn sec_g_lunge_at_thinnest_initial_margin() {
+    let (mut ran, mut liq, mut min_slack) = (0u64, 0u64, i128::MAX);
+    let mut why: std::collections::BTreeMap<String, u64> = Default::default();
+    for &mmr in &[250u64, 500, 1000] {
+        for &fee in &[10u64, 50, 100] {
+            for &fund in &[0u64, 2_000, 10_000] {
+                for &rent in &[0u64, 1_000, 10_000] {
+                    for &e in &[150u64, 300] {
+                        let Some(d) = sec_widest(mmr, fee, fund, rent, e) else {
+                            continue;
+                        };
+                        for &long_victim in &[true, false] {
+                            match sec_lunge(mmr, mmr + 1, fee, fund, rent, e, d, long_victim) {
+                                Ok(s) => {
+                                    ran += 1;
+                                    if let Some(s) = s {
+                                        liq += 1;
+                                        min_slack = min_slack.min(s);
+                                    }
+                                }
+                                Err(r) => *why.entry(r).or_default() += 1,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("SEC lunge ran={ran} liquidated={liq} min_slack={min_slack} skipped={why:?}");
+    assert!(ran > 20, "vacuous: ran={ran} {why:?}");
+}
+
+/// Free-option open at a pinned stale price. A liq-pending, settled blocker (long, underwater
+/// at the pinned lo edge) holds the epoch; the true target is far below; everyone is settled so
+/// the engine's LossStale gate is clear. Can a FRESH account open a SHORT at the stale-high price?
+#[test]
+fn sec_open_at_pinned_stale_price_with_settled_book() {
+    let mut w = World::new(band_cfg(130), 6, 2_000_000);
+    // blocker pair at max leverage (2 long, 3 short)
+    let (mut qlo, mut qhi, mut best) = (1u128, 4_000u128 * POS_SCALE, 0u128);
+    while qlo <= qhi {
+        let q = (qlo + qhi) / 2;
+        let snap = (w.header, w.markets.clone(), w.accounts.clone());
+        let ok = w.trade(2, 3, q).is_ok();
+        (w.header, w.markets, w.accounts) = snap;
+        if ok {
+            best = q;
+            qlo = q + 1
+        } else {
+            qhi = q - 1
+        }
+    }
+    w.trade(2, 3, best).unwrap();
+    w.now += 3;
+    w.accrue(0, 0, 0).unwrap(); // epoch opens, A = P0
+                                // crash target far below: price walks to lo(A) and pins (blocker cannot be certified healthy)
+    w.set_target(1);
+    for _ in 0..3 {
+        w.now += 3;
+        w.accrue(0, 0, 0).unwrap();
+    }
+    let a = w.asset();
+    let (lo, _) = band_bounds(a.band_anchor_price, 130).unwrap();
+    assert_eq!(
+        a.effective_price, lo,
+        "pinned at lo(A) while the true target is ~0"
+    );
+    // everyone settles; blocker (long) turns liq-pending; shorts certify healthy
+    for i in [2usize, 3] {
+        w.refresh(i).unwrap();
+    }
+    let a = w.asset();
+    assert!(a.band_liq_pending_long >= 1, "blocker is liq-pending");
+    assert!(
+        a.band_pin_since_slot != 0,
+        "pin clock running; target {} vs P_last {}",
+        a.raw_oracle_target_price,
+        a.effective_price
+    );
+    // fresh account 0 (short) vs fresh account 1 (long) open AT THE STALE-HIGH price
+    let r = w.trade(1, 0, 10 * POS_SCALE);
+    eprintln!(
+        "SEC OPEN AT PINNED STALE PRICE (target={}, P_last={}): {:?}",
+        a.raw_oracle_target_price, a.effective_price, r
+    );
+    // control: same state but the target equals P_last (no lag): does the open pass?
+    let mut w2 = World {
+        header: w.header,
+        markets: w.markets.clone(),
+        accounts: w.accounts.clone(),
+        now: w.now,
+    };
+    let p_last = w2.asset().effective_price;
+    w2.set_target(p_last);
+    let r2 = w2.trade(1, 0, 10 * POS_SCALE);
+    eprintln!("SEC CONTROL same state, target==P_last: {:?}", r2);
+}
+
+/// Review E-L1 regression (kept from the review): the raw integer band does collapse
+/// below ~77 ticks at d = 130. `band_never_zero_width` proves no anchor in that zone is
+/// ever accepted for genesis, new exposure or a re-anchor.
+#[test]
+fn sec_band_collapses_at_tiny_prices() {
+    // At d = 130 the integer band has zero width below ~77 ticks: the mark can never move.
+    let mut dead = vec![];
+    for a in 1..200u64 {
+        let (lo, hi) = band_bounds(a, 130).unwrap();
+        if lo == a && hi == a {
+            dead.push(a);
+        }
+    }
+    eprintln!(
+        "SEC dead-band prices at d=130: {}..={} ({} values)",
+        dead.first().unwrap(),
+        dead.last().unwrap(),
+        dead.len()
+    );
+    assert!(!dead.is_empty());
+    // downward-only dead zone: lowest price reachable from a starting anchor by repeated lo()
+    let mut p = 10_000u64;
+    while band_bounds(p, 130).unwrap().0 < p {
+        p = band_bounds(p, 130).unwrap().0;
+    }
+    eprintln!("SEC price floor reachable by walking down at d=130: {p}");
 }
