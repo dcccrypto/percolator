@@ -7,8 +7,8 @@
 //! and resolved account close.
 
 use crate::wide_math::{
-    checked_mul_div_ceil_u256, floor_div_signed_conservative_i128, mul_div_floor_u256_with_rem,
-    wide_mul_div_floor_u128, wide_signed_mul_div_floor_from_k_pair, U256,
+    checked_mul_div_ceil_u256, mul_div_floor_u256_with_rem,
+    wide_mul_div_floor_u128, wide_signed_mul_div_floor_with_carry_from_k_pair, U256,
 };
 use crate::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, FUNDING_DEN, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
@@ -32,6 +32,8 @@ pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // (anchor, epoch, certification and liquidation-pending cohorts, pin clock) and
 // holding-fee rent indices; per-leg band snapshot, liq-pending flag and rent
 // snapshot; band + rent config words. Old slabs fail closed.
+// Per-leg K/F settlement remainders (`k_rem_num`, `f_rem_num`; upstream a74b81b2, #281) ride the same
+// re-seed (variant release/v22-*-rem): one discriminator covers both.
 pub const V16_LAYOUT_DISCRIMINATOR: u16 = 19;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
@@ -1436,6 +1438,8 @@ impl V16Core {
             a_basis,
             k_snap,
             f_snap,
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap,
             epoch_snap,
             loss_weight,
@@ -2042,8 +2046,11 @@ impl V16Core {
 
     /// `ceil` or `floor` of `mag * a / FUNDING_DEN`, as a non-negative i128.
     fn funding_scaled_magnitude(mag: u128, a: u128, round_up: bool) -> V16Result<i128> {
-        // Exact fast path: A == ADL_ONE always holds on a Normal side, and ADL_ONE is a
-        // multiple of FUNDING_DEN, so no rounding and no division is needed.
+        // Exact fast path: while A == ADL_ONE (a side that has not been shrunk by a liquidation /
+        // ADL since its last epoch reset) no rounding and no division is needed, because ADL_ONE
+        // is a multiple of FUNDING_DEN. A < ADL_ONE IS reachable on a Normal side -- every
+        // bankrupt liquidation that socializes quantity shrinks the opposite side's A -- and then
+        // takes the rounded path below (payer ceil, receiver floor).
         if a == ADL_ONE {
             let v = mag
                 .checked_mul(ADL_ONE / FUNDING_DEN)
@@ -2051,7 +2058,7 @@ impl V16Core {
             return i128::try_from(v).map_err(|_| V16Error::ArithmeticOverflow);
         }
         let (q, r) = match mag.checked_mul(a) {
-            Some(p) => (p / FUNDING_DEN, p % FUNDING_DEN),
+            Some(p) => funding_div_rem(p),
             None => {
                 let (q, r) = mul_div_floor_u256_with_rem(
                     U256::from_u128(mag),
@@ -4230,6 +4237,24 @@ pub fn kani_prepare_source_credit_domain_recompute_for_epoch_steps(
     V16Core::prepare_source_credit_domain_recompute_for_epoch_steps(source, risk_epoch, epoch_steps)
 }
 
+/// Euclidean `(p / FUNDING_DEN, p % FUNDING_DEN)`. A named function so the Kani design in
+/// `tests/proofs_v22_funding_exact.rs` can replace the 128-bit divider with its (separately
+/// proven) multiplication contract.
+#[inline(always)]
+pub(crate) fn funding_div_rem(p: u128) -> (u128, u128) {
+    (p / FUNDING_DEN, p % FUNDING_DEN)
+}
+
+#[cfg(kani)]
+pub fn kani_funding_div_rem(p: u128) -> (u128, u128) {
+    funding_div_rem(p)
+}
+
+#[cfg(kani)]
+pub fn kani_funding_index_deltas(funding_num: i128, a_long: u128, a_short: u128) -> V16Result<(i128, i128)> {
+    V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
+}
+
 #[cfg(kani)]
 pub fn kani_track_kf_side_drift(
     drift: KfDriftSideV16,
@@ -6172,6 +6197,11 @@ pub struct PortfolioLegV16 {
     pub a_basis: u128,
     pub k_snap: i128,
     pub f_snap: i128,
+    /// Persistent Euclidean remainders of the K and F settlement numerators, in
+    /// `[0, a_basis * POS_SCALE)` (upstream a74b81b2): settling one K/F interval in any number
+    /// of pieces yields the same cumulative integer PnL and the same final remainder.
+    pub k_rem_num: u128,
+    pub f_rem_num: u128,
     pub kf_epoch_snap: u64,
     pub epoch_snap: u64,
     pub loss_weight: u128,
@@ -6203,6 +6233,8 @@ impl PortfolioLegV16 {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: 0,
@@ -6226,6 +6258,8 @@ impl PortfolioLegV16 {
             && self.a_basis == ADL_ONE
             && self.k_snap == 0
             && self.f_snap == 0
+            && self.k_rem_num == 0
+            && self.f_rem_num == 0
             && self.kf_epoch_snap == 0
             && self.epoch_snap == 0
             && self.loss_weight == 0
@@ -7418,6 +7452,8 @@ struct AccountKfSettlementPreparedV16 {
     k_now: i128,
     f_now: i128,
     f_delta: i128,
+    k_rem_num: u128,
+    f_rem_num: u128,
     net: i128,
 }
 
@@ -14756,45 +14792,65 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn leg_kf_delta_components_for_settlement_from_asset(
         asset: AssetStateV16,
         leg: PortfolioLegV16,
-    ) -> V16Result<(i128, i128, i128, i128, i128)> {
+    ) -> V16Result<(i128, i128, i128, i128, u128, u128, i128)> {
         let (k_now, f_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+        Self::leg_kf_delta_components_for_settlement_from_targets(k_now, f_now, leg)
+    }
+
+    /// K/F settlement of one leg against already-resolved index targets. Split from the
+    /// `_from_asset` form so a caller that holds only the targets does not decode a whole asset.
+    #[inline(always)]
+    fn leg_kf_delta_components_for_settlement_from_targets(
+        k_now: i128,
+        f_now: i128,
+        leg: PortfolioLegV16,
+    ) -> V16Result<(i128, i128, i128, i128, u128, u128, i128)> {
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let k_delta = scaled_adl_delta_fast(
+        if leg.k_rem_num >= den || leg.f_rem_num >= den {
+            return Err(V16Error::InvalidLeg);
+        }
+        // Upstream a74b81b2: K and F settle with persistent Euclidean remainders, so any
+        // partition of one K/F interval yields the same cumulative PnL (cadence-invariant).
+        let (k_delta, k_rem_num) = scaled_adl_delta_with_carry_fast(
             leg.basis_pos_q.unsigned_abs(),
             leg.a_basis,
             leg.k_snap,
             k_now,
+            leg.k_rem_num,
         )
         .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
+            wide_signed_mul_div_floor_with_carry_from_k_pair(
                 leg.basis_pos_q.unsigned_abs(),
                 leg.k_snap,
                 k_now,
                 den,
+                leg.k_rem_num,
             )
         });
-        let f_delta = scaled_adl_delta_fast(
+        let (f_delta, f_rem_num) = scaled_adl_delta_with_carry_fast(
             leg.basis_pos_q.unsigned_abs(),
             leg.a_basis,
             leg.f_snap,
             f_now,
+            leg.f_rem_num,
         )
         .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
+            wide_signed_mul_div_floor_with_carry_from_k_pair(
                 leg.basis_pos_q.unsigned_abs(),
                 leg.f_snap,
                 f_now,
                 den,
+                leg.f_rem_num,
             )
         });
         let net = k_delta
             .checked_add(f_delta)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_non_min_i128(net)?;
-        Ok((k_now, f_now, k_delta, f_delta, net))
+        Ok((k_now, f_now, k_delta, f_delta, k_rem_num, f_rem_num, net))
     }
 
     #[cfg(kani)]
@@ -14803,7 +14859,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset: AssetStateV16,
         leg: PortfolioLegV16,
     ) -> V16Result<(i128, i128, i128)> {
-        let (k_now, f_now, _k_delta, _f_delta, net) =
+        let (k_now, f_now, _k_delta, _f_delta, _k_rem_num, _f_rem_num, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         Ok((k_now, f_now, net))
     }
@@ -14856,7 +14912,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.begin_full_drain_reset_inner(asset_index, leg.side)?;
             asset = self.asset_state(asset_index)?;
         }
-        let (k_now, f_now, _k_delta, f_delta, net) =
+        let (k_now, f_now, _k_delta, f_delta, k_rem_num, f_rem_num, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         let source_side = if net > 0 {
             opposite_side(leg.side)
@@ -14871,6 +14927,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 k_now,
                 f_now,
                 f_delta,
+                k_rem_num,
+                f_rem_num,
                 net,
             },
         ))
@@ -14942,6 +15000,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset = settled_asset;
         leg.k_snap = prepared.k_now;
         leg.f_snap = prepared.f_now;
+        leg.k_rem_num = prepared.k_rem_num;
+        leg.f_rem_num = prepared.f_rem_num;
         leg.kf_epoch_snap = kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
@@ -24144,42 +24204,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
-        let den = leg
-            .a_basis
-            .checked_mul(POS_SCALE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let k_delta = scaled_adl_delta_fast(
-            leg.basis_pos_q.unsigned_abs(),
-            leg.a_basis,
-            leg.k_snap,
-            k_now,
-        )
-        .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
-                leg.basis_pos_q.unsigned_abs(),
-                leg.k_snap,
-                k_now,
-                den,
-            )
-        });
-        let f_delta = scaled_adl_delta_fast(
-            leg.basis_pos_q.unsigned_abs(),
-            leg.a_basis,
-            leg.f_snap,
-            f_now,
-        )
-        .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
-                leg.basis_pos_q.unsigned_abs(),
-                leg.f_snap,
-                f_now,
-                den,
-            )
-        });
-        let net = k_delta
-            .checked_add(f_delta)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        validate_non_min_i128(net)?;
+        let (k_now, f_now, _k_delta, f_delta, k_rem_num, f_rem_num, net) =
+            Self::leg_kf_delta_components_for_settlement_from_targets(k_now, f_now, leg)?;
 
         let mut loss_settled = 0u128;
         let mut support_consumed = 0u128;
@@ -24201,6 +24227,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
+        leg.k_rem_num = k_rem_num;
+        leg.f_rem_num = f_rem_num;
         leg.kf_epoch_snap = kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
@@ -24608,6 +24636,8 @@ pub struct PortfolioLegV16Account {
     pub a_basis: V16PodU128,
     pub k_snap: V16PodI128,
     pub f_snap: V16PodI128,
+    pub k_rem_num: V16PodU128,
+    pub f_rem_num: V16PodU128,
     pub kf_epoch_snap: V16PodU64,
     pub epoch_snap: V16PodU64,
     pub loss_weight: V16PodU128,
@@ -24626,6 +24656,7 @@ pub struct PortfolioLegV16Account {
 /// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
 /// field-by-field decode; any other bytes still take the full decode below,
 /// so every decode error is unchanged.
+/// (Same construct, same names, as v2.2 Wave B `feat/v22-band-rent`, so the two merge as one.)
 pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLegV16Account {
     active: 0,
     asset_index: V16PodU32 { bytes: [0; 4] },
@@ -24637,6 +24668,8 @@ pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLeg
     },
     k_snap: V16PodI128 { bytes: [0; 16] },
     f_snap: V16PodI128 { bytes: [0; 16] },
+    k_rem_num: V16PodU128 { bytes: [0; 16] },
+    f_rem_num: V16PodU128 { bytes: [0; 16] },
     kf_epoch_snap: V16PodU64 { bytes: [0; 8] },
     epoch_snap: V16PodU64 { bytes: [0; 8] },
     loss_weight: V16PodU128 { bytes: [0; 16] },
@@ -24669,6 +24702,8 @@ impl PortfolioLegV16Account {
             a_basis: V16PodU128::new(value.a_basis),
             k_snap: V16PodI128::new(value.k_snap),
             f_snap: V16PodI128::new(value.f_snap),
+            k_rem_num: V16PodU128::new(value.k_rem_num),
+            f_rem_num: V16PodU128::new(value.f_rem_num),
             kf_epoch_snap: V16PodU64::new(value.kf_epoch_snap),
             epoch_snap: V16PodU64::new(value.epoch_snap),
             loss_weight: V16PodU128::new(value.loss_weight),
@@ -24697,6 +24732,8 @@ impl PortfolioLegV16Account {
             a_basis: self.a_basis.get(),
             k_snap: self.k_snap.get(),
             f_snap: self.f_snap.get(),
+            k_rem_num: self.k_rem_num.get(),
+            f_rem_num: self.f_rem_num.get(),
             kf_epoch_snap: self.kf_epoch_snap.get(),
             epoch_snap: self.epoch_snap.get(),
             loss_weight: self.loss_weight.get(),
@@ -25020,7 +25057,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9947);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 10459);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -26164,6 +26201,13 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         || leg.loss_weight == 0
         || leg.loss_weight < current_loss_weight
         || leg.loss_weight > SOCIAL_LOSS_DEN
+        // K/F remainders live in [0, a_basis * POS_SCALE). Zero (every leg that never settled a
+        // fraction) is always in range, so the wide multiply runs only for a non-zero remainder;
+        // a_basis is already range-checked by the first disjunct, and an overflow fails closed.
+        || ((leg.k_rem_num | leg.f_rem_num) != 0
+            && leg.a_basis.checked_mul(POS_SCALE).is_none_or(|kf_den| {
+                leg.k_rem_num >= kf_den || leg.f_rem_num >= kf_den
+            }))
         || leg.b_rem >= SOCIAL_LOSS_DEN
         || leg.b_epoch_snap != leg.epoch_snap
         || leg.rent_carry as u128 >= crate::band_rent::RENT_INDEX_DEN
@@ -26232,22 +26276,181 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     .ok_or(V16Error::ArithmeticOverflow)
 }
 
+#[cfg(any(kani, feature = "fuzz"))]
 fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128) -> Option<i128> {
-    if abs_basis_q == 0 {
-        return Some(0);
+    scaled_adl_delta_with_carry_fast(abs_basis_q, a_basis, then, now, 0).map(|(q, _)| q)
+}
+
+/// `floor((carry + abs_basis_q * (now - then)) / (a_basis * POS_SCALE))` and its Euclidean
+/// remainder, when that fits plain i128 arithmetic; `None` sends the caller to the wide path
+/// (which computes the same pair). Each u128/i128 division is a software routine on SBF, so the
+/// common cases do none (index unchanged) or two (unit A, whole carry): the remainders are
+/// recovered by multiplication, never by a second division.
+fn scaled_adl_delta_with_carry_fast(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+    carry: u128,
+) -> Option<(i128, u128)> {
+    // Nothing accrued since the snapshot: the numerator is the carry itself, already below the
+    // denominator (validated by the caller). Holds for every a_basis.
+    if abs_basis_q == 0 || now == then {
+        return Some((0, carry));
     }
     if a_basis != ADL_ONE {
         return None;
     }
-    let adl_one_i = i128::try_from(ADL_ONE).ok()?;
+    let adl_one_i = ADL_ONE as i128;
+    let pos_scale_i = POS_SCALE as i128;
+    let reduced_carry = if carry == 0 {
+        0i128
+    } else {
+        let reduced = carry / ADL_ONE;
+        if reduced.checked_mul(ADL_ONE)? != carry {
+            return None;
+        }
+        i128::try_from(reduced).ok()?
+    };
     let delta = now.checked_sub(then)?;
-    if delta % adl_one_i != 0 {
+    let scaled_delta = delta / adl_one_i;
+    if scaled_delta.checked_mul(adl_one_i)? != delta {
         return None;
     }
-    let scaled_delta = delta / adl_one_i;
     let basis_i = i128::try_from(abs_basis_q).ok()?;
     let numerator = scaled_delta.checked_mul(basis_i)?;
-    Some(floor_div_signed_conservative_i128(numerator, POS_SCALE))
+    let total = numerator.checked_add(reduced_carry)?;
+    // floor division with a non-negative remainder, one division
+    let mut quotient = total / pos_scale_i;
+    let mut reduced_remainder = total.checked_sub(quotient.checked_mul(pos_scale_i)?)?;
+    if reduced_remainder < 0 {
+        quotient = quotient.checked_sub(1)?;
+        reduced_remainder = reduced_remainder.checked_add(pos_scale_i)?;
+    }
+    let remainder = (reduced_remainder as u128).checked_mul(ADL_ONE)?;
+    Some((quotient, remainder))
+}
+
+#[cfg(test)]
+mod empty_leg_image_tests {
+    use super::*;
+
+    /// The reference decode: every field decoded, then validated / compared (the pre-image path).
+    fn reference(leg: &PortfolioLegV16Account) -> V16Result<PortfolioLegV16> {
+        let out = PortfolioLegV16 {
+            active: decode_bool(leg.active)?,
+            asset_index: leg.asset_index.get(),
+            market_id: leg.market_id.get(),
+            side: decode_side(leg.side)?,
+            basis_pos_q: leg.basis_pos_q.get(),
+            a_basis: leg.a_basis.get(),
+            k_snap: leg.k_snap.get(),
+            f_snap: leg.f_snap.get(),
+            k_rem_num: leg.k_rem_num.get(),
+            f_rem_num: leg.f_rem_num.get(),
+            kf_epoch_snap: leg.kf_epoch_snap.get(),
+            epoch_snap: leg.epoch_snap.get(),
+            loss_weight: leg.loss_weight.get(),
+            b_snap: leg.b_snap.get(),
+            b_rem: leg.b_rem.get(),
+            b_epoch_snap: leg.b_epoch_snap.get(),
+            b_stale: decode_bool(leg.b_stale)?,
+            stale: decode_bool(leg.stale)?,
+        };
+        if out.active {
+            validate_active_leg(out)?;
+        } else if !out.is_empty() {
+            return Err(V16Error::HiddenLeg);
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn empty_image_is_the_encoding_of_empty() {
+        let empty = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+        assert_eq!(empty, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT);
+        assert!(empty.is_empty_encoding());
+        assert_eq!(empty.try_to_runtime(), Ok(PortfolioLegV16::EMPTY));
+        assert_eq!(reference(&empty), Ok(PortfolioLegV16::EMPTY));
+    }
+
+    /// Flip every single byte of the empty image to several values: the decode returns exactly
+    /// what the field-by-field reference returns (value or refusal code).
+    #[test]
+    fn single_byte_corruptions_of_an_empty_leg_decode_like_the_reference() {
+        let (mut refused, mut accepted) = (0u32, 0u32);
+        for i in 0..core::mem::size_of::<PortfolioLegV16Account>() {
+            for v in [0u8, 1, 2, 0x80, 0xFF] {
+                let mut image = [0u8; core::mem::size_of::<PortfolioLegV16Account>()];
+                image.copy_from_slice(bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT));
+                image[i] = v;
+                let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&image);
+                let (got, want) = (leg.try_to_runtime(), reference(&leg));
+                // identical value AND identical refusal code: only the exact empty image is short-cut
+                assert_eq!(got, want, "byte {i} = {v}");
+                if got.is_ok() { accepted += 1 } else { refused += 1 }
+            }
+        }
+        assert!(refused > 500 && accepted >= 150, "{refused} {accepted}");
+    }
+}
+
+#[cfg(test)]
+mod scaled_adl_carry_fast_tests {
+    use super::*;
+
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// The fast path returns exactly what the wide path returns, whenever it answers at all.
+    #[test]
+    fn fast_path_with_carry_matches_the_wide_path() {
+        let mut st = 0x9E37_79B9_7F4A_7C15u64;
+        let (mut answered, mut carried, mut negative, mut unchanged, mut declined) = (0u32, 0u32, 0u32, 0u32, 0u32);
+        for i in 0..200_000u32 {
+            let basis = match i % 4 {
+                0 => (next(&mut st) % 5_000_000) as u128,
+                1 => (next(&mut st) as u128) % (1_000_000 * POS_SCALE),
+                2 => POS_SCALE * ((next(&mut st) % 1_000) as u128 + 1),
+                _ => next(&mut st) as u128,
+            };
+            let a_basis = if i % 7 == 0 { ADL_ONE - (next(&mut st) % 1_000) as u128 - 1 } else { ADL_ONE };
+            let den = a_basis * POS_SCALE;
+            let then = (next(&mut st) as i64 as i128) * if i % 3 == 0 { ADL_ONE as i128 } else { 1 };
+            let step = match i % 5 {
+                0 => 0i128,
+                1 => (next(&mut st) % 1_000_000) as i128 * ADL_ONE as i128,
+                2 => -((next(&mut st) % 1_000_000) as i128) * ADL_ONE as i128,
+                3 => (next(&mut st) as i32 as i128) * 1_000_000, // funding-shaped: multiple of 1e6 only
+                _ => next(&mut st) as i64 as i128,
+            };
+            let now = then + step;
+            let carry = match i % 3 {
+                0 => 0u128,
+                1 => ((next(&mut st) as u128) % POS_SCALE) * ADL_ONE % den, // what the fast path writes
+                _ => (((next(&mut st) as u128) << 32) | next(&mut st) as u128) % den, // what the wide path writes
+            };
+            let wide = wide_signed_mul_div_floor_with_carry_from_k_pair(basis, then, now, den, carry);
+            match scaled_adl_delta_with_carry_fast(basis, a_basis, then, now, carry) {
+                Some(fast) => {
+                    assert_eq!(fast, wide, "basis {basis} a {a_basis} then {then} now {now} carry {carry}");
+                    assert!(fast.1 < den || basis == 0 || now == then);
+                    answered += 1;
+                    carried += (carry != 0 && now != then) as u32;
+                    negative += (fast.0 < 0) as u32;
+                    unchanged += (now == then) as u32;
+                }
+                None => declined += 1,
+            }
+        }
+        // non-vacuity: every class of answer was exercised
+        assert!(answered > 50_000 && carried > 5_000 && negative > 5_000 && unchanged > 5_000 && declined > 5_000,
+            "{answered} {carried} {negative} {unchanged} {declined}");
+    }
 }
 
 #[cfg(kani)]
@@ -26941,6 +27144,8 @@ mod close_drift_scope_tests {
             a_basis: ADL_ONE,
             k_snap: asset.k_long,
             f_snap: asset.f_long_num,
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap: 0,
             epoch_snap: asset.epoch_long,
             loss_weight: POS_SCALE,

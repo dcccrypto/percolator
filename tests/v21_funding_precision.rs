@@ -14,6 +14,7 @@ use percolator::{
     ProvenanceHeaderV16Account, TradeRequestV16, V16Config, V16PodU64,
 };
 use percolator::{ADL_ONE, POS_SCALE};
+#[cfg(feature = "fuzz")]
 use proptest::prelude::*;
 
 const FUNDING_DEN: i128 = 1_000_000_000;

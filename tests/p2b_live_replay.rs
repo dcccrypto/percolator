@@ -95,13 +95,20 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
 fn upgrade_v21_portfolio(old: &[u8]) -> Vec<u8> {
     use percolator::{PortfolioLegV16Account, V16_MAX_PORTFOLIO_ASSETS_N};
     let legs_off = core::mem::offset_of!(PortfolioAccountV16Account, legs);
-    let old_leg_len = core::mem::size_of::<PortfolioLegV16Account>() - V22_LEG_EXTRA;
+    // v2.2 leg growth: band/rent words APPENDED (V22_LEG_EXTRA) plus, in the -rem variant, the two
+    // K/F remainders (32 B, zero for a leg that never carried a fraction) inserted after `f_snap`.
+    let rem_cut = core::mem::offset_of!(PortfolioLegV16Account, k_rem_num);
+    const REM_EXTRA: usize = 32;
+    let old_leg_len = core::mem::size_of::<PortfolioLegV16Account>() - V22_LEG_EXTRA - REM_EXTRA;
     let state = &old[PORTFOLIO_STATE_OFF..];
     let mut out = Vec::new();
     out.extend_from_slice(&old[..PORTFOLIO_STATE_OFF]);
     out.extend_from_slice(&state[..legs_off]);
     for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
-        out.extend_from_slice(&state[legs_off + i * old_leg_len..legs_off + (i + 1) * old_leg_len]);
+        let leg = &state[legs_off + i * old_leg_len..legs_off + (i + 1) * old_leg_len];
+        out.extend_from_slice(&leg[..rem_cut]);
+        out.extend_from_slice(&[0u8; REM_EXTRA]);
+        out.extend_from_slice(&leg[rem_cut..]);
         out.extend_from_slice(&[0u8; V22_LEG_EXTRA]);
     }
     out.extend_from_slice(&state[legs_off + V16_MAX_PORTFOLIO_ASSETS_N * old_leg_len..]);
@@ -536,3 +543,4 @@ fn zero_domain_claims(m: &mut LiveMarket, d: usize) {
     h.c_tot = percolator::V16PodU128::new(h.c_tot.get() + retired_pnl);
     let _ = removed;
 }
+

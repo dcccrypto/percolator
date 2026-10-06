@@ -156,6 +156,8 @@ fn drain_only_holdout(
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: oi,
