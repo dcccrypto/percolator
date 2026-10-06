@@ -3569,6 +3569,18 @@ impl V16Core {
         ))
     }
 
+    /// S8: any liened or impaired claim, counterparty or insurance backed, in the DOMAIN. The
+    /// pricing branch must not depend on the pricing account's own entry (an account could steer
+    /// itself into the neutral branch by staying unliened, and a poor flipping sybil in the same
+    /// domain depresses the stored rate everyone sees), so one locked claim makes the whole
+    /// domain protective.
+    fn source_credit_domain_has_locked_claims(state: SourceCreditStateV16) -> bool {
+        state.valid_liened_backing_num != 0
+            || state.impaired_liened_backing_num != 0
+            || state.valid_liened_insurance_num != 0
+            || state.impaired_liened_insurance_num != 0
+    }
+
     /// S5: `min(1, max(stored, available / (claims - pending)))`. The rate a loser-first
     /// settlement sees: the credited-but-unbacked winner claims are taken out of the
     /// denominator and nothing else is assumed.
@@ -12733,7 +12745,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let rate = match netting {
                 Some(ctx) => {
                     let pending = self.kf_pending_credit_num(d)?;
-                    if locked != 0 {
+                    if V16Core::source_credit_domain_has_locked_claims(source_credit) {
                         // S5: a LIENED (or impaired) claim sits in this domain. Its backing is
                         // excluded from `available` while the claim stays in `claims`, so the
                         // domain's stored rate already understates every unliened claim. The
@@ -12837,6 +12849,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     if burn_account_claims {
                         account.header.source_domains[slot].source_claim_bound_num =
                             V16PodU128::new(next_account_claim);
+                        // S9: a claim leaving the domain cannot stay "pending". Burned claims
+                        // are taken from the backed part first, so only the excess over the
+                        // remaining claims is dropped from the in-flight credit.
+                        self.clamp_kf_pending_credit_to_claims(d)?;
                     }
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
@@ -13826,7 +13842,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(total)
     }
 
-    /// Positive part of a domain's `kf_pending_credit`, in claim-num units.
+    /// Positive part of a domain's `kf_pending_credit`, in claim-num units, never above the
+    /// domain's claim stock (S9: the counter is a flow balance and can transiently exceed the
+    /// stock when a winner's credit is burned by its own reversal loss before the original
+    /// loser settles; the reader clamps, `clamp_kf_pending_credit_to_claims` repairs the store
+    /// at every burn).
     fn kf_pending_credit_num(&self, domain: usize) -> V16Result<u128> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot();
@@ -13834,7 +13854,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Long => slot.kf_pending_credit_long.get(),
             SideV16::Short => slot.kf_pending_credit_short.get(),
         };
-        Ok(v.max(0) as u128)
+        let claims = self.source_credit_for_domain_shape(domain)?.positive_claim_bound_num;
+        Ok(core::cmp::min(v.max(0) as u128, claims))
+    }
+
+    /// S9: `kf_pending_credit <= claims` after a claim burn.
+    fn clamp_kf_pending_credit_to_claims(&mut self, domain: usize) -> V16Result<()> {
+        let claims = self.source_credit_for_domain_shape(domain)?.positive_claim_bound_num;
+        let claims_i = i128::try_from(claims).unwrap_or(i128::MAX);
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        match side {
+            SideV16::Long => {
+                if slot.kf_pending_credit_long.get() > claims_i {
+                    slot.kf_pending_credit_long = V16PodI128::new(claims_i);
+                }
+            }
+            SideV16::Short => {
+                if slot.kf_pending_credit_short.get() > claims_i {
+                    slot.kf_pending_credit_short = V16PodI128::new(claims_i);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Records a K/F settlement in the domain's `kf_pending_credit`: `+claims credited` for a
@@ -14599,6 +14641,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .map_err(|_| V16Error::ArithmeticOverflow)?;
                 self.add_kf_pending_credit(source_domain, -realized_num)?;
             }
+        }
+        // S9: every claim burn this settlement made (netting, tail against retained face) leaves
+        // the counter at or below the claim stock of both domains of the asset.
+        for side in [SideV16::Long, SideV16::Short] {
+            let domain = self.insurance_domain_index(asset_index, side)?;
+            self.clamp_kf_pending_credit_to_claims(domain)?;
         }
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         self.settle_kf_laggard(asset_index, &asset, &leg)?;
@@ -26381,6 +26429,23 @@ mod r1_netting_rate_tests {
                 // more future claims can only lower the rate
                 assert!(rate(s, 5, 40, 0) <= rate(s, 5, 0, 0));
             }
+        }
+    }
+
+    #[test]
+    fn domain_lock_covers_every_lien_class() {
+        let base = domain(150, 100);
+        assert!(!V16Core::source_credit_domain_has_locked_claims(base));
+        let mut a = base;
+        a.valid_liened_backing_num = 1;
+        let mut b = base;
+        b.impaired_liened_backing_num = 1;
+        let mut c = base;
+        c.valid_liened_insurance_num = 1;
+        let mut d = base;
+        d.impaired_liened_insurance_num = 1;
+        for s in [a, b, c, d] {
+            assert!(V16Core::source_credit_domain_has_locked_claims(s));
         }
     }
 

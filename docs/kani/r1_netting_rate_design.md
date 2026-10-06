@@ -77,3 +77,18 @@ asset update with `kani::stub` as the #277 proofs do).
 One run on the final tree: P1, P2, P4, P5, P6 are seconds each (pure or tiny frames); P3 and P7-step are
 the expensive ones (budget like `proof_v16_kernel_*` consumption proofs, unwind 70 is not needed, no
 loops). Check cover properties for every harness (`kani::cover!`) so no proof is vacuous.
+
+## Round 4 additions (still NOT run)
+
+- `source_credit_domain_has_locked_claims(state)`: pure; `proof_domain_lock_is_the_or_of_four_lien_counters`
+  (true iff one of `valid/impaired_liened_backing_num`, `valid/impaired_liened_insurance_num` is non-zero).
+- `clamp_kf_pending_credit_to_claims(domain)` and the clamped reader `kf_pending_credit_num`:
+  `proof_pending_clamp`: after the clamp `counter <= claims`; the other side's counter and every
+  other field of the slot are unchanged; the reader returns `min(max(counter, 0), claims)`.
+- S9 invariant `counter <= claims` at the end of `apply_account_kf_settlement_entry` and the forfeit
+  path: single-settle harness extension of `proof_settle_entry_updates_pending_by_exact_flow` with
+  the post-condition. The unbounded-sequence statement stays executable
+  (`tests/v22_r1_reversal.rs`, `tests/v22_r1_multi_claimant.rs::reconcile_pending`).
+- Protective branch selection is now a function of the DOMAIN state only: add to P3 that the rate
+  chosen for a domain does not depend on which account is netting (same inputs -> same rate for any
+  two account entries), which the earlier per-account `locked` did not satisfy.

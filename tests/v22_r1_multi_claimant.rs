@@ -487,3 +487,78 @@ fn r1_multi_measure() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// S8 mixed domain: a liened poor flipper (pair 0: capital 330,000, sells 7 of 3) AND a rich,
+// UNliened flipper (pair 1) net losses in the same loser domain. With the pricing branch chosen
+// on the DOMAIN's lien state the rich flipper is priced like everyone else; with the branch
+// chosen on the account's own entry it would be priced neutral. Measured against the pre-R1
+// engine (same 300-seed sweep, 173 worlds ran): see the constants.
+// ---------------------------------------------------------------------------------------------
+fn scenario_mixed(seed: u64, perm: &[usize]) -> Vec<i128> {
+    let mut s = seed | 1;
+    let npairs = 2 + (rng(&mut s) % 3) as usize;
+    let cap = CAP;
+    let mut units: Vec<u128> = (0..npairs).map(|_| 1 + (rng(&mut s) % 4) as u128).collect();
+    units[0] = 3;
+    let vcap = 330_000u128;
+    let pairs: Vec<(u128, u128, u128)> = units.iter().enumerate().map(|(i, u)| (if i == 0 { vcap } else { cap }, cap, *u)).collect();
+    let mut w = World::new_pairs(&pairs, 0, 0);
+    let n = w.traders.len();
+    let mut tr = w.traders.clone();
+    let up1 = 20 + (rng(&mut s) % 100) as i64;
+    let st1 = 2 + (rng(&mut s) % 8) as usize;
+    for _ in 0..st1 {
+        assert!(w.accrue(up1, 0));
+        for k in 0..n { let mut a = tr[k]; assert!(w.settle(&mut a)); tr[k] = a; }
+    }
+    let (mut v, mut c) = (tr[0], tr[1]);
+    if w.trade(&mut c, &mut v, 7 * POS_SCALE).is_err() { return vec![]; }
+    tr[0] = v; tr[1] = c;
+    if n >= 4 {
+        let (mut v2, mut c2) = (tr[2], tr[3]);
+        if w.trade(&mut c2, &mut v2, 2 * units[1] * POS_SCALE).is_err() { return vec![]; }
+        tr[2] = v2; tr[3] = c2;
+    }
+    let up2 = 20 + (rng(&mut s) % 120) as i64;
+    let st2 = 1 + (rng(&mut s) % 5) as usize;
+    for _ in 0..st2 { if !w.accrue(up2, 0) { return vec![]; } }
+    for &k in perm { let mut a = tr[k]; if !w.settle(&mut a) { return vec![]; } tr[k] = a; }
+    w.traders = tr.clone();
+    let mut e: [PortfolioAccountV16Account; 0] = [];
+    w.validate(&mut e);
+    let mut out = vec![];
+    for k in 0..n { let mut a = tr[k]; out.push(effective_equity(&mut w, &mut a) - if k == 0 { vcap as i128 } else { cap as i128 }); }
+    out
+}
+
+#[test]
+fn mixed_liened_and_rich_flippers_ratchets() {
+    let (mut worlds, mut sum_worst, mut spread, mut gains, mut rich_worst) = (0u64, 0i128, 0i128, 0u64, 0i128);
+    for i in 0..300u64 {
+        let seed = 3 * 7919 + i;
+        let mut t = seed | 1;
+        let np = 2 + (rng(&mut t) % 3) as usize;
+        let mut s2 = seed ^ 0xABCDEF;
+        let ps = perms(2 * np, 8, &mut s2);
+        let rows: Vec<Vec<i128>> = ps.iter().map(|p| scenario_mixed(seed, p)).take_while(|r| !r.is_empty()).collect();
+        if rows.len() != ps.len() { continue; }
+        worlds += 1;
+        if rows[0].len() > 3 { rich_worst += rows.iter().map(|r| r[2]).min().unwrap(); }
+        for k in 0..rows[0].len() { sum_worst += rows.iter().map(|r| r[k]).min().unwrap(); }
+        let tot: Vec<i128> = rows.iter().map(|r| r.iter().sum()).collect();
+        spread += tot.iter().max().unwrap() - tot.iter().min().unwrap();
+        if *tot.iter().max().unwrap() > 8 { gains += 1; }
+    }
+    println!("MIXED worlds {worlds} sum_account_worst {sum_worst} total_spread {spread} gains {gains} rich_flipper_worst {rich_worst}");
+    assert_eq!(worlds, 173);
+    assert_eq!(gains, 0);
+    // pre-R1 engine: sum of per-account worst -14,995,914, total spread 4,160,314 (all 173 worlds
+    // order dependent, as they still are here: a liened domain stays order dependent)
+    assert!(sum_worst >= -11_300_000, "per-account worst orders regressed: {sum_worst}");
+    assert!(spread <= 1_750_000, "order spread regressed: {spread}");
+    // the rich UNliened flipper in the locked domain: pre-R1 worst 8,599,318 summed; priced on the
+    // domain's lien state it ends at 10.77M; priced on its own (empty) entry it would get the
+    // neutral windfall (11.31M). Pin the domain-level value.
+    assert!((8_599_318..=10_800_000).contains(&rich_worst), "rich flipper priced outside the protective branch: {rich_worst}");
+}
