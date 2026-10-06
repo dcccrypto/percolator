@@ -3722,6 +3722,74 @@ impl V16Core {
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
     }
 
+    /// `source_credit_state_realizable_support_for_claim_num` evaluated at `rate_num` instead of
+    /// the state's stored rate. The available-backing cap is the state's own, so an overriding
+    /// rate can never extract more support than the domain actually holds.
+    fn source_credit_state_realizable_support_for_claim_num_at_rate(
+        state: SourceCreditStateV16,
+        claim_num: u128,
+        rate_num: u128,
+    ) -> V16Result<u128> {
+        if claim_num == 0 || state.positive_claim_bound_num == 0 {
+            return Ok(0);
+        }
+        let credited_num =
+            Self::mul_div_floor_u128_or_wide(claim_num, rate_num, CREDIT_RATE_SCALE)?;
+        Ok((credited_num / BOUND_SCALE)
+            .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+    }
+
+    /// R1: the rate at which loss netting may burn a source domain's claims, with the transient
+    /// removed: `min(1, (available + booked + pending_other) / (claims + extra_claims))`, never
+    /// below the stored rate.
+    ///
+    /// A winner's K/F gain is credited to `positive_claim_bound_num` when ITS leg settles; the
+    /// backing for it is booked when the matching losers' legs settle. In between, the stored
+    /// rate `available / claims` is transiently low, and a loss netted against a claim at that
+    /// rate burns `loss / r` face that is worth nothing once the rate recovers. The rate the
+    /// domain reaches once everything in flight has landed does not depend on the order in which
+    /// the settlements happen, so that is the rate to price the burn at:
+    /// * `booked_loss`: atoms of THIS loss that will really be booked into the domain;
+    /// * `extra_claims_num`: the winner credit matching THIS loss that has not been credited
+    ///   yet (the whole loss, bad debt included, minus what `kf_pending_credit` already holds);
+    /// * `pending_other_num`: claims already credited whose OTHER losers have not settled; their
+    ///   backing is assumed to land. If one of those losers is bankrupt it will not, which this
+    ///   rate cannot know: the bounded residual order dependence.
+    ///
+    /// The caller still caps consumable support by the real available backing, so this prices
+    /// burns and cannot create value.
+    fn source_credit_netting_rate(
+        state: SourceCreditStateV16,
+        booked_loss: u128,
+        extra_claims_num: u128,
+        pending_other_num: u128,
+    ) -> V16Result<u128> {
+        if state.positive_claim_bound_num == 0 {
+            return Ok(state.credit_rate_num);
+        }
+        let available = Self::available_backing_num_for_source_credit_state(state)?;
+        let numerator = available
+            .checked_add(Self::bound_num_from_amount(booked_loss)?)
+            .and_then(|v| v.checked_add(pending_other_num))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let denominator = state
+            .positive_claim_bound_num
+            .checked_add(extra_claims_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if denominator == 0 || numerator >= denominator {
+            return Ok(CREDIT_RATE_SCALE);
+        }
+        let rate = U256::from_u128(numerator)
+            .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
+            .and_then(|v| v.checked_div(U256::from_u128(denominator)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(core::cmp::min(
+            CREDIT_RATE_SCALE,
+            core::cmp::max(state.credit_rate_num, rate),
+        ))
+    }
+
     fn source_credit_state_realizable_support_for_face(
         state: SourceCreditStateV16,
         face_claim: u128,
@@ -7437,6 +7505,26 @@ pub struct DeadLegForfeitOutcomeV16 {
     pub explicit_loss: u128,
 }
 
+/// R1: context of a K/F loss netting for `consume_validated_account_source_credit_for_loss_not_atomic`.
+#[derive(Clone, Copy, Debug)]
+struct KfLossNettingV16 {
+    /// Atoms of loss being settled.
+    loss: u128,
+    /// The source domain the settlement books the loss into afterwards.
+    loss_domain: Option<usize>,
+    /// Whether that booking is certain to happen in full (Live, bookable bucket, solvent).
+    booking_certain: bool,
+    /// Atoms of the account's UNLIENED source-claim face. Only this much of the loss can be
+    /// paid by consuming support (and so booked as support); a liened or impaired claim, and
+    /// face with no source claim, eats the tail of the loss 1:1 without a booking.
+    consumable_face: u128,
+    /// Positive face that cannot be consumed (`positive face - consumable_face`).
+    retained_face: u128,
+    /// Part of the loss that outruns the account's free capital plus its positive face: bad
+    /// debt, never booked as backing.
+    bad_debt: u128,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SupportLossApplicationV16 {
     support_consumed: u128,
@@ -8349,6 +8437,15 @@ pub struct EngineAssetSlotV16Account {
     /// written only by accrual, K/F settlement, the trade gate and insurance withdrawal.
     pub kf_drift_long: KfDriftSideV16Account,
     pub kf_drift_short: KfDriftSideV16Account,
+    /// R1 round 2 (appended LAST, 32 bytes per slot): per source domain, in `BOUND_SCALE`
+    /// claim-num units, signed: the positive claims credited to winners by K/F settlement minus
+    /// the loss the domain's losers have realized by K/F settlement (`pending_credit`).
+    /// Positive = winners are ahead of their losers (those claims are real but their backing is
+    /// still unbooked); negative = losers settled first (surplus backing). Domain `2*asset +
+    /// side` is the LOSER side: `kf_pending_credit_long` is the domain whose losers are long.
+    /// Read only to price loss netting; never to move value.
+    pub kf_pending_credit_long: V16PodI128,
+    pub kf_pending_credit_short: V16PodI128,
 }
 
 /// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
@@ -8524,7 +8621,9 @@ impl EngineAssetSlotV16Account {
                 self.insurance_reservation_short,
             )
             && self.kf_drift_long == KfDriftSideV16Account::default()
-            && self.kf_drift_short == KfDriftSideV16Account::default())
+            && self.kf_drift_short == KfDriftSideV16Account::default()
+            && self.kf_pending_credit_long.get() == 0
+            && self.kf_pending_credit_short.get() == 0)
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -8563,6 +8662,8 @@ impl EngineAssetSlotV16Account {
             ),
             kf_drift_long: KfDriftSideV16Account::default(),
             kf_drift_short: KfDriftSideV16Account::default(),
+            kf_pending_credit_long: V16PodI128::new(0),
+            kf_pending_credit_short: V16PodI128::new(0),
         }
     }
 
@@ -9211,6 +9312,8 @@ impl MarketGroupV16HeaderAccount {
             ),
             kf_drift_long: KfDriftSideV16Account::default(),
             kf_drift_short: KfDriftSideV16Account::default(),
+            kf_pending_credit_long: V16PodI128::new(0),
+            kf_pending_credit_short: V16PodI128::new(0),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -13245,6 +13348,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         burn_account_claims: bool,
         require_full: bool,
     ) -> V16Result<(SourceCreditConsumptionV16, u128, u128)> {
+        self.consume_validated_account_source_credit_for_loss_not_atomic(
+            account,
+            effective_credit,
+            burn_account_claims,
+            require_full,
+            None,
+        )
+    }
+
+    /// `netting = Some(..)` marks a K/F loss netting (R1): every domain's claims are priced
+    /// without the transient dip (see `source_credit_netting_rate`). `None` keeps the stored
+    /// rate (conversion, Resolved, forfeit).
+    fn consume_validated_account_source_credit_for_loss_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        effective_credit: u128,
+        burn_account_claims: bool,
+        require_full: bool,
+        netting: Option<KfLossNettingV16>,
+    ) -> V16Result<(SourceCreditConsumptionV16, u128, u128)> {
         if effective_credit == 0 {
             return Ok((
                 SourceCreditConsumptionV16 {
@@ -13287,7 +13410,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Err(V16Error::Stale);
             }
-            let rate = source_credit.credit_rate_num;
+            let rate = match netting {
+                Some(ctx) => {
+                    let pending = self.kf_pending_credit_num(d)?;
+                    if ctx.loss_domain == Some(d) {
+                        // The part of THIS loss whose winner is already credited here (`own`)
+                        // sits in `claims` and in `pending`; the rest of the loss will be
+                        // credited to its winner once that winner settles.
+                        let loss_num = ctx
+                            .loss
+                            .checked_mul(BOUND_SCALE)
+                            .ok_or(V16Error::ArithmeticOverflow)?;
+                        let own_num = core::cmp::min(loss_num, pending);
+                        // Booked = loss - (tail that eats non-consumable face 1:1, unbooked)
+                        // - (bad debt beyond capital and face, never booked).
+                        let tail_eaten = core::cmp::min(
+                            ctx.loss.saturating_sub(ctx.consumable_face),
+                            ctx.retained_face,
+                        );
+                        let booked = if ctx.booking_certain {
+                            ctx.loss
+                                .saturating_sub(tail_eaten)
+                                .saturating_sub(ctx.bad_debt)
+                        } else {
+                            0
+                        };
+                        V16Core::source_credit_netting_rate(
+                            source_credit,
+                            booked,
+                            loss_num - own_num,
+                            pending - own_num,
+                        )?
+                    } else {
+                        V16Core::source_credit_netting_rate(source_credit, 0, 0, pending)?
+                    }
+                }
+                None => source_credit.credit_rate_num,
+            };
             let locked = source
                 .source_claim_liened_num
                 .get()
@@ -13299,10 +13458,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_sub(locked)
                 .ok_or(V16Error::CounterUnderflow)?;
             if rate != 0 && unliened != 0 {
-                let consumable = V16Core::source_credit_state_realizable_support_for_claim_num(
-                    source_credit,
-                    unliened,
-                )?;
+                let consumable =
+                    V16Core::source_credit_state_realizable_support_for_claim_num_at_rate(
+                        source_credit,
+                        unliened,
+                        rate,
+                    )?;
                 let take = remaining.min(consumable);
                 if take != 0 {
                     let (face_num, backing_num) =
@@ -14307,6 +14468,92 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
     ) -> V16Result<SupportLossApplicationV16> {
+        self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(account, loss_abs, None)
+    }
+
+    /// Atoms of the account's source-claim face that is neither liened nor impaired, summed over
+    /// its source domains (floor per domain, a lower bound of what a loss can consume).
+    fn account_unliened_source_face_atoms(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+        let mut total = 0u128;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let locked = source
+                    .source_claim_liened_num
+                    .get()
+                    .checked_add(source.source_claim_impaired_num.get())
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let unliened = source
+                    .source_claim_bound_num
+                    .get()
+                    .checked_sub(locked)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                total = total
+                    .checked_add(unliened / BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            slot += 1;
+        }
+        Ok(total)
+    }
+
+    /// Positive part of a domain's `kf_pending_credit`, in claim-num units.
+    fn kf_pending_credit_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let v = match side {
+            SideV16::Long => slot.kf_pending_credit_long.get(),
+            SideV16::Short => slot.kf_pending_credit_short.get(),
+        };
+        Ok(v.max(0) as u128)
+    }
+
+    /// Records a K/F settlement in the domain's `kf_pending_credit`: `+claims credited` for a
+    /// winner, `-loss realized` for a loser. Saturating (it only prices burns).
+    fn add_kf_pending_credit(&mut self, domain: usize, delta: i128) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        match side {
+            SideV16::Long => {
+                slot.kf_pending_credit_long = V16PodI128::new(
+                    slot.kf_pending_credit_long.get().saturating_add(delta),
+                );
+            }
+            SideV16::Short => {
+                slot.kf_pending_credit_short = V16PodI128::new(
+                    slot.kf_pending_credit_short.get().saturating_add(delta),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// R1: whether this settlement books its loss into `loss_domain` at all (Live and the
+    /// domain's bucket takes a booking right now). A Resolved market, a lapsed or impaired
+    /// bucket keeps the stored rate, i.e. the pre-R1 behaviour. HOW MUCH books is computed by
+    /// the caller (`KfLossNettingV16::unbooked`): a loss that outruns the account's capital and
+    /// face leaves bad debt that never books, and a tail that eats non-consumable face 1:1
+    /// does not book either.
+    fn loss_domain_books_now(&self, loss_domain: usize) -> V16Result<bool> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Ok(false);
+        }
+        self.loss_domain_accepts_realized_backing(loss_domain)
+    }
+
+    /// `loss_domain` is the source domain the caller books the settled loss into afterwards
+    /// (`reserve_new_capital_backed_loss_for_source_domain_not_atomic`); `None` for callers that
+    /// do not book (forfeit, kani shims).
+    fn apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        loss_abs: u128,
+        loss_domain: Option<usize>,
+    ) -> V16Result<SupportLossApplicationV16> {
         if loss_abs == 0 {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
@@ -14332,12 +14579,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (support_consumed, support_face_burned, preburned_source_claim_num) =
             if has_source_claims {
                 let source_support_limit = loss_abs.min(old_positive_face);
+                let unliened_face =
+                    Self::account_unliened_source_face_atoms(&account.as_view())?
+                        .min(old_positive_face);
+                let capital_free = account
+                    .header
+                    .capital
+                    .get()
+                    .saturating_sub(account.header.pnl.get().min(0).unsigned_abs());
+                let netting = match loss_domain {
+                    Some(domain) => Some(KfLossNettingV16 {
+                        loss: loss_abs,
+                        loss_domain: Some(domain),
+                        booking_certain: self.loss_domain_books_now(domain)?,
+                        consumable_face: unliened_face,
+                        retained_face: old_positive_face.saturating_sub(unliened_face),
+                        bad_debt: loss_abs.saturating_sub(
+                            old_positive_face.saturating_add(capital_free),
+                        ),
+                    }),
+                    None => None,
+                };
                 let (consumption, preburned_source_claim_num, support_consumed) = self
-                    .consume_validated_account_source_credit_not_atomic(
+                    .consume_validated_account_source_credit_for_loss_not_atomic(
                         account,
                         source_support_limit,
                         true,
                         false,
+                        netting,
                     )?;
                 (
                     support_consumed,
@@ -14962,11 +15231,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if prepared.net != 0 {
             if prepared.net > 0 {
+                let claims_before = self.source_credit_for_domain(source_domain)?.positive_claim_bound_num;
                 self.apply_signed_kf_delta_to_pnl(account, prepared.net, Some(source_domain))?;
+                let claims_after = self.source_credit_for_domain(source_domain)?.positive_claim_bound_num;
+                // claims actually credited by this settlement (a gain that nets against the
+                // account's own debt credits less than `net`)
+                let credited = i128::try_from(claims_after.saturating_sub(claims_before))
+                    .map_err(|_| V16Error::ArithmeticOverflow)?;
+                self.add_kf_pending_credit(source_domain, credited)?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
                 let source_backed = Self::account_has_source_claims(&account.as_view())?;
-                let support = self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
+                validate_non_min_i128(prepared.net)?;
+                let support = self.apply_haircut_bounded_close_loss_to_pnl_in_loss_domain(
+                    account,
+                    prepared.net.unsigned_abs(),
+                    Some(source_domain),
+                )?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 // Source-backed support consumed by the netting is paid loss too (the
                 // junior haircut branch spends no senior stock, so it books nothing).
@@ -14982,6 +15263,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     negative_after,
                     support_paid,
                 )?;
+                // the loser has realized its loss: its winners' credits no longer wait on it
+                let realized_num = i128::try_from(
+                    prepared
+                        .net
+                        .unsigned_abs()
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                )
+                .map_err(|_| V16Error::ArithmeticOverflow)?;
+                self.add_kf_pending_credit(source_domain, -realized_num)?;
             }
         }
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
@@ -24027,6 +24318,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // fix/v21-funding-scale: the KF epochs were cleared with the price/funding history.
         slot.kf_drift_long = KfDriftSideV16Account::default();
         slot.kf_drift_short = KfDriftSideV16Account::default();
+        slot.kf_pending_credit_long = V16PodI128::new(0);
+        slot.kf_pending_credit_short = V16PodI128::new(0);
         self.validate_shape()
     }
 
@@ -24214,6 +24507,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if net < 0 {
             loss_settled = net.unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
+            // realized without booking (forfeit): the winners' credits no longer wait on it
+            let leg_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let realized_num = i128::try_from(
+                loss_settled
+                    .checked_mul(BOUND_SCALE)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )
+            .map_err(|_| V16Error::ArithmeticOverflow)?;
+            self.add_kf_pending_credit(leg_domain, -realized_num)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
         } else {
@@ -25758,6 +26060,8 @@ pub fn kani_eq_engine_asset_slot_v16_account(
         )
         && a.kf_drift_long == b.kf_drift_long
         && a.kf_drift_short == b.kf_drift_short
+        && a.kf_pending_credit_long == b.kf_pending_credit_long
+        && a.kf_pending_credit_short == b.kf_pending_credit_short
 }
 
 #[cfg(kani)]
@@ -27552,5 +27856,92 @@ mod attach_writer_cross_side_oi_tripwire_tests {
             "a Recovery-lifecycle asset is transiently asymmetric during teardown \
              and must not be flagged by the Live matched-book conjunct",
         );
+    }
+}
+
+// ============================================================================
+// R1 round 2: pin `source_credit_netting_rate` to exact values.
+// ============================================================================
+#[cfg(test)]
+mod r1_netting_rate_tests {
+    use super::*;
+
+    /// A source domain with `claims` atoms of positive claims and `available` atoms of fresh
+    /// counterparty backing, nothing liened.
+    fn domain(claims: u128, available: u128) -> SourceCreditStateV16 {
+        let mut s = SourceCreditStateV16::EMPTY;
+        s.positive_claim_bound_num = claims * BOUND_SCALE;
+        s.exact_positive_claim_num = claims * BOUND_SCALE;
+        s.fresh_reserved_backing_num = available * BOUND_SCALE;
+        s.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(s).unwrap();
+        s
+    }
+
+    fn rate(state: SourceCreditStateV16, booked: u128, extra: u128, pending_other: u128) -> u128 {
+        V16Core::source_credit_netting_rate(
+            state,
+            booked,
+            extra * BOUND_SCALE,
+            pending_other * BOUND_SCALE,
+        )
+        .unwrap()
+    }
+
+    const ONE: u128 = CREDIT_RATE_SCALE;
+
+    #[test]
+    fn exact_values_pin_booked_extra_and_pending() {
+        let s = domain(150, 100);
+        // stored rate 100/150
+        assert_eq!(s.credit_rate_num, ONE * 100 / 150);
+        // nothing in flight: the stored rate, exactly
+        assert_eq!(rate(s, 0, 0, 0), ONE * 100 / 150);
+        // booked 20 books into numerator only (winner already in claims): 120/150
+        assert_eq!(rate(s, 20, 0, 0), ONE * 120 / 150);
+        // booked 20 whose winner is not yet credited (extra 20): 120/170
+        assert_eq!(rate(s, 20, 20, 0), ONE * 120 / 170);
+        // other losers' pending credit 30 is assumed to land: 130/150
+        assert_eq!(rate(s, 0, 0, 30), ONE * 130 / 150);
+        // all together: (100+20+30)/(150+20)
+        assert_eq!(rate(s, 20, 20, 30), ONE * 150 / 170);
+        // the cap: 150/150 and beyond is exactly 1
+        assert_eq!(rate(s, 50, 0, 0), ONE);
+        assert_eq!(rate(s, 60, 0, 0), ONE);
+    }
+
+    /// Kills the "booked x2" and "booked x3" mutants: the exact value at booked = 20 differs
+    /// from the value at booked = 40 and 60 (here 0.8, 0.933.., 1).
+    #[test]
+    fn booked_amount_is_not_scaled() {
+        let s = domain(150, 100);
+        let r1 = rate(s, 20, 0, 0);
+        assert_eq!(r1, ONE * 4 / 5);
+        assert_ne!(r1, rate(s, 40, 0, 0));
+        assert_ne!(r1, rate(s, 60, 0, 0));
+        assert!(rate(s, 40, 0, 0) > r1 && rate(s, 60, 0, 0) == ONE);
+    }
+
+    #[test]
+    fn never_below_stored_never_above_one_and_monotone() {
+        for claims in [1u128, 7, 150, 1_000] {
+            for available in [0u128, 1, 99, 150, 2_000] {
+                let s = domain(claims, available);
+                let mut last = 0;
+                for booked in [0u128, 1, 10, 100, 10_000] {
+                    let r = rate(s, booked, 0, 0);
+                    assert!(r >= s.credit_rate_num && r <= ONE);
+                    assert!(r >= last, "monotone in booked");
+                    last = r;
+                }
+                // more future claims can only lower the rate
+                assert!(rate(s, 5, 40, 0) <= rate(s, 5, 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_domain_keeps_the_stored_rate() {
+        let s = SourceCreditStateV16::EMPTY;
+        assert_eq!(rate(s, 10, 10, 10), s.credit_rate_num);
     }
 }
