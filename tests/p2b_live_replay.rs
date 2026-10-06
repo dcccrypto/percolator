@@ -42,9 +42,76 @@ fn fixture_dir(name: &str) -> PathBuf {
         .join(name)
 }
 
+// v2.2 (layout discriminator 19) appended band/rent words to three engine structs. The
+// fixtures are v2.1 (discriminator 18) bytes from band-off markets, whose exact v2.2
+// encoding is the same bytes with the new words zeroed (I-B7). These upgraders insert
+// exactly those zero words, so the replays keep exercising the live v2.1 state.
+const V22_CONFIG_EXTRA: usize = 6 * 8; // band_bps, E, Pmax, rent_max, band_max_positions_per_side, band_min_leg_notional
+const V22_ASSET_EXTRA: usize = 8 * 8 + 3 * 16; // 8 band u64 words + 3 rent u128 words
+const V22_LEG_EXTRA: usize = 8 + 1 + 16 + 8; // band_epoch_snap, band_liq_pending, rent_snap, rent_carry
+
+fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
+    use percolator::{AssetStateV16Account, V16ConfigAccount};
+    let new_header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
+    let old_header_len = new_header_len - V22_CONFIG_EXTRA;
+    let config_off = core::mem::offset_of!(MarketGroupV16HeaderAccount, config);
+    let old_config_end = config_off + core::mem::size_of::<V16ConfigAccount>() - V22_CONFIG_EXTRA;
+    let new_slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
+    let old_slot_len = new_slot_len - V22_ASSET_EXTRA;
+    let old_asset_len = core::mem::size_of::<AssetStateV16Account>() - V22_ASSET_EXTRA;
+    let old_stride = ASSET_ORACLE_WRAPPER_LEN + old_slot_len;
+    let mut out = Vec::new();
+    out.extend_from_slice(&old[..MARKET_GROUP_OFF]);
+    let header = &old[MARKET_GROUP_OFF..MARKET_GROUP_OFF + old_header_len];
+    out.extend_from_slice(&header[..old_config_end]);
+    out.extend_from_slice(&[0u8; V22_CONFIG_EXTRA]);
+    out.extend_from_slice(&header[old_config_end..]);
+    let rest = &old[MARKET_GROUP_OFF + old_header_len..];
+    assert_eq!(
+        rest.len() % old_stride,
+        0,
+        "v2.1 slab length must be header + N slots"
+    );
+    for slot in rest.chunks(old_stride) {
+        out.extend_from_slice(&slot[..ASSET_ORACLE_WRAPPER_LEN]);
+        let engine = &slot[ASSET_ORACLE_WRAPPER_LEN..];
+        out.extend_from_slice(&engine[..old_asset_len]);
+        out.extend_from_slice(&[0u8; V22_ASSET_EXTRA]);
+        out.extend_from_slice(&engine[old_asset_len..]);
+    }
+    out
+}
+
+fn upgrade_v21_portfolio(old: &[u8]) -> Vec<u8> {
+    use percolator::{PortfolioLegV16Account, V16_MAX_PORTFOLIO_ASSETS_N};
+    let legs_off = core::mem::offset_of!(PortfolioAccountV16Account, legs);
+    let old_leg_len = core::mem::size_of::<PortfolioLegV16Account>() - V22_LEG_EXTRA;
+    let state = &old[PORTFOLIO_STATE_OFF..];
+    let mut out = Vec::new();
+    out.extend_from_slice(&old[..PORTFOLIO_STATE_OFF]);
+    out.extend_from_slice(&state[..legs_off]);
+    for i in 0..V16_MAX_PORTFOLIO_ASSETS_N {
+        out.extend_from_slice(&state[legs_off + i * old_leg_len..legs_off + (i + 1) * old_leg_len]);
+        out.extend_from_slice(&[0u8; V22_LEG_EXTRA]);
+    }
+    out.extend_from_slice(&state[legs_off + V16_MAX_PORTFOLIO_ASSETS_N * old_leg_len..]);
+    // Provenance: discriminator 18 -> 19 (the only non-appended change).
+    let disc_off = PORTFOLIO_STATE_OFF
+        + core::mem::offset_of!(PortfolioAccountV16Account, provenance_header)
+        + core::mem::offset_of!(percolator::ProvenanceHeaderV16Account, layout_discriminator);
+    assert_eq!(
+        u16::from_le_bytes([out[disc_off], out[disc_off + 1]]),
+        18,
+        "fixture is v2.1"
+    );
+    out[disc_off..disc_off + 2]
+        .copy_from_slice(&percolator::V16_LAYOUT_DISCRIMINATOR.to_le_bytes());
+    out
+}
+
 fn load(name: &'static str) -> LiveMarket {
     let dir = fixture_dir(name);
-    let slab = fs::read(dir.join("slab.bin")).expect("slab fixture");
+    let slab = upgrade_v21_slab(&fs::read(dir.join("slab.bin")).expect("slab fixture"));
     let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
     let slot_len = core::mem::size_of::<EngineAssetSlotV16Account>();
     let stride = ASSET_ORACLE_WRAPPER_LEN + slot_len;
@@ -76,7 +143,7 @@ fn load(name: &'static str) -> LiveMarket {
         .collect();
     entries.sort();
     for p in entries {
-        let data = fs::read(&p).unwrap();
+        let data = upgrade_v21_portfolio(&fs::read(&p).unwrap());
         let account: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(
             &data[PORTFOLIO_STATE_OFF..PORTFOLIO_STATE_OFF + state_len],
         );

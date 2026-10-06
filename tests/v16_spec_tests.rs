@@ -1997,6 +1997,10 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2052,6 +2056,10 @@ fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2200,6 +2208,10 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2951,6 +2963,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -2971,6 +2987,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
     liquidated_header.health_cert.valid = 0;
@@ -3247,6 +3267,10 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3480,6 +3504,10 @@ fn v16_auto_crank_settles_released_recovery_obligation_before_finalizing_recover
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3576,6 +3604,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3596,6 +3628,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3799,6 +3835,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3819,6 +3859,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3900,6 +3944,10 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -4673,6 +4721,10 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5336,6 +5388,10 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5422,6 +5478,10 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5497,6 +5557,10 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -7360,6 +7424,10 @@ fn v16_b_settlement_loss_retires_the_legs_own_source_domain_first() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -7490,6 +7558,10 @@ fn v16_b_settlement_loss_spills_past_an_exhausted_own_source_domain() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -8226,6 +8298,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -8248,6 +8324,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9150,6 +9230,10 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
             },
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.active_bitmap[0] = V16PodU64::new(1);
         account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9255,6 +9339,10 @@ fn v16_auto_crank_retains_released_obligation_while_the_opposite_side_is_live() 
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9334,6 +9422,10 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9401,6 +9493,10 @@ fn v16_auto_crank_migrates_exhausted_residue_behind_a_current_certificate() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9505,6 +9601,10 @@ fn v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9593,6 +9693,10 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9941,6 +10045,10 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10025,6 +10133,10 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
             b_epoch_snap: asset.epoch_long,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
     }
     header.resolved_payout_blocker_count = V16PodU64::new(8);
@@ -10447,6 +10559,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: true,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10524,6 +10640,10 @@ fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10784,6 +10904,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset0.epoch_long,
                 b_stale: true,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             (header, markets, account_header)
@@ -10900,6 +11024,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset.epoch_long,
                 b_stale: false,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             {
@@ -11071,6 +11199,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11089,6 +11221,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
 
@@ -11165,6 +11301,10 @@ fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -11253,6 +11393,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11271,6 +11415,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -12170,6 +12318,10 @@ fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty()
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
