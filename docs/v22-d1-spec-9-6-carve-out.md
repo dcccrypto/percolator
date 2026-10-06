@@ -102,12 +102,16 @@ that can neither certify nor liquidate.
   minimum-size pairs. That costs `512 x min_leg_notional x IMR` of locked, refundable margin
   (512 tokens at the 10-token program floor and 10x; 5,120 at the SDK default of 100 tokens)
   and **no price exposure** (the pairs hedge each other; funding and rent between one's own
-  legs net to zero). It is no longer a lock-out: a newcomer who brings at least 2x the
-  notional of a leg on the full side evicts it (wrapper tag 119: the evicted leg is closed
+  legs net to zero). It is no longer a lock-out: on a FULL side a newcomer can evict a SMALL
+  leg (wrapper tag 119). The victim is the caller's choice, not provably "the smallest", so
+  the bound is on who can be evicted: its notional must be at most 4x the market's minimum
+  leg notional AND at most half the newcomer's own fill. The evicted leg is closed
   bilaterally against the bound vault LP at `P_last` with no fee, atomically with the
-  newcomer's own fill), so holding a side against traders of size `N` needs every filler leg
-  above `N / 2`. The flip side is accepted: on a FULL side a larger trader can displace a
-  smaller one, who keeps exact mark-to-market equity and loses only the position.
+  newcomer's fill, and keeps exact mark-to-market equity. A trader above 4x the minimum can
+  never be displaced, whatever a larger actor brings; a filler that wants to stay unevictable
+  must hold every leg above 4x the minimum (at least 4x the float). Accepted residual: a
+  trader at or below 4x the minimum can be displaced from a full side by a trader at least
+  twice its size, when the mark is not lagging.
 - **Dust sweep (tag 118).** A leg below HALF the minimum (price moves, liquidation, ADL) can
   be closed by anyone at `P_last` with no fee. Since round 2 it is a BILATERAL close against
   the bound vault LP: open interest leaves both sides together, `A` is unchanged and the

@@ -21192,6 +21192,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    /// # CALLER CONTRACT (round-3 re-review): bound-LP binding required
+    ///
+    /// The two `*_band_maker_exempt_*` entry points exempt WHOEVER the caller passes as the
+    /// maker. The engine cannot know who the standing counterparty is: the wrapper must call
+    /// them ONLY when the maker account is the traded asset's RECORDED bound vault LP
+    /// (`AssetVaultLpV18.flags & BOUND` and `vault_lp_portfolio == account key`, on every leg
+    /// of a batch), and must use `execute_*_with_fee_loss_stale_scoped_not_atomic` otherwise.
+    /// Any other embedder of this engine must reproduce that binding (same note as
+    /// `route_rent_to_account_not_atomic`). What the engine guarantees regardless of the
+    /// caller: only the maker is exempt (the taker's leg is always checked), and no side can
+    /// ever hold more than `cap + 1` positioned legs (`kernel_band_attach`), so a wrong or
+    /// hostile caller can add at most ONE leg per side beyond the cap. They stay `pub` only
+    /// because the wrapper is another crate and the engine's own default test suite drives
+    /// them; do not call them from anywhere else.
+    ///
     /// v2.2 band (round-2 re-review N-6 / N-1): the same batch fill, with the MAKER (the
     /// non-taker account) exempt from the band minimum-leg-notional check. The wrapper uses it
     /// when the maker is a matcher LP: an LP's leg is the NET of its takers and is legitimately
@@ -21214,7 +21229,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    /// Single-trade form of `execute_batch_band_maker_exempt_not_atomic`.
+    /// Single-trade form of `execute_batch_band_maker_exempt_not_atomic`. Same CALLER
+    /// CONTRACT: only with the wrapper's bound-vault-LP binding for the maker.
     pub fn execute_trade_band_maker_exempt_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,

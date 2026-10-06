@@ -2765,14 +2765,14 @@ fn band_bilateral_dust_sweep_leaves_a_unchanged_and_the_market_open() {
     w.assert_conservation();
 }
 
-/// Round-2 re-review N-1b: replace-smallest eviction. Both sides are filled to the cap with
+/// Round-2 re-review N-1b: eviction of a small leg from a full side. Both sides are filled to the cap with
 /// self-hedged minimum-size pairs (the near-free cap-fill). An honest trader who brings at
 /// least 2x the smallest leg gets in: the smallest leg on that side is closed bilaterally
 /// against the standing LP at P_last (fee 0, A untouched), which frees its slot, and the
 /// newcomer's own fill then lands. The evicted account loses nothing but the position.
 /// The LP is the one cap-exempt counterparty (at most `cap + 1` legs per side).
 #[test]
-fn band_replace_smallest_eviction_lets_an_honest_trader_in() {
+fn band_small_leg_eviction_lets_an_honest_trader_in() {
     const MIN: u64 = 100_000_000;
     const K: u64 = 4;
     const LP: usize = 10;
@@ -2837,6 +2837,92 @@ fn band_replace_smallest_eviction_lets_an_honest_trader_in() {
         Err(V16Error::BandPositionCap)
     );
     (w.header, w.markets, w.accounts) = snap;
+    w.assert_census();
+    w.assert_conservation();
+}
+
+/// Round-3 re-review, dynamic abuse test of the LP exemptions (minimum leg and cap). The
+/// `*_band_maker_exempt_*` entry points exempt exactly ONE party, the maker the caller names
+/// (the wrapper only ever names the recorded bound vault LP), and the engine bounds the damage
+/// of any caller:
+///  1. the TAKER of an exempt fill is still held to the minimum leg and to the cap;
+///  2. a second exempt maker cannot push a side past `cap + 1` (the attach hard bound);
+///  3. through the ordinary entry point a maker gets no exemption at all.
+#[test]
+fn band_lp_exemptions_are_maker_only_and_bounded_by_cap_plus_one() {
+    const MIN: u64 = 100_000_000;
+    const K: u64 = 3;
+    const LP: usize = 10;
+    const LP2: usize = 11;
+    let mut cfg = band_cfg(130);
+    cfg.band_min_leg_notional = MIN;
+    cfg.band_max_positions_per_side = K;
+    let mut w = World::new(cfg, 14, 2_000_000_000);
+    let q = MIN as u128 * POS_SCALE / P0 as u128;
+    for k in 0..K as usize {
+        w.trade(2 * k, 2 * k + 1, q)
+            .expect("fill both sides to the cap");
+    }
+    let snap = |w: &World| (w.header, w.markets.clone(), w.accounts.clone());
+    let restore = |w: &mut World,
+                   s: (
+        MarketGroupV16HeaderAccount,
+        Vec<Market<u64>>,
+        Vec<PortfolioAccountV16Account>,
+    )| {
+        (w.header, w.markets, w.accounts) = s;
+    };
+    // 1a. Exempt fill, the TAKER leaves a sub-minimum leg: refused (the maker would be fine).
+    let s = snap(&w);
+    assert_eq!(
+        w.trade_maker_exempt(LP, 0, q - 1, false),
+        Err(V16Error::BandLegBelowMinNotional),
+        "the taker (account 0, reducing to dust) is never exempt"
+    );
+    restore(&mut w, s);
+    // 1b. Exempt fill, the TAKER attaches on a full side: refused.
+    let s = snap(&w);
+    assert_eq!(
+        w.trade_maker_exempt(8, LP, 2 * q, true),
+        Err(V16Error::BandPositionCap),
+        "the taker (account 8) needs a free slot even against the exempt maker"
+    );
+    restore(&mut w, s);
+    // 3. The ordinary entry point exempts nobody. Account 0 (an existing long) adds to its
+    //    leg against a fresh maker: the maker's sub-minimum leg, and the maker's attach on the
+    //    full short side, are both refused.
+    let s = snap(&w);
+    assert_eq!(
+        w.trade(0, LP, q / 2),
+        Err(V16Error::BandLegBelowMinNotional),
+        "non-exempt maker left with a sub-minimum leg"
+    );
+    restore(&mut w, s);
+    let s = snap(&w);
+    assert_eq!(
+        w.trade(0, LP, q),
+        Err(V16Error::BandPositionCap),
+        "non-exempt maker on a full side"
+    );
+    restore(&mut w, s);
+    // 2. ONE exempt maker may sit above the cap, with any leg size ...
+    w.trade_maker_exempt(0, LP, q / 2, true)
+        .expect("the exempt maker takes a sub-minimum leg on a full side");
+    let a = w.asset();
+    assert_eq!(
+        a.stored_pos_count_short,
+        K + 1,
+        "cap + 1: the one exempt leg"
+    );
+    //    ... but a SECOND exempt maker cannot: the attach hard bound is cap + 1, whoever asks.
+    let s = snap(&w);
+    assert_eq!(
+        w.trade_maker_exempt(2, LP2, q / 2, true),
+        Err(V16Error::BandPositionCap),
+        "no caller can put more than cap + 1 legs on a side"
+    );
+    restore(&mut w, s);
+    assert!(w.asset().stored_pos_count_short <= K + 1 && w.asset().stored_pos_count_long <= K + 1);
     w.assert_census();
     w.assert_conservation();
 }
