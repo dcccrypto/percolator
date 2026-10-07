@@ -3,81 +3,76 @@
 Function: `rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)` (`src/v16.rs`).
 A pure re-attribution between the two source domains of ONE asset: no token, no account field, no
 claim changes. Callers: the end of `apply_account_kf_settlement_entry` (after the leg's own cohort
-discharge and `set_asset_state`, only under the V1 guard) and `s10_retry_for_unpositioned_asset`
-(end of `accrue_asset_to_not_atomic` / `accrue_asset_path_to_not_atomic`, only when the asset has no
-stored position).
+discharge and `set_asset_state`, under the V1 guard) and `s10_retry_for_unpositioned_asset` (end of
+`permissionless_crank_not_atomic`, Refresh action only, asset with no stored position).
 
 ## Rule
 
-1. **V1 guard (settle entry):** `stale_account_count_long == 0 && stale_account_count_short == 0`
-   (every stored leg settled to the current K/F cohort). Idle cost: two compares. Accrual retry:
-   additionally `stored_pos_count_* == 0`.
-2. **Ownership (re-review R1.1):** `provider_principal_{long,short}` mirrors the wrapper ledger's
-   principal (`+` deposit, saturating `-` withdraw, reset when the bucket is wholly empty). The part
-   of a bucket the provider owns is `provider_fresh = principal - consumed - impaired - valid_liened`
-   (saturating), exactly the wrapper ledger's `principal - (loss - recovery)` with loss = consumed +
-   impaired. Only `loser_cash = fresh_unliened - provider_fresh` may move. A receivable refill
-   raises `provider_fresh` (provider recovery), consumption lowers it (provider loss): engine and
-   wrapper agree on who owns each atom at every step. Invariant in one sentence: *fresh backing
-   beyond the provider's ledger share is loser cash, and only that may move; a provider-less bucket
-   (principal 0) is wholly loser cash.*
-3. **Amount:** `min(loser_cash(src), available(src) - claims(src), claims(dst) - available(dst))`,
-   whole atoms, both directions, and `>= S10_MIN_MOVE_ATOMS` atoms (dust floor, founder-tunable,
-   default 1,000), else skipped.
-4. **Guards inside:** source `Fresh` and `expiry_slot > now`; destination accepts a booking
-   (`loss_domain_accepts_realized_backing`) and is not `Impaired`. The budget check is FIRST, before
-   any read, then bucket and principal mirror before any source-credit state.
-5. **Budget:** `s10_moves_left` per `MarketGroupV16ViewMut` (= one instruction), default
-   `S10_MAX_MOVES_PER_INSTRUCTION` = 2, forced to 0 inside `execute_batch_with_fee_loss_stale_scoped`
-   (trades, batches) and `liquidate_account_not_atomic` (liquidations): an 11-leg liquidation crank
-   is 1,375,975 CU of 1.4M and an 11-leg batch about 1.33M, so no firing may be added there.
-   Order within an instruction is deterministic: account order, then the account's leg plan order
-   (phase, source domain, slot) = ascending asset index. A skipped move is retried by the next
-   settle entry of the asset and, with no stored position, by the next accrual of the asset.
-6. **Moved backing's expiry:** it joins the destination bucket and takes the destination's expiry
-   (an existing Fresh bucket keeps its own; Empty/Expired opens at `now + horizon`), losing the
-   source bucket's own lifetime (later or earlier).
-7. **Receivable refill:** the add delta first repays the destination's `provider_receivable`.
+1. **Budget (third review, T3/T4):** `s10_moves_left` per `MarketGroupV16ViewMut` (= one instruction)
+   is **0 by default** (`new`). Only `new_crank` and `permissionless_crank_not_atomic` with the
+   `Refresh` action set it to `S10_MAX_MOVES_PER_INSTRUCTION` (2). So trades, batches (including the
+   band-scoped batch of the bound-vault-LP route), liquidations, recovery entry points, withdraws and
+   every future entry point are budget-free unless explicitly granted one; nothing has to remember to
+   zero it. The retry hook is reachable only from the refresh crank.
+2. **V1 guard (settle entry):** both `stale_account_count_*` are 0 (every stored leg settled to the
+   current K/F cohort). Retry hook: additionally both `stored_pos_count_*` are 0.
+3. **Ownership:** `provider_principal_{long,short}` mirrors the principal of every provider of a
+   bucket. It has ONE writer, `adjust_slot_provider_principal` (add; subtract saturating at 0), called
+   by the engine's `deposit_/withdraw_fresh_counterparty_backing_not_atomic` (tag 50 providers) and by
+   the wrapper's `vault_pot_owned_adjust` (every Earn / LP-vault pot funding and draw: tags 75, 77,
+   91, the fee crank, sibling top-up, recall, rescue, resolved settle/absorb: 17 add sites and 4
+   inline subtractions, all through that helper), plus the wholly-empty reset in
+   `set_backing_bucket_for_domain` and the activation reset.
+4. **Share (founder choice, `S10_PROTECT_FULL_PROVIDER_PRINCIPAL`, default `true`):**
+   rule A `provider_fresh = principal` (the wrapper withdraws up to the full ledger principal, so
+   nothing a provider or vault holder could withdraw on the base engine ever moves);
+   rule B `provider_fresh = sat(principal - consumed - impaired - valid_liened)` (the ledger NAV's
+   arithmetic; moves loser cash that base would have let the provider withdraw). Only
+   `loser_cash = fresh_unliened - provider_fresh` may move.
+5. **Amount:** `min(loser_cash(src), available(src) - claims(src), claims(dst) - available(dst))`, whole
+   atoms, both directions, `>= S10_MIN_MOVE_ATOMS` (1,000, founder-tunable), else skipped. The budget
+   check is FIRST (before any read), then bucket and mirror, then source-credit state.
+6. **Guards inside:** source `Fresh` and `expiry_slot > now`; destination accepts a booking
+   (`loss_domain_accepts_realized_backing`) and is not `Impaired`.
+7. **Moved backing's expiry:** it takes the destination's expiry (an existing Fresh bucket keeps its
+   own; Empty/Expired opens at `now + horizon`), losing the source bucket's lifetime.
+8. **Receivable refill:** the add delta first repays the destination's `provider_receivable`.
 
-## Proof obligations (reviewer's R8 list, rewritten for the provider mirror), to be proved once
+## Proof obligations (reviewer's T8 list), to be proved once
 
-1. Guard: `moved > 0` implies the V1 guard (settle entry) or no stored position (accrual retry), AND
-   `moved <= loser_cash(src)` and `fresh_unliened(src) - moved >= provider_fresh(src)`.
-2. Ownership invariant (the key one): after every writer of a bucket (`set_backing_bucket_for_domain`,
-   15 call sites) and of the mirror (deposit, withdraw, wholly-empty reset), `provider_fresh <=
-   fresh_unliened` holds whenever it held before and the writer is not an expiry/lapse; a deposit
-   raises principal and fresh together; a withdraw lowers principal by at most the amount; the move
-   never changes principal, consumed, impaired or liened. Prove per writer with one contract on the
-   setter.
-3. Attribution agreement: `provider_fresh` equals the wrapper ledger's available principal
-   `total_principal - (consumed + impaired) - liened` when the mirror equals the ledger principal.
-4. Cap: moves fired per view `<= S10_MAX_MOVES_PER_INSTRUCTION`; zero in trade/batch/liquidation
-   views; a skipped move leaves state unchanged and returns `Ok`; the guard is re-evaluated on every
-   settle entry and every accrual of the asset (frame lemma).
-5. Totality: for every shape-valid state the function returns `Ok` (no new fail-closed path inside a
-   settle): expired source, Impaired destination, Empty/Expired destination, receivable cases, the
-   dust floor and the budget early exit.
-6. Conservation: total `fresh_unliened` and `fresh_reserved` across the two domains, liened and
-   impaired backing, insurance credit reserved, `spent_backing`, claims and exact claims, vault,
-   insurance, `c_tot` and every account are unchanged; the destination `provider_receivable` never grows.
-7. Bound: `moved <= min(loser_cash(src), available(src) - claims(src), claims(dst) - available(dst))`,
-   `moved % BOUND_SCALE == 0`, `moved >= S10_MIN_MOVE_ATOMS * BOUND_SCALE`, destination available
-   never above claims, source covered claimants never lose coverage.
-8. Idempotence and symmetry: a second call moves 0. Ledger and expiry: `validate_source_domain_ledger`
-   and `reservation_encumbrance_proof_for_domain` hold for both domains; destination expiry rule; the
-   source bucket status transition matches `prepare_counterparty_backing_withdraw_delta`.
-9. Frame: the settle-entry proofs gain both domains of the asset and the two mirror fields in the
-   frame; the accrual functions gain the same frame for the retry; nothing else.
-10. Covers (vacuity detector): a move that fires with `provider_principal > 0` and a non-zero
-    `loser_cash`; a move skipped for the budget; a move skipped for the dust floor; the V1-false branch.
-11. Resolved: the move under Resolved mode preserves the payout-snapshot invariants (#223/#224 open
-    upstream; both read the same buckets).
+1. **Mirror writer contract:** `adjust_slot_provider_principal` is the only function that writes
+   `provider_principal_*` other than the wholly-empty reset and the activation reset; `add` raises it
+   by exactly `delta` (no overflow), `!add` lowers it by `min(delta, current)`. The wrapper cannot be
+   proved in the engine crate, so the wrapper's `vault_pot_owned_adjust` calls this one setter and
+   that is the only wrapper path to the field (wrapper test: after every pot funding/draw the mirror
+   equals the vault-owned counter, `s10_every_pot_funding_and_draw_drives_the_mirror`).
+2. **Share-formula bound:** `moved <= fresh_unliened(src) - provider_fresh_by_rule(rule, principal(src),
+   bucket(src))` for every shape-valid bucket and both rules; a provider-less bucket (principal 0) is
+   wholly movable; rule A never moves anything below `min(fresh, principal)`.
+3. **Budget:** `s10_moves_left == 0` on entry of every public entry point except
+   `permissionless_crank_not_atomic` (Refresh) and `new_crank` views; every call that reaches
+   `apply_account_kf_settlement_entry` or the retry hook respects the budget and the dust floor; a
+   skipped move leaves state unchanged and returns `Ok`.
+4. **Guard:** `moved > 0` implies the V1 guard (settle entry) or no stored position (hook), and
+   `moved >= S10_MIN_MOVE_ATOMS * BOUND_SCALE`.
+5. **Totality:** for every shape-valid state the function returns `Ok`: expired source, Impaired /
+   Empty / Expired destination, receivable cases, dust floor, budget early exit.
+6. **Conservation:** total `fresh_unliened`/`fresh_reserved` across the two domains, liened and impaired
+   backing, insurance credit reserved, `spent_backing`, claims and exact claims, vault, insurance,
+   `c_tot`, every account, and the mirror are unchanged; destination `provider_receivable` never grows.
+7. **Bound / idempotence / ledger / expiry / frame / Resolved snapshot (#223/#224):** as in the previous
+   revision (moved is a multiple of `BOUND_SCALE`; a second call moves 0; ledger and reservation proofs
+   hold for both domains; destination expiry rule; the settle-entry and crank proofs gain both domains
+   and the two mirror fields in their frame).
+8. **Covers (vacuity detector):** a move that fires with `provider_principal > 0` and non-zero loser
+   cash; **a move skipped because the provider share protects it (rule A and rule B)**; **a move
+   skipped for the budget**; a move skipped for the dust floor; the V1-false branch.
 
-Contract shim to add: `kani_rebalance_unclaimed_backing_across_asset_domains_not_atomic` next to the
-R1 shims (the test seam `rebalance_unclaimed_backing_for_test_not_atomic` already bypasses V1).
+Test seams: `rebalance_unclaimed_backing_for_test_not_atomic`, `set_s10_moves_left_for_test`,
+`s10_provider_fresh_for_test`, `s10_provider_fresh_by_rule_for_test` (all `#[doc(hidden)]`).
 
 ## Not provable by Kani (simulation gates)
 
-Every account at or below ideal in random-cadence, attacker-schedule, cash-out, LP-victim and the
-reviewer's forced-shortfall (`sec_ring_exploit`) sweeps, and the 600 / 900 / 16-mask worlds. See
-`finding-stranded-backing-2026-10-07.md`.
+Every account at or below ideal in the cadence, attacker, cash-out, LP-victim and forced-shortfall
+sweeps, the 600 / 900 / 16-mask worlds, and the LiteSVM pot tests (Earn, junior tranche, rescue,
+ordinary provider). See `finding-stranded-backing-2026-10-07.md`.
