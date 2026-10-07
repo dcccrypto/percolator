@@ -59,7 +59,7 @@ pub use v16::{
     band_initialize_asset, bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active,
     bankruptcy_hlock_is_unattributed, bankruptcy_hlock_mark_domain,
     bankruptcy_hlock_mark_unattributed, canonical_accrual_price_step_v16,
-    canonical_band_accrual_price_step_v16, v16_domain_count_for_market_slots,
+    canonical_band_accrual_price_step_v16, repay_pnl_postconditions_hold, v16_domain_count_for_market_slots,
     v16_domain_pair_for_asset_index, validate_bankruptcy_hlock_wire, AccrualStepV16,
     AccrueAssetOutcomeV16, ActionableSummaryV16, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
     AdlWindDownRequestV16, KfDriftSideV16, KfDriftSideV16Account, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
