@@ -23019,6 +23019,122 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
+    /// W-4 residual (v2.2 Wave D follow-up). The most an account can route from its UNLIENED,
+    /// RELEASED, source-backed positive PnL straight into insurance while the market is Live,
+    /// even with the source-claim exposure still open. 0 whenever any precondition of
+    /// [`Self::repay_insurance_from_released_pnl_not_atomic`] fails (not Live, snapshot captured,
+    /// no source claims, a lien is held, a stale certificate, a lagging target), so the caller
+    /// can fall back to capital without a failed mutation. Read-only.
+    pub fn released_pnl_insurance_repay_capacity(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || decode_bool(self.header.payout_snapshot_captured)?
+        {
+            return Ok(0);
+        }
+        if self.ensure_favorable_action_allowed(account).is_err() {
+            return Ok(0);
+        }
+        let pos = account.header.pnl.get().max(0) as u128;
+        let released = pos.saturating_sub(account.header.reserved_pnl.get());
+        if released == 0
+            || !Self::account_has_source_claims(account)?
+            || Self::account_has_source_liens(account)
+            || Self::valid_source_lien_effective_reserved_sum(account)? != 0
+        {
+            return Ok(0);
+        }
+        self.account_source_realizable_support(account, released)
+    }
+
+    /// W-4 residual (v2.2 Wave D follow-up): repay `amount_a + amount_b` into the asset-0 (or
+    /// any) insurance budgets `domain_a` / `domain_b` out of the account's own released,
+    /// UNLIENED, source-backed positive PnL, in Live, with the source-claim exposure open.
+    ///
+    /// Why this is not the refused Live conversion. `convert_released_pnl_to_capital_not_atomic`
+    /// refuses while a source claim has open exposure because the converted value would land in
+    /// the owner's WITHDRAWABLE capital while the position can still reverse. Here the value
+    /// never rests in capital: it is converted and charged into insurance inside this one call
+    /// (conversion, re-certification, then the engine's own capital-to-insurance charge, which
+    /// still refuses to leave certified equity below the INITIAL margin requirement), so the
+    /// owner's capital can only fall (never rise) and nothing is withdrawable ahead of the
+    /// repayment. Only unliened claims are consumed (`consume_validated_account_source_credit`
+    /// never touches a liened or impaired claim), the credit rate and the haircut are the same
+    /// ones a normal conversion uses, and a lien held by the account refuses the call.
+    ///
+    /// Value flow (both legs through the existing balanced proofs): `support -> account capital`
+    /// (`support_to_account_capital`), then `account capital -> insurance`
+    /// (`account_capital_to_insurance`); `vault` is unchanged, `c_tot` is unchanged net, the
+    /// backing consumed equals the insurance credited. `_not_atomic`: any `Err` means the
+    /// caller must abort the whole transaction (as every other `_not_atomic` entry).
+    pub fn repay_insurance_from_released_pnl_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain_a: usize,
+        amount_a: u128,
+        domain_b: usize,
+        amount_b: u128,
+    ) -> V16Result<u128> {
+        let total = amount_a
+            .checked_add(amount_b)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total == 0 {
+            return Ok(0);
+        }
+        let capacity = self.released_pnl_insurance_repay_capacity(&account.as_view())?;
+        if capacity == 0 || total > capacity {
+            return Err(V16Error::LockActive);
+        }
+        let capital_before = account.header.capital.get();
+        let c_tot_before = self.header.c_tot.get();
+        let vault_before = self.header.vault.get();
+        let insurance_before = self.header.insurance.get();
+        let pos = account.header.pnl.get().max(0) as u128;
+        // Realize `total` of released source-backed PnL into capital ...
+        self.apply_released_pnl_conversion_core_not_atomic(
+            account,
+            pos,
+            total,
+            true,
+            ReleasedPnlConversionDispositionV16::ConsumeHaircutFace,
+        )?;
+        // ... and sweep exactly that value into insurance in the same call.
+        self.full_account_refresh_not_atomic(account)?;
+        if amount_a != 0 {
+            self.charge_account_backing_fee_not_atomic(account, domain_a, 0, domain_a, amount_a)?;
+        }
+        if amount_b != 0 {
+            self.charge_account_backing_fee_not_atomic(account, domain_b, 0, domain_b, amount_b)?;
+        }
+        // Post-conditions (defence in depth): capital and c_tot are net unchanged, the vault is
+        // unchanged, and the account kept no unswept conversion.
+        // (A refresh may charge a maintenance/utilisation fee out of capital, so the account's
+        // capital may only FALL, and `c_tot` must fall by exactly the same amount.)
+        // W4-1: insurance must have risen by EXACTLY the repaid total. The insurance-credit
+        // branch of the source-credit consumption would debit then re-credit insurance (net
+        // zero), so a repayment funded that way would credit nothing while the wrapper reduces
+        // the receivable in full: refuse it. (Today only a `cfg(kani | fuzz)` writer can reach
+        // that branch; this keeps the path closed if a Live writer is ever added.)
+        if self.header.insurance.get().checked_sub(insurance_before) != Some(total) {
+            return Err(V16Error::InvalidConfig);
+        }
+        let capital_after = account.header.capital.get();
+        let c_tot_after = self.header.c_tot.get();
+        if capital_after > capital_before
+            || c_tot_after > c_tot_before
+            || capital_before - capital_after != c_tot_before - c_tot_after
+            || self.header.vault.get() != vault_before
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        self.try_clear_bankruptcy_hlock_if_healthy()?;
+        self.validate_shape()?;
+        account.validate_with_market(&self.as_view())?;
+        Ok(total)
+    }
+
     // #137: NOT cfg-gated. The Live release path must exist in the deployed
     // binary; gating it to kani/fuzz is what left the IM lien permanent.
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
