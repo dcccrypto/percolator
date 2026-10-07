@@ -704,3 +704,24 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.withdraw_fresh_counterparty_backing_not_atomic(1, prov).expect("the provider withdraws all of its principal");
 }
+
+/// Compute cap: with the per-instruction move budget at 0 the recovery settle moves nothing (it
+/// still succeeds); the next settlement of the asset (a fresh view, budget restored) does the move.
+#[test]
+fn the_move_respects_the_per_instruction_cap() {
+    assert_eq!(percolator::S10_MAX_MOVES_PER_INSTRUCTION, 2);
+    let (mut w, mut maker, _long) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    {
+        let (h, mk) = (w.header, w.markets.clone());
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        m.set_s10_moves_left_for_test(0);
+        if m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut maker)).is_err() { w.header = h; w.markets = mk; panic!("refresh with a zero budget must still succeed"); }
+    }
+    assert_eq!(fresh(&w, 1), before, "no budget, no move");
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+    }
+    assert!(fresh(&w, 1) < before, "the next view has its budget back and moves it");
+}

@@ -33,7 +33,11 @@ changes.
    firings and earlier in 27-35 percent (security review), so a move can defer or advance a lapse
    of that backing to the junior residual. The all-cranked ideal does the same when a claim burn
    re-books its support into the loss domain.
-6. **Receivable refill:** the add delta first repays the destination's `provider_receivable`
+6. **Compute cap:** at most `S10_MAX_MOVES_PER_INSTRUCTION` (2) moves per `MarketGroupV16ViewMut`
+   (one instruction). A firing measured about 33k CU on BPF (113,417 -> 146,520 on the recovery
+   settle of a one-leg account); a 16-leg account could otherwise add about 530k. A skipped move
+   waits for the next settlement of that asset (the V1 guard re-evaluates every time).
+7. **Receivable refill:** the add delta first repays the destination's `provider_receivable`
    (`consumed_liened`), as any booking does; the source side never has a principal change.
 
 ## Proof obligations (the reviewer's eight, plus the ring-fence counter), to be proved once
@@ -60,6 +64,7 @@ changes.
    nothing else (no change to `kf_pending_credit` beyond the existing clamp).
 8. Covers: the move is reachable (`moved > 0`) in both directions, and the V1-false branch is
    reachable (the vacuity detector).
+10. Cap: `moves_fired <= S10_MAX_MOVES_PER_INSTRUCTION` per view and a skipped move changes nothing.
 9. Provider attribution (ring-fence): a deposit leaves the counter unchanged; a provider withdraw
    never increases it; a source reduction never leaves `counter > fresh_unliened`.
 

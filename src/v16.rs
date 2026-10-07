@@ -5338,7 +5338,15 @@ pub struct MarketGroupV16View<'a, T> {
 pub struct MarketGroupV16ViewMut<'a, T> {
     pub header: &'a mut MarketGroupV16HeaderAccount,
     pub markets: &'a mut [Market<T>],
+    /// S10 compute cap: how many more times the unclaimed-backing move may fire through this view
+    /// (one view is one instruction). A firing costs about 33k CU on BPF (measured), so a 16-leg
+    /// account could add about 530k; the cap bounds it. A move that is skipped for the cap waits for
+    /// the next settlement of that asset (the V1 guard re-evaluates every time).
+    s10_moves_left: u8,
 }
+
+/// Maximum S10 moves per instruction (per `MarketGroupV16ViewMut`). Each is about 33k CU.
+pub const S10_MAX_MOVES_PER_INSTRUCTION: u8 = 2;
 
 impl<'a, T> MarketGroupV16View<'a, T> {
     pub fn new(header: &'a MarketGroupV16HeaderAccount, markets: &'a [Market<T>]) -> Self {
@@ -5348,7 +5356,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets }
+        Self { header, markets, s10_moves_left: S10_MAX_MOVES_PER_INSTRUCTION }
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -14331,6 +14339,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if moved == 0 {
                 continue;
             }
+            if self.s10_moves_left == 0 {
+                return Ok(());
+            }
+            self.s10_moves_left -= 1;
             let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
             let b_dst = self.backing_bucket_for_domain(dst)?;
             let (b_src, s_src) =
@@ -14349,6 +14361,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.reservation_encumbrance_proof_for_domain(dst)?.validate()?;
         }
         Ok(())
+    }
+
+    /// Test seam: the S10 per-instruction move budget of this view.
+    #[doc(hidden)]
+    pub fn set_s10_moves_left_for_test(&mut self, n: u8) {
+        self.s10_moves_left = n;
     }
 
     /// Test seam for the S10 move (the V1 stale-count guard lives in the settle entry, not here):
