@@ -3,10 +3,11 @@
 //! peak, then the reversal below the entry, then the accounts settled in a permutation.
 //!
 //! * S9: the pending-credit counter never exceeds the claim stock, after every settle.
-//! * S10: equity is NOT cadence invariant here (the same in the pre-R1 engine, which deviates in
-//!   more worlds). The deviation is exactly the backing a loser's REALISED peak loss left in a
-//!   domain with no claimant (the unsettled winners' gain reversed before they settled), and
-//!   it falls on the loser side (the maker, mostly). Characterised and ratcheted, not fixed.
+//! * S10 (fixed): equity WAS not cadence invariant here (pre-R1 engine: 450 of 600 worlds
+//!   deviate, #282 round 4: 260). The deviation was exactly the backing a loser's REALISED peak loss
+//!   left in a domain with no claimant (the unsettled winners' gain reversed before they settled),
+//!   and it fell on the loser side (the maker, mostly). The unclaimed-backing rebalance
+//!   (`rebalance_unclaimed_backing_across_asset_domains_not_atomic`) closes it: 0 of 600 deviate.
 #![allow(dead_code, unused_imports, unused_mut, clippy::needless_range_loop, clippy::type_complexity)]
 // Sentinel multi-claimant R1 harness
 use percolator::{
@@ -378,14 +379,12 @@ fn reversal_pending_credit_never_exceeds_the_claim_stock() {
     assert_eq!(viol, 0, "pending credit exceeded the claim stock {viol} times in {checks} checks");
 }
 
-/// S10, characterised: against the same world with EVERYONE cranked at the peak, a random-mask
-/// world never ends above it, and whatever it falls short by is exactly the backing left stranded
-/// in a domain with no claimant (so the value is not lost by the engine, it is unowned). The loss
-/// falls on the loser side. The deviating-world count is ratcheted (pre-R1: 450 of 600).
+/// S10, fixed: against the same world with EVERYONE cranked at the peak, a random-mask world ends
+/// at the same EFFECTIVE equity for every account (0 of 600 worlds deviate; #282 round 4: 260, the
+/// pre-R1 engine: 450), never above it, and no backing is left stranded.
 #[test]
-fn reversal_cadence_deviation_equals_stranded_backing() {
-    let (mut ran, mut dev, mut eq_strand, mut above, mut longs_lose) = (0u64, 0u64, 0u64, 0u64, 0u64);
-    let (mut maker_loss, mut short_loss, mut tot_loss) = (0i128, 0i128, 0i128);
+fn reversal_cadence_is_exact_in_effective_equity() {
+    let (mut ran, mut dev, mut above, mut stranded_worlds) = (0u64, 0u64, 0u64, 0u64);
     for i in 0..600u64 {
         let seed = 3u64 * 7919 + i;
         let (nl, ns) = shape(seed);
@@ -396,21 +395,60 @@ fn reversal_cadence_deviation_equals_stranded_backing() {
         ran += 1;
         let d: Vec<i128> = r.eq.iter().zip(&ideal.eq).map(|(a, b)| a - b).collect();
         if d.iter().any(|x| *x > 8) { above += 1; }
-        if d.iter().any(|x| x.abs() > 8) {
-            dev += 1;
-            let tot: i128 = d.iter().sum();
-            tot_loss += tot;
-            if (tot + r.stranded).abs() <= 64 { eq_strand += 1; }
-            if d[..nl].iter().any(|x| *x < -8) { longs_lose += 1; }
-            short_loss += d[nl..n].iter().sum::<i128>();
-            maker_loss += d[n];
-        }
+        if d.iter().any(|x| x.abs() > 8) { dev += 1; }
+        if r.stranded > 8 { stranded_worlds += 1; }
     }
-    println!("REVCAD ran {ran} deviating {dev} deficit==stranded {eq_strand} above-ideal {above} worlds-where-a-long-loses {longs_lose} total {tot_loss} maker {maker_loss} shorts {short_loss}");
+    println!("REVCAD ran {ran} deviating {dev} above-ideal {above} worlds-with-stranded-backing {stranded_worlds}");
     assert!(ran >= 550);
     assert_eq!(above, 0, "no account ever ends above the all-cranked ideal");
-    assert_eq!(longs_lose, 0, "the winners-side longs never lose to this");
-    assert_eq!(eq_strand, dev, "every deviation equals the stranded backing");
-    assert!(dev <= 260, "deviating worlds regressed: {dev} (pre-R1 450)");
-    assert!(maker_loss + short_loss == tot_loss, "the loss is on the maker and the shorts only");
+    assert_eq!(dev, 0, "every world ends at the all-cranked ideal in effective equity");
+    assert_eq!(stranded_worlds, 0, "no backing is left in excess of claims");
+}
+
+/// Every settle order of every crank mask ends at the ideal too (the harness above fixes the
+/// settle order to 0..=n; this walks 6 random orders per world for 150 worlds).
+#[test]
+fn reversal_cadence_is_exact_for_every_settle_order() {
+    let (mut ran, mut dev) = (0u64, 0u64);
+    for i in 0..150u64 {
+        let seed = 3u64 * 7919 + 4_000 + i;
+        let (nl, ns) = shape(seed);
+        let n = nl + ns;
+        let all = (1u64 << (n + 1)) - 1;
+        let mut s2 = seed ^ 0x999;
+        let Some(ideal) = reversal(seed, &(0..=n).collect::<Vec<_>>(), Some(all)) else { continue };
+        for p in perms(n + 1, 6, &mut s2) {
+            let Some(r) = reversal(seed, &p, None) else { break };
+            ran += 1;
+            if r.eq.iter().zip(&ideal.eq).any(|(a, b)| (a - b).abs() > 8) { dev += 1; }
+        }
+    }
+    println!("REVORDER ran {ran} deviating {dev}");
+    assert!(ran > 500);
+    assert_eq!(dev, 0, "settle order changed an account's effective equity");
+}
+
+/// The rebalance moves backing only into a SHORTFALL. A loser that realised its loss while its
+/// winners are unsettled leaves backing in its own domain; with no claim anywhere to cover it must
+/// stay exactly where it was booked (the winners may still claim it).
+#[test]
+fn unclaimed_backing_stays_put_without_a_shortfall() {
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("long opens against the maker");
+    assert!(w.accrue(150, 0) && w.accrue(150, 0) && w.accrue(150, 0));
+    // the maker (the loser, short) settles alone: its loss books as backing in the SHORT domain
+    assert!(w.settle(&mut maker));
+    let sl = &w.markets[0].engine;
+    let (sc, ss) = (sl.source_credit_long.try_to_runtime().unwrap(), sl.source_credit_short.try_to_runtime().unwrap());
+    assert!(ss.fresh_reserved_backing_num > 0, "the maker's realised loss is backing");
+    assert_eq!(ss.positive_claim_bound_num, 0, "the unsettled long has no claim yet");
+    assert_eq!((sc.fresh_reserved_backing_num, sc.positive_claim_bound_num), (0, 0), "nothing moved to the long domain");
+    // and the long, settling now, claims it in full
+    assert!(w.settle(&mut long));
+    let sl = &w.markets[0].engine;
+    let ss = sl.source_credit_short.try_to_runtime().unwrap();
+    assert!(ss.positive_claim_bound_num > 0 && ss.positive_claim_bound_num <= ss.fresh_reserved_backing_num);
 }

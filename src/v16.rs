@@ -14192,6 +14192,88 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// unowned residual; the loss is nevertheless owed to this domain's opposite-side
     /// claimants, exactly as if the account had converted the support to capital and paid
     /// the loss from it. Both parts land in the domain in one step.
+    /// S10 (stranded backing on reversal). Closes the two domains of `asset_index` over each
+    /// other: backing that NO claimant of its own domain can call on moves to the opposite domain,
+    /// up to that domain's shortfall (`claims - available backing`). Run at the end of every K/F
+    /// settlement entry, in both directions, so the post-condition is that no asset ever ends a
+    /// settlement with unclaimed backing in one domain and unbacked claims in the other.
+    ///
+    /// "Unclaimed" is `min(fresh unliened backing, available backing - positive claim bound)` of
+    /// the source domain, so a credited or in-flight claimant of the source domain is never
+    /// touched, and a liened or insurance-backed part never moves.
+    ///
+    /// Why: a loser that realised its peak loss as cash while its winners were unsettled booked
+    /// backing in its OWN domain, where no claim was ever credited (the winners later settle a
+    /// net loss). Its later recovery is a claim in the OTHER domain, backed only by the other
+    /// side's final loss. The stranded amount and that domain's shortfall are the same atoms
+    /// (600 reversal worlds, to the atom). Moving it makes every claim exactly as backed as when
+    /// every account had been settled at every price. A pure re-attribution inside the vault: no
+    /// token moves, no claim is created or enlarged, the source domain's credited claimants are
+    /// untouched.
+    ///
+    /// KNOWN LIMIT: a winner that has not settled yet has no claim, so backing booked for it
+    /// ahead of its settlement looks unclaimed and can move; the symmetric pass at a later
+    /// settlement moves it back when the other domain then holds the excess, but a claim burned
+    /// at the transient rate in between is not recoverable (the R1 class, measured in
+    /// finding-stranded-backing-2026-10-07.md).
+    ///
+    /// Expiry: the destination takes the backing exactly as it would a freshly booked realised
+    /// loss (`loss_domain_accepts_realized_backing`, `fresh_counterparty_backing_expiry_slot`),
+    /// which is also what the all-cranked ideal does when a claim burn re-books its support into
+    /// the loss domain.
+    fn rebalance_unclaimed_backing_across_asset_domains_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let now = self.header.current_slot.get();
+        let long = self.insurance_domain_index(asset_index, SideV16::Long)?;
+        let short = self.insurance_domain_index(asset_index, SideV16::Short)?;
+        for (src, dst) in [(long, short), (short, long)] {
+            let b_src = self.backing_bucket_for_domain(src)?;
+            let s_src = self.source_credit_for_domain(src)?;
+            if b_src.status != BackingBucketStatusV16::Fresh
+                || b_src.expiry_slot <= now
+                || b_src.fresh_unliened_backing_num == 0
+            {
+                continue;
+            }
+            // the destination takes the backing exactly as a freshly booked realised loss would
+            if !self.loss_domain_accepts_realized_backing(dst)?
+                || self.backing_bucket_for_domain(dst)?.status == BackingBucketStatusV16::Impaired
+            {
+                continue;
+            }
+            let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
+            let b_dst = self.backing_bucket_for_domain(dst)?;
+            let s_dst = self.source_credit_for_domain(dst)?;
+            let excess = core::cmp::min(
+                b_src.fresh_unliened_backing_num,
+                V16Core::available_backing_num_for_source_credit_state(s_src)?
+                    .saturating_sub(s_src.positive_claim_bound_num),
+            );
+            let shortfall = s_dst
+                .positive_claim_bound_num
+                .saturating_sub(V16Core::available_backing_num_for_source_credit_state(s_dst)?);
+            let moved = core::cmp::min(excess, shortfall) / BOUND_SCALE * BOUND_SCALE;
+            if moved == 0 {
+                continue;
+            }
+            let (b_src, s_src) =
+                V16Core::prepare_counterparty_backing_withdraw_delta(b_src, s_src, now, moved)?;
+            let (b_dst, s_dst) =
+                V16Core::prepare_counterparty_backing_add_delta(b_dst, s_dst, moved, now, expiry)?;
+            self.set_backing_bucket_for_domain(src, b_src)?;
+            self.set_source_credit_for_domain(src, s_src)?;
+            self.set_backing_bucket_for_domain(dst, b_dst)?;
+            self.set_source_credit_for_domain(dst, s_dst)?;
+            self.recompute_source_credit_domain_after_mutation(src)?;
+            self.recompute_source_credit_domain_after_mutation(dst)?;
+            self.reservation_encumbrance_proof_for_domain(src)?.validate()?;
+            self.reservation_encumbrance_proof_for_domain(dst)?.validate()?;
+        }
+        Ok(())
+    }
+
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -14648,6 +14730,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let domain = self.insurance_domain_index(asset_index, side)?;
             self.clamp_kf_pending_credit_to_claims(domain)?;
         }
+        // S10: backing no claimant of its domain can call on covers the other domain's shortfall
+        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         self.settle_kf_laggard(asset_index, &asset, &leg)?;
         let (settled_asset, kf_epoch_snap) =
