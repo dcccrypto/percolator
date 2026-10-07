@@ -467,9 +467,16 @@ fn fresh(w: &World, d: usize) -> u128 {
     b.try_to_runtime().unwrap().fresh_unliened_backing_num / 1_000_000_000_000
 }
 
-fn counter(w: &World, d: usize) -> u128 {
+fn provider_fresh(w: &World, d: usize) -> u128 {
     let sl = &w.markets[0].engine;
-    (if d == 0 { sl.loss_booked_unclaimed_long.get() } else { sl.loss_booked_unclaimed_short.get() }) / 1_000_000_000_000
+    let (b, p) = if d == 0 { (sl.backing_long, sl.provider_principal_long.get()) } else { (sl.backing_short, sl.provider_principal_short.get()) };
+    let b = b.try_to_runtime().unwrap();
+    p.saturating_sub(b.consumed_liened_backing_num).saturating_sub(b.impaired_liened_backing_num).saturating_sub(b.valid_liened_backing_num) / 1_000_000_000_000
+}
+
+/// Fresh backing the provider does not own (loser cash): the only part the move may take.
+fn loser_cash(w: &World, d: usize) -> u128 {
+    fresh(w, d).saturating_sub(provider_fresh(w, d))
 }
 
 /// Repro P: provider principal (50,000,000 atoms in the LONG domain) must not move when a long
@@ -487,7 +494,7 @@ fn provider_principal_never_moves_when_a_winner_settles_first() {
         let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap();
     }
-    assert_eq!((fresh(&w, 0), counter(&w, 0)), (prov, 0), "a deposit is not loser-booked backing");
+    assert_eq!((fresh(&w, 0), loser_cash(&w, 0)), (prov, 0), "a deposit is not loser-booked backing");
     for _ in 0..3 { assert!(w.accrue(150, 0)); }
     assert!(w.settle(&mut t)); // the winner settles first
     assert_eq!(fresh(&w, 0), prov, "provider principal stayed in its domain");
@@ -495,7 +502,7 @@ fn provider_principal_never_moves_when_a_winner_settles_first() {
     // the maker pays: its cash is loser-booked backing in the short domain, claimed by the winner
     assert!(w.settle(&mut maker));
     assert_eq!(fresh(&w, 0), prov);
-    assert_eq!(counter(&w, 1), fresh(&w, 1), "everything in the short bucket is loser-booked");
+    assert_eq!(loser_cash(&w, 1), fresh(&w, 1), "everything in the short bucket is loser-booked");
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.withdraw_fresh_counterparty_backing_not_atomic(0, prov).expect("the provider withdraws all of its principal");
 }
@@ -534,11 +541,12 @@ fn provider_principal_is_fully_recoverable_after_resolved_close() {
     }
 }
 
-/// The counter never exceeds fresh unliened backing, through settlements, moves and withdrawals
+/// The provider's own share (`principal - consumed - impaired - liened`, the wrapper ledger's
+/// arithmetic) never exceeds the bucket's fresh backing, through settlements, moves and withdrawals
 /// (`validate_shape` also enforces it); 300 reversal worlds with 20M of provider backing in each
 /// domain, every account settled in every order, checked after every settle.
 #[test]
-fn loss_booked_counter_never_exceeds_fresh_backing() {
+fn the_providers_share_of_every_bucket_is_never_below_its_ledger_share() {
     let (mut checks, mut moved_worlds) = (0u64, 0u64);
     for i in 0..300u64 {
         let seed = 3u64 * 7919 + 9_000 + i;
@@ -565,7 +573,7 @@ fn loss_booked_counter_never_exceeds_fresh_backing() {
         if !steps(&mut w, 1_080_000 + rng(&mut s) % 100_000) { continue; }
         let mask = rng(&mut s) % (1 << (n + 1));
         let chk = |w: &World, checks: &mut u64| {
-            for d in 0..2 { assert!(counter(w, d) <= fresh(w, d) , "counter above fresh backing"); }
+            for d in 0..2 { assert!(provider_fresh(w, d) <= fresh(w, d), "a move took provider-owned backing"); }
             *checks += 1;
         };
         for k in 0..n { if mask >> k & 1 == 1 { let mut a = accts[k]; if !w.settle(&mut a) { break; } accts[k] = a; chk(&w, &mut checks); } }
@@ -588,11 +596,15 @@ fn loss_booked_counter_never_exceeds_fresh_backing() {
 /// below entry; the longs are settled; only the maker's recovery settle is left. Returns the world,
 /// the maker and the longs. `h_max` sets the backing horizon.
 fn stranded_world(h_max: u64) -> (World, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+    stranded_world_sized(h_max, 400 * POS_SCALE)
+}
+
+fn stranded_world_sized(h_max: u64, size: u128) -> (World, PortfolioAccountV16Account, PortfolioAccountV16Account) {
     let mut w = World::new_pairs_hmax(&[], 0, 0, PRICE, RATE_E9 as u64, h_max);
     let mut long = account(300);
     let mut maker = w.maker;
     w.deposit(&mut long, 1_000_000_000_000_000);
-    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
+    w.trade(&mut long, &mut maker, size).expect("open");
     for _ in 0..3 { assert!(w.accrue(150, 0)); }
     assert!(w.settle(&mut maker)); // the loser realises its peak loss alone
     for _ in 0..8 { assert!(w.accrue(-150, 0)); }
@@ -610,7 +622,7 @@ fn the_move_skips_an_expired_source_bucket_and_the_settle_still_succeeds() {
     assert_eq!(b.status, percolator::BackingBucketStatusV16::Fresh);
     assert!(b.expiry_slot <= w.slot, "the source bucket's horizon has passed (expiry {} slot {})", b.expiry_slot, w.slot);
     let before = fresh(&w, 1);
-    assert!(before > 0 && counter(&w, 1) > 0);
+    assert!(before > 0 && loser_cash(&w, 1) > 0);
     assert!(w.refresh(&mut maker), "the recovery settle must succeed with a lapsed source bucket");
     assert_eq!(fresh(&w, 1), before, "nothing moved out of a lapsed bucket");
 }
@@ -623,17 +635,17 @@ fn the_move_fires_in_the_same_world_with_a_live_source_bucket() {
     assert!(before > 0);
     // literal atoms (not read from the state under test): the maker's peak loss 18,271,200 sits
     // in the short bucket, the longs' final loss 29,362,400 in the long bucket
-    assert_eq!((fresh(&w, 1), fresh(&w, 0), counter(&w, 1), counter(&w, 0)), (18_271_200, 29_362_400, 18_271_200, 29_362_400));
+    assert_eq!((fresh(&w, 1), fresh(&w, 0), loser_cash(&w, 1), loser_cash(&w, 0)), (18_271_200, 29_362_400, 18_271_200, 29_362_400));
     assert!(w.refresh(&mut maker));
     // the maker's recovery claim is 47,633,600 = 18,271,200 + 29,362,400: all of the stranded
     // backing moved, the claim is backed exactly, nothing is left claimant-less
-    assert_eq!((fresh(&w, 1), fresh(&w, 0), counter(&w, 1), counter(&w, 0)), (0, 47_633_600, 0, 47_633_600));
+    assert_eq!((fresh(&w, 1), fresh(&w, 0), loser_cash(&w, 1), loser_cash(&w, 0)), (0, 47_633_600, 0, 47_633_600));
     let sl = &w.markets[0].engine;
     assert_eq!(sl.source_credit_long.try_to_runtime().unwrap().positive_claim_bound_num, 47_633_600 * 1_000_000_000_000);
     assert_eq!(sl.source_credit_short.try_to_runtime().unwrap().positive_claim_bound_num, 0);
     assert!(fresh(&w, 1) < before, "stranded loser-booked backing moved to cover the recovery claim");
     assert!(fresh(&w, 0) > 0);
-    assert_eq!(counter(&w, 0), fresh(&w, 0), "what moved is loser-booked backing in its new domain");
+    assert_eq!(loser_cash(&w, 0), fresh(&w, 0), "what moved is loser-booked backing in its new domain");
 }
 
 /// Guard 2 (destination acceptance): a destination bucket that is Fresh but past its expiry does
@@ -681,7 +693,7 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     }
     for _ in 0..3 { assert!(w.accrue(150, 0)); }
     assert!(w.settle(&mut maker));
-    let booked = counter(&w, 1);
+    let booked = loser_cash(&w, 1);
     assert!(booked > 0);
     assert_eq!(fresh(&w, 1), prov + booked, "provider principal and loser-booked backing share the bucket");
     for _ in 0..8 { assert!(w.accrue(-150, 0)); }
@@ -700,7 +712,7 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
         m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
     }
     assert!(fresh(&w, 1) >= prov, "an oversized shortfall still leaves the provider's principal ({} < {prov})", fresh(&w, 1));
-    assert!(counter(&w, 1) <= fresh(&w, 1) - prov);
+    assert!(loser_cash(&w, 1) <= fresh(&w, 1) - prov);
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.withdraw_fresh_counterparty_backing_not_atomic(1, prov).expect("the provider withdraws all of its principal");
 }
@@ -724,4 +736,53 @@ fn the_move_respects_the_per_instruction_cap() {
         m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
     }
     assert!(fresh(&w, 1) < before, "the next view has its budget back and moves it");
+}
+
+/// Dust floor (`S10_MIN_MOVE_ATOMS`, founder-tunable): a stranding below it is not moved (and so
+/// bumps no epoch), one just above it is. The stranded amount scales with the position size.
+#[test]
+fn the_move_has_a_dust_floor() {
+    assert_eq!(percolator::S10_MIN_MOVE_ATOMS, 1_000);
+    // 400 units strand 18,271,200 atoms; 1/30,000 of that is 609 atoms, 1/10,000 is 1,827
+    let (mut w, mut maker, _l) = stranded_world_sized(6_480_000, 400 * POS_SCALE / 30_000);
+    let before = fresh(&w, 1);
+    assert!(before > 0 && before < 1_000, "dust-sized stranding: {before} atoms");
+    assert!(w.refresh(&mut maker));
+    assert_eq!(fresh(&w, 1), before, "below the floor nothing moves");
+    let (mut w, mut maker, _l) = stranded_world_sized(6_480_000, 400 * POS_SCALE / 10_000);
+    let before = fresh(&w, 1);
+    assert!(before >= 1_000, "above the floor: {before} atoms");
+    assert!(w.refresh(&mut maker));
+    assert!(fresh(&w, 1) < before, "at or above the floor it moves");
+}
+
+/// A bucket that lapsed to empty owes nothing to the provider any more: the principal mirror
+/// resets, so loser cash booked into the reopened bucket is movable again.
+#[test]
+fn a_lapsed_empty_bucket_resets_the_provider_mirror() {
+    let mut w = World::new_pairs_hmax(&[], 0, 0, PRICE, RATE_E9 as u64, 6_480_000);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        m.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, w.slot + 2).unwrap();
+    }
+    for _ in 0..4 { assert!(w.accrue(10, 0)); }
+    {
+        let slot = w.slot;
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        m.expire_source_backing_bucket_not_atomic(1, slot).unwrap();
+    }
+    assert_eq!(fresh(&w, 1), 0, "the provider's bucket lapsed");
+    // now the stranded reversal into the reopened short bucket
+    for _ in 0..3 { assert!(w.accrue(150, 0)); }
+    assert!(w.settle(&mut maker));
+    for _ in 0..8 { assert!(w.accrue(-150, 0)); }
+    assert!(w.refresh(&mut long));
+    let before = fresh(&w, 1);
+    assert!(before >= 1_000);
+    assert!(w.refresh(&mut maker));
+    assert!(fresh(&w, 1) < before, "loser cash in the reopened bucket moves (the lapsed provider mirror was reset)");
 }
