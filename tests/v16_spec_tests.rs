@@ -14217,7 +14217,8 @@ fn w4_negative_controls_refuse_without_mutation_or_value() {
         );
         assert_eq!(market.header.insurance.get(), ins0);
     }
-    // (c) a stale certificate: capacity 0, repay refused.
+    // (c) a stale certificate: the READ-ONLY capacity is 0 (the read never refreshes); the repay itself
+    // refreshes first (see w4_repay_works_for_a_caller_that_did_not_refresh_first).
     {
         let mut w = w4_world(100, 1_000);
         let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
@@ -14226,10 +14227,6 @@ fn w4_negative_controls_refuse_without_mutation_or_value() {
         assert_eq!(
             market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap(),
             0
-        );
-        assert_eq!(
-            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 1, 1, 0),
-            Err(V16Error::LockActive)
         );
     }
     // (d) an account WITHOUT source claims (plain positive PnL): nothing is repayable, because
@@ -14359,4 +14356,33 @@ fn w4_price_reversal_after_repay_leaves_insurance_whole() {
     assert_eq!(market.header.vault.get(), vault1, "vault never moves");
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// W4-1 / E1 / E3: every clause of the repay post-conditions has a case that fails when that clause
+/// is removed from `repay_pnl_postconditions_hold`.
+#[test]
+fn w4_repay_postconditions_each_clause_is_load_bearing() {
+    use percolator::repay_pnl_postconditions_hold as ok;
+    // (vault b/a, insurance b/a, capital b/a, c_tot b/a, total)
+    assert!(ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "good: capital unchanged");
+    assert!(ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_990, 40), "good: a 10-atom fee left capital and c_tot together");
+    assert!(!ok(100, 101, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "vault moved");
+    assert!(!ok(100, 100, 10, 49, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by less than total");
+    assert!(!ok(100, 100, 10, 51, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by more than total");
+    assert!(!ok(100, 100, 50, 10, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance fell");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_001, 5_000, 5_001, 40), "E3: capital rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_001, 40), "E3: c_tot rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_995, 40), "E3: capital and c_tot fell by different amounts");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 5_000, 40), "E3: capital fell, c_tot did not");
+}
+
+/// A direct engine caller no longer has to refresh first: the repay refreshes before it snapshots.
+#[test]
+fn w4_repay_works_for_a_caller_that_did_not_refresh_first() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    long.header.health_cert.valid = 0; // stale certificate
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 10, 1, 10);
+    assert_eq!(r, Ok(20), "refreshes itself: {r:?}");
 }
