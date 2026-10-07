@@ -20559,7 +20559,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             config.liquidation_fee_cap,
             close_q == account_effective_q,
         )?;
-        let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
+        // S10-X1: `refresh_account_and_certify_not_atomic` above has just settled every leg's
+        // K/F/B to the current indices (it refuses a stale B leg) and nothing has touched the
+        // legs since, so the settle pass inside `charge_account_fee_not_atomic` is the identity.
+        // It cost about 28k CU per leg (a full-account validation plus a second K/F pass), which
+        // is what made a many-leg liquidation exceed the 1.4M transaction budget. The
+        // after-refresh form below performs the same state transition without it.
+        let charged_fee = self.charge_account_fee_after_full_refresh_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
             account.header.pnl.get().unsigned_abs()
@@ -22676,6 +22682,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         self.charge_account_fee_after_loss_settlement(account, requested_fee)
+    }
+
+    /// `charge_account_fee_not_atomic` for a caller that has JUST run
+    /// `refresh_account_and_certify_not_atomic` on `account` and has not touched its legs since.
+    ///
+    /// `charge_account_fee_after_loss_settlement` begins with `settle_account_side_effects_not_atomic`,
+    /// which for such an account is the identity on every field but two, both reproduced here so
+    /// the resulting state is bit-identical to the full form:
+    ///   * `account.health_cert.valid` is cleared (every leg apply does that);
+    ///   * `header.loss_stale_active` is re-derived from the asset of the LAST leg of the settle
+    ///     plan. With every net zero the plan order is (source domain, leg slot) ascending.
+    /// Everything else the full form does that is not a pure re-validation is kept:
+    /// the Live-mode gate, the B-stale refusal, the negative-PnL settlement from principal, the fee
+    /// charge and the shape scan. The refresh refuses a B-stale leg itself, so the per-leg B scan
+    /// of the full form cannot fire here.
+    fn charge_account_fee_after_full_refresh_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        requested_fee: u128,
+    ) -> V16Result<u128> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        let mut last: Option<(usize, usize)> = None;
+        let mut last_key = (0usize, 0usize);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset_index = leg.asset_index as usize;
+                let key = (self.insurance_domain_index(asset_index, leg.side)?, slot);
+                if last.is_none() || key > last_key {
+                    last_key = key;
+                    last = Some((asset_index, slot));
+                }
+            }
+            slot += 1;
+        }
+        if let Some((asset_index, _)) = last {
+            let asset = self.asset_state(asset_index)?;
+            self.header.loss_stale_active =
+                encode_bool(asset_is_loss_stale_at_slot(asset, self.header.current_slot.get()));
+        }
+        account.header.health_cert.valid = 0;
+        if decode_bool(account.header.b_stale_state)? {
+            return Err(V16Error::BStale);
+        }
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
+        self.validate_shape_audit_scan()?;
+        Ok(charged)
     }
 
     fn resolved_positive_payout_ready(&self) -> V16Result<bool> {
