@@ -6129,21 +6129,15 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         );
         assert_eq!(backing_after_reversal, backing_before_reversal);
     } else {
-        // S10 (fork), literal atoms. Upstream leaves 102,624 atoms in the short bucket (the
-        // 100,000 deposit, 2,624 of the short's own booked loss with no claimant left once the
-        // long's claim was burned), where the 2,624 lapse to the junior pool while the
-        // counterparty's 5,250 gain is a claim in the long domain that only the long's own 2,626
-        // of booked loss (the rest of its loss netted against its claim) backs. Every settled leg
-        // of the asset now moves those 2,624 atoms of loser cash across: the short bucket ends at
-        // exactly the 100,000-atom deposit, the long bucket at 5,250 = the claim.
-        assert_eq!(backing_after_reversal.fresh_unliened_backing_num, 100_000 * BOUND_SCALE);
         assert_eq!(
-            market.markets[0].engine.backing_long.try_to_runtime().unwrap().fresh_unliened_backing_num,
-            5_250 * BOUND_SCALE
-        );
-        assert_eq!(
-            market.markets[0].engine.source_credit_long.try_to_runtime().unwrap().positive_claim_bound_num,
-            5_250 * BOUND_SCALE
+            backing_after_reversal.fresh_unliened_backing_num,
+            backing_before_reversal
+                .fresh_unliened_backing_num
+                .checked_sub(unliened_support_consumed * BOUND_SCALE)
+                .unwrap()
+                .checked_add(lien_before.source_lien_counterparty_backing_num.get())
+                .unwrap(),
+            "the still-liened backing is unpledged rather than consumed"
         );
         assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
         assert_eq!(
@@ -6164,12 +6158,9 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     // unobservable: de-fusing both call sites to a hardcoded `epoch_steps = 1`
     // left the entire suite green (301/0 plain, 353/0 fuzz) while silently
     // landing the reversal an epoch short (5/3 instead of 6/4).
-    // S10 (fork): in the counterparty-backed variant the 2,624-atom move re-derives both domains'
-    // credit rates once (one risk-epoch step each, one credit-epoch step on the short domain).
-    let s10_move = u64::from(!insurance_backed);
     assert_eq!(
         market.header.risk_epoch.get() - risk_epoch_before_reversal,
-        6 + 2 * s10_move,
+        6,
         "the fused source-claim burn must contribute its own risk-epoch step"
     );
     assert_eq!(
@@ -6180,7 +6171,7 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             .unwrap()
             .credit_epoch
             - source_credit_epoch_before_reversal,
-        4 + s10_move,
+        4,
         "the fused source-claim burn must contribute its own credit-epoch step"
     );
     assert!(cert.valid);
@@ -14295,6 +14286,8 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
     market
         .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
         .unwrap();
+    // trades carry no S10 budget; the reversal settles as a crank would, with one
+    market.set_s10_moves_left_for_test(percolator::S10_MAX_MOVES_PER_INSTRUCTION);
     market.full_account_refresh_not_atomic(&mut short).unwrap();
     let cert = market
         .full_account_refresh_not_atomic(&mut long)

@@ -124,10 +124,11 @@ fn three_eligible_assets_two_fire_in_plan_order_and_the_third_waits_for_the_next
 }
 
 #[test]
-fn a_move_skipped_inside_a_closing_batch_is_retried_by_the_next_accrual_of_the_asset() {
+fn a_closing_batch_moves_nothing_and_each_assets_next_accrual_retries_it() {
     let (mut w, mut maker, mut a) = stranded();
-    let before2 = w.short_fresh(2);
-    // ONE view = one instruction: close all three legs (each trade settles both parties first)
+    let before: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
+    // ONE view = one instruction: close all three legs (each trade settles both parties first).
+    // Trades and liquidations carry no S10 budget (they are the heaviest CU paths).
     {
         let mut m = w.view();
         let p: Vec<u64> = (0..3).map(|i| m.markets[i].engine.asset.effective_price.get()).collect();
@@ -137,8 +138,10 @@ fn a_move_skipped_inside_a_closing_batch_is_retried_by_the_next_accrual_of_the_a
         let asset = w.markets[i].engine.asset.try_to_runtime().unwrap();
         assert_eq!(asset.stored_pos_count_long + asset.stored_pos_count_short, 0, "asset {i}: closed");
     }
-    assert_eq!(w.short_fresh(2), before2, "asset 2's move was skipped for the cap inside the closing batch and no position is left to settle");
-    // nothing re-evaluates it by settlement; the next accrual does
+    let closed: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
+    assert_eq!(closed, before, "a closing batch moves nothing, whatever the eligibility");
+    // no position is left to settle; each asset's next accrual (its own instruction, its own budget) retries it
     w.tick(10);
-    assert!(w.short_fresh(2) < before2, "the next accrual of the unpositioned asset retried and moved it");
+    let after: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
+    assert!(after.iter().zip(&before).all(|(a, b)| a < b), "every asset's accrual retried and moved: {before:?} -> {after:?}");
 }

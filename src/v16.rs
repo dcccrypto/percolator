@@ -5345,7 +5345,11 @@ pub struct MarketGroupV16ViewMut<'a, T> {
     s10_moves_left: u8,
 }
 
-/// Maximum S10 moves per instruction (per `MarketGroupV16ViewMut`). Each is about 33k CU.
+/// Maximum S10 moves per instruction (per `MarketGroupV16ViewMut`). Each is about 33k CU
+/// (measured on BPF, flat in the number of legs). The budget is 0 inside trades and liquidations
+/// (their entry points zero it): an 11-leg liquidation crank is 1,375,975 CU of 1.4M and an
+/// 11-leg batch ~1.33M, so no firing may be added there. Moves happen in the permissionless
+/// refresh crank, in direct refreshes and in the accrual retry.
 pub const S10_MAX_MOVES_PER_INSTRUCTION: u8 = 2;
 
 /// S10 dust floor (founder-tunable): the smallest move, in quote atoms. A firing costs the
@@ -14330,6 +14334,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         asset_index: usize,
     ) -> V16Result<()> {
+        // budget spent: skip before ANY read (a leg skipped for the cap must cost almost nothing;
+        // measured: reading both domains' source-credit state for every skipped leg cost ~7k CU each)
+        if self.s10_moves_left == 0 {
+            return Ok(());
+        }
         let now = self.header.current_slot.get();
         let long = self.insurance_domain_index(asset_index, SideV16::Long)?;
         let short = self.insurance_domain_index(asset_index, SideV16::Short)?;
@@ -19286,6 +19295,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         request: LiquidationRequestV16,
     ) -> V16Result<LiquidationOutcomeV16> {
+        // S10: no moves inside a liquidation (the heaviest paths: an 11-leg liquidation crank is
+        // 1,375,975 CU of 1.4M on BPF, so even one 33k firing would starve it)
+        self.s10_moves_left = 0;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
@@ -20445,6 +20457,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         requests: &[TradeRequestV16],
         taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
+        // S10: no moves inside a trade or a batch (an 11-leg batch is already ~1.33M CU of 1.4M)
+        self.s10_moves_left = 0;
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
             decode_bool(self.header.loss_stale_active)? && !requests.is_empty();
