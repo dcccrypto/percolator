@@ -28,8 +28,11 @@ pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
 // PortfolioAccountV16Account size assertion). 18: added per-side K/F settlement
-// epochs and a per-leg epoch snapshot.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
+// epochs and a per-leg epoch snapshot. 19 (v2.2 Phase 4): per-asset price band
+// (anchor, epoch, certification and liquidation-pending cohorts, pin clock) and
+// holding-fee rent indices; per-leg band snapshot, liq-pending flag and rent
+// snapshot; band + rent config words. Old slabs fail closed.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 19;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -235,6 +238,25 @@ pub enum V16Error {
     /// clock). It clears when the keeper refreshes the stale cohort. Previously this
     /// surfaced as `LockActive` (wrapper Custom 21).
     LossStale,
+    /// v2.2 band (Phase 4 item 1): an exposed accrual fed a price outside
+    /// `[lo(A), hi(A)]` of the asset's band anchor `A`. Rejected before any K/F,
+    /// price, slot or consumption mutation (I-B1). Wrapper maps it to 104.
+    BandOutOfRange,
+    /// v2.2 band: the epoch's loss-accruing window has elapsed (or the book is
+    /// otherwise pinned) and the accrual was not a no-move accrual (`price ==
+    /// P_last`, funding and rent 0) (I-B4). Wrapper maps it to 104.
+    BandPinned,
+    /// v2.2 band (review E-M1): a new leg would exceed the side's
+    /// `band_max_positions_per_side`. Wrapper maps it to 111.
+    BandPositionCap,
+    /// v2.2 band (review E-L1): the band around the current anchor is narrower
+    /// than `MIN_BAND_WIDTH_TICKS`, so no new exposure may attach (a near
+    /// zero-width band could never move). Wrapper maps it to 112.
+    BandTooNarrow,
+    /// v2.2 band (re-review N-1): a trade on a band market would leave a positioned leg
+    /// below `band_min_leg_notional` (open bigger, or close the leg fully). Wrapper maps it
+    /// to 113.
+    BandLegBelowMinNotional,
 }
 
 pub type V16Result<T> = core::result::Result<T, V16Error>;
@@ -923,6 +945,129 @@ impl V16Core {
         Ok((asset, epoch))
     }
 
+    /// fix/v21-funding-scale: record one accrual's ADVERSE K+F travel on a side BEFORE
+    /// `kernel_mark_kf_stale_cohorts` resets that side's cohort. `kf_epoch_pre`, `stale_pre`
+    /// and `loss_weight_sum` are the side's values from the pre-mark asset.
+    ///
+    /// Rotation: when the generation has no laggard left, every stored leg's snapshot is at or
+    /// after its start, so a new generation begins at the side's present KF epoch; the legs
+    /// stale right now become the laggards, the finished generation's travel becomes `prior`.
+    /// Then this accrual's travel joins `gen`, and the stale weight resets with the cohort
+    /// (`kernel_mark_kf_stale_cohorts` makes every stored leg stale next).
+    pub(crate) fn kernel_track_kf_side_drift(
+        mut drift: KfDriftSideV16,
+        changed: bool,
+        kf_epoch_pre: u64,
+        stale_pre: u64,
+        loss_weight_sum: u128,
+        adverse: u128,
+    ) -> KfDriftSideV16 {
+        if !changed {
+            return drift;
+        }
+        if drift.laggard_count == 0 {
+            drift.gen_epoch = kf_epoch_pre;
+            drift.laggard_count = stale_pre;
+            drift.laggard_weight = drift.stale_weight;
+            drift.drift_prior = drift.drift_gen;
+            drift.drift_gen = 0;
+        }
+        drift.drift_gen = drift.drift_gen.saturating_add(adverse);
+        drift.stale_weight = loss_weight_sum;
+        drift
+    }
+
+    /// fix/v21-funding-scale: a settling leg leaves the stale weight and, when it predates the
+    /// generation start, the laggard set. Call alongside `kernel_settle_kf_stale_cohort` with
+    /// the side's pre-settlement KF epoch. The count is exact (checked); weights saturate (see
+    /// `KfDriftSideV16`).
+    pub(crate) fn kernel_settle_kf_laggard(
+        mut drift: KfDriftSideV16,
+        kf_epoch: u64,
+        leg_kf_epoch_snap: u64,
+        leg_loss_weight: u128,
+    ) -> V16Result<KfDriftSideV16> {
+        if leg_kf_epoch_snap < kf_epoch {
+            drift.stale_weight = drift.stale_weight.saturating_sub(leg_loss_weight);
+        }
+        if leg_kf_epoch_snap < drift.gen_epoch {
+            drift.laggard_count = drift
+                .laggard_count
+                .checked_sub(1)
+                .ok_or(V16Error::CounterUnderflow)?;
+            drift.laggard_weight = drift.laggard_weight.saturating_sub(leg_loss_weight);
+        }
+        Ok(drift)
+    }
+
+    /// fix/v21-funding-scale: upper bound, in quote atoms, on the K/F loss that a side's
+    /// `stale` still-unsettled legs could recognize. `None` when it does not fit (uncovered).
+    ///
+    /// A leg settles `floor(b*dK/(a*POS)) + floor(b*dF/(a*POS))` with
+    /// `loss_weight = ceil(b*SWS/a)`, so its loss is at most
+    /// `loss_weight * max(0, -(dK+dF)) / (SWS*POS) + 2` (one atom of floor per term), and
+    /// `max(0, -(sum of step moves))` is at most the sum of per-step adverse moves:
+    /// `ceil(stale_weight*gen/(SWS*POS)) + ceil(laggard_weight*prior/(SWS*POS)) + 2*stale`.
+    /// Valid only while the side is `Normal` (callers check), where the weights are exact.
+    pub(crate) fn kernel_kf_hidden_loss_bound(stale: u64, drift: KfDriftSideV16) -> Option<u128> {
+        if stale == 0 {
+            return Some(0);
+        }
+        // Security review S1: every stale leg carries `loss_weight >= 1`, so a tracker whose
+        // stale weight is below the stale count is not describing this cohort (e.g. a zeroed
+        // drift tail under a live cohort). Fail CLOSED instead of collapsing to `2 * stale`.
+        if drift.stale_weight < u128::from(stale) {
+            return None;
+        }
+        let den = U256::from_u128(SOCIAL_WEIGHT_SCALE.checked_mul(POS_SCALE)?);
+        let gen_term = checked_mul_div_ceil_u256(
+            U256::from_u128(drift.stale_weight),
+            U256::from_u128(drift.drift_gen),
+            den,
+        )?
+        .try_into_u128()?;
+        let prior_term = if drift.laggard_count == 0 {
+            0
+        } else {
+            checked_mul_div_ceil_u256(
+                U256::from_u128(drift.laggard_weight),
+                U256::from_u128(drift.drift_prior),
+                den,
+            )?
+            .try_into_u128()?
+        };
+        gen_term
+            .checked_add(prior_term)?
+            .checked_add(u128::from(stale).checked_mul(2)?)
+    }
+
+    /// fix/v21-funding-scale: laggards are a subset of the stale cohort and a generation
+    /// never starts after the side's current KF epoch. On a `Normal` side (where the drift
+    /// weights are exact) every stale leg / laggard carries `loss_weight >= 1`, so the weights
+    /// can never be below the counts (security review S1). Used by the audit-scan shape walk
+    /// AND by production admission/withdrawal, which fail closed when it does not hold.
+    fn validate_kf_drift_shape(
+        asset: AssetStateV16,
+        long: KfDriftSideV16,
+        short: KfDriftSideV16,
+    ) -> V16Result<()> {
+        let weights_undercount = |mode: SideModeV16, stale: u64, d: KfDriftSideV16| {
+            mode == SideModeV16::Normal
+                && (d.stale_weight < u128::from(stale)
+                    || d.laggard_weight < u128::from(d.laggard_count))
+        };
+        if long.laggard_count > asset.stale_account_count_long
+            || short.laggard_count > asset.stale_account_count_short
+            || long.gen_epoch > asset.kf_epoch_long
+            || short.gen_epoch > asset.kf_epoch_short
+            || weights_undercount(asset.mode_long, asset.stale_account_count_long, long)
+            || weights_undercount(asset.mode_short, asset.stale_account_count_short, short)
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(())
+    }
+
     /// PRODUCTION KERNEL: cap unilateral close work by the account's effective
     /// quantity and by matched effective OI. Liquidation and owner rebalance
     /// share this bound so neither can subtract more OI than any participant
@@ -1239,6 +1384,8 @@ impl V16Core {
         basis_pos_q: i128,
         loss_weight: u128,
         asset_index_u32: u32,
+        band_bps: u64,
+        band_max_positions_per_side: u64,
     ) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
         let (a_basis, k_snap, f_snap, kf_epoch_snap, b_snap, epoch_snap) = match side {
             SideV16::Long => (
@@ -1270,6 +1417,16 @@ impl V16Core {
             basis_pos_q.unsigned_abs(),
             loss_weight,
         )?;
+        // v2.2 band: every new leg enters UNcertified (snap 0 < e). Certification
+        // is a separate, explicit health event (V16Core::kernel_band_certify_leg),
+        // so a missed certification hook can only cost liveness (the anchor
+        // cannot advance), never the loss <= capital guarantee.
+        asset = V16Core::kernel_band_attach(asset, side, band_bps, band_max_positions_per_side)?;
+        // v2.2 rent: a leg owes nothing for time before it existed (I-R5).
+        let rent_snap = match side {
+            SideV16::Long => asset.rent_index_long_num,
+            SideV16::Short => asset.rent_index_short_num,
+        };
         let leg = PortfolioLegV16 {
             active: true,
             asset_index: asset_index_u32,
@@ -1287,8 +1444,193 @@ impl V16Core {
             b_epoch_snap: epoch_snap,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap,
+            rent_carry: 0,
         };
         Ok((asset, leg))
+    }
+
+    /// v2.2 band (I-B2): a newly attached leg joins its side's uncertified
+    /// cohort. No-op when the band is off for the asset (`band_epoch == 0`,
+    /// I-B7: counters untouched). Called after the side's `stored_pos_count`
+    /// counted the new leg, so the cap check is on the post-attach count.
+    ///
+    /// Review E-M1: refused (`BandPositionCap`) beyond the per-side cap, so the
+    /// per-epoch certification sweep is bounded by `2 * cap` legs.
+    /// Review E-L1: refused (`BandTooNarrow`) while the band around the anchor is
+    /// narrower than `MIN_BAND_WIDTH_TICKS`: no exposure on a band that cannot move.
+    pub(crate) fn kernel_band_attach(
+        mut asset: AssetStateV16,
+        side: SideV16,
+        band_bps: u64,
+        band_max_positions_per_side: u64,
+    ) -> V16Result<AssetStateV16> {
+        if asset.band_epoch == 0 {
+            return Ok(asset);
+        }
+        if !crate::band_rent::band_width_ok(asset.band_anchor_price, band_bps)
+            .map_err(|_| V16Error::InvalidConfig)?
+        {
+            return Err(V16Error::BandTooNarrow);
+        }
+        let positions = match side {
+            SideV16::Long => asset.stored_pos_count_long,
+            SideV16::Short => asset.stored_pos_count_short,
+        };
+        // Hard bound `cap + 1`: the per-side cap itself is enforced at the end of the trade
+        // (`require_band_trade_shape`), where the wrapper may exempt ONE standing counterparty
+        // (the bound vault LP) so that it can always take the other side, including of a dust
+        // sweep or a slot eviction. No attach path can exceed `cap + 1` legs on a side, so the
+        // per-epoch certification sweep stays bounded by `2 * (cap + 1)`.
+        if positions > band_max_positions_per_side.saturating_add(1) {
+            return Err(V16Error::BandPositionCap);
+        }
+        let count = match side {
+            SideV16::Long => &mut asset.band_uncertified_long,
+            SideV16::Short => &mut asset.band_uncertified_short,
+        };
+        *count = count.checked_add(1).ok_or(V16Error::CounterOverflow)?;
+        Ok(asset)
+    }
+
+    /// v2.2 band (I-B2): a detaching leg leaves whichever cohorts it is in.
+    pub(crate) fn kernel_band_detach(
+        mut asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<AssetStateV16> {
+        if asset.band_epoch == 0 {
+            if leg.band_epoch_snap != 0 || leg.band_liq_pending {
+                return Err(V16Error::InvalidLeg);
+            }
+            return Ok(asset);
+        }
+        if leg.band_epoch_snap > asset.band_epoch {
+            return Err(V16Error::InvalidLeg);
+        }
+        let (uncertified, liq_pending) = match leg.side {
+            SideV16::Long => (
+                &mut asset.band_uncertified_long,
+                &mut asset.band_liq_pending_long,
+            ),
+            SideV16::Short => (
+                &mut asset.band_uncertified_short,
+                &mut asset.band_liq_pending_short,
+            ),
+        };
+        if leg.band_epoch_snap < asset.band_epoch {
+            *uncertified = uncertified
+                .checked_sub(1)
+                .ok_or(V16Error::CounterUnderflow)?;
+        }
+        if leg.band_liq_pending {
+            *liq_pending = liq_pending
+                .checked_sub(1)
+                .ok_or(V16Error::CounterUnderflow)?;
+        }
+        Ok(asset)
+    }
+
+    /// v2.2 band C-event (design §1.1). `healthy` is a FRESH health statement
+    /// about the leg's account at the current effective price:
+    ///
+    /// * healthy (`liq_deficit == 0`): the leg is certified in epoch `e`
+    ///   (`band_epoch_snap := e`, leaving the uncertified cohort once) and any
+    ///   liquidation-pending mark is cleared;
+    /// * unhealthy (`liq_deficit != 0`, i.e. liquidatable): the leg is marked
+    ///   liquidation-pending (once). It is NOT certified, and it blocks the anchor
+    ///   advance until it is liquidated, detached or healed.
+    ///
+    /// Callers must only pass `healthy == true` for a certificate computed at a
+    /// price that is (or, within the same instruction, becomes) `P_last`.
+    pub(crate) fn kernel_band_certify_leg(
+        mut asset: AssetStateV16,
+        mut leg: PortfolioLegV16,
+        healthy: bool,
+    ) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
+        if asset.band_epoch == 0 || !leg.active {
+            return Ok((asset, leg));
+        }
+        if leg.band_epoch_snap > asset.band_epoch {
+            return Err(V16Error::InvalidLeg);
+        }
+        let epoch = asset.band_epoch;
+        let (uncertified, liq_pending) = match leg.side {
+            SideV16::Long => (
+                &mut asset.band_uncertified_long,
+                &mut asset.band_liq_pending_long,
+            ),
+            SideV16::Short => (
+                &mut asset.band_uncertified_short,
+                &mut asset.band_liq_pending_short,
+            ),
+        };
+        if healthy {
+            if leg.band_epoch_snap < epoch {
+                *uncertified = uncertified
+                    .checked_sub(1)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                leg.band_epoch_snap = epoch;
+            }
+            if leg.band_liq_pending {
+                *liq_pending = liq_pending
+                    .checked_sub(1)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                leg.band_liq_pending = false;
+            }
+        } else if !leg.band_liq_pending {
+            *liq_pending = liq_pending
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?;
+            leg.band_liq_pending = true;
+        }
+        Ok((asset, leg))
+    }
+
+    /// v2.2 band (I-B3): the anchor may advance only when every positioned leg
+    /// has been certified this epoch, no leg is liquidation-pending, and no
+    /// domain-loss barrier is open on either side.
+    pub(crate) fn kernel_band_reanchor_ready(
+        asset: AssetStateV16,
+        barrier_long: u64,
+        barrier_short: u64,
+    ) -> bool {
+        asset.band_epoch != 0
+            && asset.band_uncertified_long == 0
+            && asset.band_uncertified_short == 0
+            && asset.band_liq_pending_long == 0
+            && asset.band_liq_pending_short == 0
+            && barrier_long == 0
+            && barrier_short == 0
+    }
+
+    /// v2.2 band (I-B3): advance the anchor. `A := P_last`, the window opens at
+    /// `window_start_slot`, `e += 1`, and every stored leg on each side starts
+    /// the new epoch uncertified (all snapshots are `<= e < e + 1`). The pin
+    /// clock clears (an advance is progress).
+    pub(crate) fn kernel_band_reanchor(
+        mut asset: AssetStateV16,
+        window_start_slot: u64,
+    ) -> V16Result<AssetStateV16> {
+        if asset.band_epoch == 0
+            || asset.band_liq_pending_long != 0
+            || asset.band_liq_pending_short != 0
+            || asset.band_uncertified_long != 0
+            || asset.band_uncertified_short != 0
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        asset.band_anchor_price = asset.effective_price;
+        asset.band_anchor_slot = window_start_slot;
+        asset.band_epoch = asset
+            .band_epoch
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?;
+        asset.band_uncertified_long = asset.stored_pos_count_long;
+        asset.band_uncertified_short = asset.stored_pos_count_short;
+        asset.band_pin_since_slot = 0;
+        Ok(asset)
     }
 
     /// PRODUCTION KERNEL: retain a position's loss weight after its basis is
@@ -1444,6 +1786,8 @@ impl V16Core {
         if !leg.active || !valid_effective_clear {
             return Err(V16Error::InvalidLeg);
         }
+        // v2.2 band (I-B2): the detaching leg leaves its cohorts.
+        asset = V16Core::kernel_band_detach(asset, leg)?;
         let normalized_carry = if !prior_reset_epoch && leg.b_rem != 0 {
             let (dust, explicit_loss) = match leg.side {
                 SideV16::Long => (
@@ -1651,6 +1995,81 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let f_short = checked_i128_mul(funding_index_delta, a_short)?;
         Ok((k_long, k_short, f_long, f_short))
+    }
+
+    /// fix/v21-funding-precision: per-side F index deltas for one accrual segment, computed
+    /// from the UNFLOORED funding numerator `funding_num = funding_rate_e9 * dt * price`.
+    ///
+    /// The previous form floored `funding_num / FUNDING_DEN` to whole price units BEFORE
+    /// scaling by A, so any segment worth less than one price unit per position unit lost all
+    /// positive funding (longs never paid) and charged a full unit for negative funding (shorts
+    /// overpaid by up to ~1e6x on low-priced assets, far above the solvency envelope's exact
+    /// `rate * dt` funding budget). Upstream wrote the same precision rule on an unmerged branch
+    /// (`a74b81b2`, spec: "it MUST NOT first floor by FUNDING_DEN").
+    ///
+    /// Rounding is sign-symmetric and conservative per side: the PAYING side's index moves by
+    /// `ceil(|n| * a_payer / FUNDING_DEN)`, the RECEIVING side's by
+    /// `floor(|n| * a_recv / FUNDING_DEN)`. With `a == ADL_ONE` both are exactly `|n| * 1e6`
+    /// (ADL_ONE % FUNDING_DEN == 0), so balanced books move by equal and opposite amounts, and
+    /// negating the rate mirrors the two sides exactly. Payers never pay less than receivers
+    /// receive (no value is created by rounding), and the residual is below one index unit
+    /// (1e-15 price units per position unit) per segment.
+    pub(crate) fn kernel_funding_index_deltas(
+        funding_num: i128,
+        a_long: u128,
+        a_short: u128,
+    ) -> V16Result<(i128, i128)> {
+        if funding_num == 0 {
+            return Ok((0, 0));
+        }
+        let mag = funding_num.unsigned_abs();
+        if funding_num > 0 {
+            // rate > 0: longs pay shorts.
+            let f_long = Self::funding_scaled_magnitude(mag, a_long, true)?
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let f_short = Self::funding_scaled_magnitude(mag, a_short, false)?;
+            Ok((f_long, f_short))
+        } else {
+            // rate < 0: shorts pay longs.
+            let f_long = Self::funding_scaled_magnitude(mag, a_long, false)?;
+            let f_short = Self::funding_scaled_magnitude(mag, a_short, true)?
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            Ok((f_long, f_short))
+        }
+    }
+
+    /// `ceil` or `floor` of `mag * a / FUNDING_DEN`, as a non-negative i128.
+    fn funding_scaled_magnitude(mag: u128, a: u128, round_up: bool) -> V16Result<i128> {
+        // Exact fast path: A == ADL_ONE always holds on a Normal side, and ADL_ONE is a
+        // multiple of FUNDING_DEN, so no rounding and no division is needed.
+        if a == ADL_ONE {
+            let v = mag
+                .checked_mul(ADL_ONE / FUNDING_DEN)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return i128::try_from(v).map_err(|_| V16Error::ArithmeticOverflow);
+        }
+        let (q, r) = match mag.checked_mul(a) {
+            Some(p) => (p / FUNDING_DEN, p % FUNDING_DEN),
+            None => {
+                let (q, r) = mul_div_floor_u256_with_rem(
+                    U256::from_u128(mag),
+                    U256::from_u128(a),
+                    U256::from_u128(FUNDING_DEN),
+                );
+                (
+                    q.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+                    r.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+                )
+            }
+        };
+        let v = if round_up && r != 0 {
+            q.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?
+        } else {
+            q
+        };
+        i128::try_from(v).map_err(|_| V16Error::ArithmeticOverflow)
     }
 
     #[inline]
@@ -3812,6 +4231,28 @@ pub fn kani_prepare_source_credit_domain_recompute_for_epoch_steps(
 }
 
 #[cfg(kani)]
+pub fn kani_track_kf_side_drift(
+    drift: KfDriftSideV16,
+    changed: bool,
+    kf_epoch_pre: u64,
+    stale_pre: u64,
+    loss_weight_sum: u128,
+    adverse: u128,
+) -> KfDriftSideV16 {
+    V16Core::kernel_track_kf_side_drift(drift, changed, kf_epoch_pre, stale_pre, loss_weight_sum, adverse)
+}
+
+#[cfg(kani)]
+pub fn kani_settle_kf_laggard(
+    drift: KfDriftSideV16,
+    kf_epoch: u64,
+    leg_kf_epoch_snap: u64,
+    leg_loss_weight: u128,
+) -> V16Result<KfDriftSideV16> {
+    V16Core::kernel_settle_kf_laggard(drift, kf_epoch, leg_kf_epoch_snap, leg_loss_weight)
+}
+
+#[cfg(kani)]
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
@@ -4067,6 +4508,10 @@ pub enum PermissionlessRecoveryReasonV16 {
     ExplicitLossOrDustAuditOverflow,
     OracleOrTargetUnavailableByAuthenticatedPolicy,
     CounterOrEpochOverflowDeclaredRecovery,
+    /// v2.2 band: the asset stayed pinned (unable to follow its target) for
+    /// longer than `band_max_pin_slots`. The market leaves Live through the
+    /// permissionless recovery path.
+    BandPinExpired,
 }
 
 #[repr(C)]
@@ -4135,6 +4580,31 @@ pub struct V16Config {
     pub stale_certificate_penalty_enabled: bool,
     pub full_refresh_required_for_favorable_actions: bool,
     pub public_liveness_profile_crank_forward: bool,
+    /// v2.2 band (item 1): half-width `d` of the per-epoch price band, in bps.
+    /// 0 = band off (byte-identical to v2.1 behaviour, I-B7). Immutable.
+    pub band_bps: u64,
+    /// v2.2 band: `E`, the loss-accruing window of one epoch, in slots. Past it
+    /// accruals are no-move until the book is certified (I-B4). 0 iff band off.
+    pub band_max_epoch_slots: u64,
+    /// v2.2 band: `Pmax`, how long an asset may stay pinned before the
+    /// `BandPinExpired` recovery becomes available. 0 iff band off.
+    pub band_max_pin_slots: u64,
+    /// v2.2 rent (item 2): ceiling on the per-side holding-fee rate, in 1e-9 of
+    /// notional per slot. Priced into the §1.6 envelope and the Band Safety Law.
+    pub rent_max_e9_per_slot: u64,
+    /// v2.2 band (review E-M1): cap on positioned legs per side on a band market.
+    /// Every positioned leg must be certified each epoch before the anchor can
+    /// advance, so this bounds the keeper's per-epoch sweep and stops dust legs
+    /// from holding an epoch hostage. `1..=BAND_MAX_POSITIONS_PER_SIDE` iff band
+    /// on, 0 iff band off. Enforced at attach (`kernel_band_attach`).
+    pub band_max_positions_per_side: u64,
+    /// v2.2 band (re-review N-1): smallest notional (collateral atoms, at `P_last`) a
+    /// positioned leg may be left at by a TRADE on a band market. Without it 256 one-atom
+    /// pairs fill `band_max_positions_per_side` and lock every newcomer out for free; with it
+    /// every slot-holding leg locks real margin. The wrapper floors it at a whole-token
+    /// amount from the collateral decimals. `>= 1` iff band on, 0 iff band off. Liquidation,
+    /// ADL and price moves can still leave a smaller leg (never refused: exits stay open).
+    pub band_min_leg_notional: u64,
 }
 
 impl V16Config {
@@ -4191,7 +4661,18 @@ impl V16Config {
             stale_certificate_penalty_enabled: true,
             full_refresh_required_for_favorable_actions: true,
             public_liveness_profile_crank_forward: true,
+            band_bps: 0,
+            band_max_epoch_slots: 0,
+            band_max_pin_slots: 0,
+            rent_max_e9_per_slot: 0,
+            band_max_positions_per_side: 0,
+            band_min_leg_notional: 0,
         }
+    }
+
+    /// True when the per-epoch price band is configured on this market.
+    pub const fn band_enabled(&self) -> bool {
+        self.band_bps != 0
     }
 
     fn ceil_div_u256_to_u128(n: U256, d: U256) -> V16Result<u128> {
@@ -4387,32 +4868,69 @@ impl V16Config {
         }
     }
 
+    /// Spec §1.6 per-accrual envelope, plus (v2.2) the Band Safety Law.
+    ///
+    /// * §1.6: `price_budget = max_price_move_bps_per_slot * max_accrual_dt_slots`
+    ///   over `max_accrual_dt_slots` of funding. v2.2 adds the holding-fee rent
+    ///   ceiling to the rate term: rent is an equity loss of exactly the funding
+    ///   kind, accrued per slot on notional. With `rent_max_e9_per_slot == 0` the
+    ///   check is the unchanged upstream law.
+    /// * BSL (band markets only, design §1.1): `price_budget = G(d)` (the worst
+    ///   two-epoch adverse move) over `2E` slots of funding + rent. Validated with
+    ///   the same exact breakpoint validator, so it inherits its exactness.
     fn validate_exact_solvency_envelope(&self) -> V16Result<()> {
         let price_budget_fast = (self.max_price_move_bps_per_slot as u128)
             .checked_mul(self.max_accrual_dt_slots as u128)
             .ok_or(V16Error::InvalidConfig)?;
-        if self.maintenance_margin_bps == 10_000
+        let rate_e9 = (self.max_abs_funding_e9_per_slot as u128)
+            .checked_add(self.rent_max_e9_per_slot as u128)
+            .ok_or(V16Error::InvalidConfig)?;
+        let fast_path_ok = self.maintenance_margin_bps == 10_000
             && price_budget_fast <= 10_000
-            && self.max_abs_funding_e9_per_slot == 0
+            && rate_e9 == 0
             && self.liquidation_fee_bps == 0
-            && self.min_liquidation_abs == 0
-        {
-            return Ok(());
+            && self.min_liquidation_abs == 0;
+        if !fast_path_ok {
+            self.validate_funding_headroom(self.max_accrual_dt_slots)?;
+            self.validate_funding_headroom(self.min_funding_lifetime_slots)?;
+            self.validate_exact_solvency_envelope_with(
+                price_budget_fast,
+                self.max_accrual_dt_slots,
+                rate_e9,
+            )?;
         }
+        if self.band_enabled() {
+            self.validate_band_safety_law(rate_e9)?;
+        }
+        Ok(())
+    }
 
-        self.validate_funding_headroom(self.max_accrual_dt_slots)?;
-        self.validate_funding_headroom(self.min_funding_lifetime_slots)?;
+    /// Band Safety Law (design §1.1, I-B5): for every risk notional `N`,
+    /// `price_funding_rent_loss_N(G, 2E) + liq_fee_N(at G) <= mm_req_N`.
+    fn validate_band_safety_law(&self, rate_e9: u128) -> V16Result<()> {
+        let g_bps = crate::band_rent::band_worst_adverse_bps(self.band_bps)
+            .map_err(|_| V16Error::InvalidConfig)?;
+        let funding_slots = self
+            .band_max_epoch_slots
+            .checked_mul(2)
+            .ok_or(V16Error::InvalidConfig)?;
+        self.validate_exact_solvency_envelope_with(g_bps as u128, funding_slots, rate_e9)
+    }
 
-        let move_cap = U256::from_u128(self.max_price_move_bps_per_slot as u128);
-        let dt = U256::from_u128(self.max_accrual_dt_slots as u128);
-        let rate = U256::from_u128(self.max_abs_funding_e9_per_slot as u128);
+    /// The exact §1.6 breakpoint validator, generalised over its three inputs:
+    /// the price budget in bps, the number of loss-accruing slots, and the
+    /// per-slot loss rate (funding + rent, e9 of notional).
+    fn validate_exact_solvency_envelope_with(
+        &self,
+        price_budget_bps: u128,
+        funding_slots: u64,
+        rate_e9_per_slot: u128,
+    ) -> V16Result<()> {
+        let dt = U256::from_u128(funding_slots as u128);
+        let rate = U256::from_u128(rate_e9_per_slot);
         let ten_thousand = U256::from_u128(10_000);
         let funding_den = U256::from_u128(FUNDING_DEN);
 
-        let price_budget_bps = move_cap
-            .checked_mul(dt)
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::InvalidConfig)?;
         let funding_budget_num = rate
             .checked_mul(dt)
             .and_then(|v| v.checked_mul(ten_thousand))
@@ -4616,6 +5134,41 @@ impl V16Config {
         {
             return Err(V16Error::InvalidConfig);
         }
+        // v2.2 band + rent shape (items 1, 2). `band_bps == 0` is the canonical
+        // "off" encoding and requires the two band clocks to be 0 as well, so an
+        // off market's config bytes are unambiguous.
+        if self.rent_max_e9_per_slot > crate::band_rent::MAX_RENT_E9_PER_SLOT {
+            return Err(V16Error::InvalidConfig);
+        }
+        if self.band_bps == 0 {
+            if self.band_max_epoch_slots != 0
+                || self.band_max_pin_slots != 0
+                || self.band_max_positions_per_side != 0
+                || self.band_min_leg_notional != 0
+            {
+                return Err(V16Error::InvalidConfig);
+            }
+        } else if self.band_bps > crate::band_rent::MAX_BAND_BPS
+            // Review E-M2: floors. A tiny E pins the book on one missed
+            // certification (and loosens the BSL time term); Pmax must leave the
+            // keeper several epochs to recover before BandPinExpired opens.
+            || self.band_max_epoch_slots < crate::band_rent::BAND_MIN_EPOCH_SLOTS
+            || self.band_max_pin_slots
+                < self
+                    .band_max_epoch_slots
+                    .saturating_mul(crate::band_rent::BAND_MIN_PIN_EPOCHS)
+            // Review E-M1: the per-side position cap bounds the per-epoch sweep.
+            || self.band_max_positions_per_side == 0
+            // Re-review N-1: a band market must price a slot-holding leg.
+            || self.band_min_leg_notional == 0
+            || self.band_max_positions_per_side > crate::band_rent::BAND_MAX_POSITIONS_PER_SIDE
+            // The Band Safety Law is a per-single-asset-account law: it does not
+            // extend to cross-asset portfolios without a per-account sum.
+            || self.max_market_slots != 1
+            || self.max_portfolio_assets != 1
+        {
+            return Err(V16Error::InvalidConfig);
+        }
         if !self.margin_mode_realizable_full_shared_cross_margin
             || !self.source_credit_lien_required
             || !self.insurance_credit_reservation_required
@@ -4719,6 +5272,27 @@ pub struct AssetStateV16 {
     pub epoch_short: u64,
     pub mode_long: SideModeV16,
     pub mode_short: SideModeV16,
+    /// v2.2 band: anchor price `A`; every exposed accrual price is in band(A).
+    pub band_anchor_price: u64,
+    /// v2.2 band: slot at which the current epoch's loss-accruing window opened.
+    pub band_anchor_slot: u64,
+    /// v2.2 band: the certification epoch `e`. 0 means the band is off for this
+    /// asset (the "band on" marker the pure kernels key on); >= 1 when on.
+    pub band_epoch: u64,
+    /// v2.2 band: legs on the long side not yet certified in epoch `e`.
+    pub band_uncertified_long: u64,
+    pub band_uncertified_short: u64,
+    /// v2.2 band: legs certified liquidatable and not yet liquidated or healed.
+    pub band_liq_pending_long: u64,
+    pub band_liq_pending_short: u64,
+    /// v2.2 band: first slot of the current continuous pin (0 = not pinned).
+    pub band_pin_since_slot: u64,
+    /// v2.2 rent: per-side holding-fee index (`price * rate_e9 * slots` units).
+    pub rent_index_long_num: u128,
+    pub rent_index_short_num: u128,
+    /// v2.2 rent: rent charged into insurance and not yet routed to the vault LP.
+    /// An LP-owned claim on insurance (excluded from insurance withdrawals).
+    pub rent_unrouted_atoms: u128,
 }
 
 impl Default for AssetStateV16 {
@@ -4767,6 +5341,17 @@ impl Default for AssetStateV16 {
             epoch_short: 0,
             mode_long: SideModeV16::Normal,
             mode_short: SideModeV16::Normal,
+            band_anchor_price: 0,
+            band_anchor_slot: 0,
+            band_epoch: 0,
+            band_uncertified_long: 0,
+            band_uncertified_short: 0,
+            band_liq_pending_long: 0,
+            band_liq_pending_short: 0,
+            band_pin_since_slot: 0,
+            rent_index_long_num: 0,
+            rent_index_short_num: 0,
+            rent_unrouted_atoms: 0,
         }
     }
 }
@@ -5595,6 +6180,17 @@ pub struct PortfolioLegV16 {
     pub b_epoch_snap: u64,
     pub b_stale: bool,
     pub stale: bool,
+    /// v2.2 band: the last band epoch this leg was certified in (0 = never).
+    /// The leg is uncertified in epoch `e` iff `band_epoch_snap < e`.
+    pub band_epoch_snap: u64,
+    /// v2.2 band: the leg was found liquidatable and is not yet liquidated or
+    /// healed; it blocks the anchor advance.
+    pub band_liq_pending: bool,
+    /// v2.2 rent: the side rent index this leg has paid up to.
+    pub rent_snap: u128,
+    /// v2.2 rent: sub-atom remainder of the last settle (< `RENT_INDEX_DEN`), so
+    /// the charged total is exact under any settle schedule.
+    pub rent_carry: u64,
 }
 
 impl PortfolioLegV16 {
@@ -5615,6 +6211,10 @@ impl PortfolioLegV16 {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
 
     pub fn is_empty(self) -> bool {
@@ -5634,6 +6234,10 @@ impl PortfolioLegV16 {
             && self.b_epoch_snap == 0
             && !self.b_stale
             && !self.stale
+            && self.band_epoch_snap == 0
+            && !self.band_liq_pending
+            && self.rent_snap == 0
+            && self.rent_carry == 0
     }
 }
 
@@ -5907,6 +6511,77 @@ pub struct AccrueAssetOutcomeV16 {
 /// Maximum canonical one-slot accrual steps that one public wrapper call may commit.
 /// Longer gaps remain actionable across additional bounded calls.
 pub const V16_MAX_ACCRUAL_PATH_STEPS: usize = 32;
+
+/// v2.2 band context for one canonical accrual step: the anchor, `d`, and
+/// whether the epoch's loss-accruing window has elapsed at this step's slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BandStepContextV16 {
+    pub anchor_price: u64,
+    pub band_bps: u64,
+    pub duration_pinned: bool,
+}
+
+/// The canonical one-slot step with the v2.2 band applied on top: the cap-law
+/// step of `canonical_accrual_price_step_v16`, then the band (edge clamp or
+/// duration pin) through the single D-1 path `band_rent::band_d1_pinned_step`.
+/// A step the band adjusted carries no sub-atom remainder forward (the carry
+/// belongs to the unadjusted staircase). `band == None` is byte-identical to
+/// `canonical_accrual_price_step_v16`. The engine validates every committed path
+/// step against exactly this function, so wrappers must use it too.
+pub fn canonical_band_accrual_price_step_v16(
+    current: u64,
+    target: u64,
+    cap_anchor: u64,
+    max_change_bps: u64,
+    exposed: bool,
+    remainder_before_bps_num: u16,
+    band: Option<BandStepContextV16>,
+) -> V16Result<(u64, u16)> {
+    let (step, remainder_after) = canonical_accrual_price_step_v16(
+        current,
+        target,
+        cap_anchor,
+        max_change_bps,
+        exposed,
+        remainder_before_bps_num,
+    )?;
+    match band {
+        None => Ok((step, remainder_after)),
+        Some(ctx) => {
+            let (price, adjusted) = crate::band_rent::band_d1_pinned_step(
+                current,
+                step,
+                ctx.anchor_price,
+                ctx.band_bps,
+                ctx.duration_pinned,
+            )
+            .map_err(band_rent_error_to_v16)?;
+            Ok((price, if adjusted { 0 } else { remainder_after }))
+        }
+    }
+}
+
+fn band_rent_error_to_v16(error: crate::band_rent::BandRentError) -> V16Error {
+    match error {
+        crate::band_rent::BandRentError::InvalidInput => V16Error::InvalidConfig,
+        crate::band_rent::BandRentError::Overflow => V16Error::ArithmeticOverflow,
+    }
+}
+
+/// v2.2 band gate for one accrual, computed before any mutation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BandAccrualGateV16 {
+    /// The band constrains this accrual (band on and the book is positioned).
+    active: bool,
+    /// Band on but the book is empty: the anchor tracks the price after the
+    /// accrual (no leg can lose, so the raw target may be fed directly).
+    track_empty: bool,
+    anchor_price: u64,
+    band_bps: u64,
+    max_epoch_slots: u64,
+    /// The anchor slot that governs this accrual's interval (pre-re-anchor).
+    governing_anchor_slot: u64,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7146,6 +7821,12 @@ pub struct V16ConfigAccount {
     pub stale_certificate_penalty_enabled: u8,
     pub full_refresh_required_for_favorable_actions: u8,
     pub public_liveness_profile_crank_forward: u8,
+    pub band_bps: V16PodU64,
+    pub band_max_epoch_slots: V16PodU64,
+    pub band_max_pin_slots: V16PodU64,
+    pub rent_max_e9_per_slot: V16PodU64,
+    pub band_max_positions_per_side: V16PodU64,
+    pub band_min_leg_notional: V16PodU64,
 }
 
 impl V16ConfigAccount {
@@ -7208,6 +7889,12 @@ impl V16ConfigAccount {
             public_liveness_profile_crank_forward: encode_bool(
                 value.public_liveness_profile_crank_forward,
             ),
+            band_bps: V16PodU64::new(value.band_bps),
+            band_max_epoch_slots: V16PodU64::new(value.band_max_epoch_slots),
+            band_max_pin_slots: V16PodU64::new(value.band_max_pin_slots),
+            rent_max_e9_per_slot: V16PodU64::new(value.rent_max_e9_per_slot),
+            band_max_positions_per_side: V16PodU64::new(value.band_max_positions_per_side),
+            band_min_leg_notional: V16PodU64::new(value.band_min_leg_notional),
         }
     }
 
@@ -7262,6 +7949,12 @@ impl V16ConfigAccount {
             public_liveness_profile_crank_forward: decode_bool(
                 self.public_liveness_profile_crank_forward,
             )?,
+            band_bps: self.band_bps.get(),
+            band_max_epoch_slots: self.band_max_epoch_slots.get(),
+            band_max_pin_slots: self.band_max_pin_slots.get(),
+            rent_max_e9_per_slot: self.rent_max_e9_per_slot.get(),
+            band_max_positions_per_side: self.band_max_positions_per_side.get(),
+            band_min_leg_notional: self.band_min_leg_notional.get(),
         };
         Ok(out)
     }
@@ -7457,6 +8150,17 @@ pub struct AssetStateV16Account {
     pub epoch_short: V16PodU64,
     pub mode_long: u8,
     pub mode_short: u8,
+    pub band_anchor_price: V16PodU64,
+    pub band_anchor_slot: V16PodU64,
+    pub band_epoch: V16PodU64,
+    pub band_uncertified_long: V16PodU64,
+    pub band_uncertified_short: V16PodU64,
+    pub band_liq_pending_long: V16PodU64,
+    pub band_liq_pending_short: V16PodU64,
+    pub band_pin_since_slot: V16PodU64,
+    pub rent_index_long_num: V16PodU128,
+    pub rent_index_short_num: V16PodU128,
+    pub rent_unrouted_atoms: V16PodU128,
 }
 
 impl AssetStateV16Account {
@@ -7505,6 +8209,17 @@ impl AssetStateV16Account {
             epoch_short: V16PodU64::new(value.epoch_short),
             mode_long: encode_side_mode(value.mode_long),
             mode_short: encode_side_mode(value.mode_short),
+            band_anchor_price: V16PodU64::new(value.band_anchor_price),
+            band_anchor_slot: V16PodU64::new(value.band_anchor_slot),
+            band_epoch: V16PodU64::new(value.band_epoch),
+            band_uncertified_long: V16PodU64::new(value.band_uncertified_long),
+            band_uncertified_short: V16PodU64::new(value.band_uncertified_short),
+            band_liq_pending_long: V16PodU64::new(value.band_liq_pending_long),
+            band_liq_pending_short: V16PodU64::new(value.band_liq_pending_short),
+            band_pin_since_slot: V16PodU64::new(value.band_pin_since_slot),
+            rent_index_long_num: V16PodU128::new(value.rent_index_long_num),
+            rent_index_short_num: V16PodU128::new(value.rent_index_short_num),
+            rent_unrouted_atoms: V16PodU128::new(value.rent_unrouted_atoms),
         }
     }
 
@@ -7553,6 +8268,17 @@ impl AssetStateV16Account {
             epoch_short: self.epoch_short.get(),
             mode_long: decode_side_mode(self.mode_long)?,
             mode_short: decode_side_mode(self.mode_short)?,
+            band_anchor_price: self.band_anchor_price.get(),
+            band_anchor_slot: self.band_anchor_slot.get(),
+            band_epoch: self.band_epoch.get(),
+            band_uncertified_long: self.band_uncertified_long.get(),
+            band_uncertified_short: self.band_uncertified_short.get(),
+            band_liq_pending_long: self.band_liq_pending_long.get(),
+            band_liq_pending_short: self.band_liq_pending_short.get(),
+            band_pin_since_slot: self.band_pin_since_slot.get(),
+            rent_index_long_num: self.rent_index_long_num.get(),
+            rent_index_short_num: self.rent_index_short_num.get(),
+            rent_unrouted_atoms: self.rent_unrouted_atoms.get(),
         };
         validate_non_min_i128(out.k_long)?;
         validate_non_min_i128(out.k_short)?;
@@ -7582,6 +8308,105 @@ pub struct EngineAssetSlotV16Account {
     pub backing_short: BackingBucketV16Account,
     pub insurance_reservation_long: InsuranceCreditReservationV16Account,
     pub insurance_reservation_short: InsuranceCreditReservationV16Account,
+    /// fix/v21-funding-scale: per-side K/F drift generations (see `KfDriftSideV16`). Kept
+    /// OUT of `AssetStateV16` so the hot per-leg asset copies stay the same size; read and
+    /// written only by accrual, K/F settlement, the trade gate and insurance withdrawal.
+    pub kf_drift_long: KfDriftSideV16Account,
+    pub kf_drift_short: KfDriftSideV16Account,
+}
+
+/// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
+/// the loss that still-stale legs could recognize (`V16Core::kernel_kf_hidden_loss_bound`).
+///
+/// - `gen_epoch`: the side's KF epoch at which the current generation began;
+/// - `laggard_count` / `laggard_weight`: stored legs whose `kf_epoch_snap < gen_epoch` and the
+///   sum of their `loss_weight` (laggards are a subset of the stale cohort);
+/// - `stale_weight`: sum of `loss_weight` over the side's stale legs (reset to
+///   `loss_weight_sum` with each cohort, reduced as each stale leg settles);
+/// - `drift_gen` / `drift_prior`: per accrual step, the part of the side's combined K+F index
+///   move that is ADVERSE to its legs (`max(0, -(dK + dF))`), summed since the generation began
+///   / over the previous generation. Saturating: saturation only enlarges the bound.
+///
+/// A generation rotates only once no leg is older than its start, so every stored leg's
+/// snapshot is at or after the PRIOR generation's start: a non-laggard stale leg travelled at
+/// most `drift_gen`, a laggard at most `drift_gen + drift_prior`.
+///
+/// Weights are exact while the side is `Normal`. A drain reset zeroes `loss_weight_sum` under
+/// stored prior-epoch legs, so outside `Normal` they can under-count; the bound is never used
+/// there (decrements saturate instead of failing settlement).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KfDriftSideV16 {
+    pub gen_epoch: u64,
+    pub laggard_count: u64,
+    pub drift_gen: u128,
+    pub drift_prior: u128,
+    pub stale_weight: u128,
+    pub laggard_weight: u128,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct KfDriftSideV16Account {
+    pub gen_epoch: V16PodU64,
+    pub laggard_count: V16PodU64,
+    pub drift_gen: V16PodU128,
+    pub drift_prior: V16PodU128,
+    pub stale_weight: V16PodU128,
+    pub laggard_weight: V16PodU128,
+}
+
+impl KfDriftSideV16Account {
+    pub fn from_runtime(value: &KfDriftSideV16) -> Self {
+        Self {
+            gen_epoch: V16PodU64::new(value.gen_epoch),
+            laggard_count: V16PodU64::new(value.laggard_count),
+            drift_gen: V16PodU128::new(value.drift_gen),
+            drift_prior: V16PodU128::new(value.drift_prior),
+            stale_weight: V16PodU128::new(value.stale_weight),
+            laggard_weight: V16PodU128::new(value.laggard_weight),
+        }
+    }
+
+    pub fn to_runtime(&self) -> KfDriftSideV16 {
+        KfDriftSideV16 {
+            gen_epoch: self.gen_epoch.get(),
+            laggard_count: self.laggard_count.get(),
+            drift_gen: self.drift_gen.get(),
+            drift_prior: self.drift_prior.get(),
+            stale_weight: self.stale_weight.get(),
+            laggard_weight: self.laggard_weight.get(),
+        }
+    }
+}
+
+/// v2.2 band: a freshly activated / restarted asset on a band market starts in
+/// epoch 1 anchored at its authenticated price. Off markets keep every band field
+/// at 0 (I-B7). Public so a wrapper that builds genesis asset state itself (instead
+/// of through `activate_empty_*`) arms the band identically; the accrual gate
+/// refuses a band-configured live asset that was never armed (fail closed).
+pub fn band_initialize_asset(
+    asset: &mut AssetStateV16,
+    band_bps: u64,
+    price: u64,
+    slot: u64,
+) -> V16Result<()> {
+    if band_bps == 0 {
+        return Ok(());
+    }
+    // Review E-L1: a band market's genesis price must leave a band at least
+    // MIN_BAND_WIDTH_TICKS wide.
+    if !crate::band_rent::band_width_ok(price, band_bps).map_err(|_| V16Error::InvalidConfig)? {
+        return Err(V16Error::BandTooNarrow);
+    }
+    asset.band_anchor_price = price;
+    asset.band_anchor_slot = slot;
+    asset.band_epoch = 1;
+    asset.band_uncertified_long = 0;
+    asset.band_uncertified_short = 0;
+    asset.band_liq_pending_long = 0;
+    asset.band_liq_pending_short = 0;
+    asset.band_pin_since_slot = 0;
+    Ok(())
 }
 
 fn asset_contributes_to_loss_stale_summary(asset: AssetStateV16) -> bool {
@@ -7661,7 +8486,9 @@ impl EngineAssetSlotV16Account {
             )
             && Self::insurance_reservation_account_is_empty_for_activation(
                 self.insurance_reservation_short,
-            ))
+            )
+            && self.kf_drift_long == KfDriftSideV16Account::default()
+            && self.kf_drift_short == KfDriftSideV16Account::default())
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -7698,6 +8525,8 @@ impl EngineAssetSlotV16Account {
             insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
                 &InsuranceCreditReservationV16::EMPTY,
             ),
+            kf_drift_long: KfDriftSideV16Account::default(),
+            kf_drift_short: KfDriftSideV16Account::default(),
         }
     }
 
@@ -7785,6 +8614,17 @@ impl EngineAssetSlotV16Account {
             && asset.epoch_short.get() == 0
             && asset.mode_long == 0
             && asset.mode_short == 0
+            && asset.band_anchor_price.get() == 0
+            && asset.band_anchor_slot.get() == 0
+            && asset.band_epoch.get() == 0
+            && asset.band_uncertified_long.get() == 0
+            && asset.band_uncertified_short.get() == 0
+            && asset.band_liq_pending_long.get() == 0
+            && asset.band_liq_pending_short.get() == 0
+            && asset.band_pin_since_slot.get() == 0
+            && asset.rent_index_long_num.get() == 0
+            && asset.rent_index_short_num.get() == 0
+            && asset.rent_unrouted_atoms.get() == 0
     }
 
     fn asset_state_is_empty_for_activation(asset: AssetStateV16) -> bool {
@@ -7823,6 +8663,15 @@ impl EngineAssetSlotV16Account {
             && asset.explicit_unallocated_loss_short == 0
             && asset.mode_long == SideModeV16::Normal
             && asset.mode_short == SideModeV16::Normal
+            // v2.2: no leg can remain in a band cohort, and rent history clears
+            // with the price/funding history at terminal normalization.
+            && asset.band_uncertified_long == 0
+            && asset.band_uncertified_short == 0
+            && asset.band_liq_pending_long == 0
+            && asset.band_liq_pending_short == 0
+            && asset.rent_index_long_num == 0
+            && asset.rent_index_short_num == 0
+            && asset.rent_unrouted_atoms == 0
     }
 }
 
@@ -8289,6 +9138,15 @@ impl MarketGroupV16HeaderAccount {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
+        // Re-review N-2: a band asset launches far above the width floor (>= 100x), so the
+        // narrow-band floor needs a >99% collapse to reach.
+        if config.band_bps != 0
+            && !crate::band_rent::band_genesis_price_ok(authenticated_price, config.band_bps)
+                .map_err(|_| V16Error::InvalidConfig)?
+        {
+            return Err(V16Error::BandTooNarrow);
+        }
+        band_initialize_asset(&mut asset, config.band_bps, authenticated_price, now_slot)?;
         *slot = EngineAssetSlotV16Account {
             asset: AssetStateV16Account::from_runtime(&asset),
             insurance_domain_budget_long: V16PodU128::default(),
@@ -8315,6 +9173,8 @@ impl MarketGroupV16HeaderAccount {
             insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
                 &InsuranceCreditReservationV16::EMPTY,
             ),
+            kf_drift_long: KfDriftSideV16Account::default(),
+            kf_drift_short: KfDriftSideV16Account::default(),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -8535,6 +9395,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 self.header.current_slot.get(),
                 self.header.next_market_id.get(),
             )?;
+            V16Core::validate_kf_drift_shape(
+                asset,
+                slot.kf_drift_long.to_runtime(),
+                slot.kf_drift_short.to_runtime(),
+            )?;
             let source_credit_long = slot.source_credit_long.try_to_runtime()?;
             totals.source_claim_bound_num = totals
                 .source_claim_bound_num
@@ -8660,6 +9525,27 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.stale_account_count_long > asset.stored_pos_count_long
             || asset.stale_account_count_short > asset.stored_pos_count_short
+            // v2.2 band census bounds (the per-leg census I-B2 needs every
+            // portfolio and is checked by the census tests): a cohort never holds
+            // more legs than the side stores; band off (epoch 0) keeps every band
+            // counter and the pin clock at 0 (I-B7); an on band has a valid anchor
+            // that never runs ahead of the clock.
+            || asset.band_uncertified_long > asset.stored_pos_count_long
+            || asset.band_uncertified_short > asset.stored_pos_count_short
+            || asset.band_liq_pending_long > asset.stored_pos_count_long
+            || asset.band_liq_pending_short > asset.stored_pos_count_short
+            || (asset.band_epoch == 0
+                && (asset.band_uncertified_long != 0
+                    || asset.band_uncertified_short != 0
+                    || asset.band_liq_pending_long != 0
+                    || asset.band_liq_pending_short != 0
+                    || asset.band_pin_since_slot != 0))
+            || (asset.band_epoch != 0
+                && requires_price
+                && (asset.band_anchor_price == 0
+                    || asset.band_anchor_price > MAX_ORACLE_PRICE
+                    || asset.band_anchor_slot > current_slot
+                    || asset.band_pin_since_slot > current_slot))
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
             || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)
@@ -10471,6 +11357,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterUnderflow)?,
         );
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        // v2.2 band: a capital debit carried on the prior certificate's
+        // requirements may only mark liquidation-pending, never certify.
+        self.band_observe_cert_not_atomic(account, &cert, false)?;
 
         if provider_fee != 0 {
             let mut bucket = self.backing_bucket_for_domain(provider_domain)?;
@@ -11646,6 +12535,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         amount: u128,
     ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
+        // fix/v21-funding-scale: the hidden K/F loss cover stays put for loss absorption.
+        let hidden = self.domain_hidden_kf_loss_reservation(domain)?;
+        if hidden != 0
+            && amount
+                > self
+                    .available_domain_insurance(domain)?
+                    .saturating_sub(hidden)
+        {
+            return Err(V16Error::LockActive);
+        }
         let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
         let domain_reserved_atoms = V16Core::amount_from_bound_num(
             self.insurance_reservation_for_domain(domain)?
@@ -11729,12 +12628,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// `withdraw_domain_insurance_not_atomic`'s bound style.
     pub fn withdraw_insurance_surplus_not_atomic(&mut self, amount: u128) -> V16Result<()> {
         let vault_before = self.header.vault.get();
+        // v2.2 rent: unrouted rent is the LP's claim (I_free = I - rent_unrouted).
+        let reserved = self
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            .checked_add(self.rent_unrouted_total()?)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let (next_vault, next_insurance) = Self::withdraw_insurance_surplus_delta(
             vault_before,
             self.header.insurance.get(),
-            self.header
-                .source_insurance_credit_reserved_total_atoms
-                .get(),
+            reserved,
             self.header.insurance_domain_budget_remaining_total.get(),
             amount,
         )?;
@@ -11820,6 +12724,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         account.validate_with_market(&self.as_view())?;
+        // v2.2 rent: crank-reward-style credits never consume the LP's unrouted rent.
+        let additional_reserved = additional_reserved
+            .checked_add(self.rent_unrouted_total()?)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let (next_insurance, next_c_tot, next_capital) = Self::credit_account_from_insurance_delta(
             self.header.insurance.get(),
             self.header.insurance_domain_budget_remaining_total.get(),
@@ -11838,6 +12746,119 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .validate()?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()
+    }
+
+    /// v2.2 rent: total unrouted rent across configured assets — the LP-owned
+    /// part of insurance that withdrawals and reward credits must not touch.
+    pub fn rent_unrouted_total(&self) -> V16Result<u128> {
+        let configured =
+            (self.header.config.max_market_slots.get() as usize).min(self.markets.len());
+        let mut total = 0u128;
+        let mut i = 0usize;
+        while i < configured {
+            total = total
+                .checked_add(
+                    self.markets[i]
+                        .engine_slot()
+                        .asset
+                        .rent_unrouted_atoms
+                        .get(),
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            i += 1;
+        }
+        Ok(total)
+    }
+
+    /// v2.2 rent (item 2): pure routing step. Moves `x = min(rent_unrouted,
+    /// unreserved insurance)` from insurance to the LP's capital (I-R3:
+    /// `dI = -x`, `dC_LP = +x`, `x <= rent_unrouted`). Whatever cannot be routed
+    /// now stays an LP claim, capped at the insurance physically left: only loss
+    /// absorption (which may use these atoms, the LP being the next absorber)
+    /// can shrink the claim; a relabel into a reserved budget cannot erase it.
+    /// Returns `(x, next_rent_unrouted, next_insurance, next_c_tot, next_capital)`.
+    pub(crate) fn rent_route_delta(
+        rent_unrouted: u128,
+        insurance: u128,
+        reserved: u128,
+        c_tot: u128,
+        capital: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        let available = insurance.saturating_sub(reserved);
+        let x = rent_unrouted.min(available);
+        let next_insurance = insurance.checked_sub(x).ok_or(V16Error::CounterUnderflow)?;
+        let next_c_tot = c_tot.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
+        let next_capital = capital.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?;
+        let next_rent_unrouted = rent_unrouted
+            .checked_sub(x)
+            .ok_or(V16Error::CounterUnderflow)?
+            .min(next_insurance);
+        Ok((
+            x,
+            next_rent_unrouted,
+            next_insurance,
+            next_c_tot,
+            next_capital,
+        ))
+    }
+
+    #[cfg(kani)]
+    pub fn kani_rent_route_delta(
+        rent_unrouted: u128,
+        insurance: u128,
+        reserved: u128,
+        c_tot: u128,
+        capital: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        Self::rent_route_delta(rent_unrouted, insurance, reserved, c_tot, capital)
+    }
+
+    /// v2.2 rent (item 2): route `asset_index`'s unrouted rent to `lp_account`
+    /// (the wrapper passes only the bound vault-LP portfolio). See
+    /// `rent_route_delta` for what remains a claim. Returns the atoms credited.
+    pub fn route_rent_to_account_not_atomic(
+        &mut self,
+        asset_index: usize,
+        lp_account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.validate_configured_asset_index(asset_index)?;
+        let mut asset = self.asset_state(asset_index)?;
+        if asset.rent_unrouted_atoms == 0 {
+            return Ok(0);
+        }
+        lp_account.validate_with_market(&self.as_view())?;
+        // Domain budgets and source-credit reservations stay isolated; only the
+        // unbudgeted surplus (where rent was charged) can fund the route.
+        let reserved = self
+            .header
+            .insurance_domain_budget_remaining_total
+            .get()
+            .checked_add(
+                self.header
+                    .source_insurance_credit_reserved_total_atoms
+                    .get(),
+            )
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (x, next_rent_unrouted, next_insurance, next_c_tot, next_capital) =
+            Self::rent_route_delta(
+                asset.rent_unrouted_atoms,
+                self.header.insurance.get(),
+                reserved,
+                self.header.c_tot.get(),
+                lp_account.header.capital.get(),
+            )?;
+        let vault = self.header.vault.get();
+        self.header.insurance = V16PodU128::new(next_insurance);
+        self.header.c_tot = V16PodU128::new(next_c_tot);
+        lp_account.header.capital = V16PodU128::new(next_capital);
+        lp_account.header.health_cert.valid = 0;
+        asset.rent_unrouted_atoms = next_rent_unrouted;
+        self.set_asset_state(asset_index, asset)?;
+        TokenValueFlowProofV16::insurance_capital_to_account_capital(x, vault, vault)?
+            .validate()?;
+        lp_account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(x)
     }
 
     fn available_domain_insurance(&self, domain: usize) -> V16Result<u128> {
@@ -11866,6 +12887,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.domain_asset_side(domain)?;
         Ok(self
             .available_domain_insurance(domain)?
+            .saturating_sub(self.domain_hidden_kf_loss_reservation(domain)?)
             .min(self.header.vault.get()))
     }
 
@@ -13905,6 +14927,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
+        self.settle_kf_laggard(asset_index, &asset, &leg)?;
+        // v2.2 rent (item 2): settle the leg's holding-fee rent on every touch,
+        // after the K/F delta so an unsettled loss keeps its seniority over rent.
+        let rent_charged = self.settle_leg_rent_not_atomic(account, asset, &mut leg)?;
+        if rent_charged != 0 {
+            asset.rent_unrouted_atoms = asset
+                .rent_unrouted_atoms
+                .checked_add(rent_charged)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
         let (settled_asset, kf_epoch_snap) =
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         asset = settled_asset;
@@ -13919,6 +14951,88 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.current_slot.get(),
         ));
         Ok(())
+    }
+
+    /// v2.2 rent (item 2): charge `leg` the rent its side index accrued since its
+    /// snapshot and advance the snapshot to the current index (I-R4: a second
+    /// settle in the same slot charges 0). The due is `floor(|q_eff| * dR /
+    /// (POS_SCALE * 1e9))` (floor never overcharges); the charge moves capital to
+    /// insurance and is capped at the capital no unsettled loss owns (I-R7).
+    /// Returns the atoms charged; the caller books them as unrouted LP rent.
+    fn settle_leg_rent_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset: AssetStateV16,
+        leg: &mut PortfolioLegV16,
+    ) -> V16Result<u128> {
+        let index = match leg.side {
+            SideV16::Long => asset.rent_index_long_num,
+            SideV16::Short => asset.rent_index_short_num,
+        };
+        if leg.rent_snap == index {
+            return Ok(0);
+        }
+        let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, *leg)?;
+        let (due, carry) = crate::band_rent::rent_due_with_carry(
+            effective_abs_q,
+            index,
+            leg.rent_snap,
+            leg.rent_carry,
+        )
+        .map_err(|_| V16Error::InvalidLeg)?;
+        leg.rent_snap = index;
+        leg.rent_carry = carry;
+        self.charge_account_rent_current_not_atomic(account, due)
+    }
+
+    /// v2.2 rent charge: `min(due, capital - max(-pnl, 0))` from capital to
+    /// insurance. Unlike `charge_account_fee_current_not_atomic` it does not
+    /// waive everything on negative PnL: it takes only capital that no unsettled
+    /// loss owns, so rent stays junior to losses without letting a loser's side
+    /// skip rent entirely.
+    fn charge_account_rent_current_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        due: u128,
+    ) -> V16Result<u128> {
+        let charged = crate::band_rent::rent_chargeable_atoms(
+            due,
+            account.header.capital.get(),
+            account.header.pnl.get(),
+        );
+        if charged == 0 {
+            return Ok(0);
+        }
+        let vault_before = self.header.vault.get();
+        let capital = account
+            .header
+            .capital
+            .get()
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let c_tot = self
+            .header
+            .c_tot
+            .get()
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let insurance = self
+            .header
+            .insurance
+            .get()
+            .checked_add(charged)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        account.header.capital = V16PodU128::new(capital);
+        self.header.c_tot = V16PodU128::new(c_tot);
+        self.header.insurance = V16PodU128::new(insurance);
+        TokenValueFlowProofV16::account_capital_to_insurance(
+            charged,
+            vault_before,
+            self.header.vault.get(),
+        )?
+        .validate()?;
+        account.header.health_cert.valid = 0;
+        Ok(charged)
     }
 
     fn settle_account_kf_effects_not_atomic(
@@ -14291,9 +15405,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             valid: true,
         };
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        // v2.2 band C-event (a). A price override is used only by the
+        // permissionless refresh crank, which accrues to exactly that price in the
+        // same instruction (or fails the whole instruction), so the certificate is
+        // a statement about the committed P_last either way.
+        self.band_observe_cert_not_atomic(account, &cert, true)?;
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(AccountRefreshCertOutcomeV16::Certified(cert))
+    }
+
+    /// v2.2 band: THE certification hook. Every site that writes a health
+    /// certificate routes it here. For each active leg on a band asset:
+    ///
+    /// * `liq_deficit != 0` (liquidatable): mark liquidation-pending — always
+    ///   safe, it can only block the anchor advance;
+    /// * healthy and `allow_certify`: certify the leg in the current epoch.
+    ///
+    /// `allow_certify` must be false for certificates whose requirements were not
+    /// recomputed at the current price (delta certificates carried across a
+    /// price or funding change). Band markets are single-asset (validated at
+    /// init), so the account certificate is the leg's certificate.
+    fn band_observe_cert_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        cert: &HealthCertV16,
+        allow_certify: bool,
+    ) -> V16Result<()> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(());
+        }
+        let healthy = cert.valid && cert.certified_liq_deficit == 0;
+        if healthy && !allow_certify {
+            return Ok(());
+        }
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            if active_bitmap_get(bitmap, slot) {
+                let leg = account.header.legs[slot].try_to_runtime()?;
+                let asset_index = leg.asset_index as usize;
+                let asset = self.asset_state(asset_index)?;
+                if asset.band_epoch != 0 && asset.lifecycle != AssetLifecycleV16::Recovery {
+                    let (asset, leg) = V16Core::kernel_band_certify_leg(asset, leg, healthy)?;
+                    account.header.legs[slot] = PortfolioLegV16Account::from_runtime(&leg);
+                    self.set_asset_state(asset_index, asset)?;
+                }
+            }
+            slot += 1;
+        }
+        Ok(())
     }
 
     fn has_b_stale_leg(account: &PortfolioV16View<'_>) -> V16Result<bool> {
@@ -14640,6 +15801,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             price_override,
         )?;
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        // v2.2 band C-event (a)/(c): a full certificate at the committed price
+        // (every production caller passes `None`; a partial liquidation's healthy
+        // remainder is certified here).
+        self.band_observe_cert_not_atomic(account, &cert, price_override.is_none())?;
         Ok(cert)
     }
 
@@ -14793,6 +15958,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
+        // v2.2 band: an empty book's anchor follows an authenticated reset.
+        if asset.band_epoch != 0 {
+            asset.band_anchor_price = authenticated_price;
+            asset.band_anchor_slot = now_slot;
+            asset.band_pin_since_slot = 0;
+        }
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
         self.header.slot_last = V16PodU64::new(now_slot);
@@ -14836,6 +16007,136 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         funding_rate_e9: i128,
         protective_progress_committed: bool,
     ) -> V16Result<AccrueAssetOutcomeV16> {
+        self.accrue_asset_to_with_rent_not_atomic(
+            asset_index,
+            now_slot,
+            effective_price,
+            funding_rate_e9,
+            0,
+            0,
+            protective_progress_committed,
+        )
+    }
+
+    /// v2.2 band gate (design §1.1 "Re-anchor" / "Pin"). Runs at the top of every
+    /// accrual, before any mutation:
+    ///
+    /// 1. If the band is off, or the book is empty, the band does not constrain
+    ///    the accrual (an empty book tracks the anchor afterwards).
+    /// 2. Otherwise, if every positioned leg was certified this epoch, nothing is
+    ///    liquidation-pending and no domain-loss barrier is open, the anchor
+    ///    advances (`A := P_last`, `e += 1`). The NEW window opens at the end of
+    ///    this accrual's segment; this accrual's own interval is governed by the
+    ///    window that was open when it started (`governing_anchor_slot`), so the
+    ///    loss-accruing time charged to an epoch never exceeds `E`.
+    fn band_prepare_accrual(
+        &self,
+        asset_index: usize,
+        mut asset: AssetStateV16,
+        config: &V16Config,
+        segment_end_slot: u64,
+    ) -> V16Result<(AssetStateV16, BandAccrualGateV16)> {
+        if !config.band_enabled() {
+            return Ok((asset, BandAccrualGateV16::default()));
+        }
+        // Fail closed: a band market whose asset was never armed (epoch 0) must not
+        // accrue as if the band were off.
+        if asset.band_epoch == 0 {
+            return Err(V16Error::InvalidConfig);
+        }
+        let positioned = asset.stored_pos_count_long != 0
+            || asset.stored_pos_count_short != 0
+            || asset.oi_eff_long_q != 0
+            || asset.oi_eff_short_q != 0;
+        if !positioned {
+            return Ok((
+                asset,
+                BandAccrualGateV16 {
+                    track_empty: true,
+                    ..BandAccrualGateV16::default()
+                },
+            ));
+        }
+        let governing_anchor_slot = asset.band_anchor_slot;
+        let slot = self.markets[asset_index].engine_slot();
+        // Review E-L1: never re-anchor onto a band narrower than the minimum width
+        // (the book stays on the old anchor, pins, and recovers via BandPinExpired).
+        let new_band_wide_enough =
+            crate::band_rent::band_width_ok(asset.effective_price, config.band_bps)
+                .map_err(|_| V16Error::InvalidConfig)?;
+        if new_band_wide_enough
+            && V16Core::kernel_band_reanchor_ready(
+                asset,
+                slot.pending_domain_loss_barrier_long.get(),
+                slot.pending_domain_loss_barrier_short.get(),
+            )
+        {
+            asset = V16Core::kernel_band_reanchor(asset, segment_end_slot)?;
+        }
+        Ok((
+            asset,
+            BandAccrualGateV16 {
+                active: true,
+                track_empty: false,
+                anchor_price: asset.band_anchor_price,
+                band_bps: config.band_bps,
+                max_epoch_slots: config.band_max_epoch_slots,
+                governing_anchor_slot,
+            },
+        ))
+    }
+
+    /// v2.2 band bookkeeping after a committed accrual: an empty book's anchor
+    /// follows the price; otherwise the pin clock starts when the asset cannot
+    /// follow its target (edge pin or duration pin) and clears when it can.
+    fn band_finish_accrual(
+        mut asset: AssetStateV16,
+        gate: BandAccrualGateV16,
+        target: u64,
+    ) -> V16Result<AssetStateV16> {
+        if gate.track_empty {
+            asset.band_anchor_price = asset.effective_price;
+            asset.band_anchor_slot = asset.slot_last;
+            asset.band_pin_since_slot = 0;
+            return Ok(asset);
+        }
+        if !gate.active {
+            return Ok(asset);
+        }
+        let (lo, hi) = crate::band_rent::band_bounds(asset.band_anchor_price, gate.band_bps)
+            .map_err(band_rent_error_to_v16)?;
+        let at_edge_with_target_beyond = (target > hi && asset.effective_price == hi)
+            || (target < lo && asset.effective_price == lo);
+        let duration_pinned = crate::band_rent::band_duration_pinned(
+            asset.slot_last,
+            asset.band_anchor_slot,
+            gate.max_epoch_slots,
+        );
+        let pinned =
+            target != asset.effective_price && (at_edge_with_target_beyond || duration_pinned);
+        if !pinned {
+            asset.band_pin_since_slot = 0;
+        } else if asset.band_pin_since_slot == 0 {
+            // A pin that starts at slot 0 is stamped at 1 so 0 keeps meaning "not pinned".
+            asset.band_pin_since_slot = asset.slot_last.max(1);
+        }
+        Ok(asset)
+    }
+
+    /// Rent-carrying form of `accrue_asset_to_not_atomic` (v2.2 item 2). The
+    /// per-side rent rates are computed by the wrapper from state (never caller
+    /// input, spec §9.1) and bounded here by `config.rent_max_e9_per_slot`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accrue_asset_to_with_rent_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        rent_rate_long_e9: u64,
+        rent_rate_short_e9: u64,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
         let config = self.header.config.try_to_runtime_shape()?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -14845,6 +16146,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || effective_price == 0
             || effective_price > MAX_ORACLE_PRICE
             || funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        if rent_rate_long_e9 > config.rent_max_e9_per_slot
+            || rent_rate_short_e9 > config.rent_max_e9_per_slot
         {
             return Err(V16Error::InvalidConfig);
         }
@@ -14859,12 +16165,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             dt_total
         };
-        let activity = V16Core::accrual_activity_for_asset_segment(
+        let segment_end_slot = old
+            .slot_last
+            .checked_add(segment_dt)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        // v2.2 band: re-anchor, then the band check, then the duration pin, all
+        // before any K/F, price, slot or consumption mutation (I-B1, I-B3, I-B4).
+        let (old, band_gate) =
+            self.band_prepare_accrual(asset_index, old, &config, segment_end_slot)?;
+        if band_gate.active {
+            if !crate::band_rent::price_in_band(
+                effective_price,
+                band_gate.anchor_price,
+                band_gate.band_bps,
+            )
+            .map_err(band_rent_error_to_v16)?
+            {
+                return Err(V16Error::BandOutOfRange);
+            }
+            if crate::band_rent::band_duration_pinned(
+                segment_end_slot,
+                band_gate.governing_anchor_slot,
+                band_gate.max_epoch_slots,
+            ) && (effective_price != old.effective_price
+                || funding_rate_e9 != 0
+                || rent_rate_long_e9 != 0
+                || rent_rate_short_e9 != 0)
+            {
+                return Err(V16Error::BandPinned);
+            }
+        }
+        let mut activity = V16Core::accrual_activity_for_asset_segment(
             old,
             segment_dt,
             effective_price,
             funding_rate_e9,
         );
+        let rent_delta_long = if segment_dt > 0 && old.oi_eff_long_q != 0 {
+            crate::band_rent::rent_index_delta(effective_price, rent_rate_long_e9, segment_dt)
+                .map_err(band_rent_error_to_v16)?
+        } else {
+            0
+        };
+        let rent_delta_short = if segment_dt > 0 && old.oi_eff_short_q != 0 {
+            crate::band_rent::rent_index_delta(effective_price, rent_rate_short_e9, segment_dt)
+                .map_err(band_rent_error_to_v16)?
+        } else {
+            0
+        };
+        if rent_delta_long != 0 || rent_delta_short != 0 {
+            activity.equity_active = true;
+        }
         if activity.equity_active {
             if segment_dt == 0 {
                 return Err(V16Error::NonProgress);
@@ -14894,31 +16245,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // book (a_long == a_short == ADL_ONE) this is byte-identical to the old flat code.
         // The old flat path minted value on an asymmetric-a book because the low-A side
         // over-realized by ADL_ONE/a_side (see issue #114).
-        let funding_index_delta = if activity.funding_active {
-            let n = funding_rate_e9
+        // fix/v21-funding-precision: keep the funding numerator unfloored; the per-side F
+        // deltas are rounded once, in `kernel_funding_index_deltas`.
+        let funding_num = if activity.funding_active {
+            funding_rate_e9
                 .checked_mul(segment_dt as i128)
                 .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                .ok_or(V16Error::ArithmeticOverflow)?
         } else {
             0
         };
-        let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
-            V16Core::kernel_adl_scaled_accrual_index_deltas(
-                price_delta,
-                funding_index_delta,
-                old.a_long,
-                old.a_short,
-            )?;
+        let (k_delta_long, k_delta_short, _, _) = V16Core::kernel_adl_scaled_accrual_index_deltas(
+            price_delta,
+            0,
+            old.a_long,
+            old.a_short,
+        )?;
+        let (funding_delta_long, funding_delta_short) =
+            V16Core::kernel_funding_index_deltas(funding_num, old.a_long, old.a_short)?;
 
-        let long_kf_changed = k_delta_long != 0 || funding_delta_long != 0;
-        let short_kf_changed = k_delta_short != 0 || funding_delta_short != 0;
+        // v2.2 rent is the twin of F: a rent move starts a new settlement cohort
+        // on that side, so every "K/F current" guard also means "rent current".
+        let long_kf_changed = k_delta_long != 0 || funding_delta_long != 0 || rent_delta_long != 0;
+        let short_kf_changed =
+            k_delta_short != 0 || funding_delta_short != 0 || rent_delta_short != 0;
 
         let mut asset = old;
         asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
         asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
         asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
         asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
+        asset.rent_index_long_num = asset
+            .rent_index_long_num
+            .checked_add(rent_delta_long)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        asset.rent_index_short_num = asset
+            .rent_index_short_num
+            .checked_add(rent_delta_short)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         asset.effective_price = effective_price;
         // Canonical path accrual uses this persisted nonzero field as its stable price-cap anchor.
         // A direct price move starts a new trajectory; zero-move funding must preserve an active
@@ -14931,12 +16295,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .slot_last
             .checked_add(segment_dt)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        self.track_kf_drift(
+            asset_index,
+            &asset,
+            long_kf_changed,
+            short_kf_changed,
+            kf_adverse_travel(k_delta_long, funding_delta_long),
+            kf_adverse_travel(k_delta_short, funding_delta_short),
+        );
         asset = V16Core::kernel_mark_kf_stale_cohorts(
             asset,
             long_kf_changed,
             short_kf_changed,
             asset.slot_last,
         )?;
+        let raw_target = asset.raw_oracle_target_price;
+        asset = Self::band_finish_accrual(asset, band_gate, raw_target)?;
         self.set_asset_state(asset_index, asset)?;
         // `now_slot` is the endpoint of this asset-local committed segment. Another asset can
         // already have advanced the market's authenticated clock beyond that endpoint, so keep
@@ -14959,7 +16333,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterOverflow)?,
             );
         }
-        if activity.funding_active {
+        // v2.2 rent is the twin of F: a rent move invalidates certificates exactly like
+        // funding (the next touch must settle it before any health-sensitive check).
+        if activity.funding_active || rent_delta_long != 0 || rent_delta_short != 0 {
             self.header.funding_epoch = V16PodU64::new(
                 self.header
                     .funding_epoch
@@ -14992,7 +16368,102 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         steps: &[AccrualStepV16],
         protective_progress_committed: bool,
     ) -> V16Result<AccrueAssetOutcomeV16> {
+        self.accrue_asset_path_with_rent_to_not_atomic(
+            asset_index,
+            now_slot,
+            raw_oracle_target_price,
+            steps,
+            0,
+            0,
+            protective_progress_committed,
+        )
+    }
+
+    /// The band context the engine validates path step `step_slot` against, or
+    /// `None` when the band does not constrain this accrual. Wrappers mirroring
+    /// the canonical path must use the same context (see
+    /// `canonical_band_accrual_price_step_v16`).
+    fn band_step_context(gate: BandAccrualGateV16, step_slot: u64) -> Option<BandStepContextV16> {
+        if !gate.active {
+            return None;
+        }
+        Some(BandStepContextV16 {
+            anchor_price: gate.anchor_price,
+            band_bps: gate.band_bps,
+            duration_pinned: crate::band_rent::band_duration_pinned(
+                step_slot,
+                gate.governing_anchor_slot,
+                gate.max_epoch_slots,
+            ),
+        })
+    }
+
+    /// Read-only preview of the band context the next path accrual of
+    /// `asset_index` will be validated against: `(anchor_price, band_bps,
+    /// governing_anchor_slot, max_epoch_slots)` after any re-anchor the accrual
+    /// would perform, or `None` when the band will not constrain it. The wrapper
+    /// uses this to build canonical path steps the engine accepts.
+    pub fn band_path_preview(
+        &self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<Option<(u64, u64, u64, u64)>> {
         let config = self.header.config.try_to_runtime_shape()?;
+        let asset = self.asset_state(asset_index)?;
+        if now_slot < asset.slot_last {
+            return Err(V16Error::InvalidConfig);
+        }
+        let steps = (now_slot - asset.slot_last)
+            .min(config.max_accrual_dt_slots)
+            .min(V16_MAX_ACCRUAL_PATH_STEPS as u64);
+        let segment_end_slot = asset
+            .slot_last
+            .checked_add(steps)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.band_accrual_preview(asset_index, segment_end_slot)
+    }
+
+    /// Read-only preview of the band gate for an accrual of `asset_index` whose
+    /// committed segment ends at `segment_end_slot`: `Some((anchor_price,
+    /// band_bps, governing_anchor_slot, max_epoch_slots))` after any re-anchor
+    /// the accrual would perform, or `None` when the band will not constrain it.
+    /// The accrual's price must lie in `band(anchor_price)`, and it must be
+    /// no-move when `segment_end_slot - governing_anchor_slot > max_epoch_slots`.
+    pub fn band_accrual_preview(
+        &self,
+        asset_index: usize,
+        segment_end_slot: u64,
+    ) -> V16Result<Option<(u64, u64, u64, u64)>> {
+        let config = self.header.config.try_to_runtime_shape()?;
+        let asset = self.asset_state(asset_index)?;
+        let (_, gate) = self.band_prepare_accrual(asset_index, asset, &config, segment_end_slot)?;
+        Ok(gate.active.then_some((
+            gate.anchor_price,
+            gate.band_bps,
+            gate.governing_anchor_slot,
+            gate.max_epoch_slots,
+        )))
+    }
+
+    /// Rent-carrying form of `accrue_asset_path_to_not_atomic` (v2.2 item 2).
+    /// The rates apply to every non-pinned step of the path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accrue_asset_path_with_rent_to_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        raw_oracle_target_price: u64,
+        steps: &[AccrualStepV16],
+        rent_rate_long_e9: u64,
+        rent_rate_short_e9: u64,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
+        let config = self.header.config.try_to_runtime_shape()?;
+        if rent_rate_long_e9 > config.rent_max_e9_per_slot
+            || rent_rate_short_e9 > config.rent_max_e9_per_slot
+        {
+            return Err(V16Error::InvalidConfig);
+        }
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live
             || asset_index >= config.max_market_slots as usize
             || asset_index >= self.markets.len()
@@ -15019,6 +16490,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if steps.len() != expected_steps {
             return Err(V16Error::InvalidConfig);
         }
+        let segment_end_slot = asset
+            .slot_last
+            .checked_add(expected_steps_u64)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        // v2.2 band: re-anchor before any mutation; each step is then validated
+        // against the band-adjusted canonical price (I-B1, I-B3, I-B4).
+        let (reanchored, band_gate) =
+            self.band_prepare_accrual(asset_index, asset, &config, segment_end_slot)?;
+        asset = reanchored;
+        let rent_before_long = asset.rent_index_long_num;
+        let rent_before_short = asset.rent_index_short_num;
         let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
         let price_cap_anchor = if target_changed {
             asset.effective_price
@@ -15034,6 +16516,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let mut price_move_count = 0u64;
         let mut funding_count = 0u64;
+        // fix/v21-funding-scale: per-side ADVERSE K+F index travel summed step by step (a
+        // favourable step never offsets an adverse one; the bound must be path-wide).
+        let mut kf_travel_long = 0u128;
+        let mut kf_travel_short = 0u128;
         let mut expected_remainder = steps
             .first()
             .map(|step| step.price_move_remainder_before_bps_num)
@@ -15048,48 +16534,102 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::InvalidConfig);
             }
             let exposed = asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0;
-            let (expected_price, remainder_after) = canonical_accrual_price_step_v16(
+            let step_slot = asset
+                .slot_last
+                .checked_add(1)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let band_ctx = Self::band_step_context(band_gate, step_slot);
+            let (expected_price, remainder_after) = canonical_band_accrual_price_step_v16(
                 asset.effective_price,
                 raw_oracle_target_price,
                 price_cap_anchor,
                 config.max_price_move_bps_per_slot,
                 exposed,
                 step.price_move_remainder_before_bps_num,
+                band_ctx,
             )?;
             if step.effective_price != expected_price
                 || step.price_move_remainder_after_bps_num != remainder_after
             {
                 return Err(V16Error::InvalidConfig);
             }
+            let step_pinned = band_ctx.map(|ctx| ctx.duration_pinned).unwrap_or(false);
+            if let Some(ctx) = band_ctx {
+                // Defense in depth: the canonical band step is in band by
+                // construction; re-check before mutation (I-B1).
+                if !crate::band_rent::price_in_band(
+                    step.effective_price,
+                    ctx.anchor_price,
+                    ctx.band_bps,
+                )
+                .map_err(band_rent_error_to_v16)?
+                {
+                    return Err(V16Error::BandOutOfRange);
+                }
+                // A duration-pinned step is no-move: no funding (I-B4).
+                if ctx.duration_pinned && step.funding_rate_e9 != 0 {
+                    return Err(V16Error::BandPinned);
+                }
+            }
             expected_remainder = remainder_after;
-            let activity = V16Core::accrual_activity_for_asset_segment(
+            let mut activity = V16Core::accrual_activity_for_asset_segment(
                 asset,
                 1,
                 step.effective_price,
                 step.funding_rate_e9,
             );
+            // v2.2 rent: one slot of index growth per non-pinned step on a side
+            // with open interest (I-R6: a pinned step leaves the indices alone).
+            let rent_delta_long = if !step_pinned && asset.oi_eff_long_q != 0 {
+                crate::band_rent::rent_index_delta(step.effective_price, rent_rate_long_e9, 1)
+                    .map_err(band_rent_error_to_v16)?
+            } else {
+                0
+            };
+            let rent_delta_short = if !step_pinned && asset.oi_eff_short_q != 0 {
+                crate::band_rent::rent_index_delta(step.effective_price, rent_rate_short_e9, 1)
+                    .map_err(band_rent_error_to_v16)?
+            } else {
+                0
+            };
+            if rent_delta_long != 0 || rent_delta_short != 0 {
+                activity.equity_active = true;
+            }
+            asset.rent_index_long_num = asset
+                .rent_index_long_num
+                .checked_add(rent_delta_long)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            asset.rent_index_short_num = asset
+                .rent_index_short_num
+                .checked_add(rent_delta_short)
+                .ok_or(V16Error::ArithmeticOverflow)?;
             if activity.equity_active && !protective_progress_committed {
                 return Err(V16Error::NonProgress);
             }
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
-            let funding_index_delta = if activity.funding_active {
-                let n = step
-                    .funding_rate_e9
+            // fix/v21-funding-precision: unfloored numerator (see `kernel_funding_index_deltas`).
+            let funding_num = if activity.funding_active {
+                step.funding_rate_e9
                     .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                    .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
-            let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
+            let (k_delta_long, k_delta_short, _, _) =
                 V16Core::kernel_adl_scaled_accrual_index_deltas(
                     price_delta,
-                    funding_index_delta,
+                    0,
                     asset.a_long,
                     asset.a_short,
                 )?;
+            let (funding_delta_long, funding_delta_short) =
+                V16Core::kernel_funding_index_deltas(funding_num, asset.a_long, asset.a_short)?;
 
+            kf_travel_long =
+                kf_travel_long.saturating_add(kf_adverse_travel(k_delta_long, funding_delta_long));
+            kf_travel_short = kf_travel_short
+                .saturating_add(kf_adverse_travel(k_delta_short, funding_delta_short));
             asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
             asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
             asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
@@ -15103,7 +16643,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(u64::from(activity.price_move_active))
                 .ok_or(V16Error::CounterOverflow)?;
             funding_count = funding_count
-                .checked_add(u64::from(activity.funding_active))
+                .checked_add(u64::from(
+                    activity.funding_active || rent_delta_long != 0 || rent_delta_short != 0,
+                ))
                 .ok_or(V16Error::CounterOverflow)?;
         }
 
@@ -15111,9 +16653,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset.fund_px_last = asset.effective_price;
         }
 
-        let long_kf_changed = asset.k_long != k_long_before || asset.f_long_num != f_long_before;
-        let short_kf_changed =
-            asset.k_short != k_short_before || asset.f_short_num != f_short_before;
+        let long_kf_changed = asset.k_long != k_long_before
+            || asset.f_long_num != f_long_before
+            || asset.rent_index_long_num != rent_before_long;
+        let short_kf_changed = asset.k_short != k_short_before
+            || asset.f_short_num != f_short_before
+            || asset.rent_index_short_num != rent_before_short;
+        // v2.1 funding-scale tracker: rent index moves mark the cohort but add no
+        // adverse K/F travel (rent is capped at capital no unsettled loss owns).
+        self.track_kf_drift(
+            asset_index,
+            &asset,
+            long_kf_changed,
+            short_kf_changed,
+            kf_travel_long,
+            kf_travel_short,
+        );
         asset = V16Core::kernel_mark_kf_stale_cohorts(
             asset,
             long_kf_changed,
@@ -15121,6 +16676,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset.slot_last,
         )?;
         asset.raw_oracle_target_price = raw_oracle_target_price;
+        asset = Self::band_finish_accrual(asset, band_gate, raw_oracle_target_price)?;
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
         self.header.slot_last = V16PodU64::new(asset.slot_last);
@@ -15192,6 +16748,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// flags need cert currentness only where their entrypoint does (liquidate),
     /// so refresh is selected first for a stale account and the deficit is read
     /// from a fresh cert on the next step.
+    /// v2.2 band: does `account` hold an active leg on a band asset that is not
+    /// certified in the asset's current epoch (or is liquidation-pending)?
+    fn account_has_band_uncertified_leg(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(false);
+        }
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            if active_bitmap_get(bitmap, slot) {
+                let leg = account.header.legs[slot].try_to_runtime()?;
+                let asset = self.asset_state(leg.asset_index as usize)?;
+                if asset.band_epoch != 0
+                    && asset.lifecycle != AssetLifecycleV16::Recovery
+                    && (leg.band_epoch_snap < asset.band_epoch || leg.band_liq_pending)
+                {
+                    return Ok(true);
+                }
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
+    /// v2.2 band: true when some live band asset has been pinned (unable to
+    /// follow its target) for longer than `band_max_pin_slots` at `now_slot`.
+    pub fn band_pin_expired_at(&self, now_slot: u64) -> V16Result<bool> {
+        let max_pin = self.header.config.band_max_pin_slots.get();
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(false);
+        }
+        let configured =
+            (self.header.config.max_market_slots.get() as usize).min(self.markets.len());
+        let mut i = 0usize;
+        while i < configured {
+            let asset = self.asset_state(i)?;
+            if matches!(
+                asset.lifecycle,
+                AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+            ) && asset.band_epoch != 0
+                && asset.band_pin_since_slot != 0
+                && now_slot.saturating_sub(asset.band_pin_since_slot) > max_pin
+            {
+                return Ok(true);
+            }
+            i += 1;
+        }
+        Ok(false)
+    }
+
     pub fn build_actionable_summary(
         &self,
         account: &PortfolioV16View<'_>,
@@ -15259,13 +16865,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.has_pending_residual();
+        // v2.2 band: a positioned leg not yet certified in its asset's current
+        // epoch is refresh work even when the certificate is still current (the
+        // anchor advance does not move the price, so no epoch on the cert moves).
+        let band_uncertified = live && self.account_has_band_uncertified_leg(account)?;
         let stale = V16Core::kernel_live_account_refresh_required(
             live,
             cert_current,
             reset_obligation_asset.is_some(),
             released_obligation_asset.is_some(),
             lapsed_source_backing,
-        );
+        ) || band_uncertified;
         let b_stale = live && selected_assets.0.is_some();
         // A durable close ledger is independently actionable even after the trade
         // that created it cleared the bankrupt leg. AdvanceClose infers the asset
@@ -15309,7 +16919,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // close expiry remains the proactive Recovery route above; completed or
         // unattributed deficits wait for an explicit market-level resolution
         // policy instead of inventing an asset domain or terminating the market.
-        let recovery_eligible = false;
+        //
+        // v2.2 band exception: an asset pinned for longer than
+        // `band_max_pin_slots` is a market-level fail-closed condition (keepers
+        // gone), so any account's crank may declare `BandPinExpired` recovery.
+        let recovery_eligible = live && self.band_pin_expired_at(now_slot)?;
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -15565,8 +17179,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 released_obligation_asset,
             ),
         ) = self.build_actionable_summary_and_selected_assets(&account.as_view(), work.now_slot)?;
-        let recovery_reason = if summary.expired_close || summary.recovery_eligible {
+        let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+        } else if summary.recovery_eligible {
+            PermissionlessRecoveryReasonV16::BandPinExpired
         } else {
             PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
         };
@@ -15955,6 +17571,156 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             Ok(PortfolioLegV16::EMPTY)
         }
+    }
+
+    /// v2.2 band (re-review N-1): after a trade on a band market, each traded asset's leg on
+    /// either account (if any) has a notional at `P_last` of at least `band_min_leg_notional`
+    /// (effective quantity, floor). A trade that closes the leg fully passes.
+    /// v2.2 band, end-of-trade shape rules on a band market, for each traded asset and each
+    /// of the two accounts unless it is EXEMPT (the wrapper exempts only the bound vault LP):
+    ///
+    /// * re-review N-1: a leg left by the trade has a notional at `P_last` (effective
+    ///   quantity, floor) of at least `band_min_leg_notional` (a full close passes);
+    /// * review E-M1: an account that ATTACHED a leg on a side (none there before the trade)
+    ///   needs that side's positioned-leg count to be within `band_max_positions_per_side`.
+    ///
+    /// `before[i]` is the side each account held on request `i`'s asset before the trade.
+    fn require_band_trade_shape(
+        &self,
+        long_account: &PortfolioV16ViewMut<'_>,
+        short_account: &PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        before: &[(Option<SideV16>, Option<SideV16>)],
+        exempt_long: bool,
+        exempt_short: bool,
+    ) -> V16Result<()> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(());
+        }
+        let min = self.header.config.band_min_leg_notional.get() as u128;
+        let cap = self.header.config.band_max_positions_per_side.get();
+        let mut i = 0usize;
+        while i < requests.len() {
+            let asset_index = requests[i].asset_index;
+            let asset = self.asset_state(asset_index)?;
+            for (account, exempt, side_before) in [
+                (long_account.as_view(), exempt_long, before[i].0),
+                (short_account.as_view(), exempt_short, before[i].1),
+            ] {
+                if exempt {
+                    continue;
+                }
+                let leg = Self::active_leg_for_asset(&account, asset_index)?;
+                if !leg.active {
+                    continue;
+                }
+                let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+                let notional = q
+                    .checked_mul(asset.effective_price as u128)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    / POS_SCALE;
+                if notional < min {
+                    return Err(V16Error::BandLegBelowMinNotional);
+                }
+                if side_before != Some(leg.side) {
+                    let count = match leg.side {
+                        SideV16::Long => asset.stored_pos_count_long,
+                        SideV16::Short => asset.stored_pos_count_short,
+                    };
+                    if count > cap {
+                        return Err(V16Error::BandPositionCap);
+                    }
+                }
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// The side each account holds on each request's asset (before a trade).
+    fn band_sides_before(
+        &self,
+        long_account: &PortfolioV16ViewMut<'_>,
+        short_account: &PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+    ) -> V16Result<[(Option<SideV16>, Option<SideV16>); V16_MAX_PORTFOLIO_ASSETS_N]> {
+        let mut out = [(None, None); V16_MAX_PORTFOLIO_ASSETS_N];
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(out);
+        }
+        let mut i = 0usize;
+        while i < requests.len() && i < V16_MAX_PORTFOLIO_ASSETS_N {
+            let side = |account: &PortfolioV16View<'_>| -> V16Result<Option<SideV16>> {
+                let leg = Self::active_leg_for_asset(account, requests[i].asset_index)?;
+                Ok(if leg.active { Some(leg.side) } else { None })
+            };
+            out[i] = (side(&long_account.as_view())?, side(&short_account.as_view())?);
+            i += 1;
+        }
+        Ok(out)
+    }
+
+    /// v2.2 band (round-2 re-review N-1b): the side and the notional at `P_last` (effective
+    /// quantity, floor) of the account's leg on `asset_index`, or `None` if it has none.
+    pub fn band_leg_side_and_notional(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<Option<(SideV16, u128)>> {
+        let leg = Self::active_leg_for_asset(account, asset_index)?;
+        if !leg.active {
+            return Ok(None);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let notional = q
+            .checked_mul(asset.effective_price as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / POS_SCALE;
+        Ok(Some((leg.side, notional)))
+    }
+
+    /// v2.2 band (round-2 re-review N-1b): `side` of `asset_index` holds
+    /// `band_max_positions_per_side` positioned legs, so a new leg there is refused
+    /// (`BandPositionCap`). False on a band-off market.
+    pub fn band_side_is_full(&self, asset_index: usize, side: SideV16) -> V16Result<bool> {
+        let cap = self.header.config.band_max_positions_per_side.get();
+        if self.header.config.band_bps.get() == 0 || cap == 0 {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let count = match side {
+            SideV16::Long => asset.stored_pos_count_long,
+            SideV16::Short => asset.stored_pos_count_short,
+        };
+        Ok(count >= cap)
+    }
+
+    /// v2.2 band (re-review N-1, dust sweep): the account's leg on `asset_index` is DUST: a
+    /// band market, an active leg, and its notional at `P_last` (effective quantity, floor)
+    /// below HALF of `band_min_leg_notional`. A trade can never leave such a leg (the trade
+    /// floor is the full minimum); only price moves, liquidation and ADL can, and the half
+    /// margin keeps an ordinary price dip from making a fresh minimum-size leg sweepable.
+    pub fn band_leg_is_dust(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        if self.header.config.band_bps.get() == 0 {
+            return Ok(false);
+        }
+        let leg = Self::active_leg_for_asset(account, asset_index)?;
+        if !leg.active {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let notional = q
+            .checked_mul(asset.effective_price as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / POS_SCALE;
+        let min = self.header.config.band_min_leg_notional.get() as u128;
+        Ok(notional.saturating_mul(2) < min)
     }
 
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
@@ -16609,7 +18375,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         #[cfg(feature = "fork-facade")] instruction_threshold_bps_opt: Option<u128>,
     ) -> V16Result<HLockLaneV16> {
         let account_scoped = account.is_some();
-        let bankruptcy_hlock_active = bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active);
+        let bankruptcy_hlock_active =
+            bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active);
         if let Some(account) = account {
             if decode_bool(account.header.liquidation_lock)?
                 || decode_bool(account.header.stale_state)?
@@ -16685,6 +18452,206 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset,
             self.header.current_slot.get(),
         ))
+    }
+
+    /// fix/v21-funding-scale: record one accrual's adverse travel (pre-mark asset).
+    fn track_kf_drift(
+        &mut self,
+        asset_index: usize,
+        asset: &AssetStateV16,
+        long_changed: bool,
+        short_changed: bool,
+        long_adverse: u128,
+        short_adverse: u128,
+    ) {
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let long = V16Core::kernel_track_kf_side_drift(
+            slot.kf_drift_long.to_runtime(),
+            long_changed,
+            asset.kf_epoch_long,
+            asset.stale_account_count_long,
+            asset.loss_weight_sum_long,
+            long_adverse,
+        );
+        let short = V16Core::kernel_track_kf_side_drift(
+            slot.kf_drift_short.to_runtime(),
+            short_changed,
+            asset.kf_epoch_short,
+            asset.stale_account_count_short,
+            asset.loss_weight_sum_short,
+            short_adverse,
+        );
+        slot.kf_drift_long = KfDriftSideV16Account::from_runtime(&long);
+        slot.kf_drift_short = KfDriftSideV16Account::from_runtime(&short);
+    }
+
+    /// fix/v21-funding-scale: discharge a settling leg from its side's drift generation
+    /// (pre-settlement asset).
+    fn settle_kf_laggard(
+        &mut self,
+        asset_index: usize,
+        asset: &AssetStateV16,
+        leg: &PortfolioLegV16,
+    ) -> V16Result<()> {
+        let slot = self.markets[asset_index].engine_slot_mut();
+        match leg.side {
+            SideV16::Long => {
+                let d = V16Core::kernel_settle_kf_laggard(
+                    slot.kf_drift_long.to_runtime(),
+                    asset.kf_epoch_long,
+                    leg.kf_epoch_snap,
+                    leg.loss_weight,
+                )?;
+                slot.kf_drift_long = KfDriftSideV16Account::from_runtime(&d);
+            }
+            SideV16::Short => {
+                let d = V16Core::kernel_settle_kf_laggard(
+                    slot.kf_drift_short.to_runtime(),
+                    asset.kf_epoch_short,
+                    leg.kf_epoch_snap,
+                    leg.loss_weight,
+                )?;
+                slot.kf_drift_short = KfDriftSideV16Account::from_runtime(&d);
+            }
+        }
+        Ok(())
+    }
+
+    fn kf_hidden_loss_bound_for(
+        asset: &AssetStateV16,
+        slot: &EngineAssetSlotV16Account,
+        side: SideV16,
+    ) -> Option<u128> {
+        match side {
+            SideV16::Long => V16Core::kernel_kf_hidden_loss_bound(
+                asset.stale_account_count_long,
+                slot.kf_drift_long.to_runtime(),
+            ),
+            SideV16::Short => V16Core::kernel_kf_hidden_loss_bound(
+                asset.stale_account_count_short,
+                slot.kf_drift_short.to_runtime(),
+            ),
+        }
+    }
+
+    /// fix/v21-funding-scale: hidden K/F loss bound of `side`; `u128::MAX` when it does not fit.
+    fn asset_hidden_kf_loss_bound(&self, asset_index: usize, side: SideV16) -> V16Result<u128> {
+        let asset = self.asset_state(asset_index)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(Self::kf_hidden_loss_bound_for(&asset, slot, side).unwrap_or(u128::MAX))
+    }
+
+    /// fix/v21-funding-scale: insurance that must stay in a domain to absorb the hidden K/F
+    /// loss of the opposite side's stale legs (a bankrupt side draws on the domain of the
+    /// opposite side, `consume_domain_insurance_for_negative_pnl`). Withdrawals may not dip
+    /// into it; loss absorption may.
+    fn domain_hidden_kf_loss_reservation(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let bankrupt_side = opposite_side(side);
+        // Security review S2: the drift weights are exact only on a `Normal` side and only when
+        // the tracker is well-formed. Otherwise a stale cohort's hidden loss is unbounded here:
+        // reserve everything (withdrawal blocked until the cohort settles).
+        let asset = self.asset_state(asset_index)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let (stale, mode) = match bankrupt_side {
+            SideV16::Long => (asset.stale_account_count_long, asset.mode_long),
+            SideV16::Short => (asset.stale_account_count_short, asset.mode_short),
+        };
+        if stale != 0
+            && (mode != SideModeV16::Normal
+                || V16Core::validate_kf_drift_shape(
+                    asset,
+                    slot.kf_drift_long.to_runtime(),
+                    slot.kf_drift_short.to_runtime(),
+                )
+                .is_err())
+        {
+            return Ok(u128::MAX);
+        }
+        self.asset_hidden_kf_loss_bound(asset_index, bankrupt_side)
+    }
+
+    /// fix/v21-funding-scale: a loss-stale asset may still admit risk-increasing trades when
+    /// the only staleness is unsettled K/F on other accounts AND the worst-case loss those
+    /// accounts could recognize is fully covered by the insurance that would absorb it.
+    ///
+    /// Then no deficit that existed before the trade can reach B-socialization onto the
+    /// entrant: the waterfall is capital -> insurance -> B, insurance only leaves a domain to
+    /// absorb losses or through a withdrawal that cannot dip into this cover, so the B booked
+    /// after admission is at most the deficits that arise after it (plus already-recognized
+    /// ones, which the baseline gate admits entrants against too). The entrant's own legs are
+    /// settled by the trade, and because the asset stays loss-stale its account is in the HMax
+    /// lane, so it must meet initial margin without positive credit.
+    ///
+    /// Conservative preconditions, each falling back to the baseline gate:
+    /// - single-asset market (multi-asset deficit attribution is not domain-local);
+    /// - asset `Active`, both sides `Normal` (drift weights exact), no pending obligations or
+    ///   domain-loss barriers;
+    /// - the asset is accrued to the market clock (the `slot_last < current_slot` clause of
+    ///   loss-stale is never relaxed: unaccrued travel has no bound).
+    fn asset_hidden_kf_loss_is_insurance_covered(&self, asset_index: usize) -> V16Result<bool> {
+        if self.header.config.max_market_slots.get() != 1 {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        if asset.lifecycle != AssetLifecycleV16::Active
+            || asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
+            || asset.pending_obligation_count_long != 0
+            || asset.pending_obligation_count_short != 0
+            || asset.slot_last < self.header.current_slot.get()
+            || self.pending_domain_loss_barrier_count(asset_index, SideV16::Long)? != 0
+            || self.pending_domain_loss_barrier_count(asset_index, SideV16::Short)? != 0
+        {
+            return Ok(false);
+        }
+        let slot = self.markets[asset_index].engine_slot();
+        // Security review S1: a malformed tracker never admits (production check, not only
+        // the audit-scan walk).
+        if V16Core::validate_kf_drift_shape(
+            asset,
+            slot.kf_drift_long.to_runtime(),
+            slot.kf_drift_short.to_runtime(),
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
+        for side in [SideV16::Long, SideV16::Short] {
+            let Some(bound) = Self::kf_hidden_loss_bound_for(&asset, slot, side) else {
+                return Ok(false);
+            };
+            if bound != 0 {
+                let domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+                if bound > self.available_domain_insurance(domain)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// fix/v21-funding-scale: the trade-preflight loss-stale predicate.
+    fn asset_loss_stale_blocks_risk_increase(&self, asset_index: usize) -> V16Result<bool> {
+        Ok(self.asset_is_loss_stale(asset_index)?
+            && !self.asset_hidden_kf_loss_is_insurance_covered(asset_index)?)
+    }
+
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn fuzz_asset_hidden_kf_loss_bound(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<u128> {
+        self.asset_hidden_kf_loss_bound(asset_index, side)
+    }
+
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn fuzz_asset_hidden_kf_loss_is_insurance_covered(
+        &self,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        self.asset_hidden_kf_loss_is_insurance_covered(asset_index)
     }
 
     fn account_has_loss_stale_live_leg(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
@@ -16836,7 +18803,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             );
         trade_preflight_risk_gate(
             risk_increasing,
-            self.asset_is_loss_stale(request.asset_index)?,
+            self.asset_loss_stale_blocks_risk_increase(request.asset_index)?,
             target_effective_lag,
             blocked_by_pending_domain_barrier,
         )?;
@@ -16902,7 +18869,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let loss_weight = loss_weight_for_basis(basis_pos_q.unsigned_abs(), a_basis)?;
         let (asset, new_leg) =
-            V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index as u32)?;
+            V16Core::kernel_attach_leg(
+                asset,
+                side,
+                basis_pos_q,
+                loss_weight,
+                asset_index as u32,
+                self.header.config.band_bps.get(),
+                self.header.config.band_max_positions_per_side.get(),
+            )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
@@ -18398,11 +20373,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // that side first would strand it (weight 0 => Recovery). Refuse while either side of
         // the asset carries a barrier; the close ledger's own progress path clears it first.
         if self.position_delta_blocked_by_pending_domain_loss_barrier(
-                &account.as_view(),
-                request.asset_index,
-                close_delta,
-            )?
-        {
+            &account.as_view(),
+            request.asset_index,
+            close_delta,
+        )? {
             return Err(V16Error::LockActive);
         }
         self.reduce_position(account, request.asset_index, close_q)?;
@@ -18626,7 +20600,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn recertify_account_after_source_lien_change(
-        &self,
+        &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
         let existing = account.header.health_cert.try_to_runtime()?;
@@ -18655,11 +20629,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             valid: true,
         };
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        // v2.2 band: requirements are carried from the prior certificate, so this
+        // may only mark liquidation-pending, never certify.
+        self.band_observe_cert_not_atomic(account, &cert, false)?;
         Ok(cert)
     }
 
     fn recertify_account_after_trade_delta(
-        &self,
+        &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
         old_abs_q: u128,
@@ -18680,9 +20657,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 None,
             )?;
             account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+            // v2.2 band C-event (b): a full certificate at P_last after the fill.
+            self.band_observe_cert_not_atomic(account, &cert, true)?;
             return Ok(cert);
         }
         let existing = account.header.health_cert.try_to_runtime()?;
+        // The delta certificate below is a fresh statement at this price only if
+        // the certificate it starts from was computed in the same oracle, funding,
+        // risk and asset-set epochs.
+        let existing_is_current = existing.cert_oracle_epoch == self.header.oracle_epoch.get()
+            && existing.cert_funding_epoch == self.header.funding_epoch.get()
+            && existing.cert_risk_epoch == self.header.risk_epoch.get()
+            && existing.cert_asset_set_epoch == self.header.asset_set_epoch.get();
         let old_notional = risk_notional_ceil(old_abs_q, price)?;
         let new_notional = risk_notional_ceil(new_abs_q, price)?;
         let config = self.header.config.try_to_runtime_shape()?;
@@ -18741,6 +20727,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             valid: true,
         };
         account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+        // v2.2 band C-event (b): the post-fill certificate at P_last.
+        self.band_observe_cert_not_atomic(account, &cert, existing_is_current)?;
         Ok(cert)
     }
 
@@ -19195,6 +21183,83 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         requests: &[TradeRequestV16],
         taker_is_long_account: bool,
     ) -> V16Result<BatchTradeOutcomeV16> {
+        self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            taker_is_long_account,
+            false,
+        )
+    }
+
+    /// # CALLER CONTRACT (round-3 re-review): bound-LP binding required
+    ///
+    /// The two `*_band_maker_exempt_*` entry points exempt WHOEVER the caller passes as the
+    /// maker. The engine cannot know who the standing counterparty is: the wrapper must call
+    /// them ONLY when the maker account is the traded asset's RECORDED bound vault LP
+    /// (`AssetVaultLpV18.flags & BOUND` and `vault_lp_portfolio == account key`, on every leg
+    /// of a batch), and must use `execute_*_with_fee_loss_stale_scoped_not_atomic` otherwise.
+    /// Any other embedder of this engine must reproduce that binding (same note as
+    /// `route_rent_to_account_not_atomic`). What the engine guarantees regardless of the
+    /// caller: only the maker is exempt (the taker's leg is always checked), and no side can
+    /// ever hold more than `cap + 1` positioned legs (`kernel_band_attach`), so a wrong or
+    /// hostile caller can add at most ONE leg per side beyond the cap. They stay `pub` only
+    /// because the wrapper is another crate and the engine's own default test suite drives
+    /// them; do not call them from anywhere else.
+    ///
+    /// v2.2 band (round-2 re-review N-6 / N-1): the same batch fill, with the MAKER (the
+    /// non-taker account) exempt from the band minimum-leg-notional check. The wrapper uses it
+    /// when the maker is a matcher LP: an LP's leg is the NET of its takers and is legitimately
+    /// small (or dust) while every taker leg is at least the minimum, so the LP must be able to
+    /// absorb any fill, including the bilateral dust sweep and the slot eviction. The taker's
+    /// leg is always checked.
+    pub fn execute_batch_band_maker_exempt_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
+    ) -> V16Result<BatchTradeOutcomeV16> {
+        self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            requests,
+            taker_is_long_account,
+            true,
+        )
+    }
+
+    /// Single-trade form of `execute_batch_band_maker_exempt_not_atomic`. Same CALLER
+    /// CONTRACT: only with the wrapper's bound-vault-LP binding for the maker.
+    pub fn execute_trade_band_maker_exempt_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        request: TradeRequestV16,
+        taker_is_long_account: bool,
+    ) -> V16Result<TradeOutcomeV16> {
+        let outcome = self.execute_batch_band_scoped_not_atomic(
+            long_account,
+            short_account,
+            core::slice::from_ref(&request),
+            taker_is_long_account,
+            true,
+        )?;
+        Ok(TradeOutcomeV16 {
+            fee_a: outcome.fee_a,
+            fee_b: outcome.fee_b,
+            notional: outcome.notional,
+        })
+    }
+
+    fn execute_batch_band_scoped_not_atomic(
+        &mut self,
+        long_account: &mut PortfolioV16ViewMut<'_>,
+        short_account: &mut PortfolioV16ViewMut<'_>,
+        requests: &[TradeRequestV16],
+        taker_is_long_account: bool,
+        maker_exempt: bool,
+    ) -> V16Result<BatchTradeOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         let mut ignore_unrelated_loss_stale =
             decode_bool(self.header.loss_stale_active)? && !requests.is_empty();
@@ -19216,6 +21281,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
+        let band_before = self.band_sides_before(long_account, short_account, requests)?;
         let result = self.execute_batch_with_fee_after_tail_validation_not_atomic(
             long_account,
             short_account,
@@ -19226,6 +21292,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
         let outcome = result?;
+        // v2.2 band: minimum leg notional (N-1) and per-side position cap (E-M1).
+        self.require_band_trade_shape(
+            long_account,
+            short_account,
+            requests,
+            &band_before,
+            maker_exempt && !taker_is_long_account,
+            maker_exempt && taker_is_long_account,
+        )?;
         self.validate_shape()?;
         long_account.validate_with_market(&self.as_view())?;
         short_account.validate_with_market(&self.as_view())?;
@@ -19298,6 +21373,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ignore_unrelated_loss_stale {
             self.header.loss_stale_active = 0;
         }
+        let band_before = self.band_sides_before(long_account, short_account, requests)?;
         let result = self.fork_execute_batch_after_tail_validation_with_threshold_not_atomic(
             long_account,
             short_account,
@@ -19309,6 +21385,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.loss_stale_active = restore_loss_stale_active;
         }
         let outcome = result?;
+        // v2.2 band: minimum leg notional (N-1) and per-side position cap (E-M1).
+        self.require_band_trade_shape(
+            long_account,
+            short_account,
+            requests,
+            &band_before,
+            false,
+            false,
+        )?;
         self.validate_shape()?;
         long_account.validate_with_market(&self.as_view())?;
         short_account.validate_with_market(&self.as_view())?;
@@ -19961,7 +22046,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// value and changes nothing but the hlock byte, and only in the clearing direction.
     pub fn try_clear_bankruptcy_hlock_not_atomic(&mut self) -> V16Result<bool> {
         self.try_clear_bankruptcy_hlock_if_healthy()?;
-        Ok(!bankruptcy_hlock_is_active(self.header.bankruptcy_hlock_active))
+        Ok(!bankruptcy_hlock_is_active(
+            self.header.bankruptcy_hlock_active,
+        ))
     }
 
     // P2b L1: record a bankruptcy event in the hlock byte.
@@ -21735,6 +23822,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.k_epoch_start_short = 0;
         asset.f_epoch_start_long_num = 0;
         asset.f_epoch_start_short_num = 0;
+        // v2.2 rent: the index is price/time history of the same kind as F. Any
+        // unrouted rent on a terminal empty asset is forfeited to insurance (it
+        // is only a label on insurance atoms; nothing moves). The pin clock is
+        // cleared with it; the band anchor and epoch are re-initialised at the
+        // next activation.
+        asset.rent_index_long_num = 0;
+        asset.rent_index_short_num = 0;
+        asset.rent_unrouted_atoms = 0;
+        asset.band_pin_since_slot = 0;
     }
 
     fn clear_terminal_source_spent_audit(&mut self, asset_index: usize) -> V16Result<()> {
@@ -21816,6 +23912,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.header.risk_epoch.get(),
             )?;
 
+        let band_bps = self.header.config.band_bps.get();
         let slot = self.markets[asset_index].engine_slot_mut();
         *slot = Self::restarted_asset_slot_preserving_insurance_budget(
             slot,
@@ -21823,6 +23920,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             authenticated_price,
             now_slot,
         );
+        let mut restarted = slot.asset.try_to_runtime()?;
+        band_initialize_asset(&mut restarted, band_bps, authenticated_price, now_slot)?;
+        slot.asset = AssetStateV16Account::from_runtime(&restarted);
 
         self.header.next_market_id = V16PodU64::new(next_market_id);
         self.header.current_slot = V16PodU64::new(now_slot);
@@ -21864,6 +23964,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         slot.insurance_domain_spent_long = spent_long;
         slot.insurance_domain_budget_short = budget_short;
         slot.insurance_domain_spent_short = spent_short;
+        // fix/v21-funding-scale: the KF epochs were cleared with the price/funding history.
+        slot.kf_drift_long = KfDriftSideV16Account::default();
+        slot.kf_drift_short = KfDriftSideV16Account::default();
         self.validate_shape()
     }
 
@@ -22093,6 +24196,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         let asset = self.asset_state(asset_index)?;
+        self.settle_kf_laggard(asset_index, &asset, &leg)?;
         let (asset, kf_epoch_snap) =
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         leg.k_snap = k_now;
@@ -22512,9 +24616,49 @@ pub struct PortfolioLegV16Account {
     pub b_epoch_snap: V16PodU64,
     pub b_stale: u8,
     pub stale: u8,
+    pub band_epoch_snap: V16PodU64,
+    pub band_liq_pending: u8,
+    pub rent_snap: V16PodU128,
+    pub rent_carry: V16PodU64,
 }
 
+/// The account encoding of `PortfolioLegV16::EMPTY` (pinned by a unit test).
+/// v2.2 CU: an empty slot is recognised with one byte comparison instead of a
+/// field-by-field decode; any other bytes still take the full decode below,
+/// so every decode error is unchanged.
+pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLegV16Account {
+    active: 0,
+    asset_index: V16PodU32 { bytes: [0; 4] },
+    market_id: V16PodU64 { bytes: [0; 8] },
+    side: 0,
+    basis_pos_q: V16PodI128 { bytes: [0; 16] },
+    a_basis: V16PodU128 {
+        bytes: ADL_ONE.to_le_bytes(),
+    },
+    k_snap: V16PodI128 { bytes: [0; 16] },
+    f_snap: V16PodI128 { bytes: [0; 16] },
+    kf_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    epoch_snap: V16PodU64 { bytes: [0; 8] },
+    loss_weight: V16PodU128 { bytes: [0; 16] },
+    b_snap: V16PodU128 { bytes: [0; 16] },
+    b_rem: V16PodU128 { bytes: [0; 16] },
+    b_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    b_stale: 0,
+    stale: 0,
+    band_epoch_snap: V16PodU64 { bytes: [0; 8] },
+    band_liq_pending: 0,
+    rent_snap: V16PodU128 { bytes: [0; 16] },
+    rent_carry: V16PodU64 { bytes: [0; 8] },
+};
+
 impl PortfolioLegV16Account {
+    /// Whether this slot holds exactly the empty-leg encoding (one byte compare).
+    #[inline(always)]
+    pub fn is_empty_encoding(&self) -> bool {
+        self.active == 0
+            && bytemuck::bytes_of(self) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
+    }
+
     pub fn from_runtime(value: &PortfolioLegV16) -> Self {
         Self {
             active: encode_bool(value.active),
@@ -22533,10 +24677,17 @@ impl PortfolioLegV16Account {
             b_epoch_snap: V16PodU64::new(value.b_epoch_snap),
             b_stale: encode_bool(value.b_stale),
             stale: encode_bool(value.stale),
+            band_epoch_snap: V16PodU64::new(value.band_epoch_snap),
+            band_liq_pending: encode_bool(value.band_liq_pending),
+            rent_snap: V16PodU128::new(value.rent_snap),
+            rent_carry: V16PodU64::new(value.rent_carry),
         }
     }
 
     pub fn try_to_runtime(&self) -> V16Result<PortfolioLegV16> {
+        if self.is_empty_encoding() {
+            return Ok(PortfolioLegV16::EMPTY);
+        }
         let out = PortfolioLegV16 {
             active: decode_bool(self.active)?,
             asset_index: self.asset_index.get(),
@@ -22554,6 +24705,10 @@ impl PortfolioLegV16Account {
             b_epoch_snap: self.b_epoch_snap.get(),
             b_stale: decode_bool(self.b_stale)?,
             stale: decode_bool(self.stale)?,
+            band_epoch_snap: self.band_epoch_snap.get(),
+            band_liq_pending: decode_bool(self.band_liq_pending)?,
+            rent_snap: self.rent_snap.get(),
+            rent_carry: self.rent_carry.get(),
         };
         if out.active {
             validate_active_leg(out)?;
@@ -22865,7 +25020,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9419);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9947);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -23091,8 +25246,7 @@ pub fn bankruptcy_hlock_mark_unattributed(_wire: u8) -> u8 {
 /// unattributed.
 #[inline]
 pub fn bankruptcy_hlock_mark_domain(wire: u8, domain: usize) -> u8 {
-    if bankruptcy_hlock_is_unattributed(wire) || domain >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS
-    {
+    if bankruptcy_hlock_is_unattributed(wire) || domain >= BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS {
         return BANKRUPTCY_HLOCK_ACTIVE_BIT;
     }
     wire | BANKRUPTCY_HLOCK_ACTIVE_BIT | (1u8 << (domain + 1))
@@ -23225,6 +25379,15 @@ pub fn kani_raw_basis_for_adl_effective_quantity(
     current_a: u128,
 ) -> V16Result<u128> {
     V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
+}
+
+#[cfg(any(kani, feature = "fuzz"))]
+pub fn kani_funding_index_deltas(
+    funding_num: i128,
+    a_long: u128,
+    a_short: u128,
+) -> V16Result<(i128, i128)> {
+    V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
 }
 
 #[cfg(kani)]
@@ -23556,6 +25719,8 @@ pub fn kani_eq_engine_asset_slot_v16_account(
             &a.insurance_reservation_short,
             &b.insurance_reservation_short,
         )
+        && a.kf_drift_long == b.kf_drift_long
+        && a.kf_drift_short == b.kf_drift_short
 }
 
 #[cfg(kani)]
@@ -23891,6 +26056,7 @@ fn encode_recovery_reason(value: PermissionlessRecoveryReasonV16) -> u8 {
         PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow => 5,
         PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy => 6,
         PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery => 7,
+        PermissionlessRecoveryReasonV16::BandPinExpired => 8,
     }
 }
 
@@ -23904,6 +26070,7 @@ fn decode_recovery_reason(value: u8) -> V16Result<PermissionlessRecoveryReasonV1
         5 => Ok(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
         6 => Ok(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy),
         7 => Ok(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+        8 => Ok(PermissionlessRecoveryReasonV16::BandPinExpired),
         _ => Err(V16Error::InvalidConfig),
     }
 }
@@ -23924,6 +26091,18 @@ fn signed_position(leg: PortfolioLegV16) -> i128 {
             SideV16::Long => leg.basis_pos_q.unsigned_abs() as i128,
             SideV16::Short => -(leg.basis_pos_q.unsigned_abs() as i128),
         }
+    }
+}
+
+/// fix/v21-funding-scale: the part of one accrual step's K+F index move that is adverse to a
+/// side's legs (a leg realizes `|basis| * (dK + dF) / (a_basis * POS_SCALE)`, so only a negative
+/// combined move can create loss). Falls back to the absolute travel if the sum does not fit,
+/// which is only ever larger.
+fn kf_adverse_travel(k_delta: i128, f_delta: i128) -> u128 {
+    match k_delta.checked_add(f_delta) {
+        Some(n) if n < 0 => n.unsigned_abs(),
+        Some(_) => 0,
+        None => k_delta.unsigned_abs().saturating_add(f_delta.unsigned_abs()),
     }
 }
 
@@ -23987,6 +26166,7 @@ fn validate_active_leg(leg: PortfolioLegV16) -> V16Result<()> {
         || leg.loss_weight > SOCIAL_LOSS_DEN
         || leg.b_rem >= SOCIAL_LOSS_DEN
         || leg.b_epoch_snap != leg.epoch_snap
+        || leg.rent_carry as u128 >= crate::band_rent::RENT_INDEX_DEN
     {
         return Err(V16Error::InvalidLeg);
     }
@@ -24003,9 +26183,17 @@ fn leg_snapshots_bound_to_asset_side(asset: AssetStateV16, leg: PortfolioLegV16)
         SideV16::Long => (asset.epoch_long, asset.kf_epoch_long, asset.mode_long),
         SideV16::Short => (asset.epoch_short, asset.kf_epoch_short, asset.mode_short),
     };
+    let rent_index = match leg.side {
+        SideV16::Long => asset.rent_index_long_num,
+        SideV16::Short => asset.rent_index_short_num,
+    };
     leg.kf_epoch_snap <= kf_epoch
         && snapshot_epoch_bound_to_side(leg.epoch_snap, side_epoch, mode)
         && snapshot_epoch_bound_to_side(leg.b_epoch_snap, side_epoch, mode)
+        // v2.2: band and rent snapshots never run ahead of the asset.
+        && leg.band_epoch_snap <= asset.band_epoch
+        && (!leg.band_liq_pending || asset.band_epoch != 0)
+        && leg.rent_snap <= rent_index
 }
 
 fn same_side_risk_reduction_or_flat_obligation(current: i128, next: i128) -> bool {
@@ -24761,6 +26949,10 @@ mod close_drift_scope_tests {
             b_epoch_snap: asset.epoch_long,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account.active_bitmap[0] = V16PodU64::new(1);
         account

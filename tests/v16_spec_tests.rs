@@ -928,12 +928,19 @@ fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let a_short = ADL_ONE * 3 / 4;
     let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
-    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    // fix/v21-funding-precision (upstream a74b81b2 rule "MUST NOT first floor by
+    // FUNDING_DEN"): F moves by the exact `rate * price * A / 1e9`, the paying side rounded
+    // up and the receiving side down. At this step's price (1.01e6) that is 10.1 units, which
+    // the old pre-floor truncated to 10.
+    let n = step.funding_rate_e9 * i128::from(step.effective_price);
+    assert!(n > 0, "this fixture's first step has longs paying");
+    let exact_long = n * ADL_ONE as i128 / 1_000_000_000; // ADL_ONE % 1e9 == 0: exact
+    let short_num = n * a_short as i128;
     assert_eq!(asset.a_short, a_short);
     assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
     assert_eq!(asset.k_short, -(price_delta * a_short as i128));
-    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
-    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+    assert_eq!(asset.f_long_num, -exact_long);
+    assert_eq!(asset.f_short_num, short_num.div_euclid(1_000_000_000));
 }
 
 #[test]
@@ -1997,6 +2004,10 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2052,6 +2063,10 @@ fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2200,6 +2215,10 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2368,14 +2387,12 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
     let scaled = (ADL_ONE * 3 / 4) as i128;
     assert_eq!(asset.k_long, ADL_ONE as i128);
     assert_eq!(asset.k_short, -scaled);
-    assert_eq!(
-        asset.f_long_num,
-        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
-    );
-    assert_eq!(
-        asset.f_short_num,
-        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
-    );
+    // fix/v21-funding-precision: exact funding at the accrual price (FUNDING_COUNTER_PRICE + 1),
+    // payer (long) rounded up, receiver (short, A = 3/4) rounded down; the old pre-floor gave
+    // exactly FUNDING_COUNTER_ATOMS_PER_SLOT units and dropped the 1e-5 unit.
+    let n = FUNDING_COUNTER_RATE_E9 * i128::from(FUNDING_COUNTER_PRICE + 1);
+    assert_eq!(asset.f_long_num, -(n * ADL_ONE as i128 / 1_000_000_000));
+    assert_eq!(asset.f_short_num, (n * scaled).div_euclid(1_000_000_000));
 
     let total_value = |long: &PortfolioAccountV16Account,
                        short: &PortfolioAccountV16Account|
@@ -2401,7 +2418,14 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
             )
             .unwrap();
     }
-    assert_eq!(total_value(&long_header, &short_header), value_before);
+    // fix/v21-funding-precision: funding is now exact, so this step's funding is fractional
+    // (90.00009 atoms on the long). Settlement floors each leg's K/F pnl (pre-existing rule), so
+    // the payer is charged the ceiling and the receiver gets the floor: the pair may lose at most
+    // one atom per settled leg to rounding and can never gain (no value created). Removing even
+    // this residual needs per-leg K/F remainders (upstream a74b81b2), a portfolio layout change.
+    let value_after = total_value(&long_header, &short_header);
+    assert!(value_after <= value_before, "rounding must never create value");
+    assert!(value_before - value_after <= 2, "at most one atom per settled leg");
 
     let reduced_asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(reduced_asset.oi_eff_long_q, 6 * POS_SCALE);
@@ -2435,10 +2459,13 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
         market.full_account_refresh_not_atomic(&mut long).unwrap();
         market.full_account_refresh_not_atomic(&mut short).unwrap();
     }
-    assert_eq!(
-        total_value(&long_header, &short_header),
-        value_before_continuation,
-        "future price/funding accrual must remain zero-sum after the partial ADL reduction"
+    // fix/v21-funding-precision: same rule as above -- exact (fractional) funding, settlement
+    // floors per leg: never value-creating, at most one atom per settled leg.
+    let value_after_continuation = total_value(&long_header, &short_header);
+    assert!(
+        value_after_continuation <= value_before_continuation
+            && value_before_continuation - value_after_continuation <= 2,
+        "future price/funding accrual must remain zero-sum (up to settlement floor) after the partial ADL reduction"
     );
 }
 
@@ -2951,6 +2978,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -2971,6 +3002,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
     liquidated_header.health_cert.valid = 0;
@@ -3247,6 +3282,10 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3480,6 +3519,10 @@ fn v16_auto_crank_settles_released_recovery_obligation_before_finalizing_recover
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3576,6 +3619,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3596,6 +3643,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3799,6 +3850,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3819,6 +3874,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3900,6 +3959,10 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -4673,6 +4736,10 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5336,6 +5403,10 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5422,6 +5493,10 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5497,6 +5572,10 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -7360,6 +7439,10 @@ fn v16_b_settlement_loss_retires_the_legs_own_source_domain_first() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -7490,6 +7573,10 @@ fn v16_b_settlement_loss_spills_past_an_exhausted_own_source_domain() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -8226,6 +8313,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -8248,6 +8339,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9150,6 +9245,10 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
             },
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.active_bitmap[0] = V16PodU64::new(1);
         account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9255,6 +9354,10 @@ fn v16_auto_crank_retains_released_obligation_while_the_opposite_side_is_live() 
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9334,6 +9437,10 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9401,6 +9508,10 @@ fn v16_auto_crank_migrates_exhausted_residue_behind_a_current_certificate() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9505,6 +9616,10 @@ fn v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9593,6 +9708,10 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9941,6 +10060,10 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10025,6 +10148,10 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
             b_epoch_snap: asset.epoch_long,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
     }
     header.resolved_payout_blocker_count = V16PodU64::new(8);
@@ -10447,6 +10574,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: true,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10524,6 +10655,10 @@ fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10784,6 +10919,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset0.epoch_long,
                 b_stale: true,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             (header, markets, account_header)
@@ -10900,6 +11039,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset.epoch_long,
                 b_stale: false,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             {
@@ -11071,6 +11214,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11089,6 +11236,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
 
@@ -11165,6 +11316,10 @@ fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -11253,6 +11408,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11271,6 +11430,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -12170,6 +12333,10 @@ fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty()
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
