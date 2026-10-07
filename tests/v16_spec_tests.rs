@@ -6136,22 +6136,8 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
                 .checked_sub(unliened_support_consumed * BOUND_SCALE)
                 .unwrap()
                 .checked_add(lien_before.source_lien_counterparty_backing_num.get())
-                .unwrap()
-                // S10 (fork): the counterparty refreshed first at the reversal, so its 5,250 gain
-                // is a claim in the long domain with nothing yet backing it, while the short
-                // domain's unliened backing has no claimant left (the long's 5,000 claim was just
-                // burned). The unclaimed backing covers that claim exactly; upstream leaves it in
-                // the short bucket, where it lapses to the junior pool.
-                .checked_sub(
-                    market.markets[0]
-                        .engine
-                        .source_credit_long
-                        .try_to_runtime()
-                        .unwrap()
-                        .positive_claim_bound_num,
-                )
                 .unwrap(),
-            "the still-liened backing is unpledged rather than consumed, and the unclaimed rest covers the other domain's claim"
+            "the still-liened backing is unpledged rather than consumed"
         );
         assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
         assert_eq!(
@@ -6172,13 +6158,9 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     // unobservable: de-fusing both call sites to a hardcoded `epoch_steps = 1`
     // left the entire suite green (301/0 plain, 353/0 fuzz) while silently
     // landing the reversal an epoch short (5/3 instead of 6/4).
-    // S10 (fork): in the counterparty-backed variant the unclaimed-backing move re-derives both
-    // domains' credit rates once (one risk-epoch step each, one credit-epoch step on the source
-    // domain); the insurance-backed variant has nothing to move.
-    let s10_move = u64::from(!insurance_backed);
     assert_eq!(
         market.header.risk_epoch.get() - risk_epoch_before_reversal,
-        6 + 2 * s10_move,
+        6,
         "the fused source-claim burn must contribute its own risk-epoch step"
     );
     assert_eq!(
@@ -6189,7 +6171,7 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             .unwrap()
             .credit_epoch
             - source_credit_epoch_before_reversal,
-        4 + s10_move,
+        4,
         "the fused source-claim burn must contribute its own credit-epoch step"
     );
     assert!(cert.valid);

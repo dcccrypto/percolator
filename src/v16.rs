@@ -7978,6 +7978,15 @@ pub struct EngineAssetSlotV16Account {
     /// Read only to price loss netting; never to move value.
     pub kf_pending_credit_long: V16PodI128,
     pub kf_pending_credit_short: V16PodI128,
+    /// S10 ring-fence (appended LAST, +32 B per slot): per source domain (long, short), in
+    /// `BOUND_SCALE` units, the part of the domain bucket's `fresh_unliened_backing_num` that was
+    /// booked from a loser's realised loss and that no claim has consumed since. Provider deposits
+    /// never enter it. Invariant `<= fresh_unliened_backing_num` (checked by `validate_shape`).
+    /// Maintained by `set_backing_bucket_for_domain` (every reduction of fresh backing takes it
+    /// down first, so it can only under-count), `book_realized_loss_backing_for_domain_not_atomic`
+    /// and the S10 move (increments). Only the S10 move reads it.
+    pub loss_booked_unclaimed_long: V16PodU128,
+    pub loss_booked_unclaimed_short: V16PodU128,
 }
 
 /// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
@@ -8125,7 +8134,9 @@ impl EngineAssetSlotV16Account {
             && self.kf_drift_long == KfDriftSideV16Account::default()
             && self.kf_drift_short == KfDriftSideV16Account::default()
             && self.kf_pending_credit_long.get() == 0
-            && self.kf_pending_credit_short.get() == 0)
+            && self.kf_pending_credit_short.get() == 0
+            && self.loss_booked_unclaimed_long.get() == 0
+            && self.loss_booked_unclaimed_short.get() == 0)
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -8166,6 +8177,8 @@ impl EngineAssetSlotV16Account {
             kf_drift_short: KfDriftSideV16Account::default(),
             kf_pending_credit_long: V16PodI128::new(0),
             kf_pending_credit_short: V16PodI128::new(0),
+            loss_booked_unclaimed_long: V16PodU128::new(0),
+            loss_booked_unclaimed_short: V16PodU128::new(0),
         }
     }
 
@@ -8787,6 +8800,8 @@ impl MarketGroupV16HeaderAccount {
             kf_drift_short: KfDriftSideV16Account::default(),
             kf_pending_credit_long: V16PodI128::new(0),
             kf_pending_credit_short: V16PodI128::new(0),
+            loss_booked_unclaimed_long: V16PodU128::new(0),
+            loss_booked_unclaimed_short: V16PodU128::new(0),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -9012,6 +9027,14 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 slot.kf_drift_long.to_runtime(),
                 slot.kf_drift_short.to_runtime(),
             )?;
+            // S10 ring-fence invariant: loser-booked backing is part of fresh unliened backing
+            if slot.loss_booked_unclaimed_long.get()
+                > slot.backing_long.fresh_unliened_backing_num.get()
+                || slot.loss_booked_unclaimed_short.get()
+                    > slot.backing_short.fresh_unliened_backing_num.get()
+            {
+                return Err(V16Error::InvalidConfig);
+            }
             let source_credit_long = slot.source_credit_long.try_to_runtime()?;
             totals.source_claim_bound_num = totals
                 .source_claim_bound_num
@@ -9538,10 +9561,61 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let old_bucket = self.backing_bucket_for_domain(domain)?;
         self.update_backing_aggregate_totals(old_bucket, bucket)?;
         let slot = self.markets[asset_index].engine_slot_mut();
+        let old_counter = match side {
+            SideV16::Long => slot.loss_booked_unclaimed_long.get(),
+            SideV16::Short => slot.loss_booked_unclaimed_short.get(),
+        };
+        // S10 ring-fence: every reduction of fresh backing takes the loser-booked part down first
+        // (the counter can only under-count), and it never exceeds fresh backing.
+        let counter = old_counter
+            .saturating_sub(
+                old_bucket
+                    .fresh_unliened_backing_num
+                    .saturating_sub(bucket.fresh_unliened_backing_num),
+            )
+            .min(bucket.fresh_unliened_backing_num);
+        let account = BackingBucketV16Account::from_runtime(&bucket);
         match side {
-            SideV16::Long => slot.backing_long = BackingBucketV16Account::from_runtime(&bucket),
-            SideV16::Short => slot.backing_short = BackingBucketV16Account::from_runtime(&bucket),
+            SideV16::Long => {
+                slot.backing_long = account;
+                slot.loss_booked_unclaimed_long = V16PodU128::new(counter);
+            }
+            SideV16::Short => {
+                slot.backing_short = account;
+                slot.loss_booked_unclaimed_short = V16PodU128::new(counter);
+            }
         }
+        Ok(())
+    }
+
+    /// S10 ring-fence reader: loser-booked, unclaimed backing of `domain` (BOUND_SCALE units).
+    fn loss_booked_unclaimed_for_domain(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(match side {
+            SideV16::Long => slot.loss_booked_unclaimed_long.get(),
+            SideV16::Short => slot.loss_booked_unclaimed_short.get(),
+        })
+    }
+
+    /// S10 ring-fence writer: adds `amount` (BOUND_SCALE units) of loser-booked backing. The
+    /// bucket must already hold it as fresh unliened backing.
+    fn add_loss_booked_unclaimed_for_domain(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let (b, c) = match side {
+            SideV16::Long => (&slot.backing_long, &mut slot.loss_booked_unclaimed_long),
+            SideV16::Short => (&slot.backing_short, &mut slot.loss_booked_unclaimed_short),
+        };
+        let next = c.get().checked_add(amount).ok_or(V16Error::ArithmeticOverflow)?;
+        if next > b.fresh_unliened_backing_num.get() {
+            return Err(V16Error::InvalidConfig);
+        }
+        *c = V16PodU128::new(next);
         Ok(())
     }
 
@@ -14193,34 +14267,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// claimants, exactly as if the account had converted the support to capital and paid
     /// the loss from it. Both parts land in the domain in one step.
     /// S10 (stranded backing on reversal). Closes the two domains of `asset_index` over each
-    /// other: backing that NO claimant of its own domain can call on moves to the opposite domain,
-    /// up to that domain's shortfall (`claims - available backing`). Run at the end of every K/F
-    /// settlement entry, in both directions, so the post-condition is that no asset ever ends a
-    /// settlement with unclaimed backing in one domain and unbacked claims in the other.
+    /// other: LOSER-BOOKED backing that no claimant of its own domain can call on moves to the
+    /// opposite domain, up to that domain's shortfall (`claims - available backing`). In both
+    /// directions. Post-condition: no asset ends a settlement with unclaimed loser-booked backing
+    /// in one domain and unbacked claims in the other.
     ///
-    /// "Unclaimed" is `min(fresh unliened backing, available backing - positive claim bound)` of
-    /// the source domain, so a credited or in-flight claimant of the source domain is never
-    /// touched, and a liened or insurance-backed part never moves.
+    /// Guards (all must hold, else nothing moves):
+    /// - V1 (the caller): both `stale_account_count_long` and `stale_account_count_short` of the
+    ///   asset are 0, i.e. every stored leg of the asset has settled to the current K/F cohort, so
+    ///   no unsettled winner can still claim and no unsettled loser can still pay. The remaining
+    ///   excess and shortfall are real, not in flight.
+    /// - source bucket Fresh and unexpired (else `prepare_counterparty_backing_withdraw_delta`
+    ///   would return LockActive and fail the whole settlement);
+    /// - destination accepts a booking (`loss_domain_accepts_realized_backing`) and is not
+    ///   Impaired (else the add delta would fail);
+    /// - ring-fence: the amount is capped by the source bucket's `loss_booked_unclaimed_num`, so
+    ///   provider-owned principal (deposits) never moves, whatever the order of settlements.
     ///
-    /// Why: a loser that realised its peak loss as cash while its winners were unsettled booked
-    /// backing in its OWN domain, where no claim was ever credited (the winners later settle a
-    /// net loss). Its later recovery is a claim in the OTHER domain, backed only by the other
-    /// side's final loss. The stranded amount and that domain's shortfall are the same atoms
-    /// (600 reversal worlds, to the atom). Moving it makes every claim exactly as backed as when
-    /// every account had been settled at every price. A pure re-attribution inside the vault: no
-    /// token moves, no claim is created or enlarged, the source domain's credited claimants are
-    /// untouched.
+    /// Amount: `min(loss_booked_unclaimed(src), fresh unliened(src), available(src) -
+    /// claim_bound(src), claim_bound(dst) - available(dst))`, whole atoms. Claims, liens,
+    /// insurance credit, vault, c_tot and every account are untouched.
     ///
-    /// KNOWN LIMIT: a winner that has not settled yet has no claim, so backing booked for it
-    /// ahead of its settlement looks unclaimed and can move; the symmetric pass at a later
-    /// settlement moves it back when the other domain then holds the excess, but a claim burned
-    /// at the transient rate in between is not recoverable (the R1 class, measured in
-    /// finding-stranded-backing-2026-10-07.md).
-    ///
-    /// Expiry: the destination takes the backing exactly as it would a freshly booked realised
-    /// loss (`loss_domain_accepts_realized_backing`, `fresh_counterparty_backing_expiry_slot`),
-    /// which is also what the all-cranked ideal does when a claim burn re-books its support into
-    /// the loss domain.
+    /// Expiry: the moved backing joins the destination bucket and takes the destination's expiry
+    /// (an existing Fresh bucket keeps its own, an Empty or Expired one opens at now + horizon),
+    /// exactly as a freshly booked realised loss does; it loses the source bucket's own lifetime
+    /// (later or earlier, whichever the two buckets happen to have). Receivable refill: the add
+    /// delta first repays the destination's `provider_receivable`, as any booking does.
     fn rebalance_unclaimed_backing_across_asset_domains_not_atomic(
         &mut self,
         asset_index: usize,
@@ -14229,9 +14301,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let long = self.insurance_domain_index(asset_index, SideV16::Long)?;
         let short = self.insurance_domain_index(asset_index, SideV16::Short)?;
         for (src, dst) in [(long, short), (short, long)] {
+            // cheapest checks first: the bucket and the counter before any source-credit state
             let b_src = self.backing_bucket_for_domain(src)?;
-            let s_src = self.source_credit_for_domain(src)?;
-            if b_src.status != BackingBucketStatusV16::Fresh
+            let ring = self.loss_booked_unclaimed_for_domain(src)?;
+            if ring == 0
+                || b_src.status != BackingBucketStatusV16::Fresh
                 || b_src.expiry_slot <= now
                 || b_src.fresh_unliened_backing_num == 0
             {
@@ -14243,11 +14317,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 continue;
             }
-            let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
-            let b_dst = self.backing_bucket_for_domain(dst)?;
+            let s_src = self.source_credit_for_domain(src)?;
             let s_dst = self.source_credit_for_domain(dst)?;
             let excess = core::cmp::min(
-                b_src.fresh_unliened_backing_num,
+                core::cmp::min(ring, b_src.fresh_unliened_backing_num),
                 V16Core::available_backing_num_for_source_credit_state(s_src)?
                     .saturating_sub(s_src.positive_claim_bound_num),
             );
@@ -14258,20 +14331,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if moved == 0 {
                 continue;
             }
+            let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
+            let b_dst = self.backing_bucket_for_domain(dst)?;
             let (b_src, s_src) =
                 V16Core::prepare_counterparty_backing_withdraw_delta(b_src, s_src, now, moved)?;
             let (b_dst, s_dst) =
                 V16Core::prepare_counterparty_backing_add_delta(b_dst, s_dst, moved, now, expiry)?;
+            // the setter takes the source counter down by the withdrawal
             self.set_backing_bucket_for_domain(src, b_src)?;
             self.set_source_credit_for_domain(src, s_src)?;
             self.set_backing_bucket_for_domain(dst, b_dst)?;
             self.set_source_credit_for_domain(dst, s_dst)?;
+            self.add_loss_booked_unclaimed_for_domain(dst, moved)?;
             self.recompute_source_credit_domain_after_mutation(src)?;
             self.recompute_source_credit_domain_after_mutation(dst)?;
             self.reservation_encumbrance_proof_for_domain(src)?.validate()?;
             self.reservation_encumbrance_proof_for_domain(dst)?.validate()?;
         }
         Ok(())
+    }
+
+    /// Test seam for the S10 move (the V1 stale-count guard lives in the settle entry, not here):
+    /// lets a test drive the move's own guards directly. Not used by the program.
+    #[doc(hidden)]
+    pub fn rebalance_unclaimed_backing_for_test_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)
     }
 
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
@@ -14388,6 +14475,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
             self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+            self.add_loss_booked_unclaimed_for_domain(domain, backing_num)?;
         }
         Ok(())
     }
@@ -14730,8 +14818,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let domain = self.insurance_domain_index(asset_index, side)?;
             self.clamp_kf_pending_credit_to_claims(domain)?;
         }
-        // S10: backing no claimant of its domain can call on covers the other domain's shortfall
-        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
         Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         self.settle_kf_laggard(asset_index, &asset, &leg)?;
         let (settled_asset, kf_epoch_snap) =
@@ -14745,6 +14831,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
+        // S10 (V1 guard): backing that no claimant can call on covers the other domain's shortfall,
+        // but only once no stored leg of either side of this asset is still stale, i.e. after the
+        // leg's own cohort discharge above and only when the whole asset has settled to the
+        // current K/F cohort. Idle cost: two counter compares.
+        if asset.stale_account_count_long == 0 && asset.stale_account_count_short == 0 {
+            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
+        }
         self.header.loss_stale_active = encode_bool(asset_is_loss_stale_at_slot(
             asset,
             self.header.current_slot.get(),
@@ -22927,6 +23020,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         slot.kf_drift_short = KfDriftSideV16Account::default();
         slot.kf_pending_credit_long = V16PodI128::new(0);
         slot.kf_pending_credit_short = V16PodI128::new(0);
+        slot.loss_booked_unclaimed_long = V16PodU128::new(0);
+        slot.loss_booked_unclaimed_short = V16PodU128::new(0);
         self.validate_shape()
     }
 

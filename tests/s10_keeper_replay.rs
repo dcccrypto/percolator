@@ -527,4 +527,17 @@ fn s10_keeper_settle_patterns_do_not_leak_to_the_ideal() {
         assert!(m.dev <= max_dev, "{name}: deviating paths {} > {max_dev}", m.dev);
         assert!(m.sum_lp > -max_loss, "{name}: LP deficit {}", m.sum_lp);
     }
+    // V1 pin: worlds where the pre-fix engine is exact and an unguarded move (no stale-count
+    // guard) strands the LP or a trader (113337: LP -976k, 135806: trader -181k). Random-cadence,
+    // 3 traders, 3 legs of 6 ticks, 150 per mille per tick.
+    std::env::set_var("NTR", "3"); std::env::set_var("LEGS", "3"); std::env::set_var("LEGLEN", "6");
+    std::env::set_var("AMPBPS", "300"); std::env::set_var("RANDP", "150");
+    for seed in [113_337u64, 135_806] {
+        let ideal = run(seed, Policy::Ideal, 4);
+        let r = run(seed, Policy::Random, 4);
+        assert!(ideal.ran && r.ran, "world {seed} runs");
+        assert_eq!(r.lp, ideal.lp, "world {seed}: LP exact");
+        assert_eq!(r.traders, ideal.traders, "world {seed}: traders exact");
+    }
+    for k in ["NTR", "LEGS", "LEGLEN", "AMPBPS", "RANDP"] { std::env::remove_var(k); }
 }
