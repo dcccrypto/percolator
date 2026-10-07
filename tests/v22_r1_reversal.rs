@@ -3,10 +3,11 @@
 //! peak, then the reversal below the entry, then the accounts settled in a permutation.
 //!
 //! * S9: the pending-credit counter never exceeds the claim stock, after every settle.
-//! * S10: equity is NOT cadence invariant here (the same in the pre-R1 engine, which deviates in
-//!   more worlds). The deviation is exactly the backing a loser's REALISED peak loss left in a
-//!   domain with no claimant (the unsettled winners' gain reversed before they settled), and
-//!   it falls on the loser side (the maker, mostly). Characterised and ratcheted, not fixed.
+//! * S10 (fixed): equity WAS not cadence invariant here (pre-R1 engine: 450 of 600 worlds
+//!   deviate, #282 round 4: 260). The deviation was exactly the backing a loser's REALISED peak loss
+//!   left in a domain with no claimant (the unsettled winners' gain reversed before they settled),
+//!   and it fell on the loser side (the maker, mostly). The unclaimed-backing rebalance
+//!   (`rebalance_unclaimed_backing_across_asset_domains_not_atomic`) closes it: 0 of 600 deviate.
 #![allow(dead_code, unused_imports, unused_mut, clippy::needless_range_loop, clippy::type_complexity)]
 // Sentinel multi-claimant R1 harness
 use percolator::{
@@ -47,7 +48,10 @@ impl World {
         Self::new_pairs_at(pairs, ins_long, ins_short, PRICE, RATE_E9 as u64)
     }
     fn new_pairs_at(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64) -> Self {
-        let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+        Self::new_pairs_hmax(pairs, ins_long, ins_short, px, cap, 6_480_000)
+    }
+    fn new_pairs_hmax(pairs: &[(u128, u128, u128)], ins_long: u128, ins_short: u128, px: u64, cap: u64, h_max: u64) -> Self {
+        let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, h_max);
         cfg.max_abs_funding_e9_per_slot = cap;
         cfg.max_price_move_bps_per_slot = MOVE_CAP_BPS;
         cfg.initial_margin_bps = 1_000;
@@ -74,7 +78,7 @@ impl World {
             w.traders.push(s);
         }
         {
-            let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+            let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
             if ins_long != 0 {
                 m.deposit_domain_insurance_not_atomic(0, ins_long).unwrap();
             }
@@ -86,7 +90,7 @@ impl World {
     }
 
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         let a0 = *acct;
         if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
     }
@@ -124,7 +128,7 @@ impl World {
         size: u128,
     ) -> Result<(), percolator::V16Error> {
         let price = self.price();
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
@@ -144,7 +148,7 @@ impl World {
         let new = (old + old * dp_bps as i128 / 10_000).max(1) as u64;
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -183,7 +187,7 @@ impl World {
         }
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -198,7 +202,7 @@ impl World {
     fn settle(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let slot = self.slot;
         {
-            let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+            let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
             for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         self.refresh(acct)
@@ -206,7 +210,7 @@ impl World {
 
     fn refresh(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         let r = m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(acct));
         let ok = r.is_ok();
         if !ok {
@@ -218,7 +222,7 @@ impl World {
     }
 
     fn validate(&mut self, extra: &mut [PortfolioAccountV16Account]) {
-        let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         m.validate_shape().unwrap();
         PortfolioV16ViewMut::new(&mut self.maker)
             .validate_with_market(&m.as_view())
@@ -378,14 +382,12 @@ fn reversal_pending_credit_never_exceeds_the_claim_stock() {
     assert_eq!(viol, 0, "pending credit exceeded the claim stock {viol} times in {checks} checks");
 }
 
-/// S10, characterised: against the same world with EVERYONE cranked at the peak, a random-mask
-/// world never ends above it, and whatever it falls short by is exactly the backing left stranded
-/// in a domain with no claimant (so the value is not lost by the engine, it is unowned). The loss
-/// falls on the loser side. The deviating-world count is ratcheted (pre-R1: 450 of 600).
+/// S10, fixed: against the same world with EVERYONE cranked at the peak, a random-mask world ends
+/// at the same EFFECTIVE equity for every account (0 of 600 worlds deviate; #282 round 4: 260, the
+/// pre-R1 engine: 450), never above it, and no backing is left stranded.
 #[test]
-fn reversal_cadence_deviation_equals_stranded_backing() {
-    let (mut ran, mut dev, mut eq_strand, mut above, mut longs_lose) = (0u64, 0u64, 0u64, 0u64, 0u64);
-    let (mut maker_loss, mut short_loss, mut tot_loss) = (0i128, 0i128, 0i128);
+fn reversal_cadence_is_exact_in_effective_equity() {
+    let (mut ran, mut dev, mut above, mut stranded_worlds) = (0u64, 0u64, 0u64, 0u64);
     for i in 0..600u64 {
         let seed = 3u64 * 7919 + i;
         let (nl, ns) = shape(seed);
@@ -396,21 +398,542 @@ fn reversal_cadence_deviation_equals_stranded_backing() {
         ran += 1;
         let d: Vec<i128> = r.eq.iter().zip(&ideal.eq).map(|(a, b)| a - b).collect();
         if d.iter().any(|x| *x > 8) { above += 1; }
-        if d.iter().any(|x| x.abs() > 8) {
-            dev += 1;
-            let tot: i128 = d.iter().sum();
-            tot_loss += tot;
-            if (tot + r.stranded).abs() <= 64 { eq_strand += 1; }
-            if d[..nl].iter().any(|x| *x < -8) { longs_lose += 1; }
-            short_loss += d[nl..n].iter().sum::<i128>();
-            maker_loss += d[n];
-        }
+        if d.iter().any(|x| x.abs() > 8) { dev += 1; }
+        if r.stranded > 8 { stranded_worlds += 1; }
     }
-    println!("REVCAD ran {ran} deviating {dev} deficit==stranded {eq_strand} above-ideal {above} worlds-where-a-long-loses {longs_lose} total {tot_loss} maker {maker_loss} shorts {short_loss}");
+    println!("REVCAD ran {ran} deviating {dev} above-ideal {above} worlds-with-stranded-backing {stranded_worlds}");
     assert!(ran >= 550);
     assert_eq!(above, 0, "no account ever ends above the all-cranked ideal");
-    assert_eq!(longs_lose, 0, "the winners-side longs never lose to this");
-    assert_eq!(eq_strand, dev, "every deviation equals the stranded backing");
-    assert!(dev <= 260, "deviating worlds regressed: {dev} (pre-R1 450)");
-    assert!(maker_loss + short_loss == tot_loss, "the loss is on the maker and the shorts only");
+    assert_eq!(dev, 0, "every world ends at the all-cranked ideal in effective equity");
+    assert_eq!(stranded_worlds, 0, "no backing is left in excess of claims");
+}
+
+/// Every settle order of every crank mask ends at the ideal too (the harness above fixes the
+/// settle order to 0..=n; this walks 6 random orders per world for 150 worlds).
+#[test]
+fn reversal_cadence_is_exact_for_every_settle_order() {
+    let (mut ran, mut dev) = (0u64, 0u64);
+    for i in 0..150u64 {
+        let seed = 3u64 * 7919 + 4_000 + i;
+        let (nl, ns) = shape(seed);
+        let n = nl + ns;
+        let all = (1u64 << (n + 1)) - 1;
+        let mut s2 = seed ^ 0x999;
+        let Some(ideal) = reversal(seed, &(0..=n).collect::<Vec<_>>(), Some(all)) else { continue };
+        for p in perms(n + 1, 6, &mut s2) {
+            let Some(r) = reversal(seed, &p, None) else { break };
+            ran += 1;
+            if r.eq.iter().zip(&ideal.eq).any(|(a, b)| (a - b).abs() > 8) { dev += 1; }
+        }
+    }
+    println!("REVORDER ran {ran} deviating {dev}");
+    assert!(ran > 500);
+    assert_eq!(dev, 0, "settle order changed an account's effective equity");
+}
+
+/// The rebalance moves backing only into a SHORTFALL. A loser that realised its loss while its
+/// winners are unsettled leaves backing in its own domain; with no claim anywhere to cover it must
+/// stay exactly where it was booked (the winners may still claim it).
+#[test]
+fn unclaimed_backing_stays_put_without_a_shortfall() {
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("long opens against the maker");
+    assert!(w.accrue(150, 0) && w.accrue(150, 0) && w.accrue(150, 0));
+    // the maker (the loser, short) settles alone: its loss books as backing in the SHORT domain
+    assert!(w.settle(&mut maker));
+    let sl = &w.markets[0].engine;
+    let (sc, ss) = (sl.source_credit_long.try_to_runtime().unwrap(), sl.source_credit_short.try_to_runtime().unwrap());
+    assert!(ss.fresh_reserved_backing_num > 0, "the maker's realised loss is backing");
+    assert_eq!(ss.positive_claim_bound_num, 0, "the unsettled long has no claim yet");
+    assert_eq!((sc.fresh_reserved_backing_num, sc.positive_claim_bound_num), (0, 0), "nothing moved to the long domain");
+    // and the long, settling now, claims it in full
+    assert!(w.settle(&mut long));
+    let sl = &w.markets[0].engine;
+    let ss = sl.source_credit_short.try_to_runtime().unwrap();
+    assert!(ss.positive_claim_bound_num > 0 && ss.positive_claim_bound_num <= ss.fresh_reserved_backing_num);
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// Provider ring-fence (security review F1, repros P and R) and the two guards of the move.
+// ---------------------------------------------------------------------------------------------
+
+fn fresh(w: &World, d: usize) -> u128 {
+    let sl = &w.markets[0].engine;
+    let b = if d == 0 { sl.backing_long } else { sl.backing_short };
+    b.try_to_runtime().unwrap().fresh_unliened_backing_num / 1_000_000_000_000
+}
+
+fn provider_fresh(w: &World, d: usize) -> u128 {
+    let sl = &w.markets[0].engine;
+    let (b, p) = if d == 0 { (sl.backing_long, sl.provider_principal_long.get()) } else { (sl.backing_short, sl.provider_principal_short.get()) };
+    let b = b.try_to_runtime().unwrap();
+    p.saturating_sub(b.consumed_liened_backing_num).saturating_sub(b.impaired_liened_backing_num).saturating_sub(b.valid_liened_backing_num) / 1_000_000_000_000
+}
+
+/// Fresh backing the provider does not own (loser cash): the only part the move may take.
+fn loser_cash(w: &World, d: usize) -> u128 {
+    fresh(w, d).saturating_sub(provider_fresh(w, d))
+}
+
+/// Repro P: provider principal (50,000,000 atoms in the LONG domain) must not move when a long
+/// winner settles before its loser (the ordinary keeper order). Before the ring-fence the winner
+/// pulled 18,270,000 of it into the short domain and the provider could withdraw only 31.73M.
+#[test]
+fn provider_principal_never_moves_when_a_winner_settles_first() {
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut t = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut t, 1_000_000_000_000_000);
+    w.trade(&mut t, &mut maker, 400 * POS_SCALE).expect("open");
+    let prov: u128 = 50_000_000;
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap();
+    }
+    assert_eq!((fresh(&w, 0), loser_cash(&w, 0)), (prov, 0), "a deposit is not loser-booked backing");
+    for _ in 0..3 { assert!(w.accrue(150, 0)); }
+    assert!(w.settle(&mut t)); // the winner settles first
+    assert_eq!(fresh(&w, 0), prov, "provider principal stayed in its domain");
+    assert_eq!(fresh(&w, 1), 0);
+    // the maker pays: its cash is loser-booked backing in the short domain, claimed by the winner
+    assert!(w.settle(&mut maker));
+    assert_eq!(fresh(&w, 0), prov);
+    assert_eq!(loser_cash(&w, 1), fresh(&w, 1), "everything in the short bucket is loser-booked");
+    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+    m.withdraw_fresh_counterparty_backing_not_atomic(0, prov).expect("the provider withdraws all of its principal");
+}
+
+/// Repro R: the same in a Resolved market, both close orders: the provider recovers all 50M.
+#[test]
+fn provider_principal_is_fully_recoverable_after_resolved_close() {
+    for order in [[0usize, 1], [1, 0]] {
+        let mut w = World::new_pairs(&[], 0, 0);
+        let mut t = account(300);
+        let mut maker = w.maker;
+        w.deposit(&mut t, 1_000_000_000_000_000);
+        w.trade(&mut t, &mut maker, 400 * POS_SCALE).expect("open");
+        let prov: u128 = 50_000_000;
+        { let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets); m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap(); }
+        for _ in 0..3 { assert!(w.accrue(150, 0)); }
+        assert!(w.settle(&mut t));
+        let slot = w.slot + 1;
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.resolve_market_not_atomic(slot).unwrap();
+        let mut accts = [t, maker];
+        let mut paid = [0u128; 2];
+        let mut closed = [false; 2];
+        for _ in 0..60 {
+            for &i in &order {
+                if closed[i] { continue; }
+                for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
+                if let Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) = m.close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut accts[i]), 0) { paid[i] = payout; closed[i] = true; }
+            }
+            if closed.iter().all(|c| *c) { break; }
+        }
+        assert!(closed.iter().all(|c| *c), "order {order:?}: both close");
+        assert_eq!(paid, [1_000_000_018_271_200, 999_999_981_728_800], "order {order:?}: payouts are the base engine's");
+        m.withdraw_fresh_counterparty_backing_not_atomic(0, prov).expect("provider recovers its whole principal");
+        assert_eq!(m.header.vault.get(), 0, "order {order:?}: nothing left in the vault");
+    }
+}
+
+/// The provider's own share (`principal - consumed - impaired - liened`, the wrapper ledger's
+/// arithmetic) never exceeds the bucket's fresh backing, through settlements, moves and withdrawals
+/// (`validate_shape` also enforces it); 300 reversal worlds with 20M of provider backing in each
+/// domain, every account settled in every order, checked after every settle.
+#[test]
+fn the_providers_share_of_every_bucket_is_never_below_its_ledger_share() {
+    let (mut checks, mut moved_worlds) = (0u64, 0u64);
+    for i in 0..300u64 {
+        let seed = 3u64 * 7919 + 9_000 + i;
+        let (nl, ns) = shape(seed);
+        let n = nl + ns;
+        let mut w = World::new_pairs(&[], 0, 0);
+        let mut accts: Vec<PortfolioAccountV16Account> = (0..n).map(|k| account(700 + k as u32)).collect();
+        let mut s = seed | 1;
+        for k in 0..n { let mut a = accts[k]; w.deposit(&mut a, 1_000_000_000_000_000); accts[k] = a; }
+        let mut m = w.maker;
+        for k in 0..n {
+            let u = 1 + (rng(&mut s) % 6) as u128;
+            let mut a = accts[k];
+            let r = if k < nl { w.trade(&mut a, &mut m, u * 100 * POS_SCALE) } else { w.trade(&mut m, &mut a, u * 100 * POS_SCALE) };
+            if r.is_err() { break; }
+            accts[k] = a;
+        }
+        {
+            let mut mg = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+            mg.deposit_fresh_counterparty_backing_not_atomic(0, 20_000_000, u64::MAX / 2).unwrap();
+            mg.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, u64::MAX / 2).unwrap();
+        }
+        let steps = |w: &mut World, target: u64| { let mut g = 0; while w.price() != target && g < 200 { g += 1; let cur = w.price() as i128; let b = (((target as i128 - cur) * 10_000) / cur).clamp(-190, 190) as i64; let b = if b == 0 { if target as i128 > cur { 1 } else { -1 } } else { b }; if !w.accrue(b, 0) { return false; } } true };
+        if !steps(&mut w, 1_080_000 + rng(&mut s) % 100_000) { continue; }
+        let mask = rng(&mut s) % (1 << (n + 1));
+        let chk = |w: &World, checks: &mut u64| {
+            for d in 0..2 { assert!(provider_fresh(w, d) <= fresh(w, d), "a move took provider-owned backing"); }
+            *checks += 1;
+        };
+        for k in 0..n { if mask >> k & 1 == 1 { let mut a = accts[k]; if !w.settle(&mut a) { break; } accts[k] = a; chk(&w, &mut checks); } }
+        if mask >> n & 1 == 1 { let mut mm = m; if w.settle(&mut mm) { m = mm; } chk(&w, &mut checks); }
+        if !steps(&mut w, 700_000 + rng(&mut s) % 200_000) { continue; }
+        let before = (fresh(&w, 0), fresh(&w, 1));
+        for k in 0..=n {
+            if k == n { let mut mm = m; if w.settle(&mut mm) { m = mm; } } else { let mut a = accts[k]; if w.settle(&mut a) { accts[k] = a; } }
+            chk(&w, &mut checks);
+        }
+        if (fresh(&w, 0), fresh(&w, 1)) != before { moved_worlds += 1; }
+        let mut mg = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        mg.validate_shape().unwrap();
+    }
+    println!("RINGCHK checks {checks} worlds-where-fresh-backing-changed {moved_worlds}");
+    assert!(checks > 1_000);
+}
+
+/// A world where the maker (the loser, short) settled alone at the peak and the price then fell
+/// below entry; the longs are settled; only the maker's recovery settle is left. Returns the world,
+/// the maker and the longs. `h_max` sets the backing horizon.
+fn stranded_world(h_max: u64) -> (World, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+    stranded_world_sized(h_max, 400 * POS_SCALE)
+}
+
+fn stranded_world_sized(h_max: u64, size: u128) -> (World, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+    let mut w = World::new_pairs_hmax(&[], 0, 0, PRICE, RATE_E9 as u64, h_max);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, size).expect("open");
+    for _ in 0..3 { assert!(w.accrue(150, 0)); }
+    assert!(w.settle(&mut maker)); // the loser realises its peak loss alone
+    for _ in 0..8 { assert!(w.accrue(-150, 0)); }
+    assert!(w.refresh(&mut long)); // the winner's net is a loss: no claim ever (refresh: no expiry sweep)
+    (w, maker, long)
+}
+
+/// Guard 1 (source expiry): a Fresh source bucket past its expiry must neither move nor make the
+/// settlement fail (`prepare_counterparty_backing_withdraw_delta` returns LockActive on it).
+#[test]
+fn the_move_skips_an_expired_source_bucket_and_the_settle_still_succeeds() {
+    let (mut w, mut maker, _long) = stranded_world(5);
+    let sl = &w.markets[0].engine;
+    let b = sl.backing_short.try_to_runtime().unwrap();
+    assert_eq!(b.status, percolator::BackingBucketStatusV16::Fresh);
+    assert!(b.expiry_slot <= w.slot, "the source bucket's horizon has passed (expiry {} slot {})", b.expiry_slot, w.slot);
+    let before = fresh(&w, 1);
+    assert!(before > 0 && loser_cash(&w, 1) > 0);
+    assert!(w.refresh(&mut maker), "the recovery settle must succeed with a lapsed source bucket");
+    assert_eq!(fresh(&w, 1), before, "nothing moved out of a lapsed bucket");
+}
+
+/// The same world with a live horizon moves the stranded backing, so the control above is not vacuous.
+#[test]
+fn the_move_fires_in_the_same_world_with_a_live_source_bucket() {
+    let (mut w, mut maker, _long) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    assert!(before > 0);
+    // literal atoms (not read from the state under test): the maker's peak loss 18,271,200 sits
+    // in the short bucket, the longs' final loss 29,362,400 in the long bucket
+    assert_eq!((fresh(&w, 1), fresh(&w, 0), loser_cash(&w, 1), loser_cash(&w, 0)), (18_271_200, 29_362_400, 18_271_200, 29_362_400));
+    assert!(w.refresh(&mut maker));
+    // the maker's recovery claim is 47,633,600 = 18,271,200 + 29,362,400: all of the stranded
+    // backing moved, the claim is backed exactly, nothing is left claimant-less
+    assert_eq!((fresh(&w, 1), fresh(&w, 0), loser_cash(&w, 1), loser_cash(&w, 0)), (0, 47_633_600, 0, 47_633_600));
+    let sl = &w.markets[0].engine;
+    assert_eq!(sl.source_credit_long.try_to_runtime().unwrap().positive_claim_bound_num, 47_633_600 * 1_000_000_000_000);
+    assert_eq!(sl.source_credit_short.try_to_runtime().unwrap().positive_claim_bound_num, 0);
+    assert!(fresh(&w, 1) < before, "stranded loser-booked backing moved to cover the recovery claim");
+    assert!(fresh(&w, 0) > 0);
+    assert_eq!(loser_cash(&w, 0), fresh(&w, 0), "what moved is loser-booked backing in its new domain");
+}
+
+/// Guard 2 (destination acceptance): a destination bucket that is Fresh but past its expiry does
+/// not accept a booking (`prepare_counterparty_backing_add_delta` would return LockActive); the
+/// settlement must still succeed and nothing may move.
+#[test]
+fn the_move_skips_a_destination_that_does_not_accept_backing() {
+    let (mut w, mut maker, _long) = stranded_world(6_480_000);
+    // the longs' own loss sits in the long bucket (the destination); let its horizon pass while it
+    // keeps status Fresh (a lapse is only a status change once something runs the expiry sweep)
+    let mut bk = w.markets[0].engine.backing_long.try_to_runtime().unwrap();
+    assert_eq!(bk.status, percolator::BackingBucketStatusV16::Fresh);
+    bk.expiry_slot = 1;
+    w.markets[0].engine.backing_long = percolator::BackingBucketV16Account::from_runtime(&bk);
+    // a claim shortfall in the destination (as the maker's recovery would leave), and the move
+    // driven directly: the lapsed bucket makes the claimant's own settle Stale, the guard is the move's
+    let mut sc = w.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let claims = sc.fresh_reserved_backing_num + 5_000_000 * 1_000_000_000_000;
+    sc.positive_claim_bound_num = claims;
+    sc.exact_positive_claim_num = claims;
+    w.markets[0].engine.source_credit_long = percolator::SourceCreditStateV16Account::from_runtime(&sc);
+    let _ = &mut maker;
+    let before = (fresh(&w, 0), fresh(&w, 1));
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0).expect("the move must not fail the caller");
+    }
+    assert_eq!((fresh(&w, 0), fresh(&w, 1)), before, "nothing moved into a destination that cannot accept it");
+}
+
+/// Ring-fence in the SOURCE domain with the V1 guard satisfied: 20M of provider principal sits in
+/// the short bucket next to the maker's loser-booked backing; when the recovery claim triggers the
+/// move, only the loser-booked part may go, and the provider can still withdraw all of its 20M.
+#[test]
+fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provider_principal() {
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
+    let prov: u128 = 20_000_000;
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.deposit_fresh_counterparty_backing_not_atomic(1, prov, u64::MAX / 2).unwrap();
+    }
+    for _ in 0..3 { assert!(w.accrue(150, 0)); }
+    assert!(w.settle(&mut maker));
+    let booked = loser_cash(&w, 1);
+    assert!(booked > 0);
+    assert_eq!(fresh(&w, 1), prov + booked, "provider principal and loser-booked backing share the bucket");
+    for _ in 0..8 { assert!(w.accrue(-150, 0)); }
+    assert!(w.settle(&mut long));
+    assert!(w.settle(&mut maker)); // the recovery claim triggers the move
+    assert!(fresh(&w, 1) >= prov, "provider principal stayed ({} < {prov})", fresh(&w, 1));
+    // a far larger shortfall in the long domain asks for more than the loser-booked part holds
+    let mut sc = w.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let claims = sc.fresh_reserved_backing_num + 40_000_000 * 1_000_000_000_000;
+    sc.positive_claim_bound_num = claims;
+    sc.exact_positive_claim_num = claims;
+    sc.credit_rate_num = (sc.fresh_reserved_backing_num as u128) * percolator::CREDIT_RATE_SCALE / claims;
+    w.markets[0].engine.source_credit_long = percolator::SourceCreditStateV16Account::from_runtime(&sc);
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+    }
+    assert!(fresh(&w, 1) >= prov, "an oversized shortfall still leaves the provider's principal ({} < {prov})", fresh(&w, 1));
+    assert!(loser_cash(&w, 1) <= fresh(&w, 1) - prov);
+    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+    m.withdraw_fresh_counterparty_backing_not_atomic(1, prov).expect("the provider withdraws all of its principal");
+}
+
+/// Compute cap: with the per-instruction move budget at 0 the recovery settle moves nothing (it
+/// still succeeds); the next settlement of the asset (a fresh view, budget restored) does the move.
+#[test]
+fn the_move_respects_the_per_instruction_cap() {
+    assert_eq!(percolator::S10_MAX_MOVES_PER_INSTRUCTION, 2);
+    let (mut w, mut maker, _long) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    {
+        let (h, mk) = (w.header, w.markets.clone());
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.set_s10_moves_left_for_test(0);
+        if m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut maker)).is_err() { w.header = h; w.markets = mk; panic!("refresh with a zero budget must still succeed"); }
+    }
+    assert_eq!(fresh(&w, 1), before, "no budget, no move");
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+    }
+    assert!(fresh(&w, 1) < before, "the next view has its budget back and moves it");
+}
+
+/// Dust floor (`S10_MIN_MOVE_ATOMS`, founder-tunable): a stranding below it is not moved (and so
+/// bumps no epoch), one just above it is. The stranded amount scales with the position size.
+#[test]
+fn the_move_has_a_dust_floor() {
+    assert_eq!(percolator::S10_MIN_MOVE_ATOMS, 1_000);
+    // 400 units strand 18,271,200 atoms; 1/30,000 of that is 609 atoms, 1/10,000 is 1,827
+    let (mut w, mut maker, _l) = stranded_world_sized(6_480_000, 400 * POS_SCALE / 30_000);
+    let before = fresh(&w, 1);
+    assert!(before > 0 && before < 1_000, "dust-sized stranding: {before} atoms");
+    assert!(w.refresh(&mut maker));
+    assert_eq!(fresh(&w, 1), before, "below the floor nothing moves");
+    let (mut w, mut maker, _l) = stranded_world_sized(6_480_000, 400 * POS_SCALE / 10_000);
+    let before = fresh(&w, 1);
+    assert!(before >= 1_000, "above the floor: {before} atoms");
+    assert!(w.refresh(&mut maker));
+    assert!(fresh(&w, 1) < before, "at or above the floor it moves");
+}
+
+/// A bucket that lapsed to empty owes nothing to the provider any more: the principal mirror
+/// resets, so loser cash booked into the reopened bucket is movable again.
+#[test]
+fn a_lapsed_empty_bucket_resets_the_provider_mirror() {
+    let mut w = World::new_pairs_hmax(&[], 0, 0, PRICE, RATE_E9 as u64, 6_480_000);
+    let mut long = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut long, 1_000_000_000_000_000);
+    w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
+    {
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, w.slot + 2).unwrap();
+    }
+    for _ in 0..4 { assert!(w.accrue(10, 0)); }
+    {
+        let slot = w.slot;
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        m.expire_source_backing_bucket_not_atomic(1, slot).unwrap();
+    }
+    assert_eq!(fresh(&w, 1), 0, "the provider's bucket lapsed");
+    // now the stranded reversal into the reopened short bucket
+    for _ in 0..3 { assert!(w.accrue(150, 0)); }
+    assert!(w.settle(&mut maker));
+    for _ in 0..8 { assert!(w.accrue(-150, 0)); }
+    assert!(w.refresh(&mut long));
+    let before = fresh(&w, 1);
+    assert!(before >= 1_000);
+    assert!(w.refresh(&mut maker));
+    assert!(fresh(&w, 1) < before, "loser cash in the reopened bucket moves (the lapsed provider mirror was reset)");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Re-review cb568a4f: budget policy (default 0, granted only by the refresh crank), mirror
+// withdraw, share formula, provider-protection rule.
+// ---------------------------------------------------------------------------------------------
+
+/// A view built with `new` (what a trade, batch, band batch, liquidation, recovery or withdraw
+/// instruction has) carries NO move budget: the recovery settle succeeds and moves nothing.
+#[test]
+fn a_default_view_carries_no_move_budget() {
+    let (mut w, mut maker, _l) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    assert!(before >= 1_000);
+    let (h, mk) = (w.header, w.markets.clone());
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        if m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut maker)).is_err() { w.header = h; w.markets = mk; panic!("refresh must succeed"); }
+    }
+    assert_eq!(fresh(&w, 1), before, "no budget outside the refresh crank, no move");
+}
+
+/// The permissionless refresh crank grants itself the budget, so the same recovery settle through
+/// `permissionless_crank_not_atomic` (Refresh) moves the stranded backing.
+#[test]
+fn the_refresh_crank_grants_itself_the_budget() {
+    let (mut w, mut maker, _l) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    let (price, now) = (w.price(), w.slot + 1);
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        m.permissionless_crank_not_atomic(
+            &mut PortfolioV16ViewMut::new(&mut maker),
+            percolator::PermissionlessCrankRequestV16 {
+                now_slot: now,
+                asset_index: 0,
+                effective_price: price,
+                funding_rate_e9: 0,
+                action: percolator::PermissionlessCrankActionV16::Refresh,
+            },
+        )
+        .expect("refresh crank");
+    }
+    assert!(fresh(&w, 1) < before, "the refresh crank moved the stranded backing");
+}
+
+/// The principal mirror goes down on a provider withdrawal (a withdrawal must not leave the
+/// mirror above what the provider still has deposited).
+#[test]
+fn the_provider_mirror_follows_deposit_and_withdraw() {
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    m.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, u64::MAX / 2).unwrap();
+    m.withdraw_fresh_counterparty_backing_not_atomic(1, 5_000_000).unwrap();
+    let sc = 1_000_000_000_000u128;
+    assert_eq!(m.markets[0].engine.provider_principal_short.get(), 15_000_000 * sc, "mirror = deposits - withdrawals");
+    m.withdraw_fresh_counterparty_backing_not_atomic(1, 15_000_000).unwrap();
+    assert_eq!(m.markets[0].engine.provider_principal_short.get(), 0);
+    // the wrapper's single setter: add and saturating subtract
+    percolator::adjust_slot_provider_principal(&mut m.markets[0].engine, false, 7 * sc, true).unwrap();
+    percolator::adjust_slot_provider_principal(&mut m.markets[0].engine, false, 100 * sc, false).unwrap();
+    assert_eq!(m.markets[0].engine.provider_principal_long.get(), 0, "saturates at zero");
+}
+
+/// The share formula, for both founder-selectable rules, with every term non-zero.
+#[test]
+fn the_provider_share_formula() {
+    use percolator::{BackingBucketStatusV16, BackingBucketV16};
+    let b = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: 90,
+        valid_liened_backing_num: 3,
+        consumed_liened_backing_num: 5,
+        impaired_liened_backing_num: 2,
+        utilization_fee_earnings: 0,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+    };
+    // both rules, explicitly (the default rule only exercises one of them)
+    assert_eq!(MarketGroupV16ViewMut::<u64>::s10_provider_fresh_by_rule_for_test(true, 100, b), 100, "rule A protects the full ledger principal");
+    assert_eq!(MarketGroupV16ViewMut::<u64>::s10_provider_fresh_by_rule_for_test(false, 100, b), 100 - 5 - 2 - 3, "rule B: principal - consumed - impaired - valid_liened");
+    // each term matters (a mutant that drops one is caught): vary them one at a time
+    for (c, i, l) in [(5u128, 0u128, 0u128), (0, 2, 0), (0, 0, 3)] {
+        let mut v = b; v.consumed_liened_backing_num = c; v.impaired_liened_backing_num = i; v.valid_liened_backing_num = l;
+        assert_eq!(MarketGroupV16ViewMut::<u64>::s10_provider_fresh_by_rule_for_test(false, 100, v), 100 - c - i - l);
+    }
+    // saturates, never underflows
+    assert_eq!(MarketGroupV16ViewMut::<u64>::s10_provider_fresh_by_rule_for_test(false, 4, b), 0);
+    assert_eq!(MarketGroupV16ViewMut::<u64>::s10_provider_fresh_by_rule_for_test(true, 4, b), 4);
+    let _ = MarketGroupV16ViewMut::<u64>::s10_provider_fresh_for_test(100, b);
+}
+
+/// Measurement (ignored): worlds where a provider (20M in each domain) ends with fresh backing
+/// below its ledger principal WITH the S10 move but not without it (budget-free views = base
+/// behaviour), per protection rule. `cargo test --release --test v22_r1_reversal -- --ignored
+/// --nocapture provider_worse_off_than_base`.
+fn provider_world(seed: u64, s10: bool) -> Option<[(u128, u128); 2]> {
+    let (nl, ns) = shape(seed);
+    let n = nl + ns;
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut accts: Vec<PortfolioAccountV16Account> = (0..n).map(|k| account(900 + k as u32)).collect();
+    let mut s = seed | 1;
+    for k in 0..n { let mut a = accts[k]; w.deposit(&mut a, 1_000_000_000_000_000); accts[k] = a; }
+    let mut m = w.maker;
+    for k in 0..n {
+        let u = 1 + (rng(&mut s) % 6) as u128;
+        let mut a = accts[k];
+        let r = if k < nl { w.trade(&mut a, &mut m, u * 100 * POS_SCALE) } else { w.trade(&mut m, &mut a, u * 100 * POS_SCALE) };
+        r.ok()?;
+        accts[k] = a;
+    }
+    {
+        let mut mg = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        mg.deposit_fresh_counterparty_backing_not_atomic(0, 20_000_000, u64::MAX / 2).unwrap();
+        mg.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, u64::MAX / 2).unwrap();
+    }
+    let steps = |w: &mut World, target: u64| -> bool { let mut g = 0; while w.price() != target && g < 200 { g += 1; let cur = w.price() as i128; let b = (((target as i128 - cur) * 10_000) / cur).clamp(-190, 190) as i64; let b = if b == 0 { if target as i128 > cur { 1 } else { -1 } } else { b }; if !w.accrue(b, 0) { return false; } } true };
+    let settle = |w: &mut World, a: &mut PortfolioAccountV16Account| -> bool {
+        let slot = w.slot;
+        let (h, mk, a0) = (w.header, w.markets.clone(), *a);
+        let mut g = if s10 { MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets) } else { MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets) };
+        for d in 0..2 { let _ = g.expire_source_backing_bucket_not_atomic(d, slot); }
+        let ok = g.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a)).is_ok();
+        if !ok { w.header = h; w.markets = mk; *a = a0; }
+        ok
+    };
+    if !steps(&mut w, 1_080_000 + rng(&mut s) % 100_000) { return None; }
+    let mask = rng(&mut s) % (1 << (n + 1));
+    for k in 0..n { if mask >> k & 1 == 1 { let mut a = accts[k]; if !settle(&mut w, &mut a) { return None; } accts[k] = a; } }
+    if mask >> n & 1 == 1 { let mut mm = m; if settle(&mut w, &mut mm) { m = mm; } }
+    if !steps(&mut w, 700_000 + rng(&mut s) % 200_000) { return None; }
+    for k in 0..=n { if k == n { let mut mm = m; if settle(&mut w, &mut mm) { m = mm; } } else { let mut a = accts[k]; if settle(&mut w, &mut a) { accts[k] = a; } } }
+    Some([(fresh(&w, 0), 20_000_000), (fresh(&w, 1), 20_000_000)])
+}
+
+#[test]
+#[ignore = "measurement"]
+fn provider_worse_off_than_base() {
+    let (mut ran, mut worse, mut worst, mut moved_worlds) = (0u64, 0u64, 0i128, 0u64);
+    for i in 0..4_000u64 {
+        let seed = 3u64 * 7919 + 20_000 + i;
+        let (Some(on), Some(off)) = (provider_world(seed, true), provider_world(seed, false)) else { continue };
+        ran += 1;
+        if on != off { moved_worlds += 1; }
+        for d in 0..2 {
+            let (f_on, p) = on[d];
+            let (f_off, _) = off[d];
+            if f_off >= p && f_on < p { worse += 1; worst = worst.max(p as i128 - f_on as i128); }
+        }
+    }
+    println!("PROVWORSE rule_A={} worlds {ran} worlds-where-S10-changed-a-bucket {moved_worlds} provider-domain-cases-worse-than-base {worse} worst-shortfall-atoms {worst}", percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL);
 }

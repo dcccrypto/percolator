@@ -73,7 +73,7 @@ impl World {
             w.traders.push(s);
         }
         {
-            let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+            let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
             if ins_long != 0 {
                 m.deposit_domain_insurance_not_atomic(0, ins_long).unwrap();
             }
@@ -85,7 +85,7 @@ impl World {
     }
 
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         let a0 = *acct;
         if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
     }
@@ -123,7 +123,7 @@ impl World {
         size: u128,
     ) -> Result<(), percolator::V16Error> {
         let price = self.price();
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
@@ -143,7 +143,7 @@ impl World {
         let new = (old + old * dp_bps as i128 / 10_000).max(1) as u64;
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -182,7 +182,7 @@ impl World {
         }
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -197,7 +197,7 @@ impl World {
     fn settle(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let slot = self.slot;
         {
-            let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+            let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
             for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         self.refresh(acct)
@@ -205,7 +205,7 @@ impl World {
 
     fn refresh(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         let r = m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(acct));
         let ok = r.is_ok();
         if !ok {
@@ -217,7 +217,7 @@ impl World {
     }
 
     fn validate(&mut self, extra: &mut [PortfolioAccountV16Account]) {
-        let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         m.validate_shape().unwrap();
         PortfolioV16ViewMut::new(&mut self.maker)
             .validate_with_market(&m.as_view())
@@ -320,7 +320,7 @@ fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: boo
     for &i in peak_cranks { let mut a = acts[i]; assert!(w.settle(&mut a)); acts[i] = a; }
     if reverse_first { steps(&mut w, 855_000); }
     let slot = w.slot + 1;
-    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
     m.resolve_market_not_atomic(slot).unwrap();
     let mut paid = vec![0u128; 4];
     let mut closed = [false; 4];
@@ -338,40 +338,22 @@ fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: boo
 
 /// All 16 crank masks over {actor 0, 1, 2, maker} at the peak: the FACE equity (capital + pnl) is
 /// exact in every one (the pre-R1 engine is wrong in 4 of them, e.g. {0,1,2}: -700.000 destroyed),
-/// actor 0 ends with capital 347.302 and no negative pnl, and nothing is destroyed.
-///
-/// The EFFECTIVE (certified, haircut) equity is exact in 9 masks and NOT in the 7 where a
-/// loser-side account (actor 2 or the maker) is cranked at the peak while the longs are not (S10):
-/// the backing its realised loss left in the short-loser domain has no claimant (the longs' peak
-/// gain reversed before they settled), so the claims the reversal creates in the other domain are
-/// only partly backed. Those 7 results are pinned so any change to that class is deliberate.
+/// actor 0 ends with capital 347.302 and no negative pnl, nothing is destroyed, AND (S10 fix) the
+/// EFFECTIVE (certified) equity equals the face equity in all 16. Before the S10 fix it was exact
+/// in 9 and short in the 7 masks where a loser-side account (actor 2 or the maker) is cranked at
+/// the peak while the longs are not: the backing its realised loss left in the short-loser domain
+/// had no claimant (the longs' peak gain reversed before they settled), so the claims the reversal
+/// creates in the other domain were only partly backed (maker alone: +593.1 instead of +725.2).
 #[test]
-fn i457_all_sixteen_crank_masks_are_exact_in_face_terms() {
+fn i457_all_sixteen_crank_masks_are_exact_in_face_and_effective_terms() {
     const FACE: [i128; 4] = [-652_698_000, -290_088_000, 217_566_000, 725_220_000];
-    // masks whose effective equity differs from the face equity: (mask, actor 2 eff, maker eff)
-    const STRANDED: [(u32, i128, i128); 7] = [
-        (4, 139_677_423, 593_108_576),
-        (8, 124_859_950, 117_926_049),
-        (9, 208_295_395, 664_490_604),
-        (10, 161_942_370, 360_843_629),
-        (12, 7_565_999, 25_219_999),
-        (13, 152_950_615, 509_835_384),
-        (14, 72_181_384, 240_604_615),
-    ];
     for mask in 0u32..16 {
         let peak: Vec<usize> = (0..4).filter(|i| mask >> i & 1 == 1).collect();
         let (ch, a0, eff, sum) = run(&peak);
         assert_eq!(ch, FACE, "mask {mask}: face equity");
         assert_eq!(sum, 0, "mask {mask}: nothing destroyed in face terms");
         assert_eq!(a0, (347_302_000, 0), "mask {mask}: actor 0 capital and pnl");
-        match STRANDED.iter().find(|x| x.0 == mask) {
-            None => assert_eq!(eff, FACE, "mask {mask}: effective equity exact"),
-            Some(&(_, a2, mk)) => {
-                assert_eq!((eff[0], eff[1]), (FACE[0], FACE[1]), "mask {mask}: longs exact");
-                assert_eq!((eff[2], eff[3]), (a2, mk), "mask {mask}: pinned stranded-backing class");
-                assert!(eff[2] + eff[3] < FACE[2] + FACE[3], "mask {mask}: effective is below face, never above");
-            }
-        }
+        assert_eq!(eff, FACE, "mask {mask}: effective equity exact");
     }
 }
 
@@ -388,14 +370,14 @@ fn i457_resolved_close_order_does_not_change_payouts() {
     }
 }
 
-/// S10 is permanent, not a Live liquidity haircut: at Resolved the stranded backing does not come
-/// back to the loser (it has no claimant and no junior claim covers it). Pinned for the maker-only
-/// and actor-2-only peak cranks; the all-cranked and nobody-cranked payouts are the ideal.
+/// S10 at Resolved: the stranded backing a loser realised at the peak is returned to its claims
+/// when the market closes, so every peak-crank subset pays the ideal (before the S10 fix the
+/// maker-alone peak crank paid 117.926 instead of 725.220 and actor-2-alone 1139.677 vs 1217.566).
 #[test]
-fn i457_resolved_stranded_backing_is_not_returned() {
+fn i457_resolved_stranded_backing_is_returned() {
     let ideal = vec![347_302_000u128, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
-    assert_eq!(run_resolved(&[], &[0, 1, 2, 3], true), ideal);
-    assert_eq!(run_resolved(&[0, 1, 2, 3], &[0, 1, 2, 3], true), ideal);
-    assert_eq!(run_resolved(&[3], &[0, 1, 2, 3], true), vec![347_302_000, 709_912_000, 1_124_859_950, 1_000_000_117_926_049]);
-    assert_eq!(run_resolved(&[2], &[0, 1, 2, 3], true), vec![347_302_000, 709_912_000, 1_139_677_423, 1_000_000_593_108_576]);
+    for peak in [vec![], vec![0, 1, 2, 3], vec![3], vec![2], vec![2, 3], vec![0, 3]] {
+        assert_eq!(run_resolved(&peak, &[0, 1, 2, 3], true), ideal, "peak {peak:?}");
+        assert_eq!(run_resolved(&peak, &[3, 2, 1, 0], true), ideal, "peak {peak:?} reverse close order");
+    }
 }

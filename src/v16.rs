@@ -5703,6 +5703,54 @@ pub struct MarketGroupV16View<'a, T> {
 pub struct MarketGroupV16ViewMut<'a, T> {
     pub header: &'a mut MarketGroupV16HeaderAccount,
     pub markets: &'a mut [Market<T>],
+    /// S10 compute budget: how many more times the unclaimed-backing move may fire through this
+    /// view (one view is one instruction). ZERO by default: only a view built with `new_crank`, or
+    /// the permissionless refresh crank itself (`permissionless_crank_not_atomic`, Refresh action),
+    /// carries a budget, so a trade, batch, band batch, liquidation, recovery or any future entry
+    /// point is budget-free unless it is explicitly granted one. A firing is about 33k CU on BPF
+    /// (measured, flat in the number of legs); an 11-leg liquidation crank is 1,375,975 CU of 1.4M
+    /// and an 11-leg batch about 1.33M, so no firing may be added on those paths.
+    s10_moves_left: u8,
+}
+
+/// Moves the refresh crank may fire per instruction (+33k CU each).
+pub const S10_MAX_MOVES_PER_INSTRUCTION: u8 = 2;
+
+/// S10 dust floor (founder-tunable): the smallest move, in quote atoms. A firing costs the
+/// instruction's settler about 33k CU and bumps `risk_epoch` by 2; 1,000 atoms is 0.001 of a
+/// 6-decimal quote, above the ~5,000-lamport base signature fee in value terms, so causing a
+/// firing is never free. A stranding below the floor is not lost: it is retried at the next
+/// refresh-crank settlement of the asset and moves once it (or the shortfall) passes the floor.
+pub const S10_MIN_MOVE_ATOMS: u128 = 1_000;
+
+/// S10 provider-protection rule (founder-tunable, default `true` = rule A).
+/// A (`true`): the provider's ledger principal is protected in full; only fresh backing ABOVE the
+/// full principal may move. Nothing a provider or vault holder could withdraw on the base engine
+/// (the wrapper caps withdrawals at the full ledger principal) is ever moved; repair is less
+/// exact when loser cash was consumed first.
+/// B (`false`): protect `principal - consumed - impaired - valid_liened` (the wrapper NAV's
+/// loss/recovery arithmetic): loser cash that base would have let the provider withdraw may move.
+pub const S10_PROTECT_FULL_PROVIDER_PRINCIPAL: bool = true;
+
+/// THE single writer of the provider-principal mirror (`provider_principal_{long,short}`, in
+/// `BOUND_SCALE` units): the engine's deposit and withdraw and EVERY wrapper path that adds or
+/// removes provider / vault-pot principal (the wrapper's `vault_pot_owned_adjust`) call this and
+/// nothing else writes the fields (except the wholly-empty reset in `set_backing_bucket_for_domain`
+/// and the activation reset). `add == false` saturates at zero.
+pub fn adjust_slot_provider_principal(
+    slot: &mut EngineAssetSlotV16Account,
+    short_side: bool,
+    delta_num: u128,
+    add: bool,
+) -> V16Result<()> {
+    let c = if short_side { &mut slot.provider_principal_short } else { &mut slot.provider_principal_long };
+    let next = if add {
+        c.get().checked_add(delta_num).ok_or(V16Error::ArithmeticOverflow)?
+    } else {
+        c.get().saturating_sub(delta_num)
+    };
+    *c = V16PodU128::new(next);
+    Ok(())
 }
 
 impl<'a, T> MarketGroupV16View<'a, T> {
@@ -5713,7 +5761,13 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets }
+        Self { header, markets, s10_moves_left: 0 }
+    }
+
+    /// A view that carries the S10 refresh-crank budget (what `permissionless_crank_not_atomic`
+    /// grants itself on a Refresh action). Used by the wrapper's refresh-type handlers and tests.
+    pub fn new_crank(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
+        Self { header, markets, s10_moves_left: S10_MAX_MOVES_PER_INSTRUCTION }
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -8484,6 +8538,19 @@ pub struct EngineAssetSlotV16Account {
     /// Read only to price loss netting; never to move value.
     pub kf_pending_credit_long: V16PodI128,
     pub kf_pending_credit_short: V16PodI128,
+    /// S10 provider ledger (appended LAST, +32 B per slot): per source domain (long, short), in
+    /// `BOUND_SCALE` units, the provider principal currently deposited in that domain's backing
+    /// bucket: `+` by `deposit_fresh_counterparty_backing_not_atomic`, `-` (saturating) by
+    /// `withdraw_fresh_counterparty_backing_not_atomic`, zero when the bucket is wholly empty.
+    /// It mirrors the wrapper's `BackingDomainLedger.total_principal_atoms`. The part of the
+    /// bucket the provider still owns is `provider_fresh = principal - consumed - impaired -
+    /// valid_liened` (exactly the wrapper ledger's `available = principal - (loss - recovery)`
+    /// with loss = consumed + impaired), and ONLY fresh backing above that may be moved by the S10
+    /// rebalance. Engine and wrapper therefore agree on who owns every atom of a bucket at every
+    /// step: consumption lowers `provider_fresh` (provider loss), a receivable refill raises it
+    /// (provider recovery), a deposit raises both principal and fresh, a lien moves it out of fresh.
+    pub provider_principal_long: V16PodU128,
+    pub provider_principal_short: V16PodU128,
 }
 
 /// fix/v21-funding-scale: per-side K/F drift generation, the state behind the O(1) bound on
@@ -8661,7 +8728,9 @@ impl EngineAssetSlotV16Account {
             && self.kf_drift_long == KfDriftSideV16Account::default()
             && self.kf_drift_short == KfDriftSideV16Account::default()
             && self.kf_pending_credit_long.get() == 0
-            && self.kf_pending_credit_short.get() == 0)
+            && self.kf_pending_credit_short.get() == 0
+            && self.provider_principal_long.get() == 0
+            && self.provider_principal_short.get() == 0)
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -8702,6 +8771,8 @@ impl EngineAssetSlotV16Account {
             kf_drift_short: KfDriftSideV16Account::default(),
             kf_pending_credit_long: V16PodI128::new(0),
             kf_pending_credit_short: V16PodI128::new(0),
+            provider_principal_long: V16PodU128::new(0),
+            provider_principal_short: V16PodU128::new(0),
         }
     }
 
@@ -9352,6 +9423,8 @@ impl MarketGroupV16HeaderAccount {
             kf_drift_short: KfDriftSideV16Account::default(),
             kf_pending_credit_long: V16PodI128::new(0),
             kf_pending_credit_short: V16PodI128::new(0),
+            provider_principal_long: V16PodU128::new(0),
+            provider_principal_short: V16PodU128::new(0),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -10124,11 +10197,67 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let old_bucket = self.backing_bucket_for_domain(domain)?;
         self.update_backing_aggregate_totals(old_bucket, bucket)?;
         let slot = self.markets[asset_index].engine_slot_mut();
+        let account = BackingBucketV16Account::from_runtime(&bucket);
+        // a wholly empty bucket owes nothing to a provider: the principal mirror resets
+        let wholly_empty = bucket.fresh_unliened_backing_num == 0
+            && bucket.valid_liened_backing_num == 0
+            && bucket.consumed_liened_backing_num == 0
+            && bucket.impaired_liened_backing_num == 0;
         match side {
-            SideV16::Long => slot.backing_long = BackingBucketV16Account::from_runtime(&bucket),
-            SideV16::Short => slot.backing_short = BackingBucketV16Account::from_runtime(&bucket),
+            SideV16::Long => {
+                slot.backing_long = account;
+                if wholly_empty {
+                    slot.provider_principal_long = V16PodU128::new(0);
+                }
+            }
+            SideV16::Short => {
+                slot.backing_short = account;
+                if wholly_empty {
+                    slot.provider_principal_short = V16PodU128::new(0);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// S10: provider principal mirror of `domain` (BOUND_SCALE units).
+    fn provider_principal_for_domain(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(match side {
+            SideV16::Long => slot.provider_principal_long.get(),
+            SideV16::Short => slot.provider_principal_short.get(),
+        })
+    }
+
+    /// S10: `delta` is added to (`add`) or saturating-subtracted from the principal mirror.
+    fn adjust_provider_principal_for_domain(
+        &mut self,
+        domain: usize,
+        delta: u128,
+        add: bool,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        adjust_slot_provider_principal(slot, side == SideV16::Short, delta, add)
+    }
+
+    /// S10: the part of `bucket` the provider still owns by the wrapper ledger's own arithmetic,
+    /// `principal - (consumed + impaired) - valid_liened` (saturating). Backing in the bucket
+    /// beyond it is loser cash and the only part the S10 rebalance may move.
+    fn provider_fresh_num(principal: u128, bucket: BackingBucketV16) -> u128 {
+        Self::provider_fresh_by_rule(S10_PROTECT_FULL_PROVIDER_PRINCIPAL, principal, bucket)
+    }
+
+    /// The share formula for an explicit rule (A: full ledger principal; B: ledger NAV arithmetic).
+    fn provider_fresh_by_rule(rule_a: bool, principal: u128, bucket: BackingBucketV16) -> u128 {
+        if rule_a {
+            return principal;
+        }
+        principal
+            .saturating_sub(bucket.consumed_liened_backing_num)
+            .saturating_sub(bucket.impaired_liened_backing_num)
+            .saturating_sub(bucket.valid_liened_backing_num)
     }
 
     fn insurance_reservation_for_domain(
@@ -10338,6 +10467,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let backing_num = V16Core::bound_num_from_amount(amount)?;
         self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        // S10: a deposit is provider principal (never moved by the rebalance)
+        self.adjust_provider_principal_for_domain(domain, backing_num, true)?;
         self.header.vault = V16PodU128::new(
             self.header
                 .vault
@@ -10393,6 +10524,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        // S10: principal leaves (saturating: a shutdown drain may take loser cash too)
+        self.adjust_provider_principal_for_domain(domain, backing_num, false)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;
@@ -14903,6 +15036,140 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// unowned residual; the loss is nevertheless owed to this domain's opposite-side
     /// claimants, exactly as if the account had converted the support to capital and paid
     /// the loss from it. Both parts land in the domain in one step.
+    /// S10 (stranded backing on reversal). Closes the two domains of `asset_index` over each
+    /// other: LOSER-BOOKED backing that no claimant of its own domain can call on moves to the
+    /// opposite domain, up to that domain's shortfall (`claims - available backing`). In both
+    /// directions. Post-condition: no asset ends a settlement with unclaimed loser-booked backing
+    /// in one domain and unbacked claims in the other.
+    ///
+    /// Guards (all must hold, else nothing moves):
+    /// - V1 (the caller): both `stale_account_count_long` and `stale_account_count_short` of the
+    ///   asset are 0, i.e. every stored leg of the asset has settled to the current K/F cohort, so
+    ///   no unsettled winner can still claim and no unsettled loser can still pay. The remaining
+    ///   excess and shortfall are real, not in flight.
+    /// - source bucket Fresh and unexpired (else `prepare_counterparty_backing_withdraw_delta`
+    ///   would return LockActive and fail the whole settlement);
+    /// - destination accepts a booking (`loss_domain_accepts_realized_backing`) and is not
+    ///   Impaired (else the add delta would fail);
+    /// - provider ledger: only fresh backing ABOVE the provider's own share may move. The share is
+    ///   `provider_fresh = principal - consumed - impaired - valid_liened` with the principal
+    ///   mirror `provider_principal_*` (the wrapper ledger's own arithmetic), so provider
+    ///   deposits and the part of a bucket a receivable refill returned to the provider never
+    ///   move, whatever the order of settlements, and a provider-less bucket (principal 0) is
+    ///   wholly movable.
+    /// - dust floor: a move below `S10_MIN_MOVE_ATOMS` atoms is skipped (retried at the next
+    ///   settlement), so a firing (about 33k CU, a `risk_epoch` bump) is never free to cause.
+    /// - cap: at most `S10_MAX_MOVES_PER_INSTRUCTION` per view, in the deterministic order of
+    ///   the settle entries of the instruction (account order, then the account's leg plan
+    ///   order: phase, domain, slot). A move skipped for the cap is retried by the next settlement
+    ///   entry of the asset and, once no position is stored, by the next accrual of the asset
+    ///   (`s10_retry_for_unpositioned_asset`), so it is never stranded behind the cap.
+    ///
+    /// Amount: `min(loser cash(src), available(src) - claim_bound(src), claim_bound(dst) -
+    /// available(dst))` where loser cash = `fresh unliened(src) - provider_fresh(src)`, whole atoms.
+    /// Claims, liens, insurance credit, vault, c_tot and every account are untouched.
+    ///
+    /// Expiry: the moved backing joins the destination bucket and takes the destination's expiry
+    /// (an existing Fresh bucket keeps its own, an Empty or Expired one opens at now + horizon),
+    /// exactly as a freshly booked realised loss does; it loses the source bucket's own lifetime
+    /// (later or earlier, whichever the two buckets happen to have). Receivable refill: the add
+    /// delta first repays the destination's `provider_receivable`, as any booking does.
+    fn rebalance_unclaimed_backing_across_asset_domains_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        // budget spent: skip before ANY read (a leg skipped for the cap must cost almost nothing;
+        // measured: reading both domains' source-credit state for every skipped leg cost ~7k CU each)
+        if self.s10_moves_left == 0 {
+            return Ok(());
+        }
+        let now = self.header.current_slot.get();
+        let long = self.insurance_domain_index(asset_index, SideV16::Long)?;
+        let short = self.insurance_domain_index(asset_index, SideV16::Short)?;
+        for (src, dst) in [(long, short), (short, long)] {
+            // cheapest checks first: the bucket and the counter before any source-credit state
+            let b_src = self.backing_bucket_for_domain(src)?;
+            let loser_cash = b_src.fresh_unliened_backing_num.saturating_sub(
+                Self::provider_fresh_num(self.provider_principal_for_domain(src)?, b_src),
+            );
+            if loser_cash == 0
+                || b_src.status != BackingBucketStatusV16::Fresh
+                || b_src.expiry_slot <= now
+                || b_src.fresh_unliened_backing_num == 0
+            {
+                continue;
+            }
+            // the destination takes the backing exactly as a freshly booked realised loss would
+            if !self.loss_domain_accepts_realized_backing(dst)?
+                || self.backing_bucket_for_domain(dst)?.status == BackingBucketStatusV16::Impaired
+            {
+                continue;
+            }
+            let s_src = self.source_credit_for_domain(src)?;
+            let s_dst = self.source_credit_for_domain(dst)?;
+            let excess = core::cmp::min(
+                loser_cash,
+                V16Core::available_backing_num_for_source_credit_state(s_src)?
+                    .saturating_sub(s_src.positive_claim_bound_num),
+            );
+            let shortfall = s_dst
+                .positive_claim_bound_num
+                .saturating_sub(V16Core::available_backing_num_for_source_credit_state(s_dst)?);
+            let moved = core::cmp::min(excess, shortfall) / BOUND_SCALE * BOUND_SCALE;
+            if moved < S10_MIN_MOVE_ATOMS * BOUND_SCALE {
+                continue;
+            }
+            if self.s10_moves_left == 0 {
+                return Ok(());
+            }
+            self.s10_moves_left -= 1;
+            let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
+            let b_dst = self.backing_bucket_for_domain(dst)?;
+            let (b_src, s_src) =
+                V16Core::prepare_counterparty_backing_withdraw_delta(b_src, s_src, now, moved)?;
+            let (b_dst, s_dst) =
+                V16Core::prepare_counterparty_backing_add_delta(b_dst, s_dst, moved, now, expiry)?;
+            // the setter takes the source counter down by the withdrawal
+            self.set_backing_bucket_for_domain(src, b_src)?;
+            self.set_source_credit_for_domain(src, s_src)?;
+            self.set_backing_bucket_for_domain(dst, b_dst)?;
+            self.set_source_credit_for_domain(dst, s_dst)?;
+            self.recompute_source_credit_domain_after_mutation(src)?;
+            self.recompute_source_credit_domain_after_mutation(dst)?;
+            self.reservation_encumbrance_proof_for_domain(src)?.validate()?;
+            self.reservation_encumbrance_proof_for_domain(dst)?.validate()?;
+        }
+        Ok(())
+    }
+
+    /// Test seam: the S10 provider-share formula (see `provider_fresh_num`).
+    #[doc(hidden)]
+    pub fn s10_provider_fresh_for_test(principal: u128, bucket: BackingBucketV16) -> u128 {
+        Self::provider_fresh_num(principal, bucket)
+    }
+
+    /// Test seam: the share formula under an explicit rule.
+    #[doc(hidden)]
+    pub fn s10_provider_fresh_by_rule_for_test(rule_a: bool, principal: u128, bucket: BackingBucketV16) -> u128 {
+        Self::provider_fresh_by_rule(rule_a, principal, bucket)
+    }
+
+    /// Test seam: the S10 per-instruction move budget of this view.
+    #[doc(hidden)]
+    pub fn set_s10_moves_left_for_test(&mut self, n: u8) {
+        self.s10_moves_left = n;
+    }
+
+    /// Test seam for the S10 move (the V1 stale-count guard lives in the settle entry, not here):
+    /// lets a test drive the move's own guards directly. Not used by the program.
+    #[doc(hidden)]
+    pub fn rebalance_unclaimed_backing_for_test_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)
+    }
+
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15381,6 +15648,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
+        // S10 (V1 guard): backing that no claimant can call on covers the other domain's shortfall,
+        // but only once no stored leg of either side of this asset is still stale, i.e. after the
+        // leg's own cohort discharge above and only when the whole asset has settled to the
+        // current K/F cohort. Idle cost: two counter compares.
+        if asset.stale_account_count_long == 0 && asset.stale_account_count_short == 0 {
+            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
+        }
         self.header.loss_stale_active = encode_bool(asset_is_loss_stale_at_slot(
             asset,
             self.header.current_slot.get(),
@@ -16434,6 +16708,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    /// Accrues the asset; then (S10) retries the unclaimed-backing move for an asset that has no
+    /// stored position left (both stale counts 0): once the last leg of an asset has settled and
+    /// closed no settlement re-evaluates it, so a move skipped for the per-instruction cap would
+    /// otherwise stay skipped. The next accrual of the asset (any crank or trade) closes that gap.
     pub fn accrue_asset_to_not_atomic(
         &mut self,
         asset_index: usize,
@@ -16795,6 +17073,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// boundaries that change price compounding or funding sampling. The wrapper may construct up
     /// to `V16_MAX_ACCRUAL_PATH_STEPS` deterministic steps; a longer stale interval remains
     /// actionable through another call with the same authenticated `now_slot`.
+    /// Path accrual; see `accrue_asset_to_not_atomic` for the S10 retry.
     pub fn accrue_asset_path_to_not_atomic(
         &mut self,
         asset_index: usize,
@@ -17835,6 +18114,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
+        // S10: the refresh crank is the ONLY entry point that grants itself a move budget
+        if matches!(request.action, PermissionlessCrankActionV16::Refresh) {
+            self.s10_moves_left = S10_MAX_MOVES_PER_INSTRUCTION;
+        }
         let protective_progress = match request.action {
             PermissionlessCrankActionV16::Refresh => {
                 let selected_leg_before = request.asset_index
@@ -17911,7 +18194,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             request.funding_rate_e9,
             protective_progress,
         )?;
+        // S10: an asset with no stored position has no settlement left to retry a move skipped
+        // for the budget; the refresh crank's own accrual of it does (budget 0 outside Refresh)
+        self.s10_retry_for_unpositioned_asset(request.asset_index)?;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    }
+
+    /// S10 retry hook (refresh crank only): when the whole asset has settled and no position is
+    /// stored, retry the unclaimed-backing move.
+    fn s10_retry_for_unpositioned_asset(&mut self, asset_index: usize) -> V16Result<()> {
+        if self.s10_moves_left == 0 || asset_index >= self.markets.len() {
+            return Ok(());
+        }
+        let asset = self.asset_state(asset_index)?;
+        if asset.stale_account_count_long == 0
+            && asset.stale_account_count_short == 0
+            && asset.stored_pos_count_long == 0
+            && asset.stored_pos_count_short == 0
+        {
+            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
+        }
+        Ok(())
     }
 
     /// Refresh a Recovery leg from committed engine state without attempting
@@ -24523,6 +24826,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         slot.kf_drift_short = KfDriftSideV16Account::default();
         slot.kf_pending_credit_long = V16PodI128::new(0);
         slot.kf_pending_credit_short = V16PodI128::new(0);
+        slot.provider_principal_long = V16PodU128::new(0);
+        slot.provider_principal_short = V16PodU128::new(0);
         self.validate_shape()
     }
 

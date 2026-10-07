@@ -71,7 +71,7 @@ fn upgrade_v21_slab(old: &[u8]) -> Vec<u8> {
     // (`kf_drift_long/short`, KF_DRIFT_APPENDED bytes at the END of each engine slot). A fresh
     // slab starts with exactly those zeros, so insert them while widening (test-only: an old slab
     // is never loaded in place because the stride changed). v2.1 + tail input is also accepted.
-    const KF_DRIFT_APPENDED: usize = 160 + 32; // #277 drift tail + #282 R1 equity-cadence words
+    const KF_DRIFT_APPENDED: usize = 160 + 32 + 32; // #277 drift tail + #282 R1 words + S10 provider mirror
     let bare = rest.len() % old_stride != 0;
     let stride = if bare { old_stride - KF_DRIFT_APPENDED } else { old_stride };
     assert_eq!(
