@@ -14160,3 +14160,162 @@ fn f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert() {
         "the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)"
     );
 }
+
+#[test]
+fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
+    let insurance_backed = false;
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    if insurance_backed {
+        #[cfg(feature = "fuzz")]
+        {
+            market
+                .deposit_domain_insurance_not_atomic(1, 100_000)
+                .unwrap();
+            market
+                .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
+                .unwrap();
+        }
+        #[cfg(not(feature = "fuzz"))]
+        unreachable!("the insurance-backed variant requires the fuzz test API");
+    } else {
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+            .unwrap();
+    }
+    market.deposit_not_atomic(&mut long, 52_501).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    if insurance_backed {
+        let fresh_backing_atoms = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num
+            / BOUND_SCALE;
+        assert!(fresh_backing_atoms > 0);
+        market
+            .withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms)
+            .expect("reserved insurance must fully replace withdrawn counterparty backing");
+    }
+    assert_eq!(long.header.pnl.get(), 5_000);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+    let lien_before = long.header.source_domains[0];
+    assert_eq!(long.header.pnl.get(), 5_000);
+    assert!(lien_before.source_claim_liened_num.get() > 0);
+    if insurance_backed {
+        assert!(
+            lien_before.source_lien_insurance_backing_num.get() > 0,
+            "expected insurance-backed lien: {lien_before:?}"
+        );
+        assert_eq!(lien_before.source_lien_counterparty_backing_num.get(), 0);
+    } else {
+        assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+        assert_eq!(lien_before.source_lien_insurance_backing_num.get(), 0);
+    }
+    let capital_before_reversal = long.header.capital.get();
+    let lien_effective = lien_before.source_lien_effective_reserved.get();
+    let backing_before_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let reservation_before_reversal = market.markets[0]
+        .engine
+        .insurance_reservation_short
+        .try_to_runtime()
+        .unwrap();
+    let insurance_before_reversal = market.header.insurance.get();
+    let risk_epoch_before_reversal = market.header.risk_epoch.get();
+    let source_credit_epoch_before_reversal = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap()
+        .credit_epoch;
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 100)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .unwrap();
+    // trades carry no S10 budget; the reversal settles as a crank would, with one
+    market.set_s10_moves_left_for_test(percolator::S10_MAX_MOVES_PER_INSTRUCTION);
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let cert = market
+        .full_account_refresh_not_atomic(&mut long)
+        .expect("a mark reversal must settle even when the prior positive claim backed IM");
+
+    // After the reversal (and the 2,624-atom move the settlement itself made) the short bucket
+    // holds fresh 100,000 against a 100,000-atom provider deposit of which 2,376 are consumed
+    // (receivable): the wrapper ledger's view is provider_fresh = 100,000 - 2,376 = 97,624, so
+    // only 100,000 - 97,624 = 2,376 atoms are loser cash. A ring that counted the FULL amount
+    // booked or refilled would let a forced shortfall take more; the provider's share must stay.
+    let short = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+    let principal = market.markets[0].engine.provider_principal_short.get();
+    assert_eq!(principal, 100_000 * BOUND_SCALE);
+    assert_eq!(short.fresh_unliened_backing_num, 100_000 * BOUND_SCALE);
+    assert_eq!(short.consumed_liened_backing_num, 2_376 * BOUND_SCALE);
+    // force a claim shortfall far above the loser cash in the long domain and drive the move
+    let mut sc = market.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let claims = sc.fresh_reserved_backing_num + 50_000 * BOUND_SCALE;
+    sc.positive_claim_bound_num = claims;
+    sc.exact_positive_claim_num = claims;
+    sc.credit_rate_num = sc.fresh_reserved_backing_num * CREDIT_RATE_SCALE / claims;
+    market.markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&sc);
+    market.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+    let after = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+    assert!(
+        after.fresh_unliened_backing_num >= 97_624 * BOUND_SCALE,
+        "the move took provider-owned backing: {} atoms left, the provider's share is 97,624",
+        after.fresh_unliened_backing_num / BOUND_SCALE
+    );
+    assert_eq!(after.fresh_unliened_backing_num, 97_624 * BOUND_SCALE, "exactly the 2,376 atoms of loser cash moved");
+}
