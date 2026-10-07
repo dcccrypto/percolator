@@ -23083,6 +23083,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if total == 0 {
             return Ok(0);
         }
+        // Refresh FIRST: the certificate must be current for the capacity read, and any fee or
+        // holding rent the refresh settles (into capital, `c_tot` or insurance) must not be
+        // counted against the post-conditions below, so every snapshot is taken AFTER it. A direct
+        // caller therefore does not need to refresh beforehand (it used to false-fail on a refresh
+        // that settled rent into insurance).
+        self.full_account_refresh_not_atomic(account)?;
         let capacity = self.released_pnl_insurance_repay_capacity(&account.as_view())?;
         if capacity == 0 || total > capacity {
             return Err(V16Error::LockActive);
@@ -23108,25 +23114,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount_b != 0 {
             self.charge_account_backing_fee_not_atomic(account, domain_b, 0, domain_b, amount_b)?;
         }
-        // Post-conditions (defence in depth): capital and c_tot are net unchanged, the vault is
-        // unchanged, and the account kept no unswept conversion.
-        // (A refresh may charge a maintenance/utilisation fee out of capital, so the account's
-        // capital may only FALL, and `c_tot` must fall by exactly the same amount.)
-        // W4-1: insurance must have risen by EXACTLY the repaid total. The insurance-credit
-        // branch of the source-credit consumption would debit then re-credit insurance (net
-        // zero), so a repayment funded that way would credit nothing while the wrapper reduces
-        // the receivable in full: refuse it. (Today only a `cfg(kani | fuzz)` writer can reach
-        // that branch; this keeps the path closed if a Live writer is ever added.)
-        if self.header.insurance.get().checked_sub(insurance_before) != Some(total) {
-            return Err(V16Error::InvalidConfig);
-        }
-        let capital_after = account.header.capital.get();
-        let c_tot_after = self.header.c_tot.get();
-        if capital_after > capital_before
-            || c_tot_after > c_tot_before
-            || capital_before - capital_after != c_tot_before - c_tot_after
-            || self.header.vault.get() != vault_before
-        {
+        // Post-conditions (defence in depth), as ONE pure predicate (unit-tested, see
+        // `repay_pnl_postconditions_hold`). W4-1: insurance rose by EXACTLY the repaid total (the
+        // insurance-credit branch of the consumption would debit then re-credit insurance, so a
+        // repayment funded that way would credit less than `total`); capital and `c_tot` can only
+        // fall, by equal amounts; the vault is unchanged.
+        if !repay_pnl_postconditions_hold(
+            vault_before,
+            self.header.vault.get(),
+            insurance_before,
+            self.header.insurance.get(),
+            capital_before,
+            account.header.capital.get(),
+            c_tot_before,
+            self.header.c_tot.get(),
+            total,
+        ) {
             return Err(V16Error::InvalidConfig);
         }
         self.try_clear_bankruptcy_hlock_if_healthy()?;
@@ -28063,7 +28066,7 @@ mod attach_writer_cross_side_oi_tripwire_tests {
     }
 }
 
-// ============================================================================
+// =====================================================================}
 // R1 round 2: pin `source_credit_netting_rate` to exact values.
 // ============================================================================
 #[cfg(test)]
@@ -28179,4 +28182,27 @@ mod r1_netting_rate_tests {
         let s = SourceCreditStateV16::EMPTY;
         assert_eq!(rate(s, 10, 10, 10), s.credit_rate_num);
     }
+}
+
+/// W-4 residual post-conditions of `repay_insurance_from_released_pnl_not_atomic`, pure so that each
+/// clause has a unit test that fails when it is removed (security review mutants E1 and E3):
+/// the vault is unchanged; insurance rose by EXACTLY `total`; the account's capital and `c_tot` did
+/// not rise and fell by the SAME amount (a refresh may charge a fee out of capital).
+#[allow(clippy::too_many_arguments)]
+pub fn repay_pnl_postconditions_hold(
+    vault_before: u128,
+    vault_after: u128,
+    insurance_before: u128,
+    insurance_after: u128,
+    capital_before: u128,
+    capital_after: u128,
+    c_tot_before: u128,
+    c_tot_after: u128,
+    total: u128,
+) -> bool {
+    vault_after == vault_before
+        && insurance_after.checked_sub(insurance_before) == Some(total)
+        && capital_after <= capital_before
+        && c_tot_after <= c_tot_before
+        && capital_before - capital_after == c_tot_before - c_tot_after
 }
