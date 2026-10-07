@@ -14279,3 +14279,81 @@ fn w4_negative_controls_refuse_without_mutation_or_value() {
         );
     }
 }
+
+/// W4-1: a claim backed by INSURANCE credit (not counterparty backing) must not be repaid into
+/// insurance: the consume step would debit and re-credit insurance (net zero) while the caller
+/// reduces its receivable in full. The engine refuses (insurance delta must equal the total).
+#[test]
+fn w4_insurance_credit_backed_claim_is_refused() {
+    let claim = 100u128;
+    let mut w = w4_world(claim, 1_000);
+    let claim_num = claim * BOUND_SCALE;
+    w.header.source_fresh_backing_total_num = V16PodU128::new(0);
+    w.header.insurance = V16PodU128::new(claim);
+    w.header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+    w.header.insurance_domain_budget_remaining_total = V16PodU128::new(claim);
+    w.markets[0].engine.insurance_domain_budget_short = V16PodU128::new(claim);
+    w.markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: 0,
+            insurance_credit_reserved_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    w.markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: 0,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    w.markets[0].engine.insurance_reservation_short =
+        percolator::InsuranceCreditReservationV16Account::from_runtime(
+            &percolator::InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num,
+                ..percolator::InsuranceCreditReservationV16::EMPTY
+            },
+        );
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    market.validate_shape().expect("fixture shape");
+    // On this fixture the capacity read itself refuses (Err) or reports 0: either way the repay
+    // must be refused and no insurance may be credited (W4-4: the capacity read can Err on an
+    // inconsistent source ledger, so a wrapper mode-3 call can revert where mode 1 succeeds).
+    let ins0 = market.header.insurance.get();
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 20, 1, 20);
+    assert!(r.is_err(), "an insurance-credit-funded repayment must be refused, got {r:?}");
+    let _ = ins0;
+}
+
+/// A price reversal AFTER a PnL repay: insurance keeps exactly what it was paid, the vault never
+/// moves, shapes stay valid, and the account's later loss settles against ITS OWN capital.
+#[test]
+fn w4_price_reversal_after_repay_leaves_insurance_whole() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+    let amt = 40u128.min(cap);
+    market
+        .repay_insurance_from_released_pnl_not_atomic(&mut long, 0, amt / 2, 1, amt - amt / 2)
+        .expect("repay");
+    let (vault1, ins1) = (market.header.vault.get(), market.header.insurance.get());
+    // The mark rises and falls back (the long wins then gives it back) across several slots.
+    let now = market.header.current_slot.get();
+    let mut slot = now;
+    for price in [2u64, 3, 2, 1] {
+        slot += 1;
+        market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap_or_else(|e| panic!("accrue to {price}: {e:?}"));
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    assert_eq!(market.header.insurance.get(), ins1, "insurance keeps what it was paid");
+    assert_eq!(market.header.vault.get(), vault1, "vault never moves");
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}

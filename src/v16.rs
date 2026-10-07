@@ -20568,6 +20568,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let capital_before = account.header.capital.get();
         let c_tot_before = self.header.c_tot.get();
         let vault_before = self.header.vault.get();
+        let insurance_before = self.header.insurance.get();
         let pos = account.header.pnl.get().max(0) as u128;
         // Realize `total` of released source-backed PnL into capital ...
         self.apply_released_pnl_conversion_core_not_atomic(
@@ -20589,6 +20590,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // unchanged, and the account kept no unswept conversion.
         // (A refresh may charge a maintenance/utilisation fee out of capital, so the account's
         // capital may only FALL, and `c_tot` must fall by exactly the same amount.)
+        // W4-1: insurance must have risen by EXACTLY the repaid total. The insurance-credit
+        // branch of the source-credit consumption would debit then re-credit insurance (net
+        // zero), so a repayment funded that way would credit nothing while the wrapper reduces
+        // the receivable in full: refuse it. (Today only a `cfg(kani | fuzz)` writer can reach
+        // that branch; this keeps the path closed if a Live writer is ever added.)
+        if self.header.insurance.get().checked_sub(insurance_before) != Some(total) {
+            return Err(V16Error::InvalidConfig);
+        }
         let capital_after = account.header.capital.get();
         let c_tot_after = self.header.c_tot.get();
         if capital_after > capital_before
