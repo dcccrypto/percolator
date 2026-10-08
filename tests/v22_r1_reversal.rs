@@ -703,10 +703,14 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     // a far larger shortfall in the long domain asks for more than the loser-booked part holds
     let mut sc = w.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
     let claims = sc.fresh_reserved_backing_num + 40_000_000 * 1_000_000_000_000;
+    let added = claims - sc.positive_claim_bound_num;
     sc.positive_claim_bound_num = claims;
     sc.exact_positive_claim_num = claims;
     sc.credit_rate_num = (sc.fresh_reserved_backing_num as u128) * percolator::CREDIT_RATE_SCALE / claims;
     w.markets[0].engine.source_credit_long = percolator::SourceCreditStateV16Account::from_runtime(&sc);
+    w.header.source_claim_bound_total_num = V16PodU128::new(w.header.source_claim_bound_total_num.get() + added);
+    w.header.pnl_pos_bound_tot_num = V16PodU128::new(w.header.pnl_pos_bound_tot_num.get() + added);
+    w.header.pnl_pos_bound_tot = V16PodU128::new(w.header.pnl_pos_bound_tot_num.get() / 1_000_000_000_000);
     {
         let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
         m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
