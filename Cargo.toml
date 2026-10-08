@@ -22,6 +22,11 @@ audit-scan = []  # Enable full account-table invariant scans on public exits
 # v17 fork features (lp_vault module, fork_facade mod, A-4 lifts, A-9 engine mutator) re-grafted onto the
 # frozen zero-copy core; gated so the production frozen surface stays minimal unless the wrapper opts in.
 fork-facade = []
+# S10-X1 dev-only differential monitor: every liquidation fee charge also runs the base path
+# (`charge_account_fee_not_atomic`) from the identical pre-state and compares result and full state.
+x1-diff = []
+# Negative control for the monitor: drops the clamp from the new path (the harness MUST then fail).
+x1-mutant-noclamp = ["x1-diff"]
 
 [profile.release]
 lto = "fat"

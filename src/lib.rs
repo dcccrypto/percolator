@@ -37,6 +37,10 @@ pub const MAX_WARMUP_SLOTS: u64 = u64::MAX;
 pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
 pub const MAX_RECOVERY_FALLBACK_DEVIATION_BPS: u64 = MAX_RESOLVE_PRICE_DEVIATION_BPS;
 
+// S10-X1: the dev-only differential monitor and its negative control must never reach an on-chain build.
+#[cfg(all(target_os = "solana", any(feature = "x1-diff", feature = "x1-mutant-noclamp")))]
+compile_error!("features `x1-diff` / `x1-mutant-noclamp` are test-only and must not be built for target_os = \"solana\"");
+
 /// v2.2 Phase 4 items 1 + 2: pure band / rent arithmetic (see module docs).
 pub mod band_rent;
 #[cfg(kani)]
@@ -52,6 +56,8 @@ mod wide_math;
 
 #[cfg(kani)]
 pub use v16::*;
+#[cfg(all(not(kani), feature = "x1-diff"))]
+pub use v16::x1_diff_stats;
 #[cfg(not(kani))]
 pub use v16::{
     adjust_slot_provider_principal, S10_MAX_MOVES_PER_INSTRUCTION, S10_MIN_MOVE_ATOMS, S10_PROTECT_FULL_PROVIDER_PRINCIPAL,
