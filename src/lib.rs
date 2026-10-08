@@ -52,6 +52,8 @@ mod wide_math;
 
 #[cfg(kani)]
 pub use v16::*;
+#[cfg(all(not(kani), feature = "x1-diff"))]
+pub use v16::x1_diff_stats;
 #[cfg(not(kani))]
 pub use v16::{
     active_bitmap_count_ones, active_bitmap_empty, active_bitmap_get, active_bitmap_is_empty,

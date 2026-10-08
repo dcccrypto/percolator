@@ -329,6 +329,21 @@ fn active_bitmap_with_cleared(
     Ok(bitmap)
 }
 
+#[cfg(feature = "x1-diff")]
+static X1_DIFF_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "x1-diff")]
+static X1_DIFF_CLAMP_FIRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "x1-diff")]
+static X1_DIFF_MISMATCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// S10-X1 dev monitor counters: (fee-charge calls compared, calls where the clamp found a
+/// pending-credit counter above the claims, mismatches against the base path).
+#[cfg(feature = "x1-diff")]
+pub fn x1_diff_stats() -> (u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (X1_DIFF_CALLS.load(Relaxed), X1_DIFF_CLAMP_FIRED.load(Relaxed), X1_DIFF_MISMATCH.load(Relaxed))
+}
+
 #[inline]
 fn liquidation_remaining_active_bitmap_after_close(
     active_bitmap: V16ActiveBitmap,
@@ -20565,6 +20580,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // It cost about 28k CU per leg (a full-account validation plus a second K/F pass), which
         // is what made a many-leg liquidation exceed the 1.4M transaction budget. The
         // after-refresh form below performs the same state transition without it.
+        #[cfg(feature = "x1-diff")]
+        let charged_fee = self.x1_diff_charge(account, fee)?;
+        #[cfg(not(feature = "x1-diff"))]
         let charged_fee = self.charge_account_fee_after_full_refresh_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
@@ -22654,6 +22672,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.settle_negative_pnl_from_principal_core_not_atomic(account)
     }
 
+    // Reference form of the fee charge: not called from production code any more, kept because the
+    // refinement proof of `charge_account_fee_after_full_refresh_not_atomic` (and the `x1-diff`
+    // monitor) needs it. Do not delete.
+    #[allow(dead_code)]
     fn charge_account_fee_after_loss_settlement(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22673,6 +22695,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(charged)
     }
 
+    // See `charge_account_fee_after_loss_settlement`: kept as the reference for the refinement proof.
+    #[allow(dead_code)]
     fn charge_account_fee_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22682,6 +22706,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         self.charge_account_fee_after_loss_settlement(account, requested_fee)
+    }
+
+    /// Dev monitor (`x1-diff`): runs the base fee charge and the new one from the identical
+    /// pre-state and compares the result and the full state (header, every engine asset slot,
+    /// the account). Panics on any difference.
+    #[cfg(feature = "x1-diff")]
+    fn x1_diff_charge(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        requested_fee: u128,
+    ) -> V16Result<u128> {
+        use alloc::vec::Vec;
+        use core::sync::atomic::Ordering::Relaxed;
+        let h0 = *self.header;
+        let e0: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
+        let a0 = *account.header;
+        let r_old = self.charge_account_fee_not_atomic(account, requested_fee);
+        let h_old = *self.header;
+        let e_old: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
+        let a_old = *account.header;
+        *self.header = h0;
+        for (m, e) in self.markets.iter_mut().zip(e0.iter()) {
+            m.engine = *e;
+        }
+        *account.header = a0;
+        let r_new = self.charge_account_fee_after_full_refresh_not_atomic(account, requested_fee);
+        let e_new: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
+        X1_DIFF_CALLS.fetch_add(1, Relaxed);
+        let same = r_old == r_new && (r_old.is_err() || (h_old == *self.header && e_old == e_new && a_old == *account.header));
+        if !same {
+            X1_DIFF_MISMATCH.fetch_add(1, Relaxed);
+            panic!("x1-diff: new fee charge differs from the base path: base {r_old:?} new {r_new:?}");
+        }
+        r_new
     }
 
     /// `charge_account_fee_not_atomic` for a caller that has JUST run
@@ -22705,6 +22763,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
         }
+        // The O(1) scalar preflight the skipped full validation began with.
+        self.validate_account_scalar_preflight(&account.as_view())?;
         let mut last: Option<(usize, usize)> = None;
         let mut last_key = (0usize, 0usize);
         let mut slot = 0usize;
@@ -22716,6 +22776,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if last.is_none() || key > last_key {
                     last_key = key;
                     last = Some((asset_index, slot));
+                }
+                // Every leg apply of the skipped pass ends by clamping the pending-credit counter
+                // of both domains of the leg's asset to that domain's claims. The pass is NOT a
+                // pure identity without it: a later leg's loss can burn claims in an earlier leg's
+                // domain (`decrement_account_source_claim_for_domain_not_atomic` does not clamp),
+                // leaving the counter above the claims. (Security review F2.)
+                for side in [SideV16::Long, SideV16::Short] {
+                    let domain = self.insurance_domain_index(asset_index, side)?;
+                    #[cfg(feature = "x1-diff")]
+                    {
+                        let claims = self.source_credit_for_domain_shape(domain)?.positive_claim_bound_num;
+                        let claims_i = i128::try_from(claims).unwrap_or(i128::MAX);
+                        let (ai, sd) = self.domain_asset_side(domain)?;
+                        let cur = match sd {
+                            SideV16::Long => self.markets[ai].engine_slot().kf_pending_credit_long.get(),
+                            SideV16::Short => self.markets[ai].engine_slot().kf_pending_credit_short.get(),
+                        };
+                        if cur > claims_i {
+                            X1_DIFF_CLAMP_FIRED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    #[cfg(not(feature = "x1-mutant-noclamp"))]
+                    self.clamp_kf_pending_credit_to_claims(domain)?;
                 }
             }
             slot += 1;
