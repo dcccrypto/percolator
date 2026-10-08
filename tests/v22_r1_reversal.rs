@@ -984,3 +984,165 @@ fn provider_worse_off_than_base() {
     }
     println!("PROVWORSE rule_A={} worlds {ran} worlds-where-S10-changed-a-bucket {moved_worlds} provider-domain-cases-worse-than-base {worse} worst-shortfall-atoms {worst}", percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL);
 }
+
+/// One-sided stranding: the maker realises its peak loss alone, the price comes part of the way
+/// back, the trader (still a net winner) settles, then the maker's recovery settle creates a claim
+/// in the OTHER domain. Loser cash then sits in exactly one domain (`src`) and the other (`dst`)
+/// holds no fresh backing at all, only the shortfall. `maker_short` picks which domain is which.
+fn one_sided_stranding(maker_short: bool) -> (World, PortfolioAccountV16Account, usize, usize) {
+    let mut w = World::new_pairs_hmax(&[], 0, 0, PRICE, RATE_E9 as u64, 6_480_000);
+    let mut trader = account(300);
+    let mut maker = w.maker;
+    w.deposit(&mut trader, 1_000_000_000_000_000);
+    let dir: i64 = if maker_short { 150 } else { -150 };
+    if maker_short {
+        w.trade(&mut trader, &mut maker, 400 * POS_SCALE).expect("open");
+    } else {
+        w.trade(&mut maker, &mut trader, 400 * POS_SCALE).expect("open");
+    }
+    for _ in 0..3 { assert!(w.accrue(dir, 0)); }
+    assert!(w.settle(&mut maker)); // the maker realises its peak loss alone
+    assert!(w.accrue(-dir, 0)); // part of the way back: the trader is still a net winner
+    assert!(w.refresh(&mut trader));
+    let (src, dst) = if maker_short { (1, 0) } else { (0, 1) };
+    (w, maker, src, dst)
+}
+
+/// The idle fast path must look at BOTH domains. Loser cash only in the short domain with the
+/// shortfall in the long domain still moves, and so does the mirrored case (loser cash only in
+/// the long domain). A fast path that returns after checking one domain only (reviewer's mutant
+/// M3, long only) sees "long holds no fresh backing" and skips the first; the mirror covers the
+/// short-only variant. Literal atoms, not read from the state under test.
+#[test]
+fn loser_cash_in_one_domain_only_still_moves_to_the_other() {
+    for (maker_short, name) in [(true, "loser cash only in SHORT, shortfall in LONG"), (false, "loser cash only in LONG, shortfall in SHORT")] {
+        let (mut w, mut maker, src, dst) = one_sided_stranding(maker_short);
+        let (src0, dst0) = (fresh(&w, src), fresh(&w, dst));
+        assert_eq!(dst0, 0, "{name}: vacuity: the destination holds no fresh backing before the move");
+        assert_eq!(loser_cash(&w, dst), 0, "{name}: vacuity: no loser cash in the destination");
+        assert!(loser_cash(&w, src) >= 1_000, "{name}: vacuity: loser cash sits in the source ({})", loser_cash(&w, src));
+        assert!(w.refresh(&mut maker), "{name}: the maker's recovery settle");
+        let (src1, dst1) = (fresh(&w, src), fresh(&w, dst));
+        println!("ONESIDED {name}: source {src0} -> {src1}, destination {dst0} -> {dst1}");
+        assert!(dst1 >= 1_000, "{name}: the move reached the destination ({dst0} -> {dst1})");
+        assert_eq!(src0 - src1, dst1 - dst0, "{name}: what left the source arrived in the destination");
+        let want = if maker_short { (18_271_200, 11_997_200, 6_274_000) } else { (17_731_200, 11_997_200, 5_734_000) };
+        assert_eq!((src0, src1, dst1), want, "{name}: literal atoms");
+    }
+}
+
+/// The reviewer's lien-heavy provider world (`ring_world` of the fourth and fifth reviews, the
+/// provider operations limited to the three kinds its default run uses): `ntr` traders against one
+/// maker, a provider with `prov0` atoms in each domain, a zigzag of `legs` legs; after every price
+/// step each account settles with probability `p` percent, trades with `pt` percent, and the
+/// provider withdraws half, deposits 1,000,000 or withdraws a tenth with `pop` percent.
+/// `s10 == false` runs the same world with no move budget anywhere, which is the base engine's
+/// behaviour. Returns, after every operation, `[(fresh, ledger principal); 2]` in atoms.
+fn lien_heavy_provider_world(seed: u64, ntr: usize, legs: usize, p: u64, pt: u64, pop: u64, prov0: u128, s10: bool) -> Vec<[(u128, u128); 2]> {
+    let mut s = seed | 1;
+    let mut rr = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+    let mut w = World::new_pairs(&[], 0, 0);
+    let mut accts: Vec<PortfolioAccountV16Account> = (0..ntr).map(|i| account(200 + i as u32)).collect();
+    let mut sides = vec![];
+    for i in 0..ntr {
+        let _poor = rng(&mut s) % 100; // the generator's poor-account draw (0 percent here)
+        sides.push(rng(&mut s) % 2 == 0);
+        let mut a = accts[i];
+        w.deposit(&mut a, 1_000_000_000_000_000);
+        accts[i] = a;
+    }
+    let mut m = w.maker;
+    for i in 0..ntr {
+        let u = 1 + (rng(&mut s) % 6) as u128;
+        let mut a = accts[i];
+        let _ = if sides[i] { w.trade(&mut a, &mut m, u * 100 * POS_SCALE / 4) } else { w.trade(&mut m, &mut a, u * 100 * POS_SCALE / 4) };
+        accts[i] = a;
+    }
+    let mut prin = [prov0; 2];
+    {
+        let mut g = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        for d in 0..2 { g.deposit_fresh_counterparty_backing_not_atomic(d, prov0, u64::MAX / 2).unwrap(); }
+    }
+    // production budgets: only the refresh crank carries one (and nothing does when `s10` is off)
+    let settle = |w: &mut World, a: &mut PortfolioAccountV16Account| {
+        let slot = w.slot;
+        {
+            let mut g = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+            for d in 0..2 { let _ = g.expire_source_backing_bucket_not_atomic(d, slot); }
+        }
+        let (h, mk, a0) = (w.header, w.markets.clone(), *a);
+        let mut g = if s10 { MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets) } else { MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets) };
+        if g.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a)).is_err() { w.header = h; w.markets = mk; *a = a0; }
+    };
+    let mut trace = Vec::new();
+    let mut dir: i64 = if rng(&mut s) % 2 == 0 { 1 } else { -1 };
+    for _ in 0..legs {
+        let mut left = 150 + (rng(&mut s) % 500) as i64;
+        while left > 0 {
+            let b = left.min(190);
+            left -= b;
+            if !w.accrue(dir * b, 0) { break; }
+            let mut order: Vec<usize> = (0..=ntr).collect();
+            for i in (1..order.len()).rev() { let j = (rng(&mut rr) % (i as u64 + 1)) as usize; order.swap(i, j); }
+            for &k in &order {
+                if rng(&mut rr) % 100 < p {
+                    if k == ntr { let mut mm = m; settle(&mut w, &mut mm); m = mm; } else { let mut a = accts[k]; settle(&mut w, &mut a); accts[k] = a; }
+                    trace.push([(fresh(&w, 0), prin[0]), (fresh(&w, 1), prin[1])]);
+                }
+                let d2 = rng(&mut rr) % 100;
+                if k < ntr && d2 < pt {
+                    let u = 1 + (rng(&mut rr) % 4) as u128;
+                    let mut a = accts[k];
+                    let _ = if sides[k] { w.trade(&mut a, &mut m, u * 100 * POS_SCALE / 4) } else { w.trade(&mut m, &mut a, u * 100 * POS_SCALE / 4) };
+                    accts[k] = a;
+                    trace.push([(fresh(&w, 0), prin[0]), (fresh(&w, 1), prin[1])]);
+                }
+                if rng(&mut rr) % 100 < pop {
+                    let d = (rng(&mut rr) % 2) as usize;
+                    let kind = rng(&mut rr) % 3;
+                    let snap = (w.header, w.markets.clone());
+                    let mut g = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+                    let (amt, deposit) = match kind { 0 => (prin[d] / 2 + 1, false), 1 => (1_000_000, true), _ => ((prin[d] / 10).max(1), false) };
+                    let ok = if deposit { g.deposit_fresh_counterparty_backing_not_atomic(d, amt, u64::MAX / 2).is_ok() } else { g.withdraw_fresh_counterparty_backing_not_atomic(d, amt).is_ok() };
+                    if ok { if deposit { prin[d] += amt } else { prin[d] -= amt } } else { w.header = snap.0; w.markets = snap.1; }
+                    trace.push([(fresh(&w, 0), prin[0]), (fresh(&w, 1), prin[1])]);
+                }
+            }
+        }
+        dir = -dir;
+    }
+    trace
+}
+
+/// CHARACTERISATION of the accepted rule-A residual (reviewer's seed 3000121; 4 traders, 8 legs,
+/// P=60, PT=30, POP=15, 20M per domain). This test asserts TODAY's behaviour, which is a known
+/// cost, not a property anyone wants: rule A protects the provider's principal AT MOVE TIME only.
+/// At operation 82 a move takes 2,441,725 atoms of loser cash out of the long bucket (10,124,675
+/// fresh against a 2,925,000 principal: allowed, fresh stays above principal). Claims keep
+/// consuming that bucket identically on both engines, and at operation 113 the provider's bucket
+/// holds 3,257,400 against a ledger principal of 3,632,500: 375,100 atoms (10 percent) short,
+/// where the base engine, which kept the loser cash as a cushion, holds 5,699,125.
+///
+/// Accepted residual pending the founder's rule-A decision (rule A versus "never worse than
+/// base", i.e. no move out of a bucket in which a provider holds principal). A change of rule
+/// must show up here as a change to this test.
+#[test]
+fn rule_a_residual_provider_ends_short_of_principal_where_base_stays_above_seed_3000121() {
+    let s10 = lien_heavy_provider_world(3_000_121, 4, 8, 60, 30, 15, 20_000_000, true);
+    let base = lien_heavy_provider_world(3_000_121, 4, 8, 60, 30, 15, 20_000_000, false);
+    assert!(s10.len() >= 113 && base.len() >= 113, "vacuity: the world ran ({} / {} operations)", s10.len(), base.len());
+    // operations are 1-based in the reviewer's traces (`tr_s10.txt`, `tr_base.txt`)
+    let (op81, op82, op113) = (80, 81, 112);
+    // identical up to the move
+    assert_eq!(s10[op81], base[op81], "both engines agree until the move");
+    assert_eq!(s10[op81][0], (10_124_675, 2_925_000));
+    // the move: 2,441,725 of loser cash leaves the long bucket, which stays above its principal
+    assert_eq!(s10[op82][0], (7_682_950, 2_925_000), "S10 moved 2,441,725 out, fresh still above principal");
+    assert_eq!(base[op82][0], (10_124_675, 2_925_000), "the base engine moved nothing");
+    // later consumption: the provider is short on S10 and not on base
+    assert_eq!(s10[op113][0], (3_257_400, 3_632_500), "S10: fresh 375,100 below the ledger principal");
+    assert_eq!(base[op113][0], (5_699_125, 3_632_500), "base: fresh above the ledger principal");
+    let (f, p) = s10[op113][0];
+    assert_eq!(p - f, 375_100, "the accepted residual, in atoms");
+    assert!(base[op113][0].0 >= base[op113][0].1, "base stays above");
+}
