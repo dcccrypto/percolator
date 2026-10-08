@@ -205,7 +205,7 @@ impl World {
 
     fn refresh(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
-        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
         let r = m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(acct));
         let ok = r.is_ok();
         if !ok {
@@ -307,6 +307,14 @@ fn i457_every_peak_crank_pattern_gives_the_exact_result() {
 }
 
 fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: bool) -> Vec<u128> {
+    run_resolved_model(peak_cranks, close_order, reverse_first, false)
+}
+
+/// PRODUCTION budget model: only a refresh crank (`World::settle` / `World::refresh`) carries the
+/// S10 move budget. Trades, accrual, `resolve_market` and the Resolved close run through a default
+/// view (budget 0), exactly as the program does. `cohort_refresh_before_resolve`: the keeper's
+/// refresh cranks settle every account at the final price before the market resolves.
+fn run_resolved_model(peak_cranks: &[usize], close_order: &[usize], reverse_first: bool, cohort_refresh_before_resolve: bool) -> Vec<u128> {
     let mut w = World::new_pairs(&[], 0, 0);
     let mut acts = [account(10), account(11), account(12), w.maker];
     for i in 0..3 { let mut a = acts[i]; w.deposit(&mut a, 1_000 * U); acts[i] = a; }
@@ -319,6 +327,9 @@ fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: boo
     steps(&mut w, 1_140_000);
     for &i in peak_cranks { let mut a = acts[i]; assert!(w.settle(&mut a)); acts[i] = a; }
     if reverse_first { steps(&mut w, 855_000); }
+    if cohort_refresh_before_resolve {
+        for i in 0..4 { let mut a = acts[i]; assert!(w.settle(&mut a)); acts[i] = a; }
+    }
     let slot = w.slot + 1;
     let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.resolve_market_not_atomic(slot).unwrap();
@@ -338,40 +349,22 @@ fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: boo
 
 /// All 16 crank masks over {actor 0, 1, 2, maker} at the peak: the FACE equity (capital + pnl) is
 /// exact in every one (the pre-R1 engine is wrong in 4 of them, e.g. {0,1,2}: -700.000 destroyed),
-/// actor 0 ends with capital 347.302 and no negative pnl, and nothing is destroyed.
-///
-/// The EFFECTIVE (certified, haircut) equity is exact in 9 masks and NOT in the 7 where a
-/// loser-side account (actor 2 or the maker) is cranked at the peak while the longs are not (S10):
-/// the backing its realised loss left in the short-loser domain has no claimant (the longs' peak
-/// gain reversed before they settled), so the claims the reversal creates in the other domain are
-/// only partly backed. Those 7 results are pinned so any change to that class is deliberate.
+/// actor 0 ends with capital 347.302 and no negative pnl, nothing is destroyed, AND (S10 fix) the
+/// EFFECTIVE (certified) equity equals the face equity in all 16. Before the S10 fix it was exact
+/// in 9 and short in the 7 masks where a loser-side account (actor 2 or the maker) is cranked at
+/// the peak while the longs are not: the backing its realised loss left in the short-loser domain
+/// had no claimant (the longs' peak gain reversed before they settled), so the claims the reversal
+/// creates in the other domain were only partly backed (maker alone: +593.1 instead of +725.2).
 #[test]
-fn i457_all_sixteen_crank_masks_are_exact_in_face_terms() {
+fn i457_all_sixteen_crank_masks_are_exact_in_face_and_effective_terms() {
     const FACE: [i128; 4] = [-652_698_000, -290_088_000, 217_566_000, 725_220_000];
-    // masks whose effective equity differs from the face equity: (mask, actor 2 eff, maker eff)
-    const STRANDED: [(u32, i128, i128); 7] = [
-        (4, 139_677_423, 593_108_576),
-        (8, 124_859_950, 117_926_049),
-        (9, 208_295_395, 664_490_604),
-        (10, 161_942_370, 360_843_629),
-        (12, 7_565_999, 25_219_999),
-        (13, 152_950_615, 509_835_384),
-        (14, 72_181_384, 240_604_615),
-    ];
     for mask in 0u32..16 {
         let peak: Vec<usize> = (0..4).filter(|i| mask >> i & 1 == 1).collect();
         let (ch, a0, eff, sum) = run(&peak);
         assert_eq!(ch, FACE, "mask {mask}: face equity");
         assert_eq!(sum, 0, "mask {mask}: nothing destroyed in face terms");
         assert_eq!(a0, (347_302_000, 0), "mask {mask}: actor 0 capital and pnl");
-        match STRANDED.iter().find(|x| x.0 == mask) {
-            None => assert_eq!(eff, FACE, "mask {mask}: effective equity exact"),
-            Some(&(_, a2, mk)) => {
-                assert_eq!((eff[0], eff[1]), (FACE[0], FACE[1]), "mask {mask}: longs exact");
-                assert_eq!((eff[2], eff[3]), (a2, mk), "mask {mask}: pinned stranded-backing class");
-                assert!(eff[2] + eff[3] < FACE[2] + FACE[3], "mask {mask}: effective is below face, never above");
-            }
-        }
+        assert_eq!(eff, FACE, "mask {mask}: effective equity exact");
     }
 }
 
@@ -388,14 +381,37 @@ fn i457_resolved_close_order_does_not_change_payouts() {
     }
 }
 
-/// S10 is permanent, not a Live liquidity haircut: at Resolved the stranded backing does not come
-/// back to the loser (it has no claimant and no junior claim covers it). Pinned for the maker-only
-/// and actor-2-only peak cranks; the all-cranked and nobody-cranked payouts are the ideal.
+/// S10 is a LIVE repair only. The Resolved close carries no move budget, so backing a loser
+/// stranded at the peak that no refresh crank moved before the market resolved stays stranded and
+/// the Resolved payouts are the BASE engine's (release/v22-engine-rem 8e5a8c8f), not the ideal:
+/// maker-alone peak crank pays the maker 117.926 instead of 725.220 and actor 2 1,124.860 instead
+/// of 1,217.566. Pinned so nobody reads the Live exactness tests as a Resolved guarantee.
 #[test]
-fn i457_resolved_stranded_backing_is_not_returned() {
+fn i457_resolved_close_alone_repairs_nothing() {
+    const IDEAL: [u128; 4] = [347_302_000, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
+    const BASE_MAKER_ALONE: [u128; 4] = [347_302_000, 709_912_000, 1_124_859_950, 1_000_000_117_926_049];
+    for order in [[0usize, 1, 2, 3], [3, 2, 1, 0]] {
+        assert_eq!(run_resolved(&[3], &order, true), BASE_MAKER_ALONE, "maker-alone peak crank, close order {order:?}");
+    }
+    // nothing stranded (nobody, or everybody, cranked at the peak): the ideal, as on base
+    for peak in [vec![], vec![0, 1, 2, 3]] {
+        assert_eq!(run_resolved(&peak, &[0, 1, 2, 3], true), IDEAL, "peak {peak:?}");
+    }
+    // and in every stranded subset no account is paid above the ideal
+    for peak in [vec![3], vec![2], vec![2, 3], vec![0, 3]] {
+        let paid = run_resolved(&peak, &[0, 1, 2, 3], true);
+        assert!(paid.iter().zip(IDEAL.iter()).all(|(p, i)| p <= i), "peak {peak:?}: {paid:?} above the ideal");
+    }
+}
+
+/// What does reach a Resolved market: a repair made while it was still Live. When the keeper's
+/// refresh cranks settle the whole cohort at the final price before resolution, the move fires in
+/// Live and every peak-crank subset then pays the ideal at Resolved, in both close orders.
+#[test]
+fn i457_resolved_pays_the_ideal_when_a_refresh_cohort_completed_before_resolution() {
     let ideal = vec![347_302_000u128, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
-    assert_eq!(run_resolved(&[], &[0, 1, 2, 3], true), ideal);
-    assert_eq!(run_resolved(&[0, 1, 2, 3], &[0, 1, 2, 3], true), ideal);
-    assert_eq!(run_resolved(&[3], &[0, 1, 2, 3], true), vec![347_302_000, 709_912_000, 1_124_859_950, 1_000_000_117_926_049]);
-    assert_eq!(run_resolved(&[2], &[0, 1, 2, 3], true), vec![347_302_000, 709_912_000, 1_139_677_423, 1_000_000_593_108_576]);
+    for peak in [vec![], vec![0, 1, 2, 3], vec![3], vec![2], vec![2, 3], vec![0, 3]] {
+        assert_eq!(run_resolved_model(&peak, &[0, 1, 2, 3], true, true), ideal, "peak {peak:?}");
+        assert_eq!(run_resolved_model(&peak, &[3, 2, 1, 0], true, true), ideal, "peak {peak:?} reverse close order");
+    }
 }
