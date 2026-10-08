@@ -23057,10 +23057,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let h0 = *self.header;
         let e0: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         let a0 = *account.header;
+        // #287 view fields (review N4): neither fee path may spend or deny the S10 move budget.
+        let s0 = (self.s10_moves_left, self.s10_grant_denied);
         let r_old = self.charge_account_fee_not_atomic(account, requested_fee);
         let h_old = *self.header;
         let e_old: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         let a_old = *account.header;
+        let s_old = (self.s10_moves_left, self.s10_grant_denied);
+        self.s10_moves_left = s0.0;
+        self.s10_grant_denied = s0.1;
         *self.header = h0;
         for (m, e) in self.markets.iter_mut().zip(e0.iter()) {
             m.engine = *e;
@@ -23069,7 +23074,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let r_new = self.charge_account_fee_after_full_refresh_not_atomic(account, requested_fee);
         let e_new: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         X1_DIFF_CALLS.fetch_add(1, Relaxed);
-        let same = r_old == r_new && (r_old.is_err() || (h_old == *self.header && e_old == e_new && a_old == *account.header));
+        let s_new = (self.s10_moves_left, self.s10_grant_denied);
+        let same = r_old == r_new
+            && s_old == s_new
+            && (r_old.is_err() || (h_old == *self.header && e_old == e_new && a_old == *account.header));
         if !same {
             X1_DIFF_MISMATCH.fetch_add(1, Relaxed);
             panic!("x1-diff: new fee charge differs from the base path: base {r_old:?} new {r_new:?}");
