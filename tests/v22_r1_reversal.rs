@@ -78,7 +78,7 @@ impl World {
             w.traders.push(s);
         }
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
             if ins_long != 0 {
                 m.deposit_domain_insurance_not_atomic(0, ins_long).unwrap();
             }
@@ -90,7 +90,7 @@ impl World {
     }
 
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
         if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
     }
@@ -128,7 +128,7 @@ impl World {
         size: u128,
     ) -> Result<(), percolator::V16Error> {
         let price = self.price();
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
@@ -148,7 +148,7 @@ impl World {
         let new = (old + old * dp_bps as i128 / 10_000).max(1) as u64;
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -187,7 +187,7 @@ impl World {
         }
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -202,7 +202,7 @@ impl World {
     fn settle(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let slot = self.slot;
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
             for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         self.refresh(acct)
@@ -222,7 +222,7 @@ impl World {
     }
 
     fn validate(&mut self, extra: &mut [PortfolioAccountV16Account]) {
-        let m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.validate_shape().unwrap();
         PortfolioV16ViewMut::new(&mut self.maker)
             .validate_with_market(&m.as_view())
@@ -491,7 +491,7 @@ fn provider_principal_never_moves_when_a_winner_settles_first() {
     w.trade(&mut t, &mut maker, 400 * POS_SCALE).expect("open");
     let prov: u128 = 50_000_000;
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap();
     }
     assert_eq!((fresh(&w, 0), loser_cash(&w, 0)), (prov, 0), "a deposit is not loser-booked backing");
@@ -503,7 +503,7 @@ fn provider_principal_never_moves_when_a_winner_settles_first() {
     assert!(w.settle(&mut maker));
     assert_eq!(fresh(&w, 0), prov);
     assert_eq!(loser_cash(&w, 1), fresh(&w, 1), "everything in the short bucket is loser-booked");
-    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.withdraw_fresh_counterparty_backing_not_atomic(0, prov).expect("the provider withdraws all of its principal");
 }
 
@@ -517,11 +517,11 @@ fn provider_principal_is_fully_recoverable_after_resolved_close() {
         w.deposit(&mut t, 1_000_000_000_000_000);
         w.trade(&mut t, &mut maker, 400 * POS_SCALE).expect("open");
         let prov: u128 = 50_000_000;
-        { let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets); m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap(); }
+        { let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets); m.deposit_fresh_counterparty_backing_not_atomic(0, prov, u64::MAX / 2).unwrap(); }
         for _ in 0..3 { assert!(w.accrue(150, 0)); }
         assert!(w.settle(&mut t));
         let slot = w.slot + 1;
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.resolve_market_not_atomic(slot).unwrap();
         let mut accts = [t, maker];
         let mut paid = [0u128; 2];
@@ -565,7 +565,7 @@ fn the_providers_share_of_every_bucket_is_never_below_its_ledger_share() {
             accts[k] = a;
         }
         {
-            let mut mg = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+            let mut mg = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
             mg.deposit_fresh_counterparty_backing_not_atomic(0, 20_000_000, u64::MAX / 2).unwrap();
             mg.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, u64::MAX / 2).unwrap();
         }
@@ -585,7 +585,7 @@ fn the_providers_share_of_every_bucket_is_never_below_its_ledger_share() {
             chk(&w, &mut checks);
         }
         if (fresh(&w, 0), fresh(&w, 1)) != before { moved_worlds += 1; }
-        let mut mg = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut mg = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         mg.validate_shape().unwrap();
     }
     println!("RINGCHK checks {checks} worlds-where-fresh-backing-changed {moved_worlds}");
@@ -688,7 +688,7 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
     let prov: u128 = 20_000_000;
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.deposit_fresh_counterparty_backing_not_atomic(1, prov, u64::MAX / 2).unwrap();
     }
     for _ in 0..3 { assert!(w.accrue(150, 0)); }
@@ -713,7 +713,7 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     }
     assert!(fresh(&w, 1) >= prov, "an oversized shortfall still leaves the provider's principal ({} < {prov})", fresh(&w, 1));
     assert!(loser_cash(&w, 1) <= fresh(&w, 1) - prov);
-    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.withdraw_fresh_counterparty_backing_not_atomic(1, prov).expect("the provider withdraws all of its principal");
 }
 
@@ -766,13 +766,13 @@ fn a_lapsed_empty_bucket_resets_the_provider_mirror() {
     w.deposit(&mut long, 1_000_000_000_000_000);
     w.trade(&mut long, &mut maker, 400 * POS_SCALE).expect("open");
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.deposit_fresh_counterparty_backing_not_atomic(1, 20_000_000, w.slot + 2).unwrap();
     }
     for _ in 0..4 { assert!(w.accrue(10, 0)); }
     {
         let slot = w.slot;
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
         m.expire_source_backing_bucket_not_atomic(1, slot).unwrap();
     }
     assert_eq!(fresh(&w, 1), 0, "the provider's bucket lapsed");
@@ -829,6 +829,53 @@ fn the_refresh_crank_grants_itself_the_budget() {
         .expect("refresh crank");
     }
     assert!(fresh(&w, 1) < before, "the refresh crank moved the stranded backing");
+}
+
+/// A view denied the grant (`deny_s10_budget`, the wrapper's tag-77 inline refreshes) moves
+/// nothing even through the Refresh crank, the crank still succeeds, and the next ordinary
+/// refresh crank of the asset picks the move up.
+#[test]
+fn a_denied_view_gets_no_budget_from_the_refresh_crank() {
+    let (mut w, mut maker, _l) = stranded_world(6_480_000);
+    let before = fresh(&w, 1);
+    let crank = |w: &mut World, maker: &mut PortfolioAccountV16Account, deny: bool| {
+        let (price, now) = (w.price(), w.slot + 1);
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        if deny { m.deny_s10_budget(); }
+        m.permissionless_crank_not_atomic(
+            &mut PortfolioV16ViewMut::new(maker),
+            percolator::PermissionlessCrankRequestV16 {
+                now_slot: now,
+                asset_index: 0,
+                effective_price: price,
+                funding_rate_e9: 0,
+                action: percolator::PermissionlessCrankActionV16::Refresh,
+            },
+        )
+        .expect("refresh crank");
+    };
+    crank(&mut w, &mut maker, true);
+    assert_eq!(fresh(&w, 1), before, "a denied view moves nothing");
+    crank(&mut w, &mut maker, false);
+    assert!(fresh(&w, 1) < before, "the next ordinary refresh crank of the already-settled leg moves it");
+}
+
+/// The shipped default is rule A: the provider's FULL ledger principal is protected. Pinned on the
+/// constant and on the behaviour of the default path (`s10_provider_fresh_for_test` is what the
+/// move uses): with part of the principal consumed, impaired and liened the protected share is
+/// still the whole principal, not the rule-B remainder. Flipping the constant fails this test.
+#[test]
+fn the_default_provider_rule_is_rule_a_full_principal() {
+    assert!(percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL, "default rule is A");
+    let w = World::new_pairs(&[], 0, 0);
+    let mut b = w.markets[0].engine.backing_long.try_to_runtime().unwrap();
+    b.consumed_liened_backing_num = 2_000;
+    b.impaired_liened_backing_num = 300;
+    b.valid_liened_backing_num = 70;
+    type V<'a> = MarketGroupV16ViewMut<'a, u64>;
+    assert_eq!(V::s10_provider_fresh_for_test(10_000, b), 10_000, "default path protects the full principal");
+    assert_eq!(V::s10_provider_fresh_for_test(10_000, b), V::s10_provider_fresh_by_rule_for_test(true, 10_000, b));
+    assert_ne!(V::s10_provider_fresh_for_test(10_000, b), V::s10_provider_fresh_by_rule_for_test(false, 10_000, b), "rule B would protect 7,630");
 }
 
 /// The principal mirror goes down on a provider withdrawal (a withdrawal must not leave the

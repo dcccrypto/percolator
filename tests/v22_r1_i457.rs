@@ -73,7 +73,7 @@ impl World {
             w.traders.push(s);
         }
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
             if ins_long != 0 {
                 m.deposit_domain_insurance_not_atomic(0, ins_long).unwrap();
             }
@@ -85,7 +85,7 @@ impl World {
     }
 
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
         if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
     }
@@ -123,7 +123,7 @@ impl World {
         size: u128,
     ) -> Result<(), percolator::V16Error> {
         let price = self.price();
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
@@ -143,7 +143,7 @@ impl World {
         let new = (old + old * dp_bps as i128 / 10_000).max(1) as u64;
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -182,7 +182,7 @@ impl World {
         }
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -197,7 +197,7 @@ impl World {
     fn settle(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let slot = self.slot;
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
             for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         self.refresh(acct)
@@ -217,7 +217,7 @@ impl World {
     }
 
     fn validate(&mut self, extra: &mut [PortfolioAccountV16Account]) {
-        let m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.validate_shape().unwrap();
         PortfolioV16ViewMut::new(&mut self.maker)
             .validate_with_market(&m.as_view())
@@ -307,6 +307,14 @@ fn i457_every_peak_crank_pattern_gives_the_exact_result() {
 }
 
 fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: bool) -> Vec<u128> {
+    run_resolved_model(peak_cranks, close_order, reverse_first, false)
+}
+
+/// PRODUCTION budget model: only a refresh crank (`World::settle` / `World::refresh`) carries the
+/// S10 move budget. Trades, accrual, `resolve_market` and the Resolved close run through a default
+/// view (budget 0), exactly as the program does. `cohort_refresh_before_resolve`: the keeper's
+/// refresh cranks settle every account at the final price before the market resolves.
+fn run_resolved_model(peak_cranks: &[usize], close_order: &[usize], reverse_first: bool, cohort_refresh_before_resolve: bool) -> Vec<u128> {
     let mut w = World::new_pairs(&[], 0, 0);
     let mut acts = [account(10), account(11), account(12), w.maker];
     for i in 0..3 { let mut a = acts[i]; w.deposit(&mut a, 1_000 * U); acts[i] = a; }
@@ -319,8 +327,11 @@ fn run_resolved(peak_cranks: &[usize], close_order: &[usize], reverse_first: boo
     steps(&mut w, 1_140_000);
     for &i in peak_cranks { let mut a = acts[i]; assert!(w.settle(&mut a)); acts[i] = a; }
     if reverse_first { steps(&mut w, 855_000); }
+    if cohort_refresh_before_resolve {
+        for i in 0..4 { let mut a = acts[i]; assert!(w.settle(&mut a)); acts[i] = a; }
+    }
     let slot = w.slot + 1;
-    let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+    let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
     m.resolve_market_not_atomic(slot).unwrap();
     let mut paid = vec![0u128; 4];
     let mut closed = [false; 4];
@@ -370,14 +381,37 @@ fn i457_resolved_close_order_does_not_change_payouts() {
     }
 }
 
-/// S10 at Resolved: the stranded backing a loser realised at the peak is returned to its claims
-/// when the market closes, so every peak-crank subset pays the ideal (before the S10 fix the
-/// maker-alone peak crank paid 117.926 instead of 725.220 and actor-2-alone 1139.677 vs 1217.566).
+/// S10 is a LIVE repair only. The Resolved close carries no move budget, so backing a loser
+/// stranded at the peak that no refresh crank moved before the market resolved stays stranded and
+/// the Resolved payouts are the BASE engine's (release/v22-engine-rem 8e5a8c8f), not the ideal:
+/// maker-alone peak crank pays the maker 117.926 instead of 725.220 and actor 2 1,124.860 instead
+/// of 1,217.566. Pinned so nobody reads the Live exactness tests as a Resolved guarantee.
 #[test]
-fn i457_resolved_stranded_backing_is_returned() {
+fn i457_resolved_close_alone_repairs_nothing() {
+    const IDEAL: [u128; 4] = [347_302_000, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
+    const BASE_MAKER_ALONE: [u128; 4] = [347_302_000, 709_912_000, 1_124_859_950, 1_000_000_117_926_049];
+    for order in [[0usize, 1, 2, 3], [3, 2, 1, 0]] {
+        assert_eq!(run_resolved(&[3], &order, true), BASE_MAKER_ALONE, "maker-alone peak crank, close order {order:?}");
+    }
+    // nothing stranded (nobody, or everybody, cranked at the peak): the ideal, as on base
+    for peak in [vec![], vec![0, 1, 2, 3]] {
+        assert_eq!(run_resolved(&peak, &[0, 1, 2, 3], true), IDEAL, "peak {peak:?}");
+    }
+    // and in every stranded subset no account is paid above the ideal
+    for peak in [vec![3], vec![2], vec![2, 3], vec![0, 3]] {
+        let paid = run_resolved(&peak, &[0, 1, 2, 3], true);
+        assert!(paid.iter().zip(IDEAL.iter()).all(|(p, i)| p <= i), "peak {peak:?}: {paid:?} above the ideal");
+    }
+}
+
+/// What does reach a Resolved market: a repair made while it was still Live. When the keeper's
+/// refresh cranks settle the whole cohort at the final price before resolution, the move fires in
+/// Live and every peak-crank subset then pays the ideal at Resolved, in both close orders.
+#[test]
+fn i457_resolved_pays_the_ideal_when_a_refresh_cohort_completed_before_resolution() {
     let ideal = vec![347_302_000u128, 709_912_000, 1_217_566_000, 1_000_000_725_220_000];
     for peak in [vec![], vec![0, 1, 2, 3], vec![3], vec![2], vec![2, 3], vec![0, 3]] {
-        assert_eq!(run_resolved(&peak, &[0, 1, 2, 3], true), ideal, "peak {peak:?}");
-        assert_eq!(run_resolved(&peak, &[3, 2, 1, 0], true), ideal, "peak {peak:?} reverse close order");
+        assert_eq!(run_resolved_model(&peak, &[0, 1, 2, 3], true, true), ideal, "peak {peak:?}");
+        assert_eq!(run_resolved_model(&peak, &[3, 2, 1, 0], true, true), ideal, "peak {peak:?} reverse close order");
     }
 }

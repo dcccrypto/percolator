@@ -70,7 +70,7 @@ impl World {
             w.traders.push(s);
         }
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
             if ins_long != 0 {
                 m.deposit_domain_insurance_not_atomic(0, ins_long).unwrap();
             }
@@ -82,7 +82,7 @@ impl World {
     }
 
     fn deposit(&mut self, acct: &mut PortfolioAccountV16Account, amount: u128) {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         let a0 = *acct;
         if m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(acct), amount).is_err() { *acct = a0; }
     }
@@ -120,7 +120,7 @@ impl World {
         size: u128,
     ) -> Result<(), percolator::V16Error> {
         let price = self.price();
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
             &mut PortfolioV16ViewMut::new(long),
             &mut PortfolioV16ViewMut::new(short),
@@ -140,7 +140,7 @@ impl World {
         let new = (old + old * dp_bps as i128 / 10_000).max(1) as u64;
         let slot = self.slot + 1;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_to_not_atomic(0, slot, new, rate, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -179,7 +179,7 @@ impl World {
         }
         let now = self.slot + n;
         let (h, mk) = (self.header, self.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         if m.accrue_asset_path_to_not_atomic(0, now, target, &steps, true).is_err() {
             self.header = h;
             self.markets = mk;
@@ -194,7 +194,7 @@ impl World {
     fn settle(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let slot = self.slot;
         {
-            let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+            let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
             for d in 0..2 { let _ = m.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         self.refresh(acct)
@@ -214,7 +214,7 @@ impl World {
     }
 
     fn validate(&mut self, extra: &mut [PortfolioAccountV16Account]) {
-        let m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
+        let m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
         m.validate_shape().unwrap();
         PortfolioV16ViewMut::new(&mut self.maker)
             .validate_with_market(&m.as_view())

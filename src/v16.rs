@@ -5711,6 +5711,10 @@ pub struct MarketGroupV16ViewMut<'a, T> {
     /// (measured, flat in the number of legs); an 11-leg liquidation crank is 1,375,975 CU of 1.4M
     /// and an 11-leg batch about 1.33M, so no firing may be added on those paths.
     s10_moves_left: u8,
+    /// S10: set by `deny_s10_budget`; a Refresh crank through this view then grants itself
+    /// nothing. For a refresh that is only the prelude of a heavier instruction (the wrapper's
+    /// tag-77 redemption refreshes up to two 14-leg accounts inline at about 1.25M CU).
+    s10_grant_denied: bool,
 }
 
 /// Moves the refresh crank may fire per instruction (+33k CU each).
@@ -5761,13 +5765,22 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets, s10_moves_left: 0 }
+        Self { header, markets, s10_moves_left: 0, s10_grant_denied: false }
     }
 
     /// A view that carries the S10 refresh-crank budget (what `permissionless_crank_not_atomic`
-    /// grants itself on a Refresh action). Used by the wrapper's refresh-type handlers and tests.
+    /// grants itself on a Refresh action). TEST MODEL ONLY: the program never calls it (the
+    /// wrapper builds every view with `new`); a test uses it for an operation that production runs
+    /// as a Refresh crank and for nothing else.
     pub fn new_crank(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets, s10_moves_left: S10_MAX_MOVES_PER_INSTRUCTION }
+        Self { header, markets, s10_moves_left: S10_MAX_MOVES_PER_INSTRUCTION, s10_grant_denied: false }
+    }
+
+    /// S10: this view never moves backing, not even from a Refresh crank run through it. For an
+    /// instruction that runs refreshes as its own prelude and has no compute to spare.
+    pub fn deny_s10_budget(&mut self) {
+        self.s10_grant_denied = true;
+        self.s10_moves_left = 0;
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -8540,15 +8553,15 @@ pub struct EngineAssetSlotV16Account {
     pub kf_pending_credit_short: V16PodI128,
     /// S10 provider ledger (appended LAST, +32 B per slot): per source domain (long, short), in
     /// `BOUND_SCALE` units, the provider principal currently deposited in that domain's backing
-    /// bucket: `+` by `deposit_fresh_counterparty_backing_not_atomic`, `-` (saturating) by
-    /// `withdraw_fresh_counterparty_backing_not_atomic`, zero when the bucket is wholly empty.
-    /// It mirrors the wrapper's `BackingDomainLedger.total_principal_atoms`. The part of the
-    /// bucket the provider still owns is `provider_fresh = principal - consumed - impaired -
-    /// valid_liened` (exactly the wrapper ledger's `available = principal - (loss - recovery)`
-    /// with loss = consumed + impaired), and ONLY fresh backing above that may be moved by the S10
-    /// rebalance. Engine and wrapper therefore agree on who owns every atom of a bucket at every
-    /// step: consumption lowers `provider_fresh` (provider loss), a receivable refill raises it
-    /// (provider recovery), a deposit raises both principal and fresh, a lien moves it out of fresh.
+    /// bucket. Written ONLY through `adjust_slot_provider_principal` (the engine's provider
+    /// deposit and withdraw, and the wrapper's `vault_pot_owned_adjust` for every Earn / LP-vault
+    /// pot funding and draw), plus the wholly-empty reset and the activation reset. It mirrors the
+    /// wrapper's ledger principal for the domain. The S10 rebalance may move only fresh backing
+    /// ABOVE the protected share: under the default rule A the whole mirror (`provider_fresh =
+    /// principal`), under rule B `principal - consumed - impaired - valid_liened`
+    /// (`S10_PROTECT_FULL_PROVIDER_PRINCIPAL`). The protection holds AT MOVE TIME: loser cash that
+    /// has moved out no longer cushions the provider against later claim consumption of the same
+    /// bucket, so a provider can end below where the base engine would have left it.
     pub provider_principal_long: V16PodU128,
     pub provider_principal_short: V16PodU128,
 }
@@ -15083,6 +15096,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.s10_moves_left == 0 {
             return Ok(());
         }
+        // idle fast path, on the raw slot (no bucket decode, no domain lookup): a domain holds
+        // loser cash only if it holds fresh backing (rule A: fresh backing above the principal
+        // mirror). When neither does, both passes below would `continue` at their first check.
+        // Measured: the decoded path cost about 775 CU per settled leg of an idle asset.
+        {
+            let slot = self.markets.get(asset_index).ok_or(V16Error::InvalidLeg)?.engine_slot();
+            let no_loser_cash = |fresh: u128, principal: u128| {
+                fresh == 0 || (S10_PROTECT_FULL_PROVIDER_PRINCIPAL && fresh <= principal)
+            };
+            if no_loser_cash(
+                slot.backing_long.fresh_unliened_backing_num.get(),
+                slot.provider_principal_long.get(),
+            ) && no_loser_cash(
+                slot.backing_short.fresh_unliened_backing_num.get(),
+                slot.provider_principal_short.get(),
+            ) {
+                return Ok(());
+            }
+        }
         let now = self.header.current_slot.get();
         let long = self.insurance_domain_index(asset_index, SideV16::Long)?;
         let short = self.insurance_domain_index(asset_index, SideV16::Short)?;
@@ -18115,7 +18147,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         // S10: the refresh crank is the ONLY entry point that grants itself a move budget
-        if matches!(request.action, PermissionlessCrankActionV16::Refresh) {
+        if matches!(request.action, PermissionlessCrankActionV16::Refresh) && !self.s10_grant_denied {
             self.s10_moves_left = S10_MAX_MOVES_PER_INSTRUCTION;
         }
         let protective_progress = match request.action {
