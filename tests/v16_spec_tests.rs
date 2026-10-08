@@ -14756,10 +14756,10 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
         .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
         .unwrap();
     // trades carry no S10 budget; the reversal settles as a crank would, with one
-    market.set_s10_moves_left_for_test(percolator::S10_MAX_MOVES_PER_INSTRUCTION);
-    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let mut s10_budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+    market.full_account_refresh_with_s10_budget_not_atomic(&mut short, &mut s10_budget).unwrap();
     let cert = market
-        .full_account_refresh_not_atomic(&mut long)
+        .full_account_refresh_with_s10_budget_not_atomic(&mut long, &mut s10_budget)
         .expect("a mark reversal must settle even when the prior positive claim backed IM");
 
     // After the reversal (and the 2,624-atom move the settlement itself made) the short bucket
@@ -14779,7 +14779,7 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
     sc.exact_positive_claim_num = claims;
     sc.credit_rate_num = sc.fresh_reserved_backing_num * CREDIT_RATE_SCALE / claims;
     market.markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&sc);
-    market.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+    market.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut s10_budget).unwrap();
     let after = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
     // rule A (default): the provider's full 100,000 principal is protected, nothing moves;
     // rule B: provider_fresh = 100,000 - 2,376, so exactly the 2,376 atoms of loser cash move

@@ -202,8 +202,9 @@ impl World {
 
     fn refresh(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
-        let r = m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(acct));
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        let r = m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(acct), &mut budget);
         let ok = r.is_ok();
         if !ok {
             self.header = h;

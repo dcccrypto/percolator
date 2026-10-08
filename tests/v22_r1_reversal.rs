@@ -210,8 +210,9 @@ impl World {
 
     fn refresh(&mut self, acct: &mut PortfolioAccountV16Account) -> bool {
         let (h, mk, a0) = (self.header, self.markets.clone(), *acct);
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets);
-        let r = m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(acct));
+        let mut m = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        let r = m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(acct), &mut budget);
         let ok = r.is_ok();
         if !ok {
             self.header = h;
@@ -670,8 +671,9 @@ fn the_move_skips_a_destination_that_does_not_accept_backing() {
     let _ = &mut maker;
     let before = (fresh(&w, 0), fresh(&w, 1));
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
-        m.rebalance_unclaimed_backing_for_test_not_atomic(0).expect("the move must not fail the caller");
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut budget).expect("the move must not fail the caller");
     }
     assert_eq!((fresh(&w, 0), fresh(&w, 1)), before, "nothing moved into a destination that cannot accept it");
 }
@@ -712,8 +714,9 @@ fn the_move_takes_only_loser_booked_backing_from_a_bucket_that_also_holds_provid
     w.header.pnl_pos_bound_tot_num = V16PodU128::new(w.header.pnl_pos_bound_tot_num.get() + added);
     w.header.pnl_pos_bound_tot = V16PodU128::new(w.header.pnl_pos_bound_tot_num.get() / 1_000_000_000_000);
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
-        m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut budget).unwrap();
     }
     assert!(fresh(&w, 1) >= prov, "an oversized shortfall still leaves the provider's principal ({} < {prov})", fresh(&w, 1));
     assert!(loser_cash(&w, 1) <= fresh(&w, 1) - prov);
@@ -730,14 +733,15 @@ fn the_move_respects_the_per_instruction_cap() {
     let before = fresh(&w, 1);
     {
         let (h, mk) = (w.header, w.markets.clone());
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
-        m.set_s10_moves_left_for_test(0);
-        if m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut maker)).is_err() { w.header = h; w.markets = mk; panic!("refresh with a zero budget must still succeed"); }
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut zero = 0u8;
+        if m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(&mut maker), &mut zero).is_err() { w.header = h; w.markets = mk; panic!("refresh with a zero budget must still succeed"); }
     }
     assert_eq!(fresh(&w, 1), before, "no budget, no move");
     {
-        let mut m = MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets);
-        m.rebalance_unclaimed_backing_for_test_not_atomic(0).unwrap();
+        let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        m.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut budget).unwrap();
     }
     assert!(fresh(&w, 1) < before, "the next view has its budget back and moves it");
 }
@@ -835,7 +839,7 @@ fn the_refresh_crank_grants_itself_the_budget() {
     assert!(fresh(&w, 1) < before, "the refresh crank moved the stranded backing");
 }
 
-/// A view denied the grant (`deny_s10_budget`, the wrapper's tag-77 inline refreshes) moves
+/// A crank run with grant 0 (the wrapper's tag-77 inline refreshes) moves
 /// nothing even through the Refresh crank, the crank still succeeds, and the next ordinary
 /// refresh crank of the asset picks the move up.
 #[test]
@@ -845,8 +849,8 @@ fn a_denied_view_gets_no_budget_from_the_refresh_crank() {
     let crank = |w: &mut World, maker: &mut PortfolioAccountV16Account, deny: bool| {
         let (price, now) = (w.price(), w.slot + 1);
         let mut m = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
-        if deny { m.deny_s10_budget(); }
-        m.permissionless_crank_not_atomic(
+        let grant = if deny { 0u8 } else { percolator::S10_MAX_MOVES_PER_INSTRUCTION };
+        m.permissionless_crank_s10_not_atomic(
             &mut PortfolioV16ViewMut::new(maker),
             percolator::PermissionlessCrankRequestV16 {
                 now_slot: now,
@@ -855,6 +859,7 @@ fn a_denied_view_gets_no_budget_from_the_refresh_crank() {
                 funding_rate_e9: 0,
                 action: percolator::PermissionlessCrankActionV16::Refresh,
             },
+            grant,
         )
         .expect("refresh crank");
     };
@@ -956,9 +961,10 @@ fn provider_world(seed: u64, s10: bool) -> Option<[(u128, u128); 2]> {
     let settle = |w: &mut World, a: &mut PortfolioAccountV16Account| -> bool {
         let slot = w.slot;
         let (h, mk, a0) = (w.header, w.markets.clone(), *a);
-        let mut g = if s10 { MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets) } else { MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets) };
+        let mut g = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut budget: u8 = if s10 { percolator::S10_MAX_MOVES_PER_INSTRUCTION } else { 0 };
         for d in 0..2 { let _ = g.expire_source_backing_bucket_not_atomic(d, slot); }
-        let ok = g.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a)).is_ok();
+        let ok = g.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).is_ok();
         if !ok { w.header = h; w.markets = mk; *a = a0; }
         ok
     };
@@ -1075,8 +1081,9 @@ fn lien_heavy_provider_world(seed: u64, ntr: usize, legs: usize, p: u64, pt: u64
             for d in 0..2 { let _ = g.expire_source_backing_bucket_not_atomic(d, slot); }
         }
         let (h, mk, a0) = (w.header, w.markets.clone(), *a);
-        let mut g = if s10 { MarketGroupV16ViewMut::new_crank(&mut w.header, &mut w.markets) } else { MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets) };
-        if g.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a)).is_err() { w.header = h; w.markets = mk; *a = a0; }
+        let mut g = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut budget: u8 = if s10 { percolator::S10_MAX_MOVES_PER_INSTRUCTION } else { 0 };
+        if g.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).is_err() { w.header = h; w.markets = mk; *a = a0; }
     };
     let mut trace = Vec::new();
     let mut dir: i64 = if rng(&mut s) % 2 == 0 { 1 } else { -1 };

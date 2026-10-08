@@ -50,9 +50,9 @@ impl W3 {
     fn view(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
         MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
-    /// refresh-crank view: carries the S10 budget
+    /// refresh-crank view (the budget is passed explicitly where a refresh runs; a crank grants itself one)
     fn view_crank(&mut self) -> MarketGroupV16ViewMut<'_, u64> {
-        MarketGroupV16ViewMut::new_crank(&mut self.header, &mut self.markets)
+        MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets)
     }
     fn price(&self, i: usize) -> u64 { self.markets[i].engine.asset.effective_price.get() }
     fn deposit(&mut self, a: &mut PortfolioAccountV16Account, amt: u128) {
@@ -82,7 +82,8 @@ impl W3 {
     }
     fn refresh(&mut self, a: &mut PortfolioAccountV16Account) {
         let mut m = self.view_crank();
-        m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(a)).expect("refresh");
+        let mut budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+        m.full_account_refresh_with_s10_budget_not_atomic(&mut PortfolioV16ViewMut::new(a), &mut budget).expect("refresh");
     }
     /// short-domain (maker's loss domain) fresh backing of asset i, in atoms
     fn short_fresh(&self, i: usize) -> u128 {

@@ -5718,19 +5718,10 @@ pub struct MarketGroupV16View<'a, T> {
 pub struct MarketGroupV16ViewMut<'a, T> {
     pub header: &'a mut MarketGroupV16HeaderAccount,
     pub markets: &'a mut [Market<T>],
-    /// S10 compute budget: how many more times the unclaimed-backing move may fire through this
-    /// view (one view is one instruction). ZERO by default: only a view built with `new_crank`, or
-    /// the permissionless refresh crank itself (`permissionless_crank_not_atomic`, Refresh action),
-    /// carries a budget, so a trade, batch, band batch, liquidation, recovery or any future entry
-    /// point is budget-free unless it is explicitly granted one. A firing is about 33k CU on BPF
-    /// (measured, flat in the number of legs); an 11-leg liquidation crank is 1,375,975 CU of 1.4M
-    /// and an 11-leg batch about 1.33M, so no firing may be added on those paths.
-    s10_moves_left: u8,
-    /// S10: set by `deny_s10_budget`; a Refresh crank through this view then grants itself
-    /// nothing. For a refresh that is only the prelude of a heavier instruction (the wrapper's
-    /// tag-77 redemption refreshes up to two 14-leg accounts inline at about 1.25M CU).
-    s10_grant_denied: bool,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<MarketGroupV16ViewMut<'static, u8>>() == 24, "the S10 budget is a threaded &mut u8, never view state (SBF frame budget)");
 
 /// Moves the refresh crank may fire per instruction (+33k CU each).
 pub const S10_MAX_MOVES_PER_INSTRUCTION: u8 = 2;
@@ -5780,22 +5771,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets, s10_moves_left: 0, s10_grant_denied: false }
-    }
-
-    /// A view that carries the S10 refresh-crank budget (what `permissionless_crank_not_atomic`
-    /// grants itself on a Refresh action). TEST MODEL ONLY: the program never calls it (the
-    /// wrapper builds every view with `new`); a test uses it for an operation that production runs
-    /// as a Refresh crank and for nothing else.
-    pub fn new_crank(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets, s10_moves_left: S10_MAX_MOVES_PER_INSTRUCTION, s10_grant_denied: false }
-    }
-
-    /// S10: this view never moves backing, not even from a Refresh crank run through it. For an
-    /// instruction that runs refreshes as its own prelude and has no compute to spare.
-    pub fn deny_s10_budget(&mut self) {
-        self.s10_grant_denied = true;
-        self.s10_moves_left = 0;
+        Self { header, markets }
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -15105,10 +15081,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn rebalance_unclaimed_backing_across_asset_domains_not_atomic(
         &mut self,
         asset_index: usize,
+        s10_budget: &mut u8,
     ) -> V16Result<()> {
         // budget spent: skip before ANY read (a leg skipped for the cap must cost almost nothing;
         // measured: reading both domains' source-credit state for every skipped leg cost ~7k CU each)
-        if self.s10_moves_left == 0 {
+        if *s10_budget == 0 {
             return Ok(());
         }
         // idle fast path, on the raw slot (no bucket decode, no domain lookup): a domain holds
@@ -15166,10 +15143,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if moved < S10_MIN_MOVE_ATOMS * BOUND_SCALE {
                 continue;
             }
-            if self.s10_moves_left == 0 {
+            if *s10_budget == 0 {
                 return Ok(());
             }
-            self.s10_moves_left -= 1;
+            *s10_budget -= 1;
             let expiry = self.fresh_counterparty_backing_expiry_slot(dst)?;
             let b_dst = self.backing_bucket_for_domain(dst)?;
             let (b_src, s_src) =
@@ -15201,20 +15178,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::provider_fresh_by_rule(rule_a, principal, bucket)
     }
 
-    /// Test seam: the S10 per-instruction move budget of this view.
-    #[doc(hidden)]
-    pub fn set_s10_moves_left_for_test(&mut self, n: u8) {
-        self.s10_moves_left = n;
-    }
-
     /// Test seam for the S10 move (the V1 stale-count guard lives in the settle entry, not here):
     /// lets a test drive the move's own guards directly. Not used by the program.
     #[doc(hidden)]
     pub fn rebalance_unclaimed_backing_for_test_not_atomic(
         &mut self,
         asset_index: usize,
+        s10_budget: &mut u8,
     ) -> V16Result<()> {
-        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)
+        self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index, s10_budget)
     }
 
     fn reserve_new_capital_backed_loss_for_source_domain_not_atomic(
@@ -15600,6 +15572,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         entry: u64,
         prepared: AccountKfSettlementPreparedV16,
+        s10_budget: &mut u8,
     ) -> V16Result<()> {
         let (phase, source_domain, leg_slot) = decode_account_kf_settlement_plan_key(entry)?;
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
@@ -15700,7 +15673,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // leg's own cohort discharge above and only when the whole asset has settled to the
         // current K/F cohort. Idle cost: two counter compares.
         if asset.stale_account_count_long == 0 && asset.stale_account_count_short == 0 {
-            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
+            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index, s10_budget)?;
         }
         self.header.loss_stale_active = encode_bool(asset_is_loss_stale_at_slot(
             asset,
@@ -15795,6 +15768,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         normalize_exhausted_sides: bool,
+        s10_budget: &mut u8,
     ) -> V16Result<()> {
         // The composing refresh/crank paths validate bitmap-to-leg consistency. Flat
         // accounts have no K/F work, and skipping a second full leg scan preserves
@@ -15814,7 +15788,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let (entry, prepared) =
                 self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
-            return self.apply_account_kf_settlement_entry(account, entry, prepared);
+            return self.apply_account_kf_settlement_entry(account, entry, prepared, s10_budget);
         }
         let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut prepared_by_slot =
@@ -15841,7 +15815,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
                 return Err(V16Error::InvalidLeg);
             }
-            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot])?;
+            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot], s10_budget)?;
             index += 1;
         }
         Ok(())
@@ -15941,7 +15915,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
-        match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
+        self.full_account_refresh_with_s10_budget_not_atomic(account, &mut 0u8)
+    }
+
+    /// `full_account_refresh_not_atomic` with an explicit S10 move budget (what a Refresh crank
+    /// runs with). The budget is a plain argument, not view state: the view stays 24 B.
+    pub fn full_account_refresh_with_s10_budget_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        s10_budget: &mut u8,
+    ) -> V16Result<HealthCertV16> {
+        match self.refresh_account_and_certify_not_atomic(account, None, 0, false, s10_budget)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
             AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
@@ -15954,6 +15938,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         price_override: Option<(usize, u64)>,
         b_loss_atom_budget: u128,
         allow_b_chunk: bool,
+        s10_budget: &mut u8,
     ) -> V16Result<AccountRefreshCertOutcomeV16> {
         self.validate_account_scalar_preflight(&account.as_view())?;
         let source_claim_sum_num = if account.header.source_domains[0].is_sparse_tail_default() {
@@ -15985,7 +15970,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
-        self.settle_account_kf_effects_not_atomic(account, true)?;
+        self.settle_account_kf_effects_not_atomic(account, true, s10_budget)?;
         let config = self.header.config.try_to_runtime_shape()?;
         let mut initial_req = 0u128;
         let mut maintenance_req = 0u128;
@@ -16512,7 +16497,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_loss_atom_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
-        self.settle_account_kf_effects_not_atomic(account, false)?;
+        self.settle_account_kf_effects_not_atomic(account, false, &mut 0u8)?;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -17894,6 +17879,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
+        self.permissionless_auto_crank_s10_not_atomic(account, work, S10_MAX_MOVES_PER_INSTRUCTION)
+    }
+
+    /// `permissionless_auto_crank_not_atomic` with an explicit S10 move budget per Refresh crank
+    /// (0 = the wrapper's tag-77 prelude, which has no compute to spare).
+    pub fn permissionless_auto_crank_s10_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        work: AutoCrankWorkV16<'_>,
+        s10_grant: u8,
+    ) -> V16Result<AutoCrankResultV16> {
         // A market already in Recovery has exactly one bounded public step left:
         // the value-neutral transition to Resolved, which puts terminal account
         // close back within reach. Without it Recovery is a dead end for the single
@@ -18020,7 +18016,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                           obs: AutoCrankObservationV16,
                           action: PermissionlessCrankActionV16|
          -> V16Result<PermissionlessProgressOutcomeV16> {
-            me.permissionless_crank_not_atomic(
+            me.permissionless_crank_s10_not_atomic(
                 account,
                 PermissionlessCrankRequestV16 {
                     now_slot: work.now_slot,
@@ -18029,6 +18025,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     funding_rate_e9: obs.funding_rate_e9,
                     action,
                 },
+                s10_grant,
             )
         };
 
@@ -18155,6 +18152,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         request: PermissionlessCrankRequestV16,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_s10_not_atomic(account, request, S10_MAX_MOVES_PER_INSTRUCTION)
+    }
+
+    /// `permissionless_crank_not_atomic` with an explicit S10 move budget for a Refresh action:
+    /// `S10_MAX_MOVES_PER_INSTRUCTION` is the normal grant; pass 0 for a refresh that is only the
+    /// prelude of a heavier instruction (the wrapper's tag-77 redemption). Every other action
+    /// runs with budget 0. The budget is a local, threaded as `&mut u8` (the view stays 24 B).
+    pub fn permissionless_crank_s10_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: PermissionlessCrankRequestV16,
+        s10_grant: u8,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live
             && !matches!(request.action, PermissionlessCrankActionV16::Recover(_))
@@ -18162,9 +18172,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         // S10: the refresh crank is the ONLY entry point that grants itself a move budget
-        if matches!(request.action, PermissionlessCrankActionV16::Refresh) && !self.s10_grant_denied {
-            self.s10_moves_left = S10_MAX_MOVES_PER_INSTRUCTION;
-        }
+        let mut s10_budget: u8 = if matches!(request.action, PermissionlessCrankActionV16::Refresh) {
+            s10_grant
+        } else {
+            0
+        };
         let protective_progress = match request.action {
             PermissionlessCrankActionV16::Refresh => {
                 let selected_leg_before = request.asset_index
@@ -18176,6 +18188,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     Some((request.asset_index, request.effective_price)),
                     self.header.config.public_b_chunk_atoms.get(),
                     true,
+                    &mut s10_budget,
                 )? {
                     AccountRefreshCertOutcomeV16::Certified(_) => {}
                     AccountRefreshCertOutcomeV16::BChunk(out) => {
@@ -18243,14 +18256,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         // S10: an asset with no stored position has no settlement left to retry a move skipped
         // for the budget; the refresh crank's own accrual of it does (budget 0 outside Refresh)
-        self.s10_retry_for_unpositioned_asset(request.asset_index)?;
+        self.s10_retry_for_unpositioned_asset(request.asset_index, &mut s10_budget)?;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
     /// S10 retry hook (refresh crank only): when the whole asset has settled and no position is
     /// stored, retry the unclaimed-backing move.
-    fn s10_retry_for_unpositioned_asset(&mut self, asset_index: usize) -> V16Result<()> {
-        if self.s10_moves_left == 0 || asset_index >= self.markets.len() {
+    fn s10_retry_for_unpositioned_asset(&mut self, asset_index: usize, s10_budget: &mut u8) -> V16Result<()> {
+        if *s10_budget == 0 || asset_index >= self.markets.len() {
             return Ok(());
         }
         let asset = self.asset_state(asset_index)?;
@@ -18259,7 +18272,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && asset.stored_pos_count_long == 0
             && asset.stored_pos_count_short == 0
         {
-            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index)?;
+            self.rebalance_unclaimed_backing_across_asset_domains_not_atomic(asset_index, s10_budget)?;
         }
         Ok(())
     }
@@ -18299,6 +18312,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None,
             self.header.config.public_b_chunk_atoms.get(),
             true,
+            &mut 0u8,
         )? {
             AccountRefreshCertOutcomeV16::Certified(_) => {
                 PermissionlessProgressOutcomeV16::AccountCurrent
@@ -20813,6 +20827,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None,
             self.header.config.public_b_chunk_atoms.get(),
             false,
+            &mut 0u8,
         )? {
             AccountRefreshCertOutcomeV16::Certified(_) => {}
             AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
@@ -21138,6 +21153,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             None,
             self.header.config.public_b_chunk_atoms.get(),
             false,
+            &mut 0u8,
         )? {
             AccountRefreshCertOutcomeV16::Certified(_) => {}
             AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
@@ -21206,7 +21222,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return account.header.health_cert.try_to_runtime();
         }
-        match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
+        match self.refresh_account_and_certify_not_atomic(account, None, 0, false, &mut 0u8)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
             AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
@@ -23057,15 +23073,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let h0 = *self.header;
         let e0: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         let a0 = *account.header;
-        // #287 view fields (review N4): neither fee path may spend or deny the S10 move budget.
-        let s0 = (self.s10_moves_left, self.s10_grant_denied);
         let r_old = self.charge_account_fee_not_atomic(account, requested_fee);
         let h_old = *self.header;
         let e_old: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         let a_old = *account.header;
-        let s_old = (self.s10_moves_left, self.s10_grant_denied);
-        self.s10_moves_left = s0.0;
-        self.s10_grant_denied = s0.1;
         *self.header = h0;
         for (m, e) in self.markets.iter_mut().zip(e0.iter()) {
             m.engine = *e;
@@ -23074,9 +23085,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let r_new = self.charge_account_fee_after_full_refresh_not_atomic(account, requested_fee);
         let e_new: Vec<EngineAssetSlotV16Account> = self.markets.iter().map(|m| m.engine).collect();
         X1_DIFF_CALLS.fetch_add(1, Relaxed);
-        let s_new = (self.s10_moves_left, self.s10_grant_denied);
         let same = r_old == r_new
-            && s_old == s_new
             && (r_old.is_err() || (h_old == *self.header && e_old == e_new && a_old == *account.header));
         if !same {
             X1_DIFF_MISMATCH.fetch_add(1, Relaxed);
