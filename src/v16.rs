@@ -4371,7 +4371,7 @@ pub fn kani_funding_div_rem(p: u128) -> (u128, u128) {
     funding_div_rem(p)
 }
 
-#[cfg(kani)]
+#[cfg(any())] // kani v22-final: duplicate of the cfg(any(kani, fuzz)) copy at :26420; disabled, line count kept
 pub fn kani_funding_index_deltas(funding_num: i128, a_long: u128, a_short: u128) -> V16Result<(i128, i128)> {
     V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
 }
@@ -28700,3 +28700,10 @@ pub fn repay_pnl_postconditions_hold(
         && c_tot_after <= c_tot_before
         && capital_before - capital_after == c_tot_before - c_tot_after
 }
+
+#[cfg(kani)]
+#[path = "kani_v22_shims.rs"]
+mod kani_v22_shims;
+#[cfg(kani)]
+#[path = "kani_v22_band_shims.rs"]
+mod kani_v22_band_shims;

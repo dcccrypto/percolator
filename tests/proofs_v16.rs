@@ -12,7 +12,6 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_commit_declared_liquidation_recovery, kani_decode_account_kf_settlement_plan_key,
-    kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
@@ -939,18 +938,14 @@ fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
     let mut expected_header = header_before;
     expected_header.oracle_epoch =
         V16PodU64::new(header_before.oracle_epoch.get() + u64::from(changed));
-    assert!(kani_eq_market_group_v16_header_account(
-        &expected_header,
-        market.header
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(expected_header == *market.header);
     let mut expected_slot = slot_before;
     let mut expected_asset = expected_slot.asset.try_to_runtime().unwrap();
     expected_asset.raw_oracle_target_price = target;
     expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &expected_slot,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(expected_slot == market.markets[0].engine);
 }
 
 #[kani::proof]
@@ -6919,6 +6914,10 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     account_header.legs[0] = percolator::v16::PortfolioLegV16Account::from_runtime(&leg);
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
@@ -18706,14 +18705,10 @@ fn assert_terminal_insurance_retirement_rejected_without_mutation(
     let result = market.retire_terminal_unbudgeted_insurance_not_atomic(0);
 
     assert_eq!(result, Err(V16Error::LockActive));
-    assert!(kani_eq_market_group_v16_header_account(
-        &header_before,
-        market.header
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &slot_before,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(header_before == *market.header);
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(slot_before == market.markets[0].engine);
 }
 
 // Production-route theorem: when insurance is the only remaining vault stock,
@@ -18744,14 +18739,10 @@ fn proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed() {
         "terminal retirement covers a nonzero full-width insurance balance"
     );
     assert_eq!(result, Ok(insurance));
-    assert!(kani_eq_market_group_v16_header_account(
-        &expected_header,
-        market.header
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &slot_before,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(expected_header == *market.header);
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(slot_before == market.markets[0].engine);
     assert_eq!(market.validate_shape(), Ok(()));
 }
 

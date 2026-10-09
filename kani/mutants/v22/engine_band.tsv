@@ -1,0 +1,13 @@
+id	file	line	original	replacement	target_harness	expected_kill
+BND-M1	src/v16.rs	1621	            && asset.band_liq_pending_long == 0	            && true	kani_band_reanchor_iff_certified	cover 'not ready: liq long' unsatisfied / ready == expected fails
+BND-M2	src/v16.rs	1619	            && asset.band_uncertified_long == 0	            && true	kani_band_reanchor_iff_certified	assert ready == expected fails (uncertified long ignored)
+BND-M3	src/band_rent.rs	165	    Ok((ratio_bps - BPS) as u64)	    Ok((2 * d) as u64)	kani_band_G_upper_bound	assert |p3-p1|*1e4 <= G*p1 fails
+BND-M4	src/v16.rs	16940	                return Err(V16Error::BandPinned);	                {}	kani_band_accrue_rejects_before_mutation	assert Err(BandPinned) fails on the pinned moving accrual
+BND-M5	src/v16.rs	1588	        if healthy {	        if true {	kani_band_certify_leg	unhealthy arm: assert band_liq_pending fails
+BND-M6	src/v16.rs	1541	        if leg.band_epoch_snap < asset.band_epoch {	        if false {	kani_band_attach_detach_roundtrip	assert back == a0 fails
+BND-R1	src/v16.rs	1468	            rent_snap,	            rent_snap: 0,	kani_rent_settle_idempotent_and_attach_snap	assert leg.rent_snap == index fails
+BND-R2	src/v16.rs	13106	        let next_rent_unrouted = rent_unrouted	        let next_rent_unrouted = rent_unrouted.checked_add(x).ok_or(V16Error::ArithmeticOverflow)?	kani_rent_route_conserves	assert nru <= ru - x fails
+BND-R3	src/band_rent.rs	259	        return Ok((total / RENT_INDEX_DEN, (total % RENT_INDEX_DEN) as u64));	        return Ok((total.div_ceil(RENT_INDEX_DEN), (total % RENT_INDEX_DEN) as u64));	kani_rent_due_with_carry_exact	assert due*D + carry' == total fails
+BND-R4	src/band_rent.rs	257	        .and_then(|v| v.checked_add(carry as u128))	        .and_then(|v| v.checked_add(0))	kani_rent_split_never_overcharges	assert d1 + d2 == d fails
+BND-C1	src/v16.rs	1506	        if positions > band_max_positions_per_side.saturating_add(1) {	        if positions > band_max_positions_per_side.saturating_add(2) {	kani_band_attach_respects_position_cap	Ok arm: assert positions <= cap + 1 fails
+BND-C2	src/v16.rs	18429	                    if count > cap {	                    if false {	kani_band_trade_shape_cap_and_min_notional_exempt	cover 'end-of-trade cap refused' unsatisfied; Ok-arm count <= cap fails
