@@ -1112,6 +1112,27 @@ If `price_move_active`, before mutating any K/F/price/slot/consumption state, re
 abs(oracle_price - P_last) * 10_000 <= cfg_max_price_move_bps_per_slot * dt * P_last
 ```
 
+Same-leg reversal netting (Live). Before the support-and-burn rule above, a
+newly observed negative K/F delta on a leg whose loss books into domain
+`L = (asset, side)` MUST first cancel, one for one, the account's unliened
+positive face in the twin domain `T = (asset, opposite(side))` -- the unrealized
+gain of that same leg, which was never paid out. The netted amount is
+`n = min(loss, positive face, unliened T claim)`; the account's T claim, T's
+claim bound and `PNL` all fall by exactly `n`, and only `loss - n` continues
+through support-and-burn and capital reservation. Pricing this give-back at
+T's stored credit rate would make the outcome depend on whether T's losers
+were settled before the reversal. Together with the cancelled face, T's
+counterparty backing that supported it moves to `L`:
+`floor(n * BOUND_SCALE * rate_T)` bound units of unliened Fresh principal
+(capped by T's unliened bucket principal), as a pure reclassification between
+the two domains' `counterparty_backing_principal` (`V`, `C_tot`, `I` flat). The
+transfer is skipped (netting still applies) when either side of the asset has
+a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
+fresh principal; skipping only raises T's rate. Because the transfer is at or
+below T's rate, no remaining T claimant's rate falls, no account is credited
+more than its position's PnL, and liened or impaired T face is never netted.
+Face in other source domains keeps the support-and-burn rule.
+
 Then update stress consumption:
 
 ```text
