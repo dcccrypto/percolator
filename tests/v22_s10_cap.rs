@@ -162,3 +162,56 @@ fn a_closing_batch_moves_nothing_and_each_assets_next_refresh_crank_retries_it()
     let after: Vec<u128> = (0..3).map(|i| w.short_fresh(i)).collect();
     assert!(after.iter().zip(&before).all(|(a, b)| a < b), "every asset's refresh crank retried and moved: {before:?} -> {after:?}");
 }
+
+/// Reviewer follow-up (fold 2026-10-08): only the Refresh action may use the S10 grant. All three
+/// assets are closed (no stored position) with a pending move each. A Liquidate and a SettleB crank
+/// called with grant 2 must move nothing (loser cash and the provider mirror unchanged), while the
+/// SAME state under a Refresh crank with the same grant does move (vacuity control).
+#[test]
+fn a_non_refresh_crank_action_never_uses_the_s10_grant() {
+    let (mut w, mut maker, mut a) = stranded();
+    {
+        let mut m = w.view();
+        let p: Vec<u64> = (0..3).map(|i| m.markets[i].engine.asset.effective_price.get()).collect();
+        for i in 0..3 { W3::trade(&mut m, i, p[i], &mut maker, &mut a, 400 * POS_SCALE); }
+    }
+    let snap = |w: &W3| -> Vec<(u128, u128, u128, u128)> {
+        (0..3).map(|i| (
+            w.short_fresh(i), w.long_fresh(i),
+            w.markets[i].engine.provider_principal_short.get(), w.markets[i].engine.provider_principal_long.get(),
+        )).collect()
+    };
+    let before = snap(&w);
+    w.slot += 1;
+    let grant = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+    let actions = |i: usize| vec![
+        PermissionlessCrankActionV16::Liquidate(percolator::LiquidationRequestV16 { asset_index: i }),
+        PermissionlessCrankActionV16::SettleB { asset_index: i },
+    ];
+    for i in 0..3 {
+        for action in actions(i) {
+            let price = w.price(i);
+            let now = w.slot;
+            let (h, mk) = (w.header, w.markets.clone());
+            let mut m = w.view();
+            let r = m.permissionless_crank_s10_not_atomic(
+                &mut PortfolioV16ViewMut::new(&mut maker),
+                PermissionlessCrankRequestV16 { now_slot: now, asset_index: i, effective_price: price, funding_rate_e9: 0, action },
+                grant,
+            );
+            if r.is_err() { w.header = h; w.markets = mk; }
+            assert_eq!(snap(&w), before, "asset {i}: a non-Refresh action moved backing ({r:?})");
+        }
+    }
+    // vacuity: the pending moves exist; a Refresh crank with the same grant makes one
+    let price = w.price(0);
+    let now = w.slot;
+    let mut m = w.view();
+    m.permissionless_crank_s10_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut maker),
+        PermissionlessCrankRequestV16 { now_slot: now, asset_index: 0, effective_price: price, funding_rate_e9: 0, action: PermissionlessCrankActionV16::Refresh },
+        grant,
+    )
+    .expect("refresh crank");
+    assert!(w.short_fresh(0) < before[0].0, "vacuity: the Refresh crank retried and moved asset 0");
+}
