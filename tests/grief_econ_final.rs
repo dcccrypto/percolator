@@ -156,6 +156,8 @@ fn drain_only_holdout(
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: oi,
@@ -164,6 +166,10 @@ fn drain_only_holdout(
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     acct.active_bitmap[0] = V16PodU64::new(1);
 

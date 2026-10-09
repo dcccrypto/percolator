@@ -685,6 +685,8 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
         a_basis: ADL_ONE,
         k_snap: 10 * ADL_ONE as i128,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POSITION_Q,
@@ -693,6 +695,10 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 

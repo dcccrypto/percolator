@@ -37,6 +37,12 @@ pub const MAX_WARMUP_SLOTS: u64 = u64::MAX;
 pub const MAX_RESOLVE_PRICE_DEVIATION_BPS: u64 = 10_000;
 pub const MAX_RECOVERY_FALLBACK_DEVIATION_BPS: u64 = MAX_RESOLVE_PRICE_DEVIATION_BPS;
 
+// S10-X1: the dev-only differential monitor and its negative control must never reach an on-chain build.
+#[cfg(all(target_os = "solana", any(feature = "x1-diff", feature = "x1-mutant-noclamp")))]
+compile_error!("features `x1-diff` / `x1-mutant-noclamp` are test-only and must not be built for target_os = \"solana\"");
+
+/// v2.2 Phase 4 items 1 + 2: pure band / rent arithmetic (see module docs).
+pub mod band_rent;
 #[cfg(kani)]
 pub mod v16;
 #[cfg(not(kani))]
@@ -50,25 +56,29 @@ mod wide_math;
 
 #[cfg(kani)]
 pub use v16::*;
+#[cfg(all(not(kani), feature = "x1-diff"))]
+pub use v16::x1_diff_stats;
 #[cfg(not(kani))]
 pub use v16::{
+    adjust_slot_provider_principal, S10_MAX_MOVES_PER_INSTRUCTION, S10_MIN_MOVE_ATOMS, S10_PROTECT_FULL_PROVIDER_PRINCIPAL,
     active_bitmap_count_ones, active_bitmap_empty, active_bitmap_get, active_bitmap_is_empty,
     auto_crank_plan_requires_caller_observation, backing_domain_fee_split_for_lien_delta_num,
-    bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active, bankruptcy_hlock_is_unattributed,
-    bankruptcy_hlock_mark_domain, bankruptcy_hlock_mark_unattributed,
-    canonical_accrual_price_step_v16, v16_domain_count_for_market_slots,
-    validate_bankruptcy_hlock_wire, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
-    AdlWindDownRequestV16, BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
-    v16_domain_pair_for_asset_index, AccrualStepV16, AccrueAssetOutcomeV16, ActionableSummaryV16,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankObservationV16,
-    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16, AutoCrankWorkV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BackingDomainFeeSplitV16,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, LiquidationOutcomeV16,
-    LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, MarketModeV16, MarketSlotV16View, MarketSlotV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    band_initialize_asset, bankruptcy_hlock_domain_mask, bankruptcy_hlock_is_active,
+    bankruptcy_hlock_is_unattributed, bankruptcy_hlock_mark_domain,
+    bankruptcy_hlock_mark_unattributed, canonical_accrual_price_step_v16,
+    canonical_band_accrual_price_step_v16, repay_pnl_postconditions_hold, v16_domain_count_for_market_slots,
+    v16_domain_pair_for_asset_index, validate_bankruptcy_hlock_wire, AccrualStepV16,
+    AccrueAssetOutcomeV16, ActionableSummaryV16, AdlWindDownBoundV16, AdlWindDownOutcomeV16,
+    AdlWindDownRequestV16, KfDriftSideV16, KfDriftSideV16Account, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
+    AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16,
+    AutoCrankWorkV16, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BackingDomainFeeSplitV16, BandStepContextV16, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, DeadLegForfeitOutcomeV16, EngineAssetSlotV16Account,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, LiquidationOutcomeV16, LiquidationRequestV16, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, MarketModeV16,
+    MarketSlotV16View, MarketSlotV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceOutcomeV16, RebalanceRequestV16,
@@ -77,9 +87,10 @@ pub use v16::{
     SourceCreditStateV16, SourceCreditStateV16Account, TerminalSlabOutcomeV16, TradeRequestV16,
     V16ActiveBitmap, V16Config, V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount,
     V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64, V16Result,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION,
-    V16_EMPTY_ACTIVE_BITMAP, V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS,
-    V16_MAX_PORTFOLIO_ASSETS_N,
+    BANKRUPTCY_HLOCK_ACTIVE_BIT, BANKRUPTCY_HLOCK_MAX_ATTRIBUTED_DOMAINS,
+    PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
+    V16_LAYOUT_DISCRIMINATOR, V16_MAX_ACCRUAL_PATH_STEPS, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 
 // kani_active_bitmap_set is gated #[cfg(any(kani, test, feature="fork-facade"))]
@@ -89,7 +100,10 @@ pub use v16::kani_active_bitmap_set;
 
 // ADL effective-quantity kernels for the fuzz targets (kani builds get them from the blanket re-export).
 #[cfg(all(not(kani), feature = "fuzz"))]
-pub use v16::{kani_adl_effective_quantity_ceil, kani_raw_basis_for_adl_effective_quantity};
+pub use v16::{
+    kani_adl_effective_quantity_ceil, kani_funding_index_deltas,
+    kani_raw_basis_for_adl_effective_quantity,
+};
 
 // Bounded source-credit mul-div kernels + fused claim-burn deltas for the
 // rounding-residue differential fuzz target (upstream 4c4dfb20).

@@ -3048,6 +3048,8 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -3056,6 +3058,10 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -3531,6 +3537,8 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -3539,6 +3547,10 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
     account_header.active_bitmap = bitmap.map(V16PodU64::new);
@@ -6893,6 +6905,8 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         // exact ceil(abs * SOCIAL_WEIGHT_SCALE / a_basis); with a_basis == ADL_ONE
@@ -6956,6 +6970,8 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -6964,6 +6980,10 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     let short_leg = PortfolioLegV16 {
         side: SideV16::Short,
@@ -10260,6 +10280,8 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -10268,6 +10290,10 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market.kani_leg_kf_delta_for_settlement(leg).unwrap()
@@ -15574,6 +15600,8 @@ fn adl_partition_settlement_net(
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: abs_basis_q,
@@ -15582,6 +15610,10 @@ fn adl_partition_settlement_net(
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     market.kani_leg_kf_delta_for_settlement(leg).unwrap().2
 }
@@ -16593,6 +16625,8 @@ fn install_flat_pending_obligation(
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: weight,
@@ -16601,6 +16635,10 @@ fn install_flat_pending_obligation(
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     let mut bitmap = account.active_bitmap.map(V16PodU64::get);
     active_bitmap_set(&mut bitmap, 0).unwrap();
@@ -19584,6 +19622,8 @@ fn proof_v16_kernel_advance_leg_b_snap_rank_witness() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
@@ -19592,6 +19632,10 @@ fn proof_v16_kernel_advance_leg_b_snap_rank_witness() {
         b_epoch_snap: kani::any(),
         b_stale: kani::any(),
         stale: kani::any(),
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     let delta_b: u128 = kani::any();
     let new_remainder: u128 = kani::any();
