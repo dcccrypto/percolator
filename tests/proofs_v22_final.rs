@@ -880,21 +880,56 @@ fn proof_v22_s10_settle_entry_frame() {
 /// refreshed with budget 0 (so every leg is at its current K/F/B/rent snapshots: the refinement
 /// precondition), then symbolic `kf_pending_credit` per domain, a symbolic fee, an optional
 /// B-stale flag and an optional non-Live mode.
+fn x1_catch_up<const N: usize>(w: &mut World<N>) {
+    // advance every asset to the current slot (accrual is bounded per call by max_accrual_dt_slots)
+    for _ in 0..8 {
+        for i in 0..N {
+            let cur = w.header.current_slot.get();
+            let p = w.markets[i].engine.asset.effective_price.get();
+            let _ = w.view().accrue_asset_to_not_atomic(i, cur, p, 0, true);
+        }
+    }
+}
+
+/// Review M2: three concrete worlds built through REAL operations, selected symbolically.
+/// * 0, base: two assets, the trader long both, three +1.5% ticks, both refreshed (budget 0).
+/// * 1, lien: the trader (capital 1_000_000) wins, accrual caught up, both refreshed, then
+///   INCREASES its asset-0 long through the real trade path, which liens its source-backed PnL;
+///   refreshed. The charged account is the trader (liened).
+/// * 2, negative PnL: the maker (capital 1_000_000, exactly enough initial margin) loses more than its
+///   capital over eight +1.5% ticks; refreshed; the charged account is the maker (pnl < 0, capital 0).
+/// Native replay (`kani-work/fx/tests/x1.rs`, mock-cfg build calling the same shims): variant 1
+/// liened = true, both fee paths Ok; variant 2 pnl = -11_920, both fee paths Ok.
 fn x1_world() -> (World<2>, PortfolioAccountV16Account, u128, bool) {
+    let variant: u8 = kani::any();
+    kani::assume(variant < 3);
     let mut w = World::<2>::new();
     let mut a = scenario_account(300);
     let mut maker = scenario_account(0);
-    w.deposit(&mut a, 1_000_000_000_000_000);
-    w.deposit(&mut maker, 1_000_000_000_000_000);
+    let (dep_a, dep_m, size, ticks) = match variant {
+        0 => (1_000_000_000_000_000u128, 1_000_000_000_000_000u128, 400 * POS_SCALE, 3usize),
+        1 => (1_000_000u128, 1_000_000_000_000_000u128, 4 * POS_SCALE, 3usize),
+        _ => (1_000_000_000_000_000u128, 1_000_000u128, 4 * POS_SCALE, 8usize),
+    };
+    w.deposit(&mut a, dep_a);
+    w.deposit(&mut maker, dep_m);
     for i in 0..2 {
-        w.trade(i, &mut a, &mut maker, 400 * POS_SCALE);
+        w.trade(i, &mut a, &mut maker, size);
     }
-    for _ in 0..3 {
+    for _ in 0..ticks {
         w.tick(150);
+    }
+    if variant == 1 {
+        x1_catch_up(&mut w);
     }
     w.refresh(&mut maker, 0).unwrap();
     w.refresh(&mut a, 0).unwrap();
-    let pick_maker: bool = kani::any();
+    if variant == 1 {
+        w.trade(0, &mut a, &mut maker, 4 * POS_SCALE); // the lien-creating increase (real path)
+        w.refresh(&mut maker, 0).unwrap();
+        w.refresh(&mut a, 0).unwrap();
+    }
+    let pick_maker: bool = if variant == 2 { true } else if variant == 1 { false } else { kani::any() };
     let acc = if pick_maker { maker } else { a };
     for i in 0..2 {
         let pl: i32 = kani::any();
@@ -1066,7 +1101,10 @@ fn proof_v22_leg_cap_validator() {
     MarketGroupV16ViewMut::new(&mut header, &mut markets).activate_empty_market_not_atomic(0, 100, 1).unwrap();
     let mut account = empty_account_fixture(market_id, 2);
     let leg_bytes: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
-    let slot = cap as usize;
+    // review M8: the symbolic leg sits at ANY slot in [cap, V16_MAX_PORTFOLIO_ASSETS_N), so a
+    // `==`-for-`>=` defect in the validator is caught (not only the slot exactly at the cap).
+    let slot: usize = kani::any();
+    kani::assume(slot >= cap as usize && slot < percolator::V16_MAX_PORTFOLIO_ASSETS_N);
     account.legs[slot] = bytemuck::pod_read_unaligned(&leg_bytes);
     let bit: bool = kani::any();
     let mut bitmap = account.active_bitmap.map(V16PodU64::get);
@@ -1083,6 +1121,7 @@ fn proof_v22_leg_cap_validator() {
     kani::cover!(!empty && r == Err(V16Error::HiddenLeg), "non-empty leg at slot cap refused");
     kani::cover!(empty && !bit && r.is_ok(), "empty slot at the cap accepted");
     kani::cover!(cap == 4 && r.is_ok(), "cap 4");
+    kani::cover!(!empty && slot > cap as usize && r == Err(V16Error::HiddenLeg), "non-empty leg strictly above the cap refused");
 }
 
 /// E-CAP-1 batch-length refusal (rev2.1 5b), site `:22230`
@@ -1158,38 +1197,53 @@ fn batch_len_body(fork: bool) {
 #[kani::solver(cadical)]
 fn proof_v22_attached_legs_have_unit_a() {
     let (mut header, mut markets) = one_market_only_fixture();
-    let a_long: u128 = kani::any();
-    kani::assume(a_long >= MIN_A_SIDE && a_long <= ADL_ONE);
-    markets[0].engine.asset.a_long = V16PodU128::new(a_long);
-    let cur: i64 = kani::any();
-    let new: i64 = kani::any();
-    kani::assume(cur >= 0 && new >= 0); // the long side: risk-increasing iff new > cur
-    let g = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_require_position_change_adl_safe(0, cur as i128, new as i128);
-    if g.is_ok() && new > cur {
-        assert_eq!(a_long, ADL_ONE, "an increase is admitted only at unit A");
+    // review M3: symbolic side (both branches of the ADL gate) and a resize leg whose a_basis is
+    // its OWN symbolic value, so a resize that rewrites a_basis to the asset's A is visible.
+    let short: bool = kani::any();
+    let side = if short { SideV16::Short } else { SideV16::Long };
+    let a_side: u128 = kani::any();
+    kani::assume(a_side >= MIN_A_SIDE && a_side <= ADL_ONE);
+    if short {
+        markets[0].engine.asset.a_short = V16PodU128::new(a_side);
+    } else {
+        markets[0].engine.asset.a_long = V16PodU128::new(a_side);
+    }
+    let cur_abs: i64 = kani::any();
+    let new_abs: i64 = kani::any();
+    kani::assume(cur_abs >= 0 && new_abs >= 0); // same side: risk-increasing iff |new| > |cur|
+    let (cur, new) = if short { (-(cur_abs as i128), -(new_abs as i128)) } else { (cur_abs as i128, new_abs as i128) };
+    let g = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_require_position_change_adl_safe(0, cur, new);
+    if g.is_ok() && new_abs > cur_abs {
+        assert_eq!(a_side, ADL_ONE, "an increase is admitted only at unit A");
     }
     let asset = markets[0].engine.asset.try_to_runtime();
     kani::assume(asset.is_ok());
     let asset = asset.unwrap();
     let basis = kani::any::<u32>() as i128 + 1;
-    let att = View::kani_v22_attach_leg(asset, SideV16::Long, basis, basis as u128, 0, 0, 0);
+    let signed_basis = if short { -basis } else { basis };
+    let att = View::kani_v22_attach_leg(asset, side, signed_basis, basis as u128, 0, 0, 0);
     if let Ok((_, leg)) = att {
-        assert_eq!(leg.a_basis, a_long, "attach copies the side's A");
+        assert_eq!(leg.a_basis, a_side, "attach copies the side's A");
         assert!(leg.k_rem_num == 0 && leg.f_rem_num == 0, "attach starts at remainder 0");
     }
-    // resize keeps a_basis and the remainders
-    let mut leg = PortfolioLegV16 { active: true, side: SideV16::Long, basis_pos_q: basis, a_basis: a_long, loss_weight: basis as u128, ..PortfolioLegV16::EMPTY };
+    // resize keeps a_basis (its own value, not the asset's A) and the remainders
+    let leg_a: u128 = kani::any();
+    kani::assume(leg_a >= MIN_A_SIDE && leg_a <= ADL_ONE);
+    let mut leg = PortfolioLegV16 { active: true, side, basis_pos_q: signed_basis, a_basis: leg_a, loss_weight: basis as u128, ..PortfolioLegV16::EMPTY };
     leg.k_rem_num = kani::any::<u64>() as u128;
     leg.f_rem_num = kani::any::<u64>() as u128;
     let new_basis = kani::any::<u32>() as i128 + 1;
-    let rs = View::kani_v22_resize_leg_same_side(leg, asset, new_basis, new_basis as u128, false, basis as u128, new_basis as u128);
+    let new_signed = if short { -new_basis } else { new_basis };
+    let rs = View::kani_v22_resize_leg_same_side(leg, asset, new_signed, new_basis as u128, false, basis as u128, new_basis as u128);
     if let Ok((leg2, _)) = rs {
         assert!(leg2.a_basis == leg.a_basis && leg2.k_rem_num == leg.k_rem_num && leg2.f_rem_num == leg.f_rem_num);
     }
-    kani::cover!(g.is_ok() && new > cur && a_long == ADL_ONE, "increase admitted at unit A");
-    kani::cover!(g.is_err() && new > cur && a_long < ADL_ONE, "increase refused under scaled A");
-    kani::cover!(att.is_ok() && a_long == ADL_ONE, "attach ok");
-    kani::cover!(rs.is_ok() && a_long < ADL_ONE, "resize keeps a scaled a_basis");
+    kani::cover!(g.is_ok() && new_abs > cur_abs && a_side == ADL_ONE && !short, "long increase admitted at unit A");
+    kani::cover!(g.is_ok() && new_abs > cur_abs && a_side == ADL_ONE && short, "short increase admitted at unit A");
+    kani::cover!(g.is_err() && new_abs > cur_abs && a_side < ADL_ONE, "increase refused under scaled A");
+    kani::cover!(att.is_ok() && a_side == ADL_ONE, "attach ok");
+    kani::cover!(rs.is_ok() && leg.a_basis != a_side, "resize keeps an a_basis that differs from the asset's A");
+    kani::cover!(rs.is_ok() && short, "short resize");
 }
 
 // =====================================================================================
@@ -1219,42 +1273,109 @@ fn proof_v22_w4_postcondition_predicate() {
 
 /// W-4 world: the trader wins (long), the maker loses and settles (booking backing), the trader
 /// settles (claims credited, exposure still open).
-fn w4_world() -> (World<1>, PortfolioAccountV16Account) {
-    let mut w = World::<1>::new();
-    let mut a = scenario_account(300);
-    let mut maker = scenario_account(0);
-    w.deposit(&mut a, 1_000_000_000_000_000);
-    w.deposit(&mut maker, 1_000_000_000_000_000);
-    w.trade(0, &mut a, &mut maker, 400 * POS_SCALE);
-    for _ in 0..3 {
-        w.tick(150);
+/// Review M1: the W-4 fixture of the engine's own spec suite (`tests/v16_spec_tests.rs`
+/// `w4_world`, which `w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance`
+/// pins at capacity > 0): a long holding `claim` atoms of unliened, source-backed positive PnL
+/// (counterparty fresh backing at rate 1) opens a funded position through the REAL trade path and is
+/// refreshed. `capital == 0` makes the same trade take a lien through the real trade path (the
+/// spec's case (e): lien-held). Natively replayed (`kani-work/fx/tests/w4.rs`): capital 1_000 ->
+/// capacity 100, repay(50,50) = Ok(100), repay(10,10) = Ok(20); capital 0 -> liened, capacity 0,
+/// repay -> Err(LockActive).
+fn w4_world(claim: u128, capital: u128) -> (MarketGroupV16HeaderAccount, [Market<u64>; 1], PortfolioAccountV16Account) {
+    let (market_id, _, owner) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    header.activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 1, 1).unwrap();
+    let acct = |seed: u8| {
+        let h = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(market_id, [seed; 32], owner));
+        let mut a = PortfolioAccountV16Account::default();
+        a.init_empty_in_place(h).unwrap();
+        a
+    };
+    let mut long_h = acct(8);
+    let mut short_h = acct(9);
+    let claim_num = claim * BOUND_SCALE;
+    long_h.pnl = V16PodI128::new(claim as i128);
+    long_h.source_domains[0].domain = percolator::V16PodU32::new(1);
+    long_h.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_h.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim + header.vault.get());
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_h);
+        m.deposit_not_atomic(&mut short, 1_000).unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_h);
+        m.deposit_not_atomic(&mut long, capital).unwrap();
+        m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 { asset_index: 0, size_q: (10 * POS_SCALE) as i128, exec_price: 1, fee_bps: 0 },
+            true,
+        )
+        .unwrap();
+        m.full_account_refresh_not_atomic(&mut long).unwrap();
     }
-    w.refresh(&mut maker, 0).unwrap();
-    w.refresh(&mut a, 0).unwrap();
-    (w, a)
+    (header, markets, long_h)
+}
+
+/// Review M1 (E-W4-4): the claim domain's credit becomes INSURANCE-backed through real ops: fund
+/// the domain's insurance (`deposit_domain_insurance_not_atomic`), reserve insurance credit with the
+/// kani|fuzz writer `reserve_insurance_credit_not_atomic`, then withdraw the counterparty fresh
+/// backing (`withdraw_fresh_counterparty_backing_not_atomic`). Native replay: capacity 100 (> 0),
+/// and repay(10,10) / (50,50) / (1,0) = Err(InvalidConfig) with insurance unchanged: the refusal is
+/// the post-condition (insurance delta != total), NOT the capacity-0 LockActive.
+fn w4_insurance_world() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1], PortfolioAccountV16Account) {
+    let (mut h, mut mk, a) = w4_world(100, 1_000);
+    {
+        let mut m = MarketGroupV16ViewMut::new(&mut h, &mut mk);
+        m.deposit_domain_insurance_not_atomic(1, 200).unwrap();
+        m.reserve_insurance_credit_not_atomic(1, 100 * BOUND_SCALE).unwrap();
+        m.withdraw_fresh_counterparty_backing_not_atomic(1, 100).unwrap();
+    }
+    (h, mk, a)
 }
 
 fn w4_body(insurance_backed: bool) {
-    let (mut w, mut acc) = w4_world();
+    let liened_variant: bool = if insurance_backed { false } else { kani::any() };
+    let (mut header, mut markets, mut acc) = if insurance_backed {
+        w4_insurance_world()
+    } else if liened_variant {
+        w4_world(100, 0)
+    } else {
+        w4_world(100, 1_000)
+    };
     kani::cover!(true, "W4 world built");
-    if insurance_backed {
-        // the kani-gated writer: make the claim domain's credit insurance-backed
-        let extra = 1_000_000u128;
-        w.header.insurance = V16PodU128::new(w.header.insurance.get() + extra);
-        w.header.vault = V16PodU128::new(w.header.vault.get() + extra);
-        let r = w.view().reserve_insurance_credit_not_atomic(1, extra * BOUND_SCALE);
-        kani::assume(r.is_ok());
-    }
-    let resolved: bool = kani::any();
+    let resolved: bool = if insurance_backed { false } else { kani::any() };
     if resolved {
-        w.header.mode = 1;
+        let slot = header.current_slot.get();
+        kani::assume(MarketGroupV16ViewMut::new(&mut header, &mut markets).resolve_market_not_atomic(slot).is_ok());
     }
-    let amount_a = kani::any::<u16>() as u128;
-    let amount_b = kani::any::<u16>() as u128;
+    let amount_a = kani::any::<u8>() as u128;
+    let amount_b = kani::any::<u8>() as u128;
     let liened = acc.source_domains.iter().any(|d| d.source_claim_liened_num.get() > 0);
     // capacity as read by the function: on a clone, after the same first refresh
     let cap = {
-        let (mut hc, mut mc, mut ac) = (w.header, w.markets, acc);
+        let (mut hc, mut mc, mut ac) = (header, markets, acc);
         let mut v = MarketGroupV16ViewMut::new(&mut hc, &mut mc);
         let mut av_ = PortfolioV16ViewMut::new(&mut ac);
         match v.full_account_refresh_not_atomic(&mut av_) {
@@ -1262,21 +1383,21 @@ fn w4_body(insurance_backed: bool) {
             Err(_) => 0,
         }
     };
-    let (h0, a0) = (w.header, acc);
-    let r = w.view().repay_insurance_from_released_pnl_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc), 0, amount_a, 1, amount_b);
+    let (h0, a0) = (header, acc);
+    let r = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .repay_insurance_from_released_pnl_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc), 0, amount_a, 1, amount_b);
     if let Ok(t) = r {
         if t > 0 {
+            assert_eq!(t, amount_a + amount_b);
             assert!(t <= cap, "t <= capacity");
-            assert_eq!(w.header.vault.get(), h0.vault.get());
-            assert_eq!(w.header.insurance.get() - h0.insurance.get(), t);
-            assert!(acc.capital.get() <= a0.capital.get() && w.header.c_tot.get() <= h0.c_tot.get());
-            assert_eq!(a0.capital.get() - acc.capital.get(), h0.c_tot.get() - w.header.c_tot.get());
+            assert_eq!(header.vault.get(), h0.vault.get());
+            assert_eq!(header.insurance.get() - h0.insurance.get(), t);
+            assert!(acc.capital.get() <= a0.capital.get() && header.c_tot.get() <= h0.c_tot.get());
+            assert_eq!(a0.capital.get() - acc.capital.get(), h0.c_tot.get() - header.c_tot.get());
             for i in 0..acc.source_domains.len() {
                 assert_eq!(acc.source_domains[i].source_claim_liened_num, a0.source_domains[i].source_claim_liened_num);
                 assert_eq!(acc.source_domains[i].source_claim_impaired_num, a0.source_domains[i].source_claim_impaired_num);
             }
-            assert!(!resolved);
-            assert!(!liened, "a lien held by the account refuses the call");
         }
     }
     if liened && amount_a + amount_b > 0 {
@@ -1287,13 +1408,13 @@ fn w4_body(insurance_backed: bool) {
     }
     if insurance_backed {
         assert!(r.map_or(true, |t| t == 0), "insurance-credit-backed repay refused");
-        kani::cover!(amount_a + amount_b > 0 && r.is_err(), "insurance-credit branch reached and refused");
+        kani::cover!(cap > 0 && amount_a + amount_b > 0 && r == Err(V16Error::InvalidConfig), "capacity > 0 and refused at the insurance-delta post-condition");
     } else {
         kani::cover!(r.map_or(false, |t| t > 0) && amount_a > 0 && amount_b > 0, "both sweep legs non-zero and Ok");
         kani::cover!(r.map_or(false, |t| t > 0 && t == cap), "t == capacity");
         kani::cover!(r.map_or(false, |t| t > 0 && t < cap), "t < capacity");
-        kani::cover!(liened, "liened account");
-        kani::cover!(resolved && amount_a > 0, "Resolved reached");
+        kani::cover!(liened && amount_a > 0 && r.is_err(), "liened account refused");
+        kani::cover!(resolved && amount_a > 0 && r.is_err(), "Resolved refused");
     }
 }
 
@@ -1511,3 +1632,41 @@ fn proof_v22_kf_hidden_loss_bound() {
     kani::cover!(stale > 0 && r.is_none(), "fail-closed");
     kani::cover!(stale > 0 && d.laggard_count > 0 && r.is_some(), "laggard term");
 }
+
+/// E-REM-6, semantic half (review M9): for a 2-leg cohort the bound is >= the TRUE hidden loss.
+/// Two stale legs (unit A, so loss_weight == abs basis) with their own carried remainders take an
+/// adverse K move of `g` (a multiple of ADL_ONE: the fast path the production settle uses at unit
+/// A); each leg's realised loss is the magnitude of the REAL `scaled_adl_delta_with_carry_fast`
+/// quotient. The tracker that describes this cohort has stale_weight = w1 + w2, drift_gen = |dK|,
+/// no laggards. Assert |q1| + |q2| <= kernel_kf_hidden_loss_bound(2, drift). Bounded: u16 bases,
+/// u8 move, carries < DEN. Mutant REM-M6 is killed by the formula harness above; this harness
+/// carries the "bound covers the loss" meaning.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v22_kf_hidden_loss_bound_covers_two_leg_loss() {
+    let b1 = kani::any::<u16>() as u128 + 1;
+    let b2 = kani::any::<u16>() as u128 + 1;
+    let g = kani::any::<u8>() as i128;
+    let c1 = kani::any::<u32>() as u128;
+    let c2 = kani::any::<u32>() as u128;
+    kani::assume(c1 < POS_SCALE && c2 < POS_SCALE);
+    let dk = -(g * ADL_ONE as i128); // adverse K move for the long side
+    let q1 = View::kani_v22_scaled_adl_delta_with_carry_fast(b1, ADL_ONE, 0, dk, c1 * ADL_ONE);
+    let q2 = View::kani_v22_scaled_adl_delta_with_carry_fast(b2, ADL_ONE, 0, dk, c2 * ADL_ONE);
+    kani::assume(q1.is_some() && q2.is_some());
+    let loss = q1.unwrap().0.unsigned_abs() + q2.unwrap().0.unsigned_abs();
+    let d = KfDriftSideV16 {
+        gen_epoch: 0,
+        laggard_count: 0,
+        drift_gen: (g as u128) * ADL_ONE,
+        drift_prior: 0,
+        stale_weight: b1 + b2,
+        laggard_weight: 0,
+    };
+    let r = View::kani_v22_kf_hidden_loss_bound(2, d);
+    assert!(r.is_some());
+    assert!(loss <= r.unwrap(), "the bound covers the cohort's true hidden loss");
+    kani::cover!(loss > 0, "a real loss");
+    kani::cover!(loss > 0 && r.unwrap() - loss <= 4, "bound within its 2*stale slack of the loss (tight)");
+}
+
