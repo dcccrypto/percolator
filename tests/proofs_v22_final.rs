@@ -977,7 +977,7 @@ fn proof_v22_x1_fee_refinement_ok_state() {
     let liened = acc.source_domains.iter().any(|d| d.source_claim_liened_num.get() > 0);
     kani::cover!(active_legs >= 2 && r_new.is_ok() && r_ref.is_ok(), ">= 2 legs, both Ok");
     kani::cover!(clamp_case && r_new.is_ok() && r_ref.is_ok(), "pending credit above claims: the clamp fires");
-    kani::cover!(acc.pnl.get() < 0 && r_new.is_ok(), "negative PnL settled from principal");
+    kani::cover!(acc.pnl.get() < 0 && r_new.is_ok(), "negative PnL (capital exhausted), Ok");
     kani::cover!(r_new.map_or(false, |c| c > 0), "fee charged > 0");
     kani::cover!(liened, "an account holding a lien");
 }
@@ -1271,16 +1271,16 @@ fn proof_v22_w4_postcondition_predicate() {
     kani::cover!(got && ca < cb, "all true with capital falling");
 }
 
-/// W-4 world: the trader wins (long), the maker loses and settles (booking backing), the trader
-/// settles (claims credited, exposure still open).
-/// Review M1: the W-4 fixture of the engine's own spec suite (`tests/v16_spec_tests.rs`
-/// `w4_world`, which `w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance`
-/// pins at capacity > 0): a long holding `claim` atoms of unliened, source-backed positive PnL
-/// (counterparty fresh backing at rate 1) opens a funded position through the REAL trade path and is
-/// refreshed. `capital == 0` makes the same trade take a lien through the real trade path (the
-/// spec's case (e): lien-held). Natively replayed (`kani-work/fx/tests/w4.rs`): capital 1_000 ->
-/// capacity 100, repay(50,50) = Ok(100), repay(10,10) = Ok(20); capital 0 -> liened, capacity 0,
-/// repay -> Err(LockActive).
+/// E-W4-3/4 fixture (review M1; label per round 2): a FIELD-SEEDED base (the claim state: pnl,
+/// source_domains[0], five header totals, source_credit_short, backing_short) copied verbatim from
+/// the engine spec suite's `w4_world` (`tests/v16_spec_tests.rs:14330-14382`, which
+/// `w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance` pins at capacity
+/// > 0), followed by REAL ops: deposits, a funded trade, a refresh (and, in the harness, resolve).
+/// Evidence label: "seeded spec-suite fixture + real ops" (shape-valid under the cfg(kani) full audit
+/// scan, not reached by a production path). `capital == 0` makes the same trade take a lien through
+/// the real trade path (the spec's case (e): lien-held). Native replay (`kani-work/fx/tests/w4.rs`):
+/// capital 1_000 -> capacity 100, repay(50,50) = Ok(100), repay(10,10) = Ok(20); capital 0 -> liened,
+/// capacity 0, repay -> Err(LockActive).
 fn w4_world(claim: u128, capital: u128) -> (MarketGroupV16HeaderAccount, [Market<u64>; 1], PortfolioAccountV16Account) {
     let (market_id, _, owner) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -1634,6 +1634,8 @@ fn proof_v22_kf_hidden_loss_bound() {
 }
 
 /// E-REM-6, semantic half (review M9): for a 2-leg cohort the bound is >= the TRUE hidden loss.
+/// Label (round 2): BOUNDED, K-only (dF = 0), gen-term only (no laggard / prior term): it exercises
+/// one of the two floor atoms per leg that the `+2*stale` term pays for.
 /// Two stale legs (unit A, so loss_weight == abs basis) with their own carried remainders take an
 /// adverse K move of `g` (a multiple of ADL_ONE: the fast path the production settle uses at unit
 /// A); each leg's realised loss is the magnitude of the REAL `scaled_adl_delta_with_carry_fast`
