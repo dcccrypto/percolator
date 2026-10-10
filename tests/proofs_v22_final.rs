@@ -1089,7 +1089,7 @@ fn proof_v22_s9_protective_rate() {
 /// E-CAP-1 validator: `validate_with_market` Ok => every slot at or above `max_portfolio_assets`
 /// has bitmap bit 0 and an empty leg. Symbolic tail from `cap` (rev2 R2.1). Mutant CAP-M1.
 #[kani::proof]
-#[kani::unwind(20)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn proof_v22_leg_cap_validator() {
     let cap: u16 = kani::any();

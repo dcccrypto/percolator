@@ -1283,7 +1283,7 @@ fn kani_band_trade_shape_cap_and_min_notional_exempt() {
 /// leaves `a_long`, `a_short` unchanged and both OI sides back where they were. Cost L / high
 /// risk (whole trade path); memory-heavy, run under the RSS cap.
 #[kani::proof]
-#[kani::unwind(18)]
+#[kani::unwind(33)]
 #[kani::solver(cadical)]
 fn kani_band_bilateral_close_preserves_a() {
     let (mut header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
