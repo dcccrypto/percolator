@@ -19678,6 +19678,7 @@ fn cross_asset_burn_run_with(
                     exec_price: 1_000_000,
                     fee_bps: 0,
                 },
+                true,
             )
             .unwrap();
     }
