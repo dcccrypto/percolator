@@ -1672,3 +1672,31 @@ fn proof_v22_kf_hidden_loss_bound_covers_two_leg_loss() {
     kani::cover!(loss > 0 && r.unwrap() - loss <= 4, "bound within its 2*stale slack of the loss (tight)");
 }
 
+
+/// E-REM-5b (r2, memcmp unwind fix, option B): under cfg(kani) `is_empty_encoding` defaults to a
+/// field-wise compare (`percolator::v16::kani_v22_is_empty_encoding_fieldwise`); this proves it equals the
+/// PRODUCTION byte compare over all 217 symbolic bytes, in both directions. The production path is the
+/// unchanged body of `PortfolioLegV16Account::is_empty_encoding`, taken with the proof-only switch on
+/// (`kani_v22_set_leg_byte_compare(true)`); then the switch is turned off and the same leg is tested again.
+/// Also: the raw 217-byte equality equals the derived field-wise `==` (no padding, no hidden bytes).
+/// #[kani::unwind(218)]: the 217-byte memcmp plus its exit test; no other loop. Cost S.
+#[kani::proof]
+#[kani::unwind(218)]
+#[kani::solver(cadical)]
+fn proof_v22_empty_leg_bytes_eq_fieldwise() {
+    use percolator::v16::{kani_v22_is_empty_encoding_fieldwise, kani_v22_set_leg_byte_compare, PORTFOLIO_LEG_V16_EMPTY_ACCOUNT};
+    let bytes: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let leg: PortfolioLegV16Account = bytemuck::pod_read_unaligned(&bytes);
+    kani_v22_set_leg_byte_compare(true);
+    let prod = leg.is_empty_encoding(); // production: active == 0 && bytes_of(leg) == bytes_of(EMPTY)
+    kani_v22_set_leg_byte_compare(false);
+    let shim = leg.is_empty_encoding(); // proof-only default: field-wise
+    assert_eq!(shim, kani_v22_is_empty_encoding_fieldwise(&leg));
+    assert!(!prod || shim, "byte-equal => field-wise equal");
+    assert!(!shim || prod, "field-wise equal => byte-equal");
+    let raw_eq = bytes[..] == *bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT);
+    assert_eq!(raw_eq, leg == PORTFOLIO_LEG_V16_EMPTY_ACCOUNT, "217-byte equality == derived field-wise ==");
+    kani::cover!(prod && shim, "equal (the empty encoding)");
+    kani::cover!(!prod && !shim, "unequal");
+    kani::cover!(leg.active == 0 && !prod, "active == 0 but some other byte differs");
+}
