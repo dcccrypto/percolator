@@ -642,7 +642,7 @@ fn kani_band_census_inductive() {
 /// Positioned band fixture: one long and one short "virtual" leg in the counters (no account),
 /// both uncertified so the asset is not re-anchor-ready; shape-validated by assumption.
 fn positioned_band_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
-    let (header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
+    let (mut header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
     let mut a = asset_of(&markets);
     a.stored_pos_count_long = 1;
     a.stored_pos_count_short = 1;
@@ -653,6 +653,11 @@ fn positioned_band_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) 
     a.band_uncertified_long = 1;
     a.band_uncertified_short = 1;
     put_asset(&mut markets, &a);
+    // The header aggregates (resolved_payout_blocker_count = stored long + short) must match the
+    // slots, as every real position-opening path leaves them (validate_shape_full_audit_scan).
+    MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .refresh_header_aggregate_totals_for_test()
+        .unwrap();
     (header, markets)
 }
 
