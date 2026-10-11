@@ -554,7 +554,12 @@ fn proof_v22_s10_retry_hook_guard_m() {
         a.stored_pos_count_long = V16PodU64::new(c[2] as u64);
         a.stored_pos_count_short = V16PodU64::new(c[3] as u64);
     }
-    kani::assume(MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape().is_ok());
+    // batch-3 diag §8 rule: the counters feed the header aggregate resolved_payout_blocker_count, which
+    // validate_shape_full_audit_scan checks; refresh it from the slots (as real paths leave it), else every
+    // c != 0 is shape-invalid and the four "skip" covers are unreachable.
+    // (refresh errs only where the slot recomputation itself fails, i.e. where validate_shape fails too)
+    let refreshed = MarketGroupV16ViewMut::new(&mut header, &mut markets).refresh_header_aggregate_totals_for_test().is_ok();
+    kani::assume(refreshed && MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape().is_ok());
     kani::cover!(true, "hook fixture is shape-valid");
     let b0: u8 = kani::any();
     kani::assume(b0 <= S10_MAX_MOVES_PER_INSTRUCTION);
