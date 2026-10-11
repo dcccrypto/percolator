@@ -2793,7 +2793,7 @@ fn proof_v16_dynamic_market_account_len_fails_closed_on_arithmetic_overflow() {
 }
 
 #[kani::proof]
-#[kani::unwind(16)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
     let extension_index_raw: u8 = kani::any();
