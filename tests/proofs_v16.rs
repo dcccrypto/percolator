@@ -9987,7 +9987,12 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         account.header.pnl.get(),
         -(loss as i128) + expected_used as i128
     );
-    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    // P2b L1 (e6aaf94e): an attributable bankruptcy marks the bankrupt side's domain
+    // (asset 0, Long = domain 0) in the wire byte: 1 | (1 << 1) = 3.
+    assert_eq!(
+        market.header.bankruptcy_hlock_active,
+        percolator::bankruptcy_hlock_mark_domain(0, 0)
+    );
     assert_eq!(
         market.header.negative_pnl_account_count.get(),
         if expected_used == loss { 0 } else { 1 }

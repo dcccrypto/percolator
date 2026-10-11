@@ -1096,8 +1096,10 @@ fn proof_v22_leg_cap_validator() {
     kani::assume(cap >= 1 && cap <= 4);
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(cap, 4, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    // new_dynamic requires asset_slot_capacity >= max_market_slots (4) (batch-3 diag: capacity 1 was
+    // InvalidConfig on every path, so the first-freeze row was VACUOUS)
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 4, 0).unwrap();
+    let mut markets = core::array::from_fn::<_, 4, _>(|_| Market::new(0u64, EngineAssetSlotV16Account::default()));
     MarketGroupV16ViewMut::new(&mut header, &mut markets).activate_empty_market_not_atomic(0, 100, 1).unwrap();
     let mut account = empty_account_fixture(market_id, 2);
     let leg_bytes: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();

@@ -662,7 +662,7 @@ fn positioned_band_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) 
 /// `BandPinned`, both with header and slot byte-identical. Mutant: BND-M4 (rev 2.1 location
 /// corrected to `:16931`, the pin check in the accrual).
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(15)] // band_min_wide_anchor(130) in the activation fixture runs 14 iterations
 #[kani::solver(cadical)]
 fn kani_band_accrue_rejects_before_mutation() {
     let (mut header, mut markets) = positioned_band_fixture();
@@ -709,7 +709,7 @@ fn kani_band_accrue_rejects_before_mutation() {
 /// `band_bps != 0 && band_epoch == 0` is `InvalidConfig` for any state (no shape assumption:
 /// the claim is about a corrupt state).
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(15)]
 #[kani::solver(cadical)]
 fn kani_band_unarmed_fails_closed() {
     let (mut header, mut markets) = positioned_band_fixture();
@@ -758,7 +758,7 @@ fn kani_rent_route_conserves() {
 /// `settle_leg_rent_not_atomic` `:15691` (shim), leg from the real `kernel_attach_leg`.
 /// Mutant: BND-R1 (attach does not reset the rent snapshot).
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(17)] // account_fixture: init_empty_in_place walks 16 leg slots
 #[kani::solver(cadical)]
 fn kani_rent_settle_idempotent_and_attach_snap() {
     let (mut header, mut markets) = market_fixture(band_cfg(0), P0);
@@ -1110,7 +1110,9 @@ fn kani_band_width_ok_exact() {
     kani::assume(anchor >= 1 && anchor <= MAX_ORACLE_PRICE);
     if band_width_ok(anchor, d).unwrap() {
         let (lo, hi) = band_bounds(anchor, d).unwrap();
-        assert!(lo < anchor && anchor < hi, "the band moves both ways");
+        // hi is clipped at MAX_ORACLE_PRICE by design; no price/target can exceed it.
+        assert!(lo < anchor && (anchor < hi || anchor == MAX_ORACLE_PRICE), "the band moves both ways");
+        kani::cover!(anchor == MAX_ORACLE_PRICE, "band at the price ceiling (upper side clipped)");
         kani::cover!(true, "wide band");
     } else {
         kani::cover!(true, "narrow band");
@@ -1120,7 +1122,7 @@ fn kani_band_width_ok_exact() {
 /// E-BND-27 (§7 `kani_band_reanchor_never_narrow`): `band_prepare_accrual` `:16777` (shim)
 /// never re-anchors onto a band narrower than `MIN_BAND_WIDTH_TICKS`.
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(15)]
 #[kani::solver(cadical)]
 fn kani_band_reanchor_never_narrow() {
     let (mut header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
