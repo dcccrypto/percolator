@@ -13395,7 +13395,7 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1); // the one negative account
 
-    let mut acct_header = PortfolioAccountV16Account::default();
+    let mut acct_header = empty_account_fixture(market_id, 2);
     acct_header.capital = V16PodU128::new(capital);
     acct_header.pnl = V16PodI128::new(pnl);
 
