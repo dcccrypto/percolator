@@ -147,6 +147,8 @@ fn proof_v17_stress_envelope_writer_monotonic() {
     view.apply_stress_envelope_progress(c2, now).unwrap();
     let a2 = view.header.stress_consumption_bps_e9_since_envelope.get();
     assert!(a2 >= a1, "accumulator monotonic within epoch/slot");
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(a2 > a1, "accumulator strictly grows on the second write");
 }
 
 /// A-6.2: flag flips true iff one accrual reaches the trigger; start slot/epoch
@@ -182,6 +184,9 @@ fn proof_v17_stress_envelope_activation_threshold() {
             u64::MAX
         );
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(active, "trigger reached: envelope activated");
+    kani::cover!(!active && c > 0, "below the trigger with non-zero consumption");
 }
 
 /// A-6.3: clear zeroes the accumulator, restores u64::MAX sentinels, clears the flag.
@@ -317,6 +322,9 @@ fn proof_v17_apply_fee_policy_update_validates_bounds() {
             m
         );
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(m > MAX_MARGIN_BPS && result.is_err(), "out-of-bounds update refused");
+    kani::cover!(m > 0 && result.is_ok(), "in-bounds non-zero update accepted");
 }
 
 /// A-9.2: a valid update persists exactly the four fee-policy fields.
@@ -341,6 +349,8 @@ fn proof_v17_apply_fee_policy_update_persists() {
     assert_eq!(cfg.liquidation_fee_bps, 0);
     assert_eq!(cfg.liquidation_fee_cap, 0);
     assert_eq!(cfg.min_liquidation_abs, 0);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(m > 0 && cfg.max_trading_fee_bps == m, "non-zero fee persisted");
 }
 
 /// A-9.3: NO config field outside the four fee-policy targets is mutated (additive-surface invariant).
@@ -369,6 +379,8 @@ fn proof_v17_fee_policy_update_no_other_field_mutation() {
     expected.liquidation_fee_cap = update.liquidation_fee_cap;
     expected.min_liquidation_abs = update.min_liquidation_abs;
     assert_eq!(after_cfg, expected, "only the 4 fee-policy fields change");
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(after_cfg.max_trading_fee_bps != before_cfg.max_trading_fee_bps, "the fee field actually changes");
 }
 
 // ============================================================================
@@ -1180,6 +1192,8 @@ fn proof_v17_lp_vault_shares_round_down_no_over_issue() {
     // Mathematical guarantee: shares <= a*ts/nav, so shares*nav <= a*ts,
     // so back = floor(shares*nav/ts) <= floor(a*ts/ts) = a.
     assert!(back <= a128, "LP-NAV-3: floor(floor(a*ts/nav)*nav/ts) <= a");
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(shares > 0 && back < a128, "model-only: strict rounding loss with shares issued");
 }
 
 /// LP-NAV-4: lp_vault_nav_atoms is non-negative: available_principal + lp_earnings >= 0.
@@ -1269,6 +1283,8 @@ fn proof_v17_lp_vault_redemption_round_down() {
     // Mathematical guarantee: floor(x) * d <= x * d for any x = s*nav, d = ts.
     // Proof: atoms_out = floor(s*nav/ts) <= s*nav/ts, so atoms_out*ts <= s*nav.
     assert!(lhs <= rhs, "LP-NAV-5: floor(s*nav/ts)*ts <= s*nav");
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(atoms_out > 0 && lhs < rhs, "model-only: strict floor with a non-zero payout");
 }
 
 // ============================================================================

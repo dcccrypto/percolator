@@ -3306,6 +3306,8 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(i > 0 && needs_obs(&AutoCrankPlanV16::RefreshAccount { asset_index: None }), "symbolic index; the one observation-requiring plan");
 }
 
 // A flat account whose independently funded source-credit lien is no longer
@@ -3349,6 +3351,8 @@ fn proof_v16_auto_crank_source_lien_release_is_total_and_prioritized() {
         PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
     );
     assert_eq!(liquidation, AutoCrankPlanV16::Liquidate { asset_index: 7 });
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(release == AutoCrankPlanV16::ReleaseSourceLiens && liquidation == AutoCrankPlanV16::Liquidate { asset_index: 7 }, "concrete harness: both selections reached");
 }
 
 // Pending close is a production-dispatchable class, not merely a proof-summary
@@ -3423,6 +3427,8 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
             reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
         }
     );
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(lower == AutoCrankPlanV16::AdvanceClose && terminal == proactive_recovery, "concrete harness: all three selections reached");
 }
 
 #[kani::proof]
@@ -7604,6 +7610,8 @@ fn proof_v16_source_support_rounds_per_domain_before_aggregation() {
     assert_eq!(first, 0);
     assert_eq!(second, 0);
     assert_eq!(first.checked_add(second), Some(0));
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(first == 0 && second == 0, "concrete harness: half-rate support floors to 0 per domain");
 }
 
 // Cross-account solvency: two independent winners holding positive-PnL claims
@@ -15265,6 +15273,9 @@ fn proof_account_kf_settlement_key_roundtrip_and_priority() {
             kani_account_kf_settlement_plan_key(phase, source_domain, other_slot).unwrap();
         assert!(earlier_slot < later_slot);
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(phase == 1 && source_domain < other_domain && leg_slot > 0, "gain-phase key, domain order branch");
+    kani::cover!(leg_slot < other_slot && source_domain > 0, "slot order branch");
 }
 
 // The whole-account K/F settlement plan is built one entry at a time by this
@@ -15342,6 +15353,9 @@ fn proof_account_kf_settlement_plan_insert_preserves_order_and_multiset() {
         index += 1;
     }
     assert!(proof_holds);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(prefix_len >= 2 && expected_insert_at > 0 && expected_insert_at < prefix_len, "insert in the middle of a sorted plan");
+    kani::cover!(prefix_len >= 1 && expected_insert_at == prefix_len, "append at the end");
 }
 
 // Shared liquidation/rebalance theorem for partially ADL-reduced positions.
@@ -16054,6 +16068,9 @@ fn proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation() {
     } else {
         assert_eq!(selected, None);
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(!has_refresh && has_reset && selected == Some(reset_index), "reset obligation selected");
+    kani::cover!(has_refresh && has_reset && refresh_index != reset_index, "refresh wins over reset");
 }
 
 #[kani::proof]
@@ -16107,6 +16124,8 @@ fn proof_v16_detached_refresh_leg_skips_post_refresh_accrual() {
         kani_refresh_detached_selected_leg(selected_leg_before, selected_leg_after),
         selected_leg_before && !selected_leg_after
     );
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(selected_leg_before && !selected_leg_after, "detach detected");
 }
 
 // Permissionless mixed-lifecycle liveness theorem. Symbolic masks cover every
@@ -18320,6 +18339,8 @@ fn proof_v16_backing_expiry_kernel_rejects_every_ineligible_bucket() {
 #[kani::solver(cadical)]
 fn proof_v16_fully_backed_expiry_yields_zero_realizable_support() {
     assert_expired_backing_yields_zero_realizable_support(3);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the helper ran to completion");
 }
 
 #[kani::proof]
@@ -18405,6 +18426,8 @@ fn proof_v16_public_backing_expiry_replay_is_inert() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(result == Err(V16Error::Stale), "concrete harness: stale replay refused");
 }
 
 // These two bounded bindings execute the production zero-copy route for both
@@ -18416,6 +18439,8 @@ fn proof_v16_public_backing_expiry_replay_is_inert() {
 #[kani::solver(cadical)]
 fn proof_v16_public_post_snapshot_expiry_improves_haircut_and_frames_receipts() {
     assert_post_snapshot_expiry_route(1, 1, 4, BOUND_SCALE);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the route helper ran to completion");
 }
 
 #[kani::proof]
@@ -18423,6 +18448,8 @@ fn proof_v16_public_post_snapshot_expiry_improves_haircut_and_frames_receipts() 
 #[kani::solver(cadical)]
 fn proof_v16_public_post_snapshot_expiry_restores_full_rate() {
     assert_post_snapshot_expiry_route(3, 1, 3, 0);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the route helper ran to completion");
 }
 
 // upstream 63891280 "Prove the no-free-OI fee lower bound": a risk-increasing fill
@@ -18548,6 +18575,8 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(charged == 0 && capital > 1 && earnings_before > 0, "payer with capital and prior earnings; fee floors to zero");
 }
 
 // upstream 9b737fdc "Prove unattributed loss lock lifecycle" (with 6d8e0a48 "Fix
