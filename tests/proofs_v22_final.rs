@@ -548,11 +548,26 @@ fn proof_v22_s10_retry_hook_guard_m() {
     let (mut header, mut markets) = world.unwrap();
     let c: [u8; 4] = kani::any();
     {
-        let a = &mut markets[0].engine.asset;
-        a.stale_account_count_long = V16PodU64::new(c[0] as u64);
-        a.stale_account_count_short = V16PodU64::new(c[1] as u64);
-        a.stored_pos_count_long = V16PodU64::new(c[2] as u64);
-        a.stored_pos_count_short = V16PodU64::new(c[3] as u64);
+        // A stale cohort of c[0] long / c[1] short legs (loss weight 1 each) built by the real kernels
+        // (track drift: stale_weight = loss_weight_sum; mark: stale = stored), then c[2] / c[3] fresh legs
+        // attach after the cohort. validate_kf_drift_shape (:1083) needs stale_weight >= stale count.
+        let slot = &mut markets[0].engine;
+        let mut a = slot.asset.try_to_runtime().unwrap();
+        a.stored_pos_count_long = c[0] as u64;
+        a.stored_pos_count_short = c[1] as u64;
+        a.loss_weight_sum_long += c[0] as u128;
+        a.loss_weight_sum_short += c[1] as u128;
+        let dl = percolator::v16::kani_track_kf_side_drift(slot.kf_drift_long.to_runtime(), c[0] != 0, a.kf_epoch_long, a.stale_account_count_long, a.loss_weight_sum_long, 0);
+        let ds = percolator::v16::kani_track_kf_side_drift(slot.kf_drift_short.to_runtime(), c[1] != 0, a.kf_epoch_short, a.stale_account_count_short, a.loss_weight_sum_short, 0);
+        let epoch = a.kf_epoch_long.max(a.kf_epoch_short) + 1;
+        a = percolator::v16::kani_mark_kf_stale_cohorts(a, c[0] != 0, c[1] != 0, epoch).unwrap();
+        a.stored_pos_count_long += c[2] as u64;
+        a.stored_pos_count_short += c[3] as u64;
+        a.loss_weight_sum_long += c[2] as u128;
+        a.loss_weight_sum_short += c[3] as u128;
+        slot.asset = AssetStateV16Account::from_runtime(&a);
+        slot.kf_drift_long = percolator::v16::KfDriftSideV16Account::from_runtime(&dl);
+        slot.kf_drift_short = percolator::v16::KfDriftSideV16Account::from_runtime(&ds);
     }
     // batch-3 diag §8 rule: the counters feed the header aggregate resolved_payout_blocker_count, which
     // validate_shape_full_audit_scan checks; refresh it from the slots (as real paths leave it), else every
