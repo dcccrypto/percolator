@@ -6,6 +6,16 @@
 //! `tests/proofs_v22_final.rs` lines 13-247 (test files are separate crates and cannot share it),
 //! so every replacement harness quantifies over exactly the original admitted state set unless
 //! its doc comment states a `BOUNDED:` / `CASE:` restriction.
+//!
+//! UNWIND (all harnesses here carry `#[kani::unwind(N)]`; Kani's unwinding assertions stay ON, so
+//! an insufficient N makes the run FAIL, never pass unsoundly). Diagnosis 2026-10-14: the original
+//! S10 rows have NO unwind attribute, so the activation fixture's `band_min_wide_anchor` loop
+//! (`for _ in 0..256`, band_rent.rs:113, whose exit symex cannot decide) is unrolled 256 times
+//! and every later statement is symexed under the merged exits; the run never leaves symex
+//! (measured here: even the 20-line setter harness on that fixture, 900 s, no symex end). Every
+//! PASSing v16 harness on the same fixture cuts it at 48/64 with the unwinding assertion SUCCESS.
+//! N = 70 where no other loop exceeds 64; 220 where an empty portfolio leg is decoded (217-byte
+//! memcmp, diag 10-10); 260 where concrete U256 long divisions run (<= 256 iterations).
 #![allow(clippy::too_many_arguments, dead_code, unused_imports, unused_mut)]
 
 use percolator::v16::{
@@ -293,6 +303,7 @@ fn div_rem_u256_native_only(num: U256, den: U256) -> (U256, U256) {
 /// PROBE (diagnostic only, not evidence): cost of the S10 fixture alone under the model rate.
 #[kani::proof]
 #[kani::stub(percolator::v16::V16Core::expected_source_credit_rate_num_for_state, s10_rate_model)]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn probe_s10_world_m() {
     let w = s10_world(any_dom(false), any_dom(false));
@@ -303,6 +314,7 @@ fn probe_s10_world_m() {
 /// PROBE (diagnostic only, not evidence): cost of the S10 fixture alone, real rate, restricted div.
 #[kani::proof]
 #[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn probe_s10_world_div() {
     let w = s10_world(any_dom(false), any_dom(false));
@@ -456,18 +468,21 @@ fn settle_entry_frame_body(b: u8) {
 }
 
 #[kani::proof]
+#[kani::unwind(260)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_settle_entry_frame_b0() {
     settle_entry_frame_body(0);
 }
 
 #[kani::proof]
+#[kani::unwind(260)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_settle_entry_frame_b1() {
     settle_entry_frame_body(1);
 }
 
 #[kani::proof]
+#[kani::unwind(260)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_settle_entry_frame_b2() {
     settle_entry_frame_body(2);
@@ -556,6 +571,7 @@ fn grant_body(sel: u8, mode: u8) {
 macro_rules! grant_case {
     ($name:ident, $sel:expr, $mode:expr) => {
         #[kani::proof]
+        #[kani::unwind(220)]
         #[kani::solver(kissat)]
         fn $name() {
             grant_body($sel, $mode);
@@ -573,6 +589,7 @@ grant_case!(proof_v22_s10_grant_recover_recovery, ACT_RECOVER, 2);
 /// Liquidate} and mode in {Resolved, Recovery} stay symbolic; all six exit at the mode check
 /// (v16.rs:18169) before any mutation, so symex does not merge any deep path. Same body.
 #[kani::proof]
+#[kani::unwind(220)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_grant_nonrecover_nonlive() {
     let sel: u8 = kani::any();
@@ -625,6 +642,7 @@ fn rebalance_spy<'a, T>(_v: &mut MarketGroupV16ViewMut<'a, T>, asset_index: usiz
 
 #[kani::proof]
 #[kani::stub(percolator::v16::MarketGroupV16ViewMut::rebalance_unclaimed_backing_across_asset_domains_not_atomic, rebalance_spy)]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_retry_hook_guard_split_spy() {
     let (mut header, mut markets) = one_market_only_fixture();
@@ -698,6 +716,7 @@ fn any_bucket(market_id: u64) -> BackingBucketV16 {
 }
 
 #[kani::proof]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_wholly_empty_reset_any_state() {
     let (mut header, mut markets) = one_market_only_fixture();
@@ -948,6 +967,7 @@ macro_rules! move_case {
     ($name:ident, $ins:expr, $sl:expr, $ss:expr) => {
         #[kani::proof]
         #[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
+        #[kani::unwind(70)]
         #[kani::solver(kissat)]
         fn $name() {
             s10_move_case_body($ins, $sl, $ss);
@@ -990,6 +1010,7 @@ move_case!(proof_v22_s10_move_ins_case_i_i, true, 3, 3);
 /// PROBE (diagnostic only): fixture cost with fully concrete domains (the grant fixture's).
 #[kani::proof]
 #[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn probe_s10_world_conc() {
     let l = Dom { status: 1, fr: 50_000, valid: 0, cons: 0, imp: 0, exp: 200, claims: 0, rem: 0, exact_full: true, spent_extra: 0, pp: 0, ins: 0 };
@@ -1002,6 +1023,7 @@ fn probe_s10_world_conc() {
 /// PROBE (diagnostic only): fixture cost with concrete statuses (Fresh, Empty), rest symbolic.
 #[kani::proof]
 #[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn probe_s10_world_case_f_e() {
     let mut l = any_dom(false);
@@ -1027,6 +1049,7 @@ fn probe_s10_world_case_f_e() {
 // by BOUND_SCALE is a special case), no shape assumption. Same assertions as the original.
 
 #[kani::proof]
+#[kani::unwind(70)]
 #[kani::solver(kissat)]
 fn proof_v22_s10_idle_fast_path_any_state() {
     let (mut header, mut markets) = one_market_only_fixture();
@@ -1055,4 +1078,37 @@ fn proof_v22_s10_idle_fast_path_any_state() {
     kani::cover!(bl.fresh_unliened_backing_num == 0 && bs.fresh_unliened_backing_num == 0, "idle with both domains empty of fresh");
     kani::cover!(budget0 == 0, "budget 0");
     kani::cover!(budget0 == 2, "budget 2");
+}
+
+// ---- negative controls (expected FAIL; run once, then gated off with cfg(any())) ------------
+
+/// NEGCTL for `proof_v22_s10_wholly_empty_reset_any_state`: claims the mirror survives a wholly
+/// empty bucket (the opposite of the real reset). Must FAIL.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn negctl_s10_wholly_empty_reset_keeps_mirror() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.provider_principal_long = V16PodU128::new(kani::any());
+    let nb = any_bucket(market_id);
+    let m0 = markets;
+    let r = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_set_backing_bucket_for_domain(0, nb);
+    kani::assume(r.is_ok());
+    assert_eq!(pp_of(&markets, 0), pp_of(&m0, 0), "NEGCTL: mirror never changes (wrong)");
+}
+
+/// NEGCTL for `proof_v22_s10_retry_hook_guard_split_spy`: claims the hook never runs the move.
+/// Must FAIL (the spy is called when budget > 0 and all four counters are 0).
+#[kani::proof]
+#[kani::stub(percolator::v16::MarketGroupV16ViewMut::rebalance_unclaimed_backing_across_asset_domains_not_atomic, rebalance_spy)]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn negctl_s10_retry_hook_never_moves() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let b0: u8 = kani::any();
+    kani::assume(b0 <= S10_MAX_MOVES_PER_INSTRUCTION);
+    let mut b = b0;
+    let _ = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_s10_retry(0, &mut b);
+    assert_eq!(unsafe { SPY_CALLS }, 0, "NEGCTL: the move never runs (wrong)");
 }

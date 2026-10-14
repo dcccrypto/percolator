@@ -201,13 +201,19 @@ fn funding_div_rem_recorder(p: u128) -> (u128, u128) {
 
 fn funding_h2_structure_body(longs_pay: bool) {
     let m64: u64 = kani::any();
-    let mag = m64 as u128;
-    let a_long: u128 = kani::any();
-    let a_short: u128 = kani::any();
-    kani::assume(mag > 0);
+    // a < 2^64 is not a narrowing (a <= ADL_ONE = 1e15 < 2^50): building it from a u64 makes its
+    // upper 64 bits structurally zero, so the product's no-overflow is visible to the solver
+    let al64: u64 = kani::any();
+    let as64: u64 = kani::any();
+    let (a_long, a_short) = (al64 as u128, as64 as u128);
+    kani::assume(m64 > 0);
     kani::assume(a_long > 0 && a_long <= ADL_ONE);
     kani::assume(a_short > 0 && a_short <= ADL_ONE);
-    let n = if longs_pay { mag as i128 } else { -(mag as i128) };
+    let n = if longs_pay { m64 as i128 } else { -(m64 as i128) };
+    // the production reads |n| through `unsigned_abs`; the harness uses the SAME expression (so
+    // the products below are syntactically the production's), and pins it to the design value
+    let mag = n.unsigned_abs();
+    assert_eq!(mag, m64 as u128);
     let r = kani_funding_index_deltas(n, a_long, a_short);
     assert!(r.is_ok());
     let (f_long, f_short) = r.unwrap();
@@ -236,7 +242,7 @@ fn funding_h2_structure_body(longs_pay: bool) {
     kani::cover!((a_long == ADL_ONE) != (a_short == ADL_ONE), "one side on the fast path");
     kani::cover!(a_long == ADL_ONE && a_short == ADL_ONE, "both on the fast path");
     kani::cover!(calls == 2 && unsafe { DR_R[0] != 0 }, "rounding remainder non-zero");
-    kani::cover!(mag == MAG_BOUND - 1 && a_long == ADL_ONE - 1, "top of the bounded range");
+    kani::cover!(m64 == u64::MAX && a_long == ADL_ONE - 1, "top of the bounded range");
 }
 
 #[kani::proof]
