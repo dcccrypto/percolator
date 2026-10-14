@@ -1112,3 +1112,216 @@ fn negctl_s10_retry_hook_never_moves() {
     let _ = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_s10_retry(0, &mut b);
     assert_eq!(unsafe { SPY_CALLS }, 0, "NEGCTL: the move never runs (wrong)");
 }
+
+// =====================================================================================
+// REVIEW 2026-10-14 (lane engine-s10-funding): repaired replacements
+// =====================================================================================
+// `proof_v22_s10_wholly_empty_reset_any_state` FAILED overnight (logs/engine2, 1643 s) on two
+// HARNESS defects, not engine defects (its `bucket(&markets, d) == nb` check 161 was SUCCESS):
+//   (1) line 748 `header_total + old.fee` is an unchecked u128 add over two ARBITRARY u128s
+//       (the engine's own `apply_total_delta` is checked and fails closed);
+//   (2) `bucket()` = `try_to_runtime().unwrap()`, which runs `validate_backing_bucket_static`;
+//       `any_bucket` admits statically invalid buckets (e.g. Empty with non-zero amounts), and the
+//       harness unwraps the pre-state bucket BEFORE `assume(r.is_ok())` (and the other side's and
+//       the stored new bucket after it; the setter does not validate the new bucket).
+// Repair (no new assumption): compare RAW accounts (`BackingBucketV16Account`) instead of decoded
+// buckets, and compare the earnings identity as exact 129-bit sums via `overflowing_add`.
+
+fn raw_bucket(m: &[Market<u64>; 1], d: usize) -> BackingBucketV16Account {
+    if d == 0 { m[0].engine.backing_long } else { m[0].engine.backing_short }
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn proof_v22_s10_wholly_empty_reset_any_state_v2() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let bl = any_bucket(market_id);
+    let bs = any_bucket(market_id);
+    {
+        let e = &mut markets[0].engine;
+        e.backing_long = BackingBucketV16Account::from_runtime(&bl);
+        e.backing_short = BackingBucketV16Account::from_runtime(&bs);
+        e.provider_principal_long = V16PodU128::new(kani::any());
+        e.provider_principal_short = V16PodU128::new(kani::any());
+    }
+    header.backing_provider_earnings_total = V16PodU128::new(kani::any());
+    let d: usize = if kani::any::<bool>() { 1 } else { 0 };
+    let nb = any_bucket(market_id);
+    let old_fee = if d == 0 { bl.utilization_fee_earnings } else { bs.utilization_fee_earnings };
+    let (h0, m0) = (header, markets);
+    let r = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_set_backing_bucket_for_domain(d, nb);
+    kani::assume(r.is_ok());
+    let wholly_empty = nb.fresh_unliened_backing_num == 0 && nb.valid_liened_backing_num == 0
+        && nb.consumed_liened_backing_num == 0 && nb.impaired_liened_backing_num == 0;
+    if wholly_empty {
+        assert_eq!(pp_of(&markets, d), 0);
+    } else {
+        assert_eq!(pp_of(&markets, d), pp_of(&m0, d));
+    }
+    assert_eq!(pp_of(&markets, 1 - d), pp_of(&m0, 1 - d), "other side's mirror untouched");
+    assert!(raw_bucket(&markets, d) == BackingBucketV16Account::from_runtime(&nb), "stored bucket is exactly nb");
+    assert_eq!(
+        header.backing_provider_earnings_total.get().overflowing_add(old_fee),
+        h0.backing_provider_earnings_total.get().overflowing_add(nb.utilization_fee_earnings),
+        "earnings total moves by exactly new_fee - old_fee (exact 129-bit identity)"
+    );
+    assert!(raw_bucket(&markets, 1 - d) == raw_bucket(&m0, 1 - d), "other bucket untouched");
+    let mut hx = header;
+    hx.backing_provider_earnings_total = h0.backing_provider_earnings_total;
+    assert!(hx == h0, "header frame");
+    let mut ex = markets[0].engine;
+    ex.backing_long = m0[0].engine.backing_long;
+    ex.backing_short = m0[0].engine.backing_short;
+    ex.provider_principal_long = m0[0].engine.provider_principal_long;
+    ex.provider_principal_short = m0[0].engine.provider_principal_short;
+    assert!(ex == m0[0].engine, "slot frame");
+    kani::cover!(wholly_empty && pp_of(&m0, d) > 0, "reset fires");
+    kani::cover!(!wholly_empty && nb.fresh_unliened_backing_num == 0 && pp_of(&m0, d) > 0, "fresh 0 but not wholly empty: no reset");
+    kani::cover!(d == 0 && wholly_empty, "long side");
+    kani::cover!(d == 1 && wholly_empty, "short side");
+    kani::cover!(old_fee > nb.utilization_fee_earnings, "earnings total decreases");
+    kani::cover!(old_fee < nb.utilization_fee_earnings, "earnings total increases");
+}
+
+// `rebalance_spy` failed to BUILD: the original method's generics are <'a, T> with 'a EARLY-bound
+// (it comes from the impl); a free fn's `'a` used only in argument types is late-bound and not
+// counted. The `T: 'a` bound makes it early-bound, so the stub has the same 2 generic params.
+static mut SPY2_CALLS: u32 = 0;
+static mut SPY2_IDX: usize = usize::MAX;
+static mut SPY2_BUDGET: u8 = 0;
+static mut SPY2_OK: bool = true;
+
+fn rebalance_spy2<'a, T: 'a>(_v: &mut MarketGroupV16ViewMut<'a, T>, asset_index: usize, budget: &mut u8) -> V16Result<()> {
+    let ok: bool = kani::any();
+    unsafe {
+        SPY2_CALLS += 1;
+        SPY2_IDX = asset_index;
+        SPY2_BUDGET = *budget;
+        SPY2_OK = ok;
+    }
+    if ok { Ok(()) } else { Err(V16Error::ArithmeticOverflow) }
+}
+
+#[kani::proof]
+#[kani::stub(percolator::v16::MarketGroupV16ViewMut::rebalance_unclaimed_backing_across_asset_domains_not_atomic, rebalance_spy2)]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn proof_v22_s10_retry_hook_guard_split_spy_v2() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let c: [u64; 4] = kani::any();
+    {
+        let slot = &mut markets[0].engine;
+        let mut a = slot.asset.try_to_runtime().unwrap();
+        a.stale_account_count_long = c[0];
+        a.stale_account_count_short = c[1];
+        a.stored_pos_count_long = c[2];
+        a.stored_pos_count_short = c[3];
+        slot.asset = AssetStateV16Account::from_runtime(&a);
+    }
+    let b0: u8 = kani::any();
+    kani::assume(b0 <= S10_MAX_MOVES_PER_INSTRUCTION);
+    let (h0, m0) = (header, markets);
+    let mut b = b0;
+    let r = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_s10_retry(0, &mut b);
+    let any_count = c.iter().any(|x| *x != 0);
+    let (calls, idx, bud, ok) = unsafe { (SPY2_CALLS, SPY2_IDX, SPY2_BUDGET, SPY2_OK) };
+    assert!(header == h0 && markets == m0, "the hook itself mutates nothing");
+    assert_eq!(b, b0, "the hook itself does not touch the budget");
+    if b0 == 0 || any_count {
+        assert_eq!(calls, 0, "hook skipped => the move is not run");
+        assert!(r.is_ok());
+    } else {
+        assert_eq!(calls, 1, "guard passes => the move runs exactly once");
+        assert_eq!(idx, 0);
+        assert_eq!(bud, b0);
+        assert_eq!(r.is_ok(), ok, "the hook returns the move's result");
+        if !ok {
+            assert_eq!(r, Err(V16Error::ArithmeticOverflow));
+        }
+    }
+    kani::cover!(b0 > 0 && c[0] != 0 && c[1] == 0 && c[2] == 0 && c[3] == 0, "skip: stale long only");
+    kani::cover!(b0 > 0 && c[1] != 0 && c[0] == 0 && c[2] == 0 && c[3] == 0, "skip: stale short only");
+    kani::cover!(b0 > 0 && c[2] != 0 && c[0] == 0 && c[1] == 0 && c[3] == 0, "skip: stored long only");
+    kani::cover!(b0 > 0 && c[3] != 0 && c[0] == 0 && c[1] == 0 && c[2] == 0, "skip: stored short only");
+    kani::cover!(b0 == 0 && !any_count, "skip: budget 0");
+    kani::cover!(b0 > 0 && !any_count && ok, "hook runs the move (Ok)");
+    kani::cover!(b0 > 0 && !any_count && !ok, "hook runs the move (Err propagated)");
+}
+
+/// NEGCTL for `_spy_v2` (expected FAIL): claims the hook never runs the move.
+#[kani::proof]
+#[kani::stub(percolator::v16::MarketGroupV16ViewMut::rebalance_unclaimed_backing_across_asset_domains_not_atomic, rebalance_spy2)]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn negctl_s10_retry_hook_never_moves_v2() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let b0: u8 = kani::any();
+    kani::assume(b0 <= S10_MAX_MOVES_PER_INSTRUCTION);
+    let mut b = b0;
+    let _ = MarketGroupV16ViewMut::new(&mut header, &mut markets).kani_v22_s10_retry(0, &mut b);
+    assert_eq!(unsafe { SPY2_CALLS }, 0, "NEGCTL: the move never runs (wrong)");
+}
+
+// `proof_v22_s10_idle_fast_path_any_state` OOMed (12 GB, 270 s): CBMC symexes the whole decoded
+// slow path (U256 rate math) even though the assumption makes it unreachable. Repair: a TRIPWIRE
+// stub on `insurance_domain_index`, the first call after the fast-path `return` (v16.rs:15111):
+// it ASSERTS FALSE, so reaching the slow path FAILS the proof (sound: it narrows nothing that is
+// reachable without failing). The fixture never calls it (activation runs on the header type).
+fn insurance_domain_index_tripwire<'a, T: 'a>(_v: &MarketGroupV16ViewMut<'a, T>, _asset_index: usize, _side: SideV16) -> V16Result<usize> {
+    kani::assert(false, "TRIPWIRE: S10 slow path reached");
+    Err(V16Error::InvalidLeg)
+}
+
+#[kani::proof]
+#[kani::stub(percolator::v16::MarketGroupV16ViewMut::insurance_domain_index, insurance_domain_index_tripwire)]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn proof_v22_s10_idle_fast_path_any_state_v2() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let bl = any_bucket(market_id);
+    let bs = any_bucket(market_id);
+    let pl: u128 = kani::any();
+    let ps: u128 = kani::any();
+    kani::assume(bl.fresh_unliened_backing_num <= pl && bs.fresh_unliened_backing_num <= ps);
+    {
+        let e = &mut markets[0].engine;
+        e.backing_long = BackingBucketV16Account::from_runtime(&bl);
+        e.backing_short = BackingBucketV16Account::from_runtime(&bs);
+        e.provider_principal_long = V16PodU128::new(pl);
+        e.provider_principal_short = V16PodU128::new(ps);
+    }
+    let budget0: u8 = kani::any();
+    kani::assume(budget0 <= S10_MAX_MOVES_PER_INSTRUCTION);
+    let mut budget = budget0;
+    let (h0, m0) = (header, markets);
+    let r = MarketGroupV16ViewMut::new(&mut header, &mut markets).rebalance_unclaimed_backing_for_test_not_atomic(0, &mut budget);
+    assert!(r.is_ok());
+    assert!(header == h0 && markets == m0);
+    assert_eq!(budget, budget0);
+    kani::cover!(bl.fresh_unliened_backing_num > 0 && budget0 > 0, "idle with fresh backing below the principal");
+    kani::cover!(bl.fresh_unliened_backing_num == 0 && bs.fresh_unliened_backing_num == 0, "idle with both domains empty of fresh");
+    kani::cover!(budget0 == 0, "budget 0");
+    kani::cover!(budget0 == 2, "budget 2");
+}
+
+/// NEGCTL for `_idle_fast_path_any_state_v2` (expected FAIL on the tripwire): drops the
+/// fresh <= principal assumption on the long side, so the slow path is reachable.
+#[kani::proof]
+#[kani::stub(percolator::v16::MarketGroupV16ViewMut::insurance_domain_index, insurance_domain_index_tripwire)]
+#[kani::unwind(70)]
+#[kani::solver(kissat)]
+fn negctl_s10_idle_fast_path_tripwire_fires() {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let bl = any_bucket(market_id);
+    {
+        let e = &mut markets[0].engine;
+        e.backing_long = BackingBucketV16Account::from_runtime(&bl);
+        e.provider_principal_long = V16PodU128::new(kani::any());
+    }
+    let mut budget: u8 = 1;
+    let _ = MarketGroupV16ViewMut::new(&mut header, &mut markets).rebalance_unclaimed_backing_for_test_not_atomic(0, &mut budget);
+}
