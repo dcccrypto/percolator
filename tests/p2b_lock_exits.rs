@@ -1071,3 +1071,70 @@ fn l3_mg_flat_account_without_a_close_ledger_stays_unattributed() {
     }
     assert_eq!(header.bankruptcy_hlock_active, 0b101, "short leg: attributed to domain 1");
 }
+
+// ===================== #126: a side flip is risk-increasing (stale / target-lag) ======
+
+/// Open `open_q` (long `l`, short `s`) at a healthy mark, then make the asset loss-stale.
+fn stale_world(open_q: u128, seed: u8) -> (Header, Markets, PortfolioAccountV16Account, PortfolioAccountV16Account) {
+    let (mut header, mut markets) = market_fixture_slots(1, 100);
+    let mut l = account_fixture(1, seed);
+    let mut s = account_fixture(1, seed + 1);
+    deposit(&mut header, &mut markets, &mut l, 1_000);
+    deposit(&mut header, &mut markets, &mut s, 1_000);
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(open_q), 100).unwrap();
+    accrue(&mut header, &mut markets, 3, 101);
+    (header, markets, l, s)
+}
+
+#[test]
+fn issue126_equal_size_side_flip_is_rejected_while_loss_stale() {
+    let (mut header, mut markets, mut l, mut s) = stale_world(POS_SCALE, 40);
+    // l: +1 -> -1, s: -1 -> +1. Same absolute size, opposite side.
+    assert_eq!(
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(2 * POS_SCALE), 101),
+        Err(V16Error::LossStale),
+        "an equal-size flip opens fresh opposite exposure and must hit the stale gate"
+    );
+}
+
+#[test]
+fn issue126_smaller_abs_side_flip_is_rejected_while_loss_stale() {
+    let (mut header, mut markets, mut l, mut s) = stale_world(2 * POS_SCALE, 42);
+    // l: +2 -> -1, s: -2 -> +1. Absolute size shrinks but the side flips.
+    assert_eq!(
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(3 * POS_SCALE), 101),
+        Err(V16Error::LossStale)
+    );
+}
+
+#[test]
+fn issue126_side_flip_is_rejected_while_target_lags_effective() {
+    let (mut header, mut markets) = market_fixture_slots(1, 100);
+    let mut l = account_fixture(1, 44);
+    let mut s = account_fixture(1, 45);
+    deposit(&mut header, &mut markets, &mut l, 1_000);
+    deposit(&mut header, &mut markets, &mut s, 1_000);
+    trade(&mut header, &mut markets, &mut l, &mut s, signed_q(2 * POS_SCALE), 100).unwrap();
+    // Oracle target moved, effective price has not caught up: risk-increasing trades refused.
+    markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(101);
+    assert_eq!(
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(3 * POS_SCALE), 100),
+        Err(V16Error::LockActive),
+        "a smaller-abs flip must hit the target-lag gate"
+    );
+    assert_eq!(
+        trade(&mut header, &mut markets, &mut l, &mut s, -signed_q(4 * POS_SCALE), 100),
+        Err(V16Error::LockActive),
+        "an equal-size flip must hit the target-lag gate"
+    );
+}
+
+#[test]
+fn issue126_same_side_reduction_and_close_stay_allowed_while_loss_stale() {
+    // NEGATIVE CONTROLS: pure reductions and a close-to-flat are not risk-increasing.
+    let (mut header, mut markets, mut l, mut s) = stale_world(2 * POS_SCALE, 46);
+    trade(&mut header, &mut markets, &mut s, &mut l, signed_q(POS_SCALE), 101)
+        .expect("same-side reduction is not risk-increasing");
+    trade(&mut header, &mut markets, &mut s, &mut l, signed_q(POS_SCALE), 101)
+        .expect("a close to flat is not risk-increasing");
+}

@@ -19766,10 +19766,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_lookup: PositionDeltaLookupV16,
     ) -> V16Result<TradePositionPreflightV16> {
         Self::trade_signed_size_deltas(request.size_q)?;
-        let long_risk_increasing = long_lookup.next_effective_q.unsigned_abs()
-            > long_lookup.current_effective_q.unsigned_abs();
-        let short_risk_increasing = short_lookup.next_effective_q.unsigned_abs()
-            > short_lookup.current_effective_q.unsigned_abs();
+        let long_risk_increasing = position_change_increases_risk(
+            long_lookup.current_effective_q,
+            long_lookup.next_effective_q,
+        );
+        let short_risk_increasing = position_change_increases_risk(
+            short_lookup.current_effective_q,
+            short_lookup.next_effective_q,
+        );
         let risk_increasing = long_risk_increasing || short_risk_increasing;
         let preflight_asset = self.asset_state(request.asset_index)?;
         kernel_trade_preexisting_oi_reduction_gate(
@@ -26458,20 +26462,97 @@ fn account_equity_from_parts(capital: u128, pnl: i128, fee_credits: i128) -> V16
         .ok_or(V16Error::ArithmeticOverflow)
 }
 
+/// spec.md: a position change is risk-increasing when it increases the absolute effective
+/// position, flips sign, or opens from flat. A flip to a smaller (or equal) absolute size
+/// still opens a fresh opposite-side exposure, so it must not skip the stale/target-lag
+/// rejection or the initial-margin source-lien creation (dcccrypto/percolator#126).
+/// A same-side reduction and a close to flat are NOT risk-increasing.
+fn position_change_increases_risk(current: i128, next: i128) -> bool {
+    let opens_from_flat = current == 0 && next != 0;
+    let flips_sign = current != 0 && next != 0 && (current > 0) != (next > 0);
+    opens_from_flat || flips_sign || next.unsigned_abs() > current.unsigned_abs()
+}
+
 #[cfg(kani)]
 fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     let next = current
         .checked_add(delta_q)
         .ok_or(V16Error::ArithmeticOverflow)?;
     validate_basis_or_zero(next)?;
-    Ok(next.unsigned_abs() > current.unsigned_abs())
+    Ok(position_change_increases_risk(current, next))
 }
 
 // upstream f06a04a7 "Keep strict trade reductions open below initial margin":
 // only a STRICT reduction of the account's position on the asset is exempt from
-// the final initial-margin gate; equal-size flips and increases keep it.
+// the final initial-margin gate; equal-size flips and increases keep it. A sign flip is
+// not a reduction of the position even when its absolute size shrinks (it opens fresh
+// opposite-side exposure), so every flip keeps the gate and the source-lien creation
+// that is keyed on it (dcccrypto/percolator#126).
 fn trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
-    next.unsigned_abs() >= current.unsigned_abs()
+    next.unsigned_abs() >= current.unsigned_abs() || position_change_increases_risk(current, next)
+}
+
+#[cfg(test)]
+mod position_change_risk_classifier_126_tests {
+    use super::*;
+
+    const Q: i128 = 100;
+
+    #[test]
+    fn long_to_short_equal_size_is_risk_increasing() {
+        assert!(position_change_increases_risk(Q, -Q));
+    }
+    #[test]
+    fn short_to_long_equal_size_is_risk_increasing() {
+        assert!(position_change_increases_risk(-Q, Q));
+    }
+    #[test]
+    fn flip_with_smaller_abs_is_risk_increasing() {
+        assert!(position_change_increases_risk(Q, -(Q / 2)));
+        assert!(position_change_increases_risk(-Q, Q / 2));
+        assert!(position_change_increases_risk(Q, -1));
+    }
+    #[test]
+    fn flip_with_larger_abs_is_risk_increasing() {
+        assert!(position_change_increases_risk(Q, -2 * Q));
+    }
+    #[test]
+    fn open_from_flat_is_risk_increasing() {
+        assert!(position_change_increases_risk(0, Q));
+        assert!(position_change_increases_risk(0, -Q));
+    }
+    #[test]
+    fn same_side_increase_is_risk_increasing() {
+        assert!(position_change_increases_risk(Q, 2 * Q));
+        assert!(position_change_increases_risk(-Q, -2 * Q));
+    }
+    #[test]
+    fn same_side_reduction_is_not_risk_increasing() {
+        assert!(!position_change_increases_risk(Q, Q / 2));
+        assert!(!position_change_increases_risk(-Q, -(Q / 2)));
+    }
+    #[test]
+    fn close_to_flat_and_flat_to_flat_are_not_risk_increasing() {
+        assert!(!position_change_increases_risk(Q, 0));
+        assert!(!position_change_increases_risk(-Q, 0));
+        assert!(!position_change_increases_risk(0, 0));
+    }
+    #[test]
+    fn unchanged_position_is_not_risk_increasing() {
+        assert!(!position_change_increases_risk(Q, Q));
+        assert!(!position_change_increases_risk(-Q, -Q));
+    }
+    #[test]
+    fn initial_margin_gate_keeps_flips_and_exempts_only_strict_same_side_reductions() {
+        assert!(trade_account_requires_initial_margin(Q, -Q));
+        assert!(trade_account_requires_initial_margin(Q, -(Q / 2)));
+        assert!(trade_account_requires_initial_margin(-Q, Q / 2));
+        assert!(trade_account_requires_initial_margin(0, Q));
+        assert!(trade_account_requires_initial_margin(Q, 2 * Q));
+        assert!(!trade_account_requires_initial_margin(Q, Q / 2));
+        assert!(!trade_account_requires_initial_margin(-Q, -(Q / 2)));
+        assert!(!trade_account_requires_initial_margin(Q, 0));
+    }
 }
 
 // ---------------------------------------------------------------------------------------
