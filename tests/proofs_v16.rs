@@ -3882,8 +3882,25 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
         "risk classifier covers same-side exposure increase"
     );
     kani::cover!(
-        expected_ok && result == Ok(false) && current != 0 && delta_q.signum() != current.signum(),
-        "risk classifier covers risk reduction or side flip"
+        expected_ok
+            && result == Ok(false)
+            && current != 0
+            && next.unwrap() != 0
+            && next.unwrap().signum() == current.signum(),
+        "risk classifier covers same-side risk reduction"
+    );
+    kani::cover!(
+        expected_ok
+            && result == Ok(true)
+            && current != 0
+            && next.unwrap() != 0
+            && next.unwrap().signum() != current.signum()
+            && next.unwrap().unsigned_abs() <= current.unsigned_abs(),
+        "risk classifier covers a side flip with equal or smaller absolute size"
+    );
+    kani::cover!(
+        expected_ok && result == Ok(false) && next.unwrap() == 0 && current != 0,
+        "risk classifier covers a close to flat"
     );
     kani::cover!(
         !expected_ok,
@@ -3892,9 +3909,19 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok(increases) = result {
         let next = next.unwrap();
-        assert_eq!(increases, next.unsigned_abs() > current.unsigned_abs());
+        let flips = current != 0 && next != 0 && next.signum() != current.signum();
+        assert_eq!(
+            increases,
+            next.unsigned_abs() > current.unsigned_abs() || flips
+        );
         if current == 0 {
             assert_eq!(increases, next != 0);
+        }
+        if flips {
+            assert!(increases);
+        }
+        if next == 0 {
+            assert!(!increases);
         }
         if increases {
             assert!(next != 0);
@@ -17742,11 +17769,16 @@ fn proof_v16_trade_margin_gate_is_skipped_only_for_strict_risk_reduction() {
     let next = kani::any::<i16>() as i128;
     let requires_margin =
         MarketGroupV16ViewMut::<u64>::kani_trade_account_requires_initial_margin(current, next);
-    let expected = next.unsigned_abs() >= current.unsigned_abs();
+    let flips = current != 0 && next != 0 && next.signum() != current.signum();
+    let expected = next.unsigned_abs() >= current.unsigned_abs() || flips;
 
     kani::cover!(
         !requires_margin && current != 0 && next != 0,
         "strict same-side reduction skips the final IM gate"
+    );
+    kani::cover!(
+        requires_margin && flips && next.unsigned_abs() < current.unsigned_abs(),
+        "a side flip to a smaller size retains the final IM gate"
     );
     kani::cover!(
         requires_margin && current != next && current.unsigned_abs() == next.unsigned_abs(),
@@ -17759,6 +17791,7 @@ fn proof_v16_trade_margin_gate_is_skipped_only_for_strict_risk_reduction() {
     assert_eq!(requires_margin, expected);
     if !requires_margin {
         assert!(next.unsigned_abs() < current.unsigned_abs());
+        assert!(next == 0 || next.signum() == current.signum());
     }
 }
 
