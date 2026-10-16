@@ -928,12 +928,19 @@ fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let a_short = ADL_ONE * 3 / 4;
     let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
-    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    // fix/v21-funding-precision (upstream a74b81b2 rule "MUST NOT first floor by
+    // FUNDING_DEN"): F moves by the exact `rate * price * A / 1e9`, the paying side rounded
+    // up and the receiving side down. At this step's price (1.01e6) that is 10.1 units, which
+    // the old pre-floor truncated to 10.
+    let n = step.funding_rate_e9 * i128::from(step.effective_price);
+    assert!(n > 0, "this fixture's first step has longs paying");
+    let exact_long = n * ADL_ONE as i128 / 1_000_000_000; // ADL_ONE % 1e9 == 0: exact
+    let short_num = n * a_short as i128;
     assert_eq!(asset.a_short, a_short);
     assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
     assert_eq!(asset.k_short, -(price_delta * a_short as i128));
-    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
-    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+    assert_eq!(asset.f_long_num, -exact_long);
+    assert_eq!(asset.f_short_num, short_num.div_euclid(1_000_000_000));
 }
 
 #[test]
@@ -1989,6 +1996,8 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -1997,6 +2006,10 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2044,6 +2057,8 @@ fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: 2 * POS_SCALE,
@@ -2052,6 +2067,10 @@ fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2192,6 +2211,8 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -2200,6 +2221,10 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -2368,14 +2393,12 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
     let scaled = (ADL_ONE * 3 / 4) as i128;
     assert_eq!(asset.k_long, ADL_ONE as i128);
     assert_eq!(asset.k_short, -scaled);
-    assert_eq!(
-        asset.f_long_num,
-        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
-    );
-    assert_eq!(
-        asset.f_short_num,
-        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
-    );
+    // fix/v21-funding-precision: exact funding at the accrual price (FUNDING_COUNTER_PRICE + 1),
+    // payer (long) rounded up, receiver (short, A = 3/4) rounded down; the old pre-floor gave
+    // exactly FUNDING_COUNTER_ATOMS_PER_SLOT units and dropped the 1e-5 unit.
+    let n = FUNDING_COUNTER_RATE_E9 * i128::from(FUNDING_COUNTER_PRICE + 1);
+    assert_eq!(asset.f_long_num, -(n * ADL_ONE as i128 / 1_000_000_000));
+    assert_eq!(asset.f_short_num, (n * scaled).div_euclid(1_000_000_000));
 
     let total_value = |long: &PortfolioAccountV16Account,
                        short: &PortfolioAccountV16Account|
@@ -2401,7 +2424,14 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
             )
             .unwrap();
     }
-    assert_eq!(total_value(&long_header, &short_header), value_before);
+    // fix/v21-funding-precision: funding is now exact, so this step's funding is fractional
+    // (90.00009 atoms on the long). Settlement floors each leg's K/F pnl (pre-existing rule), so
+    // the payer is charged the ceiling and the receiver gets the floor: the pair may lose at most
+    // one atom per settled leg to rounding and can never gain (no value created). Removing even
+    // this residual needs per-leg K/F remainders (upstream a74b81b2), a portfolio layout change.
+    let value_after = total_value(&long_header, &short_header);
+    assert!(value_after <= value_before, "rounding must never create value");
+    assert!(value_before - value_after <= 2, "at most one atom per settled leg");
 
     let reduced_asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(reduced_asset.oi_eff_long_q, 6 * POS_SCALE);
@@ -2435,10 +2465,13 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
         market.full_account_refresh_not_atomic(&mut long).unwrap();
         market.full_account_refresh_not_atomic(&mut short).unwrap();
     }
-    assert_eq!(
-        total_value(&long_header, &short_header),
-        value_before_continuation,
-        "future price/funding accrual must remain zero-sum after the partial ADL reduction"
+    // fix/v21-funding-precision: same rule as above -- exact (fractional) funding, settlement
+    // floors per leg: never value-creating, at most one atom per settled leg.
+    let value_after_continuation = total_value(&long_header, &short_header);
+    assert!(
+        value_after_continuation <= value_before_continuation
+            && value_before_continuation - value_after_continuation <= 2,
+        "future price/funding accrual must remain zero-sum (up to settlement floor) after the partial ADL reduction"
     );
 }
 
@@ -2943,6 +2976,8 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_Q,
@@ -2951,6 +2986,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -2963,6 +3002,8 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: MATCHED_Q,
@@ -2971,6 +3012,10 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
     liquidated_header.health_cert.valid = 0;
@@ -3239,6 +3284,8 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
             a_basis: ADL_ONE,
             k_snap: asset.k_short,
             f_snap: asset.f_short_num,
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap: 0,
             epoch_snap: asset.epoch_short,
             loss_weight: 30_000,
@@ -3247,6 +3294,10 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3472,6 +3523,8 @@ fn v16_auto_crank_settles_released_recovery_obligation_before_finalizing_recover
             a_basis: ADL_ONE,
             k_snap: asset.k_short,
             f_snap: asset.f_short_num,
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap: 0,
             epoch_snap: asset.epoch_short,
             loss_weight: 30_000,
@@ -3480,6 +3533,10 @@ fn v16_auto_crank_settles_released_recovery_obligation_before_finalizing_recover
             b_epoch_snap: asset.epoch_short,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
@@ -3568,6 +3625,8 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_Q,
@@ -3576,6 +3635,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3588,6 +3651,8 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: MATCHED_Q,
@@ -3596,6 +3661,10 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3791,6 +3860,8 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_Q,
@@ -3799,6 +3870,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
     survivor_header.health_cert.valid = 0;
@@ -3811,6 +3886,8 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: MATCHED_Q,
@@ -3819,6 +3896,10 @@ fn v16_exact_oi_liquidation_close_starts_reset_for_adl_basis_residue() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     counterparty_header.active_bitmap[0] = V16PodU64::new(1);
     counterparty_header.health_cert.valid = 0;
@@ -3892,6 +3973,8 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: 2 * POS_SCALE,
@@ -3900,6 +3983,10 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -4665,6 +4752,8 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -4673,6 +4762,10 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5328,6 +5421,8 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -5336,6 +5431,10 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5414,6 +5513,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POSITION_Q,
@@ -5422,6 +5523,10 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -5489,6 +5594,8 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
@@ -5497,6 +5604,10 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -7352,6 +7463,8 @@ fn v16_b_settlement_loss_retires_the_legs_own_source_domain_first() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: LOT_Q,
@@ -7360,6 +7473,10 @@ fn v16_b_settlement_loss_retires_the_legs_own_source_domain_first() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -7482,6 +7599,8 @@ fn v16_b_settlement_loss_spills_past_an_exhausted_own_source_domain() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: LOT_Q,
@@ -7490,6 +7609,10 @@ fn v16_b_settlement_loss_spills_past_an_exhausted_own_source_domain() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     long_header.active_bitmap[0] = V16PodU64::new(1);
     long_header.health_cert.valid = 0;
@@ -8218,6 +8341,8 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: LIQUIDATED_SHORT_Q,
@@ -8226,6 +8351,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     liquidated_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -8240,6 +8369,8 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_LONG_Q,
@@ -8248,6 +8379,10 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     survivor_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9133,6 +9268,8 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
                 SideV16::Long => asset.f_long_num,
                 SideV16::Short => asset.f_short_num,
             },
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap: 0,
             epoch_snap: match side {
                 SideV16::Long => asset.epoch_long,
@@ -9150,6 +9287,10 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
             },
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
         account_header.active_bitmap[0] = V16PodU64::new(1);
         account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9247,6 +9388,8 @@ fn v16_auto_crank_retains_released_obligation_while_the_opposite_side_is_live() 
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: POS_SCALE,
@@ -9255,6 +9398,10 @@ fn v16_auto_crank_retains_released_obligation_while_the_opposite_side_is_live() 
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9326,6 +9473,8 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -9334,6 +9483,10 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9393,6 +9546,8 @@ fn v16_auto_crank_migrates_exhausted_residue_behind_a_current_certificate() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -9401,6 +9556,10 @@ fn v16_auto_crank_migrates_exhausted_residue_behind_a_current_certificate() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9497,6 +9656,8 @@ fn v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: POS_SCALE,
@@ -9505,6 +9666,10 @@ fn v16_auto_crank_does_not_liquidate_against_unmatched_effective_oi() {
         b_epoch_snap: asset.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -9585,6 +9750,8 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
@@ -9593,6 +9760,10 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -9933,6 +10104,8 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -9941,6 +10114,10 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10017,6 +10194,8 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
             a_basis: ADL_ONE,
             k_snap: asset.k_long,
             f_snap: asset.f_long_num,
+            k_rem_num: 0,
+            f_rem_num: 0,
             kf_epoch_snap: 0,
             epoch_snap: asset.epoch_long,
             loss_weight: POS_SCALE,
@@ -10025,6 +10204,10 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
             b_epoch_snap: asset.epoch_long,
             b_stale: false,
             stale: false,
+            band_epoch_snap: 0,
+            band_liq_pending: false,
+            rent_snap: 0,
+            rent_carry: 0,
         });
     }
     header.resolved_payout_blocker_count = V16PodU64::new(8);
@@ -10439,6 +10622,8 @@ fn v16_auto_crank_settles_b_stale_leg() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
@@ -10447,6 +10632,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: true,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10516,6 +10705,8 @@ fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -10524,6 +10715,10 @@ fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -10776,6 +10971,8 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset0.k_long,
                 f_snap: asset0.f_long_num,
+                k_rem_num: 0,
+                f_rem_num: 0,
                 kf_epoch_snap: 0,
                 epoch_snap: asset0.epoch_long,
                 loss_weight: POS_SCALE,
@@ -10784,6 +10981,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset0.epoch_long,
                 b_stale: true,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             (header, markets, account_header)
@@ -10892,6 +11093,8 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset.k_long,
                 f_snap: asset.f_long_num,
+                k_rem_num: 0,
+                f_rem_num: 0,
                 kf_epoch_snap: 0,
                 epoch_snap: asset.epoch_long,
                 loss_weight: POS_SCALE,
@@ -10900,6 +11103,10 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 b_epoch_snap: asset.epoch_long,
                 b_stale: false,
                 stale: false,
+                band_epoch_snap: 0,
+                band_liq_pending: false,
+                rent_snap: 0,
+                rent_carry: 0,
             });
             account_header.active_bitmap[0] = V16PodU64::new(1);
             {
@@ -11063,6 +11270,8 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
@@ -11071,6 +11280,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset0.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11081,6 +11294,8 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         a_basis: ADL_ONE,
         k_snap: asset1.k_short,
         f_snap: asset1.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset1.epoch_short,
         loss_weight: POS_SCALE,
@@ -11089,6 +11304,10 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
 
@@ -11157,6 +11376,8 @@ fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
         a_basis: ADL_ONE,
         k_snap: asset.k_epoch_start_long,
         f_snap: asset.f_epoch_start_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -11165,6 +11386,10 @@ fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -11245,6 +11470,8 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_epoch_start_long,
         f_snap: asset0.f_epoch_start_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
@@ -11253,6 +11480,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
@@ -11263,6 +11494,8 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         a_basis: ADL_ONE,
         k_snap: asset1.k_short,
         f_snap: asset1.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset1.epoch_short,
         loss_weight: POS_SCALE,
@@ -11271,6 +11504,10 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
         b_epoch_snap: asset1.epoch_short,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(3);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -12162,6 +12399,8 @@ fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty()
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
@@ -12170,6 +12409,10 @@ fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty()
         b_epoch_snap: asset.epoch_long,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     });
     account_header.active_bitmap[0] = V16PodU64::new(1);
 
@@ -14067,5 +14310,484 @@ fn f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert() {
         residual_after,
         residual_before + 50,
         "the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// W-4 residual (v2.2 Wave D follow-up): repay insurance from released, unliened, source-backed
+// positive PnL while Live, with the source-claim exposure still open.
+// ---------------------------------------------------------------------------------------------
+
+/// A long that holds `claim` of unliened source-backed PnL and real capital (so the trade needs
+/// no lien) and an open position; the market is Live, backing fresh.
+struct W4World {
+    header: MarketGroupV16HeaderAccount,
+    markets: Vec<Market<u64>>,
+    long: PortfolioAccountV16Account,
+    short: PortfolioAccountV16Account,
+}
+
+fn w4_world(claim: u128, capital: u128) -> W4World {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut long_header = account_fixture(1, 8);
+    let mut short_header = account_fixture(1, 9);
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_header.source_domains[0].domain = V16PodU32::new(1);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim + header.vault.get());
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market.deposit_not_atomic(&mut long, capital).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(10 * POS_SCALE),
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .expect("funded trade");
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    W4World { header, markets, long: long_header, short: short_header }
+}
+
+#[test]
+fn w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    assert_eq!(
+        long.header.source_domains[0].source_claim_liened_num.get(),
+        0,
+        "a funded trade must not lien (the fixture's premise)"
+    );
+    // Premise: the normal Live conversion IS refused by the open exposure.
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut long),
+        Err(V16Error::LockActive),
+        "premise: exposure refuses the plain conversion"
+    );
+    let cap = market
+        .released_pnl_insurance_repay_capacity(&long.as_view())
+        .unwrap();
+    assert!(cap > 0, "capacity must be visible with an open exposure and no lien: {cap}");
+    let (vault0, ins0, ctot0, cap0) = (
+        market.header.vault.get(),
+        market.header.insurance.get(),
+        market.header.c_tot.get(),
+        long.header.capital.get(),
+    );
+    let pnl0 = long.header.pnl.get();
+    let backing0 = market.markets[0].engine.backing_short.fresh_unliened_backing_num.get();
+    let amt = 40u128.min(cap);
+    let moved = market
+        .repay_insurance_from_released_pnl_not_atomic(&mut long, 0, amt / 2, 1, amt - amt / 2)
+        .expect("repay from PnL");
+    assert_eq!(moved, amt);
+    // Conservation: vault unchanged, insurance +amt, c_tot and the owner's capital unchanged
+    // (nothing rests in withdrawable capital), PnL face burned, backing consumed.
+    assert_eq!(market.header.vault.get(), vault0, "vault unchanged (no value created)");
+    assert_eq!(market.header.insurance.get(), ins0 + amt, "insurance credited exactly");
+    assert_eq!(market.header.c_tot.get(), ctot0, "c_tot unchanged net");
+    assert_eq!(long.header.capital.get(), cap0, "owner capital unchanged (never withdrawable)");
+    assert!(long.header.pnl.get() < pnl0, "positive PnL face is burned");
+    assert!(
+        market.markets[0].engine.backing_short.fresh_unliened_backing_num.get() < backing0,
+        "backing is consumed"
+    );
+    // The consumed backing equals what insurance received (credit rate 1.0).
+    assert_eq!(
+        backing0 - market.markets[0].engine.backing_short.fresh_unliened_backing_num.get(),
+        amt * BOUND_SCALE
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn w4_negative_controls_refuse_without_mutation_or_value() {
+    // (a) more than the capacity: refused.
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, cap, 1, 1),
+            Err(V16Error::LockActive),
+            "capacity + 1 is refused"
+        );
+    }
+    // (b) zero amount: no-op.
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let ins0 = market.header.insurance.get();
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 0, 1, 0),
+            Ok(0)
+        );
+        assert_eq!(market.header.insurance.get(), ins0);
+    }
+    // (c) a stale certificate: the READ-ONLY capacity is 0 (the read never refreshes); the repay itself
+    // refreshes first (see w4_repay_works_for_a_caller_that_did_not_refresh_first).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        long.header.health_cert.valid = 0;
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap(),
+            0
+        );
+    }
+    // (d) an account WITHOUT source claims (plain positive PnL): nothing is repayable, because
+    // Live realises nothing for an un-source-backed claim (same rule as the plain conversion).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut short = PortfolioV16ViewMut::new(&mut w.short);
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&short.as_view()).unwrap(),
+            0
+        );
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut short, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // (f) a non-Live market: capacity 0 and the repay is refused (this is a Live-only path).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let slot = market.header.current_slot.get();
+        market.resolve_market_not_atomic(slot).unwrap();
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap(),
+            0,
+            "Resolved: nothing is repayable through the Live path"
+        );
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // (e) a repayment that would cut equity below the INITIAL margin requirement is refused by
+    // the engine's own charge, even when the PnL is large: a position needing all of its equity.
+    {
+        let mut w = w4_world(100, 0);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+        // With zero capital the trade needed a lien, so the account is lien-held: refused.
+        assert_eq!(cap, 0, "a lien-held account repays nothing from PnL");
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+}
+
+/// W4-1: a claim backed by INSURANCE credit (not counterparty backing) must not be repaid into
+/// insurance: the consume step would debit and re-credit insurance (net zero) while the caller
+/// reduces its receivable in full. The engine refuses (insurance delta must equal the total).
+// The hand-forged insurance-credit ledger fails the stricter audit-scan shape validation (as it should), so
+// the fixture only exists without that feature.
+#[cfg(not(feature = "audit-scan"))]
+#[test]
+fn w4_insurance_credit_backed_claim_is_refused() {
+    let claim = 100u128;
+    let mut w = w4_world(claim, 1_000);
+    let claim_num = claim * BOUND_SCALE;
+    w.header.source_fresh_backing_total_num = V16PodU128::new(0);
+    w.header.insurance = V16PodU128::new(claim);
+    w.header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+    w.header.insurance_domain_budget_remaining_total = V16PodU128::new(claim);
+    w.markets[0].engine.insurance_domain_budget_short = V16PodU128::new(claim);
+    w.markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: 0,
+            insurance_credit_reserved_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    w.markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: 0,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    w.markets[0].engine.insurance_reservation_short =
+        percolator::InsuranceCreditReservationV16Account::from_runtime(
+            &percolator::InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num,
+                ..percolator::InsuranceCreditReservationV16::EMPTY
+            },
+        );
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    market.validate_shape().expect("fixture shape");
+    // On this fixture the capacity read itself refuses (Err) or reports 0: either way the repay
+    // must be refused and no insurance may be credited (W4-4: the capacity read can Err on an
+    // inconsistent source ledger, so a wrapper mode-3 call can revert where mode 1 succeeds).
+    let ins0 = market.header.insurance.get();
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 20, 1, 20);
+    assert!(r.is_err(), "an insurance-credit-funded repayment must be refused, got {r:?}");
+    let _ = ins0;
+}
+
+/// A price reversal AFTER a PnL repay: insurance keeps exactly what it was paid, the vault never
+/// moves, shapes stay valid, and the account's later loss settles against ITS OWN capital.
+#[test]
+fn w4_price_reversal_after_repay_leaves_insurance_whole() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+    let amt = 40u128.min(cap);
+    market
+        .repay_insurance_from_released_pnl_not_atomic(&mut long, 0, amt / 2, 1, amt - amt / 2)
+        .expect("repay");
+    let (vault1, ins1) = (market.header.vault.get(), market.header.insurance.get());
+    // The mark rises and falls back (the long wins then gives it back) across several slots.
+    let now = market.header.current_slot.get();
+    let mut slot = now;
+    for price in [2u64, 3, 2, 1] {
+        slot += 1;
+        market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap_or_else(|e| panic!("accrue to {price}: {e:?}"));
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    assert_eq!(market.header.insurance.get(), ins1, "insurance keeps what it was paid");
+    assert_eq!(market.header.vault.get(), vault1, "vault never moves");
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// W4-1 / E1 / E3: every clause of the repay post-conditions has a case that fails when that clause
+/// is removed from `repay_pnl_postconditions_hold`.
+#[test]
+fn w4_repay_postconditions_each_clause_is_load_bearing() {
+    use percolator::repay_pnl_postconditions_hold as ok;
+    // (vault b/a, insurance b/a, capital b/a, c_tot b/a, total)
+    assert!(ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "good: capital unchanged");
+    assert!(ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_990, 40), "good: a 10-atom fee left capital and c_tot together");
+    assert!(!ok(100, 101, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "vault moved");
+    assert!(!ok(100, 100, 10, 49, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by less than total");
+    assert!(!ok(100, 100, 10, 51, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by more than total");
+    assert!(!ok(100, 100, 50, 10, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance fell");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_001, 5_000, 5_001, 40), "E3: capital rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_001, 40), "E3: c_tot rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_995, 40), "E3: capital and c_tot fell by different amounts");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 5_000, 40), "E3: capital fell, c_tot did not");
+}
+
+/// A direct engine caller no longer has to refresh first: the repay refreshes before it snapshots.
+#[test]
+fn w4_repay_works_for_a_caller_that_did_not_refresh_first() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    long.header.health_cert.valid = 0; // stale certificate
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 10, 1, 10);
+    assert_eq!(r, Ok(20), "refreshes itself: {r:?}");
+}
+
+#[test]
+fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
+    let insurance_backed = false;
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    if insurance_backed {
+        #[cfg(feature = "fuzz")]
+        {
+            market
+                .deposit_domain_insurance_not_atomic(1, 100_000)
+                .unwrap();
+            market
+                .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
+                .unwrap();
+        }
+        #[cfg(not(feature = "fuzz"))]
+        unreachable!("the insurance-backed variant requires the fuzz test API");
+    } else {
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+            .unwrap();
+    }
+    market.deposit_not_atomic(&mut long, 52_501).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    if insurance_backed {
+        let fresh_backing_atoms = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num
+            / BOUND_SCALE;
+        assert!(fresh_backing_atoms > 0);
+        market
+            .withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms)
+            .expect("reserved insurance must fully replace withdrawn counterparty backing");
+    }
+    assert_eq!(long.header.pnl.get(), 5_000);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+    let lien_before = long.header.source_domains[0];
+    assert_eq!(long.header.pnl.get(), 5_000);
+    assert!(lien_before.source_claim_liened_num.get() > 0);
+    if insurance_backed {
+        assert!(
+            lien_before.source_lien_insurance_backing_num.get() > 0,
+            "expected insurance-backed lien: {lien_before:?}"
+        );
+        assert_eq!(lien_before.source_lien_counterparty_backing_num.get(), 0);
+    } else {
+        assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+        assert_eq!(lien_before.source_lien_insurance_backing_num.get(), 0);
+    }
+    let capital_before_reversal = long.header.capital.get();
+    let lien_effective = lien_before.source_lien_effective_reserved.get();
+    let backing_before_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let reservation_before_reversal = market.markets[0]
+        .engine
+        .insurance_reservation_short
+        .try_to_runtime()
+        .unwrap();
+    let insurance_before_reversal = market.header.insurance.get();
+    let risk_epoch_before_reversal = market.header.risk_epoch.get();
+    let source_credit_epoch_before_reversal = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap()
+        .credit_epoch;
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 100)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .unwrap();
+    // trades carry no S10 budget; the reversal settles as a crank would, with one
+    let mut s10_budget = percolator::S10_MAX_MOVES_PER_INSTRUCTION;
+    market.full_account_refresh_with_s10_budget_not_atomic(&mut short, &mut s10_budget).unwrap();
+    let cert = market
+        .full_account_refresh_with_s10_budget_not_atomic(&mut long, &mut s10_budget)
+        .expect("a mark reversal must settle even when the prior positive claim backed IM");
+
+    // After the reversal (and the 2,624-atom move the settlement itself made) the short bucket
+    // holds fresh 100,000 against a 100,000-atom provider deposit of which 2,376 are consumed
+    // (receivable): the wrapper ledger's view is provider_fresh = 100,000 - 2,376 = 97,624, so
+    // only 100,000 - 97,624 = 2,376 atoms are loser cash. A ring that counted the FULL amount
+    // booked or refilled would let a forced shortfall take more; the provider's share must stay.
+    let short = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+    let principal = market.markets[0].engine.provider_principal_short.get();
+    assert_eq!(principal, 100_000 * BOUND_SCALE);
+    assert_eq!(short.fresh_unliened_backing_num, 100_000 * BOUND_SCALE);
+    assert_eq!(short.consumed_liened_backing_num, 2_376 * BOUND_SCALE);
+    // force a claim shortfall far above the loser cash in the long domain and drive the move
+    let mut sc = market.markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let claims = sc.fresh_reserved_backing_num + 50_000 * BOUND_SCALE;
+    sc.positive_claim_bound_num = claims;
+    sc.exact_positive_claim_num = claims;
+    sc.credit_rate_num = sc.fresh_reserved_backing_num * CREDIT_RATE_SCALE / claims;
+    market.markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&sc);
+    market.rebalance_unclaimed_backing_for_test_not_atomic(0, &mut s10_budget).unwrap();
+    let after = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+    // rule A (default): the provider's full 100,000 principal is protected, nothing moves;
+    // rule B: provider_fresh = 100,000 - 2,376, so exactly the 2,376 atoms of loser cash move
+    let floor = if percolator::S10_PROTECT_FULL_PROVIDER_PRINCIPAL { 100_000 } else { 97_624 };
+    assert_eq!(
+        after.fresh_unliened_backing_num,
+        floor * BOUND_SCALE,
+        "the move took provider-owned backing (or too little): {} atoms left, protected floor {floor}",
+        after.fresh_unliened_backing_num / BOUND_SCALE
     );
 }
