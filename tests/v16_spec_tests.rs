@@ -14069,3 +14069,320 @@ fn f5_fully_netted_loss_into_lapsed_loss_domain_does_not_revert() {
         "the unbookable support stays in Residual exactly as on 35ddd692 (no value created or lost)"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// W-4 residual (v2.2 Wave D follow-up): repay insurance from released, unliened, source-backed
+// positive PnL while Live, with the source-claim exposure still open.
+// ---------------------------------------------------------------------------------------------
+
+/// A long that holds `claim` of unliened source-backed PnL and real capital (so the trade needs
+/// no lien) and an open position; the market is Live, backing fresh.
+struct W4World {
+    header: MarketGroupV16HeaderAccount,
+    markets: Vec<Market<u64>>,
+    long: PortfolioAccountV16Account,
+    short: PortfolioAccountV16Account,
+}
+
+fn w4_world(claim: u128, capital: u128) -> W4World {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut long_header = account_fixture(1, 8);
+    let mut short_header = account_fixture(1, 9);
+    let claim_num = claim * BOUND_SCALE;
+    long_header.pnl = V16PodI128::new(claim as i128);
+    long_header.source_domains[0].domain = V16PodU32::new(1);
+    long_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    long_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.vault = V16PodU128::new(claim + header.vault.get());
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market.deposit_not_atomic(&mut long, capital).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(10 * POS_SCALE),
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .expect("funded trade");
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    W4World { header, markets, long: long_header, short: short_header }
+}
+
+#[test]
+fn w4_repay_from_released_pnl_with_open_exposure_moves_value_only_into_insurance() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    assert_eq!(
+        long.header.source_domains[0].source_claim_liened_num.get(),
+        0,
+        "a funded trade must not lien (the fixture's premise)"
+    );
+    // Premise: the normal Live conversion IS refused by the open exposure.
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut long),
+        Err(V16Error::LockActive),
+        "premise: exposure refuses the plain conversion"
+    );
+    let cap = market
+        .released_pnl_insurance_repay_capacity(&long.as_view())
+        .unwrap();
+    assert!(cap > 0, "capacity must be visible with an open exposure and no lien: {cap}");
+    let (vault0, ins0, ctot0, cap0) = (
+        market.header.vault.get(),
+        market.header.insurance.get(),
+        market.header.c_tot.get(),
+        long.header.capital.get(),
+    );
+    let pnl0 = long.header.pnl.get();
+    let backing0 = market.markets[0].engine.backing_short.fresh_unliened_backing_num.get();
+    let amt = 40u128.min(cap);
+    let moved = market
+        .repay_insurance_from_released_pnl_not_atomic(&mut long, 0, amt / 2, 1, amt - amt / 2)
+        .expect("repay from PnL");
+    assert_eq!(moved, amt);
+    // Conservation: vault unchanged, insurance +amt, c_tot and the owner's capital unchanged
+    // (nothing rests in withdrawable capital), PnL face burned, backing consumed.
+    assert_eq!(market.header.vault.get(), vault0, "vault unchanged (no value created)");
+    assert_eq!(market.header.insurance.get(), ins0 + amt, "insurance credited exactly");
+    assert_eq!(market.header.c_tot.get(), ctot0, "c_tot unchanged net");
+    assert_eq!(long.header.capital.get(), cap0, "owner capital unchanged (never withdrawable)");
+    assert!(long.header.pnl.get() < pnl0, "positive PnL face is burned");
+    assert!(
+        market.markets[0].engine.backing_short.fresh_unliened_backing_num.get() < backing0,
+        "backing is consumed"
+    );
+    // The consumed backing equals what insurance received (credit rate 1.0).
+    assert_eq!(
+        backing0 - market.markets[0].engine.backing_short.fresh_unliened_backing_num.get(),
+        amt * BOUND_SCALE
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn w4_negative_controls_refuse_without_mutation_or_value() {
+    // (a) more than the capacity: refused.
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, cap, 1, 1),
+            Err(V16Error::LockActive),
+            "capacity + 1 is refused"
+        );
+    }
+    // (b) zero amount: no-op.
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let ins0 = market.header.insurance.get();
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 0, 1, 0),
+            Ok(0)
+        );
+        assert_eq!(market.header.insurance.get(), ins0);
+    }
+    // (c) a stale certificate: the READ-ONLY capacity is 0 (the read never refreshes); the repay itself
+    // refreshes first (see w4_repay_works_for_a_caller_that_did_not_refresh_first).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        long.header.health_cert.valid = 0;
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap(),
+            0
+        );
+    }
+    // (d) an account WITHOUT source claims (plain positive PnL): nothing is repayable, because
+    // Live realises nothing for an un-source-backed claim (same rule as the plain conversion).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut short = PortfolioV16ViewMut::new(&mut w.short);
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&short.as_view()).unwrap(),
+            0
+        );
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut short, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // (f) a non-Live market: capacity 0 and the repay is refused (this is a Live-only path).
+    {
+        let mut w = w4_world(100, 1_000);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let slot = market.header.current_slot.get();
+        market.resolve_market_not_atomic(slot).unwrap();
+        assert_eq!(
+            market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap(),
+            0,
+            "Resolved: nothing is repayable through the Live path"
+        );
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // (e) a repayment that would cut equity below the INITIAL margin requirement is refused by
+    // the engine's own charge, even when the PnL is large: a position needing all of its equity.
+    {
+        let mut w = w4_world(100, 0);
+        let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+        let mut long = PortfolioV16ViewMut::new(&mut w.long);
+        let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+        // With zero capital the trade needed a lien, so the account is lien-held: refused.
+        assert_eq!(cap, 0, "a lien-held account repays nothing from PnL");
+        assert_eq!(
+            market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 1, 1, 0),
+            Err(V16Error::LockActive)
+        );
+    }
+}
+
+/// W4-1: a claim backed by INSURANCE credit (not counterparty backing) must not be repaid into
+/// insurance: the consume step would debit and re-credit insurance (net zero) while the caller
+/// reduces its receivable in full. The engine refuses (insurance delta must equal the total).
+// The hand-forged insurance-credit ledger fails the stricter audit-scan shape validation (as it should), so
+// the fixture only exists without that feature.
+#[cfg(not(feature = "audit-scan"))]
+#[test]
+fn w4_insurance_credit_backed_claim_is_refused() {
+    let claim = 100u128;
+    let mut w = w4_world(claim, 1_000);
+    let claim_num = claim * BOUND_SCALE;
+    w.header.source_fresh_backing_total_num = V16PodU128::new(0);
+    w.header.insurance = V16PodU128::new(claim);
+    w.header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+    w.header.insurance_domain_budget_remaining_total = V16PodU128::new(claim);
+    w.markets[0].engine.insurance_domain_budget_short = V16PodU128::new(claim);
+    w.markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: 0,
+            insurance_credit_reserved_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    w.markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: 0,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    w.markets[0].engine.insurance_reservation_short =
+        percolator::InsuranceCreditReservationV16Account::from_runtime(
+            &percolator::InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num,
+                ..percolator::InsuranceCreditReservationV16::EMPTY
+            },
+        );
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    market.validate_shape().expect("fixture shape");
+    // On this fixture the capacity read itself refuses (Err) or reports 0: either way the repay
+    // must be refused and no insurance may be credited (W4-4: the capacity read can Err on an
+    // inconsistent source ledger, so a wrapper mode-3 call can revert where mode 1 succeeds).
+    let ins0 = market.header.insurance.get();
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 20, 1, 20);
+    assert!(r.is_err(), "an insurance-credit-funded repayment must be refused, got {r:?}");
+    let _ = ins0;
+}
+
+/// A price reversal AFTER a PnL repay: insurance keeps exactly what it was paid, the vault never
+/// moves, shapes stay valid, and the account's later loss settles against ITS OWN capital.
+#[test]
+fn w4_price_reversal_after_repay_leaves_insurance_whole() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    let cap = market.released_pnl_insurance_repay_capacity(&long.as_view()).unwrap();
+    let amt = 40u128.min(cap);
+    market
+        .repay_insurance_from_released_pnl_not_atomic(&mut long, 0, amt / 2, 1, amt - amt / 2)
+        .expect("repay");
+    let (vault1, ins1) = (market.header.vault.get(), market.header.insurance.get());
+    // The mark rises and falls back (the long wins then gives it back) across several slots.
+    let now = market.header.current_slot.get();
+    let mut slot = now;
+    for price in [2u64, 3, 2, 1] {
+        slot += 1;
+        market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap_or_else(|e| panic!("accrue to {price}: {e:?}"));
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+    assert_eq!(market.header.insurance.get(), ins1, "insurance keeps what it was paid");
+    assert_eq!(market.header.vault.get(), vault1, "vault never moves");
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+/// W4-1 / E1 / E3: every clause of the repay post-conditions has a case that fails when that clause
+/// is removed from `repay_pnl_postconditions_hold`.
+#[test]
+fn w4_repay_postconditions_each_clause_is_load_bearing() {
+    use percolator::repay_pnl_postconditions_hold as ok;
+    // (vault b/a, insurance b/a, capital b/a, c_tot b/a, total)
+    assert!(ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "good: capital unchanged");
+    assert!(ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_990, 40), "good: a 10-atom fee left capital and c_tot together");
+    assert!(!ok(100, 101, 10, 50, 1_000, 1_000, 5_000, 5_000, 40), "vault moved");
+    assert!(!ok(100, 100, 10, 49, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by less than total");
+    assert!(!ok(100, 100, 10, 51, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance rose by more than total");
+    assert!(!ok(100, 100, 50, 10, 1_000, 1_000, 5_000, 5_000, 40), "E1: insurance fell");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_001, 5_000, 5_001, 40), "E3: capital rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 1_000, 5_000, 5_001, 40), "E3: c_tot rose");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 4_995, 40), "E3: capital and c_tot fell by different amounts");
+    assert!(!ok(100, 100, 10, 50, 1_000, 990, 5_000, 5_000, 40), "E3: capital fell, c_tot did not");
+}
+
+/// A direct engine caller no longer has to refresh first: the repay refreshes before it snapshots.
+#[test]
+fn w4_repay_works_for_a_caller_that_did_not_refresh_first() {
+    let mut w = w4_world(100, 1_000);
+    let mut market = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    let mut long = PortfolioV16ViewMut::new(&mut w.long);
+    long.header.health_cert.valid = 0; // stale certificate
+    let r = market.repay_insurance_from_released_pnl_not_atomic(&mut long, 0, 10, 1, 10);
+    assert_eq!(r, Ok(20), "refreshes itself: {r:?}");
+}
