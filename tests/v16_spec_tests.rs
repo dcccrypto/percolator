@@ -15175,3 +15175,203 @@ fn v16_issue289_forfeited_bankruptcy_claim_recredits_paired_insurance_at_termina
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
 }
+
+// ---- S1-6 (audit 2026-10-17): randomized Resolved close-order walk ----
+//
+// Four accounts, one asset, random pair trades, a random price path with random partial
+// refreshes, then Resolved with a random interleaving of close / auto-crank close /
+// payout top-up / bucket expiry / clock advance. Deterministic (fixed LCG).
+// Pinned on this branch; on 3ce4cbd1 the pinned seeds pay less and strand vault atoms
+// (upstream 0b861efb: late debt after the creditor exited recreated ownerless backing).
+// Also pins liveness: every account must be closable in every scenario (a port of upstream
+// 94979ede (c) deadlocks 131 of them on this line, which is why it is withheld).
+
+struct S16Lcg(u64);
+impl S16Lcg {
+    fn n(&mut self, m: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % m
+    }
+}
+
+/// Returns None when the scenario could not be built, else (paid, all_closed, vault).
+fn s16_resolved_walk(seed: u64) -> Option<([u128; 4], bool, u128)> {
+    let mut r = S16Lcg(seed * 7919 + 1);
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut hs = [
+        account_fixture(1, 221),
+        account_fixture(1, 222),
+        account_fixture(1, 223),
+        account_fixture(1, 224),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let [h0, h1, h2, h3] = &mut hs;
+    let mut acc = [
+        PortfolioV16ViewMut::new(h0),
+        PortfolioV16ViewMut::new(h1),
+        PortfolioV16ViewMut::new(h2),
+        PortfolioV16ViewMut::new(h3),
+    ];
+    for a in acc.iter_mut() {
+        let c = [200u128, 400, 800, 1000][r.n(4) as usize];
+        market.deposit_not_atomic(a, c).unwrap();
+    }
+    let mut trades = 0;
+    for _ in 0..(1 + r.n(3)) {
+        let x = r.n(4) as usize;
+        let mut y = r.n(4) as usize;
+        if y == x {
+            y = (y + 1) % 4;
+        }
+        let sz = (1 + r.n(3)) as u128;
+        let (lo, hi) = (x.min(y), x.max(y));
+        let (a, b) = acc.split_at_mut(hi);
+        let (first, second) = (&mut a[lo], &mut b[0]);
+        // x is long, y is short
+        let (l, s) = if x < y { (first, second) } else { (second, first) };
+        if market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                l,
+                s,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(sz * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .is_ok()
+        {
+            trades += 1;
+        }
+    }
+    if trades == 0 {
+        return None;
+    }
+    let mut slot = market.header.current_slot.get();
+    let mut p = 100u64;
+    for _ in 0..(1 + r.n(4)) {
+        let tgt = [60u64, 80, 120, 160, 220, 300][r.n(6) as usize];
+        while p != tgt {
+            slot += 1;
+            p = if tgt > p {
+                (p + 10).min(tgt)
+            } else {
+                p.saturating_sub(10).max(tgt)
+            };
+            if market.set_asset_raw_oracle_target_not_atomic(0, p).is_err()
+                || market.accrue_asset_to_not_atomic(0, slot, p, 0, true).is_err()
+            {
+                return None;
+            }
+            for k in 0..4 {
+                if r.n(3) == 0 {
+                    let _ = market.full_account_refresh_not_atomic(&mut acc[k]);
+                }
+            }
+        }
+    }
+    if market.resolve_market_not_atomic(slot).is_err() {
+        return None;
+    }
+    let mut paid = [0u128; 4];
+    let mut closed = [false; 4];
+    for _ in 0..80 {
+        let who = r.n(4) as usize;
+        match r.n(8) {
+            6 if !closed[who] => {
+                let observations = [AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: market.markets[0].engine.asset.effective_price.get(),
+                    funding_rate_e9: 0,
+                }];
+                let work = AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                };
+                if let Ok(AutoCrankResultV16 {
+                    outcome:
+                        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout }),
+                    ..
+                }) = market.permissionless_auto_crank_not_atomic(&mut acc[who], work)
+                {
+                    paid[who] += payout;
+                    closed[who] = true;
+                }
+            }
+            0..=2 if !closed[who] => {
+                if let Ok(ResolvedCloseOutcomeV16::Closed { payout }) =
+                    market.close_resolved_account_not_atomic(&mut acc[who], 0)
+                {
+                    paid[who] += payout;
+                    closed[who] = true;
+                }
+            }
+            3 if !closed[who]
+                && acc[who]
+                    .header
+                    .resolved_payout_receipt
+                    .try_to_runtime()
+                    .unwrap()
+                    .present =>
+            {
+                if let Ok(t) = market.claim_resolved_payout_topup_not_atomic(&mut acc[who]) {
+                    paid[who] += t;
+                }
+            }
+            4 => {
+                for d in 0..2 {
+                    let _ = market
+                        .expire_source_backing_bucket_not_atomic(d, market.header.current_slot.get());
+                }
+            }
+            5 => {
+                let now = market.header.current_slot.get() + 1 + r.n(3_000_000);
+                let _ = market.advance_resolved_slot_not_atomic(now);
+            }
+            _ => {}
+        }
+    }
+    market.validate_shape().unwrap();
+    Some((paid, closed.iter().all(|c| *c), market.header.vault.get()))
+}
+
+#[test]
+fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
+    // (seed, paid, vault left). On 3ce4cbd1 these seeds pay less and leave more in the
+    // vault: 1470 -> [800,200,499,80] 21; 2322 -> [800,800,200,780] 20;
+    // 3167 -> [880,480,1000,1000] 40; 4698 -> [880,200,800,1000] 120;
+    // 5120 -> [909,200,880,200] 11.
+    let pinned: [(u64, [u128; 4], u128); 5] = [
+        (1470, [800, 200, 509, 80], 11),
+        (2322, [800, 800, 209, 780], 11),
+        (3167, [880, 500, 1000, 1000], 20),
+        (4698, [880, 200, 800, 1090], 30),
+        (5120, [919, 200, 880, 200], 1),
+    ];
+    for (seed, paid, vault) in pinned {
+        let (got, all_closed, v) = s16_resolved_walk(seed).expect("scenario builds");
+        assert!(all_closed, "seed {seed}: every account closes");
+        assert_eq!((got, v), (paid, vault), "seed {seed}");
+    }
+    // Liveness: the walk leaves some accounts unclosed only because it stops after 80
+    // random steps; 3ce4cbd1 has exactly these 7. Any other seed here is a new stuck
+    // account (a port of upstream 94979ede (c) adds 131).
+    let mut unclosed = vec![];
+    let mut built = 0;
+    for seed in 0..6000u64 {
+        if let Some((_, all_closed, _)) = s16_resolved_walk(seed) {
+            built += 1;
+            if !all_closed {
+                unclosed.push(seed);
+            }
+        }
+    }
+    assert!(built > 5000, "vacuity: {built} scenarios built");
+    assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
+}

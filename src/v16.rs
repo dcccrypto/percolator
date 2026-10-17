@@ -24379,44 +24379,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn source_domain_terminal_for_haircut_demote(
-        &self,
-        domain: usize,
-        retiring_source: PortfolioSourceDomainV16Account,
-    ) -> V16Result<bool> {
-        let (asset_index, loss_side) = self.domain_asset_side(domain)?;
-        let bucket = self.backing_bucket_for_domain(domain)?;
-        if matches!(
-            bucket.status,
-            BackingBucketStatusV16::Expired | BackingBucketStatusV16::Impaired
-        ) {
-            return Ok(true);
-        }
-        if retiring_source.source_claim_impaired_num.get() != 0 {
-            return Ok(true);
-        }
-        let source = self.source_credit_for_domain(domain)?;
-        let remaining_claim_num = source
-            .positive_claim_bound_num
-            .checked_sub(retiring_source.source_claim_bound_num.get())
-            .ok_or(V16Error::CounterUnderflow)?;
-        if remaining_claim_num != 0 {
-            return Ok(false);
-        }
-        let asset = self.asset_state(asset_index)?;
-        let creditor_counts = match opposite_side(loss_side) {
-            SideV16::Long => (
-                asset.stored_pos_count_long,
-                asset.pending_obligation_count_long,
-            ),
-            SideV16::Short => (
-                asset.stored_pos_count_short,
-                asset.pending_obligation_count_short,
-            ),
-        };
-        Ok(creditor_counts == (0, 0))
-    }
-
     /// Realize one canonical source domain before its claim face enters the
     /// junior receipt pool. Each call consumes only that domain's whole-atom
     /// backing entitlement, demotes its unconverted haircut face to ordinary
@@ -24488,12 +24450,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if converted == 0 {
-            // upstream 94979ede (c): demote only once the source domain can no longer
-            // back this face (terminal bucket, impaired claim, or no remaining claim and
-            // no creditor leg or pending obligation).
-            if !self.source_domain_terminal_for_haircut_demote(source_domain, source)? {
-                return Err(V16Error::LockActive);
-            }
+            // NOT PORTED on v22: upstream 94979ede (c) refuses this demotion (LockActive)
+            // until the source domain is terminal for the face. On this line it leaves
+            // accounts permanently un-closable in Resolved (a randomized close-order walk
+            // finds 131 of 5,478 scenarios where claimants wait on each other).
+            // Tracked in F-S1-6-engine-resolved-payout.md.
             // Zero-rate, sub-atom, or impaired source face remains a junior claim;
             // only its source-specific backing attribution is terminally removed.
             self.burn_account_source_claim_bound_num_domain_first(
