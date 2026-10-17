@@ -25505,6 +25505,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 loss_domain,
                 negative_before,
                 reserved_after,
+                // Only the capital-covered part is credited here (upstream #450 has no
+                // support_paid argument; the support-netted part stays residual).
+                0,
             )?;
         } else {
             positive_pnl_forfeited = net as u128;
