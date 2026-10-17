@@ -15461,35 +15461,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // (upstream 0b861efb)
             self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
-            // upstream 94979ede (a): in Resolved, only the part of the loss that closes
-            // this domain's outstanding support gap becomes source backing; the rest
-            // funds terminal junior claims instead of recreating ownerless backing.
-            let (source_backing_num, residual_backing) =
-                if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                    let source = self.source_credit_for_domain(domain)?;
-                    let support_gap_num = source.positive_claim_bound_num.saturating_sub(
-                        V16Core::available_backing_num_for_source_credit_state(source)?,
-                    );
-                    let source_backing_num = backing_num.min(support_gap_num);
-                    let residual_num = backing_num
-                        .checked_sub(source_backing_num)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    (
-                        source_backing_num,
-                        V16Core::amount_from_bound_num(residual_num)?,
-                    )
-                } else {
-                    (backing_num, 0)
-                };
-            if source_backing_num != 0 {
-                let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-                self.add_fresh_counterparty_backing_unchecked(
-                    domain,
-                    source_backing_num,
-                    expiry_slot,
-                )?;
-            }
-            self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
+            // NOT PORTED on v22: upstream 94979ede (a) credits the part of a late Resolved
+            // loss beyond the domain's support gap to the post-snapshot residual instead of
+            // source backing. On this line it (1) moves the pinned Resolved close payouts
+            // of tests/v22_r1_settle_order.rs (one order pays the loser 10,999 atoms more
+            // loss and strands 11,000 in the vault) and (2) together with hunk (c) leaves
+            // two accounts permanently LockActive in tests/v22_r1_i457.rs (a zero-rate
+            // source domain whose claimants wait on each other). Tracked in
+            // F-S1-6-engine-resolved-payout.md.
+            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+            self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         }
         Ok(())
     }

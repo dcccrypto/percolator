@@ -15105,6 +15105,9 @@ fn v16_issue289_forfeited_bankruptcy_claim_recredits_paired_insurance_at_termina
     assert_eq!(asset.stored_pos_count_long, 1);
     assert_eq!(long.header.pnl.get(), 0);
 
+    // v22 narrows the dead-leg classifier: a ResetPending side on a Live asset is no
+    // longer forfeitable, so the asset is put into Recovery (as in the #450 test).
+    market.force_asset_recovery_not_atomic(0, slot).unwrap();
     let forfeit = market
         .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
         .expect("the winner's dead Recovery leg must be forfeitable");
