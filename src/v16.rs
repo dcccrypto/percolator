@@ -28998,3 +28998,7 @@ const _: () = {
             == core::mem::size_of::<PortfolioLegV16Account>()
     );
 };
+
+#[cfg(kani)]
+#[path = "kani_audit_1017_shims.rs"]
+mod kani_audit_1017_shims;
