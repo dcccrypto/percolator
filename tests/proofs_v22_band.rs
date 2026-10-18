@@ -661,13 +661,33 @@ fn positioned_band_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) 
     (header, markets)
 }
 
+/// audit-1017: restricted stub of the U256 long division (the 256-iteration loop OOM'd the band accrual rows).
+/// Exactly the real function on the zero / `den > num` / both-operands-below-2^128 paths (copied verbatim from
+/// `tests/proofs_v22_overnight_engine.rs::div_rem_u256_native_only`); any harness path that reaches the loop
+/// branch FAILS the `assert!`, so a PASS is a PASS of the real function plus a proof that branch is unreachable.
+fn div_rem_u256_native_only(num: percolator::wide_math::U256, den: percolator::wide_math::U256) -> (percolator::wide_math::U256, percolator::wide_math::U256) {
+    use percolator::wide_math::U256;
+    if den.is_zero() {
+        panic!("U256 division by zero");
+    }
+    if num.is_zero() {
+        return (U256::ZERO, U256::ZERO);
+    }
+    if den > num {
+        return (U256::ZERO, num);
+    }
+    assert!(num.hi() == 0 && den.hi() == 0, "restricted stub: only the native-u128 branch is reachable");
+    (U256::from_u128(num.lo() / den.lo()), U256::from_u128(num.lo() % den.lo()))
+}
+
 /// E-BND-14 (§2 `kani_band_accrue_rejects_before_mutation`, I-B1, I-B4, spec test 10).
 /// `accrue_asset_to_with_rent_not_atomic` `:16875` (band checks `:16922-16941`).
 /// An out-of-band price is `BandOutOfRange` and a moving accrual past the window is
 /// `BandPinned`, both with header and slot byte-identical. Mutant: BND-M4 (rev 2.1 location
 /// corrected to `:16931`, the pin check in the accrual).
 #[kani::proof]
-#[kani::unwind(260)] // audit-1017: was 15; the run FAILED on memcmp and div_rem_u256 unwinding assertions (u256 long division <= 256 iterations)
+#[kani::unwind(40)] // audit-1017: was 15 (FAILED: memcmp needs 33); u256 division stubbed (unwind 260 OOM'd at 10 GB)
+#[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
 #[kani::solver(cadical)]
 fn kani_band_accrue_rejects_before_mutation() {
     let (mut header, mut markets) = positioned_band_fixture();
@@ -1290,7 +1310,8 @@ fn kani_band_trade_shape_cap_and_min_notional_exempt() {
 /// leaves `a_long`, `a_short` unchanged and both OI sides back where they were. Cost L / high
 /// risk (whole trade path); memory-heavy, run under the RSS cap.
 #[kani::proof]
-#[kani::unwind(260)] // audit-1017: was 33; unwinding assertions on memcmp / div_rem_u256 failed
+#[kani::unwind(40)] // audit-1017: was 33; u256 division stubbed (see div_rem_u256_native_only)
+#[kani::stub(percolator::wide_math::div_rem_u256, div_rem_u256_native_only)]
 #[kani::solver(cadical)]
 fn kani_band_bilateral_close_preserves_a() {
     let (mut header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
