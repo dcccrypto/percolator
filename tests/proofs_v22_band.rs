@@ -667,7 +667,7 @@ fn positioned_band_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) 
 /// `BandPinned`, both with header and slot byte-identical. Mutant: BND-M4 (rev 2.1 location
 /// corrected to `:16931`, the pin check in the accrual).
 #[kani::proof]
-#[kani::unwind(15)] // band_min_wide_anchor(130) in the activation fixture runs 14 iterations
+#[kani::unwind(260)] // audit-1017: was 15; the run FAILED on memcmp and div_rem_u256 unwinding assertions (u256 long division <= 256 iterations)
 #[kani::solver(cadical)]
 fn kani_band_accrue_rejects_before_mutation() {
     let (mut header, mut markets) = positioned_band_fixture();
@@ -1290,7 +1290,7 @@ fn kani_band_trade_shape_cap_and_min_notional_exempt() {
 /// leaves `a_long`, `a_short` unchanged and both OI sides back where they were. Cost L / high
 /// risk (whole trade path); memory-heavy, run under the RSS cap.
 #[kani::proof]
-#[kani::unwind(33)]
+#[kani::unwind(260)] // audit-1017: was 33; unwinding assertions on memcmp / div_rem_u256 failed
 #[kani::solver(cadical)]
 fn kani_band_bilateral_close_preserves_a() {
     let (mut header, mut markets) = market_fixture(band_cfg(BAND_D), P0);
