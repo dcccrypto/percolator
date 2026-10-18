@@ -18,3 +18,65 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_source_credit_for_domain(domain, state)
     }
 }
+
+// ---- K-E6: forfeit capacity (#450). The harness lives in this cfg(kani) child module of v16 so it can stub the
+// PRIVATE reader `source_credit_for_domain`; the stub returns a symbolic source-credit state and remembers it, so the
+// assertion is about the very state the production fn consumed. No fixture activation (the fn reads nothing else).
+#[cfg(kani)]
+mod e6 {
+    use super::*;
+    static mut LAST: SourceCreditStateV16 = SourceCreditStateV16::EMPTY;
+
+    fn source_credit_any<'a, T>(_s: &MarketGroupV16ViewMut<'a, T>, _domain: usize) -> V16Result<SourceCreditStateV16>
+    where
+        T: 'a,
+    {
+        let st = SourceCreditStateV16 {
+            positive_claim_bound_num: kani::any(),
+            exact_positive_claim_num: kani::any(),
+            fresh_reserved_backing_num: kani::any(),
+            spent_backing_num: kani::any(),
+            provider_receivable_num: kani::any(),
+            valid_liened_backing_num: kani::any(),
+            impaired_liened_backing_num: kani::any(),
+            insurance_credit_reserved_num: kani::any(),
+            valid_liened_insurance_num: kani::any(),
+            impaired_liened_insurance_num: kani::any(),
+            credit_rate_num: kani::any(),
+            credit_epoch: kani::any(),
+        };
+        unsafe { LAST = st };
+        Ok(st)
+    }
+
+    /// K-E6 (#450): the loss-created backing a forfeit may credit to a domain never exceeds what that domain's claimants
+    /// own (unbacked claim bound plus the provider receivable already advanced), in whole atoms:
+    /// `capacity * BOUND_SCALE <= positive_claim_bound + provider_receivable`, for ANY source-credit state the reader
+    /// returns. Also: zero when nothing is owned.
+    #[kani::proof]
+    #[kani::stub(super::MarketGroupV16ViewMut::source_credit_for_domain, source_credit_any)]
+    fn kani_audit1017_e6_forfeit_capacity_never_exceeds_claimant_ownership() {
+        let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+        let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
+        let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+        let v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let domain: usize = kani::any();
+        match v.forfeit_loss_backing_capacity_atoms(domain) {
+            Ok(cap) => {
+                let st = unsafe { LAST };
+                let owned = st.positive_claim_bound_num.checked_add(st.provider_receivable_num);
+                assert!(owned.is_some());
+                assert!(cap <= owned.unwrap() / BOUND_SCALE);
+                if st.positive_claim_bound_num == 0 && st.provider_receivable_num == 0 {
+                    assert!(cap == 0);
+                }
+                kani::cover!(cap > 0, "positive forfeit capacity");
+                kani::cover!(cap == 0 && st.positive_claim_bound_num > 0, "claims fully backed: zero capacity");
+                kani::cover!(st.provider_receivable_num >= BOUND_SCALE && cap > 0, "receivable contributes");
+            }
+            Err(_) => {
+                kani::cover!(true, "refused: shape / overflow of the state");
+            }
+        }
+    }
+}
