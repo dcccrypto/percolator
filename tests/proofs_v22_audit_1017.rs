@@ -55,10 +55,16 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
-fn account_validator_ok<'a, T>(_s: &PortfolioV16View<'a>, _m: &MarketGroupV16View<'_, T>) -> V16Result<()> {
+fn account_validator_ok<'a, T>(_s: &PortfolioV16View<'a>, _m: &MarketGroupV16View<'_, T>) -> V16Result<()>
+where
+    T: 'a,
+{
     Ok(())
 }
-fn market_shape_ok<'a, T>(_s: &MarketGroupV16View<'a, T>) -> V16Result<()> {
+fn market_shape_ok<'a, T>(_s: &MarketGroupV16View<'a, T>) -> V16Result<()>
+where
+    T: 'a,
+{
     Ok(())
 }
 
