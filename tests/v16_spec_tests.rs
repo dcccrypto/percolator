@@ -1249,6 +1249,202 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryForfeitFundingOrder {
+    /// Payer and receiver settle, then the payer forfeits its settled leg.
+    SettleFirst,
+    /// Receiver settles (claim not yet backed), then the payer forfeits.
+    ReceiverThenForfeit,
+    /// Payer forfeits before the receiver has any claim.
+    ForfeitThenReceiver,
+    /// Payer forfeits, then the receiver forfeits its own unsettled gain.
+    BothForfeit,
+}
+
+struct RecoveryForfeitFundingOutcome {
+    source: SourceCreditStateV16,
+    payouts: [u128; 2],
+    vault_after: u128,
+    restartable: bool,
+}
+
+fn drain_resolved_pair<'a>(
+    market: &mut MarketGroupV16ViewMut<'_, u64>,
+    long: &mut PortfolioV16ViewMut<'a>,
+    short: &mut PortfolioV16ViewMut<'a>,
+) -> [u128; 2] {
+    let mut paid = [0u128; 2];
+    let mut closed = [false; 2];
+    for _ in 0..32 {
+        for (index, account) in [&mut *long, &mut *short].into_iter().enumerate() {
+            if closed[index] {
+                continue;
+            }
+            match market.close_resolved_account_not_atomic(account, 0) {
+                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    paid[index] += payout;
+                    closed[index] = true;
+                }
+                Ok(ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                Err(error) => panic!("resolved close of account {index} failed: {error:?}"),
+            }
+        }
+        if closed == [true; 2] {
+            break;
+        }
+    }
+    assert_eq!(closed, [true; 2], "resolved pair did not close");
+    for (index, account) in [&mut *long, &mut *short].into_iter().enumerate() {
+        if let Ok(topup) = market.claim_resolved_payout_topup_not_atomic(account) {
+            paid[index] += topup;
+        }
+    }
+    paid
+}
+
+/// prog#450: a Recovery forfeit that settles the payer's unsettled funding
+/// loss must not leave the receiver's claim under-backed relative to the
+/// settle-first ordering, and must not turn a loss nobody claims into
+/// ownerless (provider-withdrawable, restart-blocking) source backing.
+fn recovery_forfeit_funding_order_outcome(
+    order: RecoveryForfeitFundingOrder,
+) -> RecoveryForfeitFundingOutcome {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 140);
+    let mut short_header = account_fixture(1, 141);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_one_lot_pair(&mut market, &mut long, &mut short);
+    market
+        .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+        .unwrap();
+    market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    match order {
+        RecoveryForfeitFundingOrder::SettleFirst => {
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+        }
+        RecoveryForfeitFundingOrder::ReceiverThenForfeit => {
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+        }
+        RecoveryForfeitFundingOrder::ForfeitThenReceiver => {
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+        RecoveryForfeitFundingOrder::BothForfeit => {
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+                .unwrap();
+            // The payer's loss weight was retained while its creditor still held
+            // a leg; with the creditor gone the retained obligation detaches.
+            if !active_bitmap_is_empty(long.header.active_bitmap.map(V16PodU64::get)) {
+                market
+                    .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                    .unwrap();
+            }
+            assert!(active_bitmap_is_empty(
+                long.header.active_bitmap.map(V16PodU64::get)
+            ));
+        }
+    }
+    assert_eq!(
+        funding_counter_tuple(long.header),
+        (FUNDING_COUNTER_ATOMS_PER_SLOT, 0, 0, 0)
+    );
+    assert_eq!(
+        long.header.capital.get(),
+        10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let restartable = order == RecoveryForfeitFundingOrder::BothForfeit && {
+        let mut header_copy = market.header.clone();
+        let mut markets_copy = market.markets.to_vec();
+        let mut copy = MarketGroupV16ViewMut::new(&mut header_copy, &mut markets_copy);
+        copy.restart_empty_asset_preserving_insurance_budget_not_atomic(0, FUNDING_COUNTER_PRICE, 3)
+            .map_err(|e| eprintln!("restart error: {e:?}"))
+            .is_ok()
+    };
+
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+    let payouts = drain_resolved_pair(&mut market, &mut long, &mut short);
+    RecoveryForfeitFundingOutcome {
+        source,
+        payouts,
+        vault_after: market.header.vault.get(),
+        restartable,
+    }
+}
+
+#[test]
+fn v16_recovery_forfeit_credits_unsettled_funding_loss_to_payer_source_domain() {
+    use RecoveryForfeitFundingOrder::*;
+    let control = recovery_forfeit_funding_order_outcome(SettleFirst);
+    assert_eq!(control.source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        control.source.fresh_reserved_backing_num,
+        FUNDING_COUNTER_ATOMS_PER_SLOT * BOUND_SCALE
+    );
+    let expected_payouts = [
+        10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT,
+        10_000_000 + FUNDING_COUNTER_ATOMS_PER_SLOT,
+    ];
+    assert_eq!(control.payouts, expected_payouts);
+    assert_eq!(control.vault_after, 0);
+
+    // The receiver's existing claim must be backed by the forfeit-settled loss.
+    let receiver_first = recovery_forfeit_funding_order_outcome(ReceiverThenForfeit);
+    assert_eq!(
+        receiver_first.source.fresh_reserved_backing_num, control.source.fresh_reserved_backing_num,
+        "forfeit loss left the receiver's claim under-backed: {:?}",
+        receiver_first.source
+    );
+    assert_eq!(receiver_first.source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(receiver_first.payouts, expected_payouts);
+    assert_eq!(receiver_first.vault_after, 0);
+
+    // A later receiver is still paid in full from the unassigned residual.
+    let forfeit_first = recovery_forfeit_funding_order_outcome(ForfeitThenReceiver);
+    assert_eq!(forfeit_first.payouts, expected_payouts);
+    assert_eq!(forfeit_first.vault_after, 0);
+
+    // Nobody claims the loss: it must not become ownerless source backing that
+    // blocks restarting the emptied asset.
+    let both = recovery_forfeit_funding_order_outcome(BothForfeit);
+    assert_eq!(
+        both.source.fresh_reserved_backing_num, 0,
+        "{:?}",
+        both.source
+    );
+    assert!(
+        both.restartable,
+        "forfeit-created backing blocked asset restart"
+    );
+    assert_eq!(
+        both.payouts,
+        [10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT, 10_000_000]
+    );
+}
+
 #[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
@@ -14146,95 +14342,6 @@ fn source_reclass_same_leg_reversal_insurance_backed_im_liened() {
 }
 
 
-// ---- Resolved close-order regression matrix (upstream 0b861efb / 94979ede / 4db11a8c) ----
-//
-// Upstream pins these three Resolved-mode fixes with wrapper-level invariant suites
-// (percolator-prog inv_039 / inv_067 / row417 / row419), not engine tests. This matrix
-// is a regression net at the engine level: every close order, with and without the
-// losses being settled before resolution, must pay both sides their exact endpoint and
-// drain the vault. It is NOT a red->green reproduction of the upstream defects.
-
-fn rz_resolved_world(settle_before_resolve: bool, loser_first: bool, reversal: bool) {
-    let (mut header, mut markets) = market_fixture(1, 100);
-    let mut winner_h = account_fixture(1, 221);
-    let mut loser_h = account_fixture(1, 222);
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut winner = PortfolioV16ViewMut::new(&mut winner_h);
-    let mut loser = PortfolioV16ViewMut::new(&mut loser_h);
-    market.deposit_not_atomic(&mut winner, 1_000).unwrap();
-    market.deposit_not_atomic(&mut loser, 1_000).unwrap();
-    rx_trade(
-        &mut market,
-        &mut winner,
-        &mut loser,
-        0,
-        signed_q(POS_SCALE),
-        100,
-    );
-    let mut slot = market.header.current_slot.get();
-    let path: &[u64] = if reversal { &[40, 80, 110] } else { &[110] };
-    for &mark in path {
-        slot += 1;
-        rx_mark(&mut market, 0, slot, mark);
-        if settle_before_resolve {
-            market.full_account_refresh_not_atomic(&mut winner).unwrap();
-            market.full_account_refresh_not_atomic(&mut loser).unwrap();
-        }
-    }
-    market.resolve_market_not_atomic(slot).unwrap();
-    let label =
-        format!("settled={settle_before_resolve} loser_first={loser_first} reversal={reversal}");
-    let mut paid = [0u128; 2];
-    let order: [usize; 4] = if loser_first {
-        [1, 0, 1, 0]
-    } else {
-        [0, 1, 0, 1]
-    };
-    for who in order {
-        let account = if who == 0 { &mut winner } else { &mut loser };
-        for _ in 0..16 {
-            match market.close_resolved_account_not_atomic(account, 0) {
-                Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
-                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
-                    paid[who] += payout;
-                    break;
-                }
-                Err(e) => panic!("{label}: resolved close failed: {e:?}"),
-            }
-        }
-        if account
-            .header
-            .resolved_payout_receipt
-            .try_to_runtime()
-            .unwrap()
-            .present
-        {
-            if let Ok(topup) = market.claim_resolved_payout_topup_not_atomic(account) {
-                paid[who] += topup;
-            }
-        }
-        market.validate_shape().unwrap();
-    }
-    assert_eq!(paid, [1_010, 990], "{label}: exact endpoints");
-    assert_eq!(market.header.vault.get(), 0, "{label}: vault drained");
-    assert_eq!(
-        market.header.source_fresh_backing_total_num.get(),
-        0,
-        "{label}: no ownerless backing"
-    );
-}
-
-#[test]
-fn resolved_close_order_matrix_pays_exact_endpoints() {
-    for settle in [false, true] {
-        for loser_first in [false, true] {
-            for reversal in [false, true] {
-                rz_resolved_world(settle, loser_first, reversal);
-            }
-        }
-    }
-}
-
 // ---- F-5 (security review of E1, 2026-10-04): a FULLY netted loss (support only, no new
 // capital-backed tail) into a Live loss domain whose bucket cannot take an add (Fresh but past
 // its expiry, or Impaired) must not add a revert path the deployed engine did not have. ----
@@ -14790,4 +14897,481 @@ fn s10_provider_share_after_consumption_and_refill_is_never_moved() {
         "the move took provider-owned backing (or too little): {} atoms left, protected floor {floor}",
         after.fresh_unliened_backing_num / BOUND_SCALE
     );
+}
+
+// ---- Resolved close-order regression matrix (upstream 0b861efb / 94979ede / 4db11a8c) ----
+//
+// Upstream pins these three Resolved-mode fixes with wrapper-level invariant suites
+// (percolator-prog inv_039 / inv_067 / row417 / row419), not engine tests. This matrix
+// is a regression net at the engine level: every close order, with and without the
+// losses being settled before resolution, must pay both sides their exact endpoint and
+// drain the vault. It is NOT a red->green reproduction of the upstream defects.
+
+fn rz_resolved_world(
+    settle_before_resolve: bool,
+    loser_first: bool,
+    reversal: bool,
+    via_autocrank: bool,
+) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut winner_h = account_fixture(1, 221);
+    let mut loser_h = account_fixture(1, 222);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_h);
+    let mut loser = PortfolioV16ViewMut::new(&mut loser_h);
+    market.deposit_not_atomic(&mut winner, 1_000).unwrap();
+    market.deposit_not_atomic(&mut loser, 1_000).unwrap();
+    rx_trade(
+        &mut market,
+        &mut winner,
+        &mut loser,
+        0,
+        signed_q(POS_SCALE),
+        100,
+    );
+    let mut slot = market.header.current_slot.get();
+    let path: &[u64] = if reversal { &[40, 80, 110] } else { &[110] };
+    for &mark in path {
+        slot += 1;
+        rx_mark(&mut market, 0, slot, mark);
+        if settle_before_resolve {
+            market.full_account_refresh_not_atomic(&mut winner).unwrap();
+            market.full_account_refresh_not_atomic(&mut loser).unwrap();
+        }
+    }
+    market.resolve_market_not_atomic(slot).unwrap();
+    let label =
+        format!("settled={settle_before_resolve} loser_first={loser_first} reversal={reversal}");
+    let mut paid = [0u128; 2];
+    let order: [usize; 4] = if loser_first {
+        [1, 0, 1, 0]
+    } else {
+        [0, 1, 0, 1]
+    };
+    for who in order {
+        let account = if who == 0 { &mut winner } else { &mut loser };
+        for _ in 0..16 {
+            let result = if via_autocrank {
+                let observations = [AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: market.markets[0].engine.asset.effective_price.get(),
+                    funding_rate_e9: 0,
+                }];
+                let work = AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                };
+                match market.permissionless_auto_crank_not_atomic(account, work) {
+                    Ok(AutoCrankResultV16 {
+                        selected: AutoCrankPlanV16::CloseResolved,
+                        outcome: AutoCrankOutcomeV16::ResolvedClose(outcome),
+                    }) => Ok(outcome),
+                    // Not actionable yet for this account (it waits on the other side).
+                    Ok(AutoCrankResultV16 {
+                        selected: AutoCrankPlanV16::NoAction,
+                        ..
+                    }) => break,
+                    Ok(other) => panic!("{label}: auto-crank must select CloseResolved: {other:?}"),
+                    Err(e) => Err(e),
+                }
+            } else {
+                market.close_resolved_account_not_atomic(account, 0)
+            };
+            match result {
+                Ok(ResolvedCloseOutcomeV16::ProgressOnly) => continue,
+                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    paid[who] += payout;
+                    break;
+                }
+                Ok(other) => panic!("{label}: unexpected outcome {other:?}"),
+                Err(e) => panic!("{label}: resolved close failed: {e:?}"),
+            }
+        }
+        if account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+            .present
+        {
+            if let Ok(topup) = market.claim_resolved_payout_topup_not_atomic(account) {
+                paid[who] += topup;
+            }
+        }
+        market.validate_shape().unwrap();
+    }
+    assert_eq!(paid, [1_010, 990], "{label}: exact endpoints");
+    assert_eq!(market.header.vault.get(), 0, "{label}: vault drained");
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        0,
+        "{label}: no ownerless backing"
+    );
+}
+
+#[test]
+fn resolved_close_order_matrix_pays_exact_endpoints() {
+    for settle in [false, true] {
+        for loser_first in [false, true] {
+            for reversal in [false, true] {
+                for via_autocrank in [false, true] {
+                    rz_resolved_world(settle, loser_first, reversal, via_autocrank);
+                }
+            }
+        }
+    }
+}
+
+/// Issue #289 (forfeit path): a bankrupt short is liquidated and domain
+/// insurance funds the loser's deficit into the junior pool. The winning long
+/// keeps its dead leg into the reset and forfeits the unsettled gain through
+/// Recovery instead of realizing it, so no provider receivable is ever created.
+/// Once every claimant is gone, the insurance it had been funded by must be
+/// recredited to the paying insurance domain rather than left as claim-free
+/// residue for terminal retirement to burn. Only the insurance spend is
+/// restored; the loser's own forfeited capital is not reclassified.
+#[test]
+fn v16_issue289_forfeited_bankruptcy_claim_recredits_paired_insurance_at_terminal() {
+    const PRICE: u64 = 100;
+    const FINAL_PRICE: u64 = 130;
+    const CAPITAL: u128 = 10_000_000;
+    const INSURANCE_PER_SIDE: u128 = 100_000_000;
+    const SIZE_Q: u128 = 1_000_000 * POS_SCALE;
+
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 241);
+    let mut short_header = account_fixture(1, 242);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .deposit_domain_insurance_not_atomic(0, INSURANCE_PER_SIDE)
+        .unwrap();
+    market
+        .deposit_domain_insurance_not_atomic(1, INSURANCE_PER_SIDE)
+        .unwrap();
+    market.deposit_not_atomic(&mut long, CAPITAL).unwrap();
+    market.deposit_not_atomic(&mut short, CAPITAL).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(SIZE_Q),
+                exec_price: PRICE,
+                fee_bps: 0,
+            },
+            true,
+        )
+        .unwrap();
+    let mut slot = 1u64;
+    let mut price = PRICE;
+    while price < FINAL_PRICE {
+        slot += 1;
+        price = (price + 5).min(FINAL_PRICE);
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+    market.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(FINAL_PRICE);
+    let liq = market
+        .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 0 })
+        .expect("the bankrupt short must be liquidatable");
+    // Short lost 30M on 10M capital: insurance on the winner-side domain funds 20M.
+    assert_eq!(liq.insurance_used, 20_000_000);
+    assert_eq!(
+        market.header.insurance.get(),
+        2 * INSURANCE_PER_SIDE - 20_000_000
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        20_000_000
+    );
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.stored_pos_count_long, 1);
+    assert_eq!(long.header.pnl.get(), 0);
+
+    // v22 narrows the dead-leg classifier: a ResetPending side on a Live asset is no
+    // longer forfeitable, so the asset is put into Recovery (as in the #450 test).
+    market.force_asset_recovery_not_atomic(0, slot).unwrap();
+    let forfeit = market
+        .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+        .expect("the winner's dead Recovery leg must be forfeitable");
+    assert!(forfeit.detached);
+    assert_eq!(forfeit.positive_pnl_forfeited, 30_000_000);
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Long)
+        .unwrap();
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Short)
+        .unwrap();
+    market.resolve_market_not_atomic(slot + 1).unwrap();
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: CAPITAL })
+    );
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut short, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
+
+    // Terminal: no claimant, no provider receivable, 20M insurance + 10M forfeited
+    // loser capital sit as claim-free residual.
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.vault.get(), 2 * INSURANCE_PER_SIDE + CAPITAL);
+    for source in [
+        market.markets[0].engine.source_credit_long,
+        market.markets[0].engine.source_credit_short,
+    ] {
+        assert_eq!(source.provider_receivable_num.get(), 0);
+    }
+
+    assert_eq!(
+        market.recredit_terminal_claim_free_residual_for_asset_not_atomic(0),
+        Ok(20_000_000),
+        "forfeited bankruptcy funding must return to the paying insurance domain"
+    );
+    assert_eq!(market.header.insurance.get(), 2 * INSURANCE_PER_SIDE);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        2 * INSURANCE_PER_SIDE
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    // Only the insurance spend is restored; the remaining claim-free residual
+    // (the loser's forfeited capital) is not reclassified as insurance.
+    assert_eq!(
+        market.header.vault.get() - market.header.insurance.get(),
+        CAPITAL
+    );
+    // Idempotent: the spend and residual were both consumed by the first call.
+    assert_eq!(
+        market.recredit_terminal_claim_free_residual_for_asset_not_atomic(0),
+        Ok(0)
+    );
+    assert_eq!(market.header.insurance.get(), 2 * INSURANCE_PER_SIDE);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+// ---- S1-6 (audit 2026-10-17): randomized Resolved close-order walk ----
+//
+// Four accounts, one asset, random pair trades, a random price path with random partial
+// refreshes, then Resolved with a random interleaving of close / auto-crank close /
+// payout top-up / bucket expiry / clock advance. Deterministic (fixed LCG).
+// Pinned on this branch; on 3ce4cbd1 the pinned seeds pay less and strand vault atoms
+// (upstream 0b861efb: late debt after the creditor exited recreated ownerless backing).
+// Also pins liveness: every account must be closable in every scenario (a port of upstream
+// 94979ede (c) deadlocks 131 of them on this line, which is why it is withheld).
+
+struct S16Lcg(u64);
+impl S16Lcg {
+    fn n(&mut self, m: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % m
+    }
+}
+
+/// Returns None when the scenario could not be built, else (paid, all_closed, vault).
+fn s16_resolved_walk(seed: u64) -> Option<([u128; 4], bool, u128)> {
+    let mut r = S16Lcg(seed * 7919 + 1);
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut hs = [
+        account_fixture(1, 221),
+        account_fixture(1, 222),
+        account_fixture(1, 223),
+        account_fixture(1, 224),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let [h0, h1, h2, h3] = &mut hs;
+    let mut acc = [
+        PortfolioV16ViewMut::new(h0),
+        PortfolioV16ViewMut::new(h1),
+        PortfolioV16ViewMut::new(h2),
+        PortfolioV16ViewMut::new(h3),
+    ];
+    for a in acc.iter_mut() {
+        let c = [200u128, 400, 800, 1000][r.n(4) as usize];
+        market.deposit_not_atomic(a, c).unwrap();
+    }
+    let mut trades = 0;
+    for _ in 0..(1 + r.n(3)) {
+        let x = r.n(4) as usize;
+        let mut y = r.n(4) as usize;
+        if y == x {
+            y = (y + 1) % 4;
+        }
+        let sz = (1 + r.n(3)) as u128;
+        let (lo, hi) = (x.min(y), x.max(y));
+        let (a, b) = acc.split_at_mut(hi);
+        let (first, second) = (&mut a[lo], &mut b[0]);
+        // x is long, y is short
+        let (l, s) = if x < y { (first, second) } else { (second, first) };
+        if market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                l,
+                s,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(sz * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .is_ok()
+        {
+            trades += 1;
+        }
+    }
+    if trades == 0 {
+        return None;
+    }
+    let mut slot = market.header.current_slot.get();
+    let mut p = 100u64;
+    for _ in 0..(1 + r.n(4)) {
+        let tgt = [60u64, 80, 120, 160, 220, 300][r.n(6) as usize];
+        while p != tgt {
+            slot += 1;
+            p = if tgt > p {
+                (p + 10).min(tgt)
+            } else {
+                p.saturating_sub(10).max(tgt)
+            };
+            if market.set_asset_raw_oracle_target_not_atomic(0, p).is_err()
+                || market.accrue_asset_to_not_atomic(0, slot, p, 0, true).is_err()
+            {
+                return None;
+            }
+            for k in 0..4 {
+                if r.n(3) == 0 {
+                    let _ = market.full_account_refresh_not_atomic(&mut acc[k]);
+                }
+            }
+        }
+    }
+    if market.resolve_market_not_atomic(slot).is_err() {
+        return None;
+    }
+    let mut paid = [0u128; 4];
+    let mut closed = [false; 4];
+    for _ in 0..80 {
+        let who = r.n(4) as usize;
+        match r.n(8) {
+            6 if !closed[who] => {
+                let observations = [AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: market.markets[0].engine.asset.effective_price.get(),
+                    funding_rate_e9: 0,
+                }];
+                let work = AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                };
+                if let Ok(AutoCrankResultV16 {
+                    outcome:
+                        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout }),
+                    ..
+                }) = market.permissionless_auto_crank_not_atomic(&mut acc[who], work)
+                {
+                    paid[who] += payout;
+                    closed[who] = true;
+                }
+            }
+            0..=2 if !closed[who] => {
+                if let Ok(ResolvedCloseOutcomeV16::Closed { payout }) =
+                    market.close_resolved_account_not_atomic(&mut acc[who], 0)
+                {
+                    paid[who] += payout;
+                    closed[who] = true;
+                }
+            }
+            3 if !closed[who]
+                && acc[who]
+                    .header
+                    .resolved_payout_receipt
+                    .try_to_runtime()
+                    .unwrap()
+                    .present =>
+            {
+                if let Ok(t) = market.claim_resolved_payout_topup_not_atomic(&mut acc[who]) {
+                    paid[who] += t;
+                }
+            }
+            4 => {
+                for d in 0..2 {
+                    let _ = market
+                        .expire_source_backing_bucket_not_atomic(d, market.header.current_slot.get());
+                }
+            }
+            5 => {
+                let now = market.header.current_slot.get() + 1 + r.n(3_000_000);
+                let _ = market.advance_resolved_slot_not_atomic(now);
+            }
+            _ => {}
+        }
+    }
+    market.validate_shape().unwrap();
+    Some((paid, closed.iter().all(|c| *c), market.header.vault.get()))
+}
+
+#[test]
+fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
+    // (seed, paid, vault left). On 3ce4cbd1 these seeds pay less and leave more in the
+    // vault: 1470 -> [800,200,499,80] 21; 2322 -> [800,800,200,780] 20;
+    // 3167 -> [880,480,1000,1000] 40; 4698 -> [880,200,800,1000] 120;
+    // 5120 -> [909,200,880,200] 11.
+    let pinned: [(u64, [u128; 4], u128); 5] = [
+        (1470, [800, 200, 509, 80], 11),
+        (2322, [800, 800, 209, 780], 11),
+        (3167, [880, 500, 1000, 1000], 20),
+        (4698, [880, 200, 800, 1090], 30),
+        (5120, [919, 200, 880, 200], 1),
+    ];
+    for (seed, paid, vault) in pinned {
+        let (got, all_closed, v) = s16_resolved_walk(seed).expect("scenario builds");
+        assert!(all_closed, "seed {seed}: every account closes");
+        assert_eq!((got, v), (paid, vault), "seed {seed}");
+    }
+    // Liveness: the walk leaves some accounts unclosed only because it stops after 80
+    // random steps; 3ce4cbd1 has exactly these 7. Any other seed here is a new stuck
+    // account (a port of upstream 94979ede (c) adds 131).
+    let mut unclosed = vec![];
+    let mut built = 0;
+    for seed in 0..6000u64 {
+        if let Some((_, all_closed, _)) = s16_resolved_walk(seed) {
+            built += 1;
+            if !all_closed {
+                unclosed.push(seed);
+            }
+        }
+    }
+    assert!(built > 5000, "vacuity: {built} scenarios built");
+    assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
 }

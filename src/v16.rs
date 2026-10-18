@@ -877,6 +877,20 @@ impl V16Core {
             .min(claim_free_residual_remaining)
     }
 
+    /// Terminal recredit of insurance spend that no claimant consumed. Once the
+    /// terminal gate has extinguished every portfolio, PnL claim, source claim,
+    /// and payout receipt, claim-free residual has no trader owner. Insurance
+    /// that a bankruptcy moved into the junior pool (for example to fund a
+    /// winner who later forfeited the claim through Recovery) is restored to
+    /// the insurance domain that paid it, never beyond that domain's
+    /// outstanding spend and never beyond the remaining claim-free residual.
+    fn terminal_claim_free_unconsumed_spend_recredit(
+        domain_insurance_spent_remaining: u128,
+        claim_free_residual_remaining: u128,
+    ) -> u128 {
+        domain_insurance_spent_remaining.min(claim_free_residual_remaining)
+    }
+
     /// One asset step of the bounded terminal slab scan, priority ordered:
     /// expire a lapsed long, then short, bucket; recredit; wait on live
     /// backing; else continue. (upstream 6f3c5c12 / 545e0224)
@@ -10655,8 +10669,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             insurance_spent,
             *claim_free_residual_remaining,
         );
+        self.apply_terminal_insurance_recredit_not_atomic(
+            insurance_domain,
+            insurance_spent,
+            recredit,
+            claim_free_residual_remaining,
+        )
+    }
+
+    /// Second terminal stage: after the provider-receivable overlap, restores
+    /// any remaining insurance-domain spend that is still sitting in claim-free
+    /// residual. This covers bankruptcy insurance whose funded claim was
+    /// forfeited (Recovery forfeit/reset) rather than realized, which never
+    /// creates a provider receivable. Bounded by the domain's outstanding spend
+    /// and the remaining claim-free residual, and decrements both, so repeated
+    /// calls cannot recredit the same atoms twice.
+    fn recredit_terminal_claim_free_unconsumed_spend_for_domain_not_atomic(
+        &mut self,
+        insurance_domain: usize,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
+        let (_, insurance_spent) = self.domain_insurance_budget_spent(insurance_domain)?;
+        let recredit = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            insurance_spent,
+            *claim_free_residual_remaining,
+        );
+        self.apply_terminal_insurance_recredit_not_atomic(
+            insurance_domain,
+            insurance_spent,
+            recredit,
+            claim_free_residual_remaining,
+        )
+    }
+
+    fn apply_terminal_insurance_recredit_not_atomic(
+        &mut self,
+        insurance_domain: usize,
+        insurance_spent: u128,
+        recredit: u128,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
         if recredit == 0 {
             return Ok(0);
+        }
+        if recredit > insurance_spent || recredit > *claim_free_residual_remaining {
+            return Err(V16Error::CounterUnderflow);
         }
 
         let vault_before = self.header.vault.get();
@@ -10725,8 +10782,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot.insurance_domain_spent_long.get(),
             residual_after_long,
         );
+        let residual_after_overlap = residual_after_long
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // Second stage mirrors `recredit_terminal_claim_free_residual_for_asset_core_not_atomic`:
+        // unconsumed spend on the short insurance domain, then the long one.
+        let short_spent_remaining = slot
+            .insurance_domain_spent_short
+            .get()
+            .checked_sub(long_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            short_spent_remaining,
+            residual_after_overlap,
+        );
+        let residual_after_short = residual_after_overlap
+            .checked_sub(short_unconsumed)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_spent_remaining = slot
+            .insurance_domain_spent_long
+            .get()
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            long_spent_remaining,
+            residual_after_short,
+        );
         long_source_recredit
             .checked_add(short_source_recredit)
+            .and_then(|value| value.checked_add(short_unconsumed))
+            .and_then(|value| value.checked_add(long_unconsumed))
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
@@ -10750,8 +10835,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Restores one asset's claim-free terminal residual that is also backed by
     /// both an outstanding counterparty-provider receivable and historical
-    /// insurance spend on the paired side. The final materialized-portfolio gate
-    /// makes the residual unowned by traders before any reclassification occurs.
+    /// insurance spend on the paired side, then any remaining insurance-domain
+    /// spend still held as claim-free residual (e.g. a bankruptcy-funded claim
+    /// that was forfeited instead of realized). The final materialized-portfolio
+    /// gate makes the residual unowned by traders before any reclassification
+    /// occurs.
     ///
     /// This operation is intentionally asset-local: wrapper callers can make
     /// bounded progress even when the market account contains thousands of
@@ -10770,6 +10858,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let recredited = self
                 .recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
                     source_domain,
+                    &mut claim_free_residual_remaining,
+                )?;
+            recredited_total = recredited_total
+                .checked_add(recredited)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
+        // Forfeited (never realized) claims leave no provider receivable, so the
+        // overlap above cannot see insurance they had been funded by. With every
+        // claimant gone, restore the remaining paired spend up to the residual
+        // instead of leaving it for terminal retirement to burn.
+        for insurance_side in [SideV16::Short, SideV16::Long] {
+            if claim_free_residual_remaining == 0 {
+                break;
+            }
+            let insurance_domain = self.insurance_domain_index(asset_index, insurance_side)?;
+            let recredited = self
+                .recredit_terminal_claim_free_unconsumed_spend_for_domain_not_atomic(
+                    insurance_domain,
                     &mut claim_free_residual_remaining,
                 )?;
             recredited_total = recredited_total
@@ -11010,6 +11116,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Expire exactly one lapsed backing bucket used by the account (the first in
     /// scan order) at the market clock; None when nothing has lapsed.
     /// (upstream c09d4575)
+    // upstream 4db11a8c: a retained receipt can depend on backing outside its former
+    // source domains. Inspect only the hinted asset; status and expiry remain
+    // committed-state inputs.
+    fn first_lapsed_source_backing_for_asset_at_slot(
+        &self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
+        if self.header.source_fresh_backing_total_num.get() == 0 {
+            return Ok(None);
+        }
+        if asset_index >= self.header.config.max_market_slots.get() as usize {
+            return Err(V16Error::InvalidLeg);
+        }
+        let slot = self
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidConfig)?
+            .engine_slot();
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
+        for (domain, bucket) in [
+            (long_domain, &slot.backing_long),
+            (short_domain, &slot.backing_short),
+        ] {
+            if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
+                && bucket.expiry_slot.get() <= now_slot
+            {
+                return Ok(Some(domain));
+            }
+        }
+        Ok(None)
+    }
+
     fn expire_first_lapsed_source_backing_for_account_not_atomic(
         &mut self,
         account: &PortfolioV16View<'_>,
@@ -15294,13 +15433,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let backing_num = amount
             .checked_mul(BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let terminal_impaired = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
-            && self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired;
-        if terminal_impaired {
-            // Once the provider bucket has defaulted, newly crystallized loss is
-            // terminal junior support, not recoverable provider principal.
+        let terminal_residual = if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+        {
+            let (asset_index, loss_side) = self.domain_asset_side(domain)?;
+            let asset = self.asset_state(asset_index)?;
+            let creditor_counts = match opposite_side(loss_side) {
+                SideV16::Long => (asset.stored_pos_count_long, asset.stale_account_count_long),
+                SideV16::Short => (
+                    asset.stored_pos_count_short,
+                    asset.stale_account_count_short,
+                ),
+            };
+            self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired
+                || (self
+                    .source_credit_for_domain(domain)?
+                    .positive_claim_bound_num
+                    == 0
+                    && creditor_counts == (0, 0))
+        } else {
+            false
+        };
+        if terminal_residual {
+            // A consumed credit can outlive its creditor's final leg. With no
+            // remaining claim or creditor leg, late debt funds terminal junior
+            // claims instead of recreating ownerless source backing. Impaired
+            // provider buckets likewise leave new losses as junior support.
+            // (upstream 0b861efb)
             self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
+            // NOT PORTED on v22: upstream 94979ede (a) credits the part of a late Resolved
+            // loss beyond the domain's support gap to the post-snapshot residual instead of
+            // source backing. On this line it (1) moves the pinned Resolved close payouts
+            // of tests/v22_r1_settle_order.rs (one order pays the loser 10,999 atoms more
+            // loss and strands 11,000 in the vault) and (2) together with hunk (c) leaves
+            // two accounts permanently LockActive in tests/v22_r1_i457.rs (a zero-rate
+            // source domain whose claimants wait on each other). Tracked in
+            // F-S1-6-engine-resolved-payout.md.
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
             self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         }
@@ -18135,6 +18303,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AutoCrankPlanV16::FinalizeRecovery => return Err(V16Error::InvalidConfig),
             AutoCrankPlanV16::CloseResolved => {
                 self.advance_resolved_slot_not_atomic(work.now_slot)?;
+                // upstream 4db11a8c: while a present receipt's rate can still rise, first
+                // expire lapsed backing on the hinted asset (which can raise it) and do
+                // not clear a receipt that is still owed a shortfall.
+                let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+                if receipt.present
+                    && !receipt.finalized
+                    && !self.resolved_payout_rate_is_terminal()?
+                {
+                    if let Some(observation) = work.observations.first() {
+                        if let Some(domain) = self.first_lapsed_source_backing_for_asset_at_slot(
+                            observation.asset_index,
+                            self.header.current_slot.get(),
+                        )? {
+                            self.expire_source_backing_bucket_not_atomic(
+                                domain,
+                                self.header.current_slot.get(),
+                            )?;
+                            self.validate_shape()?;
+                            account.validate_with_market(&self.as_view())?;
+                            return Ok(AutoCrankResultV16 {
+                                selected: plan,
+                                outcome: AutoCrankOutcomeV16::ResolvedClose(
+                                    ResolvedCloseOutcomeV16::ProgressOnly,
+                                ),
+                            });
+                        }
+                    }
+                    if self.resolved_receipt_claimable_now(receipt)? == 0 {
+                        return Err(V16Error::NonProgress);
+                    }
+                }
                 AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
                     account,
                     work.resolved_close_fee_rate_per_slot,
@@ -24131,14 +24330,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    // A resolved-payout receipt that has been paid its full entitlement at the TERMINAL
-    // payout rate (no unreceipted bound remains, so the rate can no longer rise) holds
-    // only unrecoverable insolvency bad debt: the haircut shortfall (face - paid) is not
-    // an open obligation. The only finalize site requires paid_effective == FULL face,
-    // which is unreachable under a haircut, so the receipt would otherwise stay
-    // `present && !finalized` forever and permanently block the portfolio from
-    // dematerializing (stranding insurance + backing earnings + residual vault + rent).
-    // Clear such a fully-diluted receipt so the account can close.
+    // upstream 4db11a8c: the payout rate is terminal once no junior bound is left
+    // unreceipted AND either the rate is already full or no source backing remains
+    // whose expiry could still release value into the payout pool.
+    fn resolved_payout_rate_is_terminal(&self) -> V16Result<bool> {
+        let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+        Ok(ledger.terminal_claim_bound_unreceipted_num == 0
+            && (ledger.current_payout_rate_num == ledger.current_payout_rate_den
+                || self.header.source_fresh_backing_total_num.get() == 0))
+    }
+
+    // Clear a paid haircut receipt only when neither claim refinement nor future
+    // backing expiry can raise its rate. Otherwise the shortfall is still claimable.
+    // (A fully diluted receipt would otherwise stay `present && !finalized` forever and
+    // block the portfolio from dematerializing.)
     fn clear_fully_diluted_resolved_receipt_if_terminal(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -24147,9 +24352,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !receipt.present || receipt.finalized {
             return Ok(());
         }
-        let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        // Rate is terminal only once all junior bound has been receipted/refined.
-        if ledger.terminal_claim_bound_unreceipted_num != 0 {
+        if !self.resolved_payout_rate_is_terminal()? {
+            return Ok(());
+        }
+        if !self.resolved_positive_payout_ready()? {
             return Ok(());
         }
         if self.resolved_receipt_claimable_now(receipt)? != 0 {
@@ -24244,6 +24450,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if converted == 0 {
+            // NOT PORTED on v22: upstream 94979ede (c) refuses this demotion (LockActive)
+            // until the source domain is terminal for the face. On this line it leaves
+            // accounts permanently un-closable in Resolved (a randomized close-order walk
+            // finds 131 of 5,478 scenarios where claimants wait on each other).
+            // Tracked in F-S1-6-engine-resolved-payout.md.
             // Zero-rate, sub-atom, or impaired source face remains a junior claim;
             // only its source-specific backing attribution is terminally removed.
             self.burn_account_source_claim_bound_num_domain_first(
@@ -25203,6 +25414,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
+            let negative_before = account.header.pnl.get().min(0).unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             // realized without booking (forfeit): the winners' credits no longer wait on it
             let leg_domain = self.insurance_domain_index(asset_index, leg.side)?;
@@ -25215,6 +25427,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.add_kf_pending_credit(leg_domain, -realized_num)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
+            // prog#450: the capital-covered part of a newly realized forfeit
+            // loss backs the opposite side's claims on this leg's domain, as in
+            // ordinary K/F settlement -- but only up to what those claims can
+            // own: the domain's current support gap plus the provider receivable
+            // its backing already advanced to them. A forfeit has no matched
+            // receiver of its own (the opposite side may itself have forfeited
+            // or been paid), so any excess stays unassigned residual instead of
+            // becoming ownerless provider-withdrawable backing.
+            let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+            let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let owned_atoms = self.forfeit_loss_backing_capacity_atoms(loss_domain)?;
+            let new_loss = negative_after.saturating_sub(negative_before);
+            let reserved_after = negative_before
+                .checked_add(new_loss.min(owned_atoms))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+                account,
+                loss_domain,
+                negative_before,
+                reserved_after,
+                // Only the capital-covered part is credited here (upstream #450 has no
+                // support_paid argument; the support-netted part stays residual).
+                0,
+            )?;
         } else {
             positive_pnl_forfeited = net as u128;
         }
@@ -25242,6 +25478,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             support_consumed,
             junior_face_burned,
         ))
+    }
+
+    /// Whole atoms of new loss-created backing that existing claimants of
+    /// `domain` own: unbacked claim bound plus the provider receivable already
+    /// advanced against this domain (refilled first by a backing add).
+    fn forfeit_loss_backing_capacity_atoms(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        let owned_num = support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(owned_num / BOUND_SCALE)
     }
 
     fn leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
