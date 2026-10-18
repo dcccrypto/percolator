@@ -666,11 +666,15 @@ fn r1_resolved_close_is_unchanged() {
 #[test]
 fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
     // (cap, sell, up2, st2) -> (fix winner-first, fix victim-first, pre-R1 winner-first, pre-R1 victim-first)
-    const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 4] = [
+    // engine #126 (side-flip fix): the former 4th case, (300_000, 6, 200, 10), was an EQUAL-size
+    // flip (+3 -> -3) that the buggy classifier treated as not risk-increasing, so it took no
+    // initial-margin source lien and was priced here as a NON-liened victim. A flip is
+    // risk-increasing (spec), the lien is now created, and the case belongs to the liened class:
+    // see `r1_equal_size_flip_victim_is_liened_and_order_independent` below.
+    const CASES: [((u128, u128, i64, usize), (i128, i128, i128, i128)); 3] = [
         ((330_000, 5, 200, 14), (-553_486, -518_502, -643_128, -518_502)),
         ((330_000, 5, 200, 18), (-807_740, -747_130, -877_922, -747_130)),
         ((330_000, 5, 200, 12), (-428_054, -410_804, -531_165, -410_804)),
-        ((300_000, 6, 200, 10), (-580_525, -537_447, -662_711, -537_447)),
     ];
     for &((cap, sell, up2, st2), (fwf, flf, bwf, blf)) in &CASES {
         let wf = liened_scenario_try(true, cap, sell, up2, st2).expect("scenario runs");
@@ -679,4 +683,18 @@ fn r1_nonliened_bankrupt_victim_is_pinned_and_no_worse_than_pre_r1() {
         assert!(wf.0 >= bwf && lf.0 >= blf, "victim worse than the pre-R1 engine");
         assert_eq!((wf.1, lf.1), (cap as i128 - 1, cap as i128 - 1), "the counterparty is untouched");
     }
+}
+
+/// engine #126 (fix-all 2026-10-18): the equal-size flip (+3 -> -3, cap 300,000, sell 6) used to be
+/// classified as not risk-increasing, so it skipped the initial-margin source lien and its
+/// bankrupt victim was priced at the order-DEPENDENT neutral rate (-580,525 winner-first vs
+/// -537,447 victim-first). With the flip correctly risk-increasing the lien is created and the
+/// victim is priced at the protective rate: the same result in both settle orders (-551,220), the
+/// counterparty untouched in both. Red with the side-flip fix reverted.
+#[test]
+fn r1_equal_size_flip_victim_is_liened_and_order_independent() {
+    let wf = liened_scenario_try(true, 300_000, 6, 200, 10).expect("scenario runs");
+    let lf = liened_scenario_try(false, 300_000, 6, 200, 10).expect("scenario runs");
+    assert_eq!(wf, lf, "a liened victim's settle order must not change effective equity");
+    assert_eq!(wf, (-551_220, 299_999), "pinned (side-flip fix)");
 }
