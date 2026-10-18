@@ -241,8 +241,7 @@ fn kani_audit1017_e3_resolved_close_pays_capital_and_never_more_than_vault() {
             kani::cover!(payout > 0 && payout == vault, "payout drains the vault exactly");
             kani::cover!(insurance > 0, "insurance present and untouched");
         }
-        _ => {
-            kani::cover!(true, "other outcome (refusal / not closed)");
-        }
+        // every state the harness admits closes: a refusal or a non-Closed outcome is a failure
+        _ => assert!(false, "a Resolved flat close of a solvent account must return Closed"),
     }
 }
