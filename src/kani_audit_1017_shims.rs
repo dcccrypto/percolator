@@ -79,7 +79,8 @@ mod e6 {
                 let (bound, recv) = (get(&BOUND_HI, &BOUND_LO), get(&RECV_HI, &RECV_LO));
                 let owned = bound.checked_add(recv);
                 assert!(owned.is_some());
-                assert!(cap <= owned.unwrap() / BOUND_SCALE);
+                // multiplicative form (a constant multiply is cheap for the solver; comparing two divisions is not)
+                assert!(cap.checked_mul(BOUND_SCALE).is_some_and(|x| x <= owned.unwrap()));
                 if bound == 0 && recv == 0 {
                     assert!(cap == 0);
                 }
