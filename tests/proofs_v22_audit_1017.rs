@@ -190,3 +190,53 @@ fn kani_audit1017_e2_deposit_exact_value_flow() {
     // completeness: Ok exactly when no counter overflows
     assert_eq!(r.is_ok(), vault.checked_add(amount).is_some());
 }
+
+/// K-E3: a Resolved close of a FLAT, non-negative-PnL account pays out exactly its capital, never more
+/// than the vault holds, and moves vault and `c_tot` down by exactly that payout (insurance untouched).
+/// Full u128 width. This upgrades `proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault`
+/// (capital in 1..=5 on a u8) which has no wider-domain sibling. Same stub rule as E1/E2.
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::stub(percolator::v16::PortfolioV16View::validate_with_market, account_validator_ok)]
+#[kani::stub(percolator::v16::MarketGroupV16View::validate_shape, market_shape_ok)]
+fn kani_audit1017_e3_resolved_close_pays_capital_and_never_more_than_vault() {
+    use percolator::v16::{ResolvedCloseOutcomeV16, V16PodU64};
+    let capital: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let vault: u128 = kani::any();
+    kani::assume(capital <= c_tot);
+    kani::assume(c_tot.checked_add(insurance).is_some_and(|s| s <= vault));
+    kani::assume(vault <= MAX_VAULT_TVL);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1;
+    header.current_slot = V16PodU64::new(2);
+    header.resolved_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.last_fee_slot = V16PodU64::new(2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let r = market.close_resolved_account_not_atomic(&mut account, 0);
+    match r {
+        Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+            assert!(payout == capital);
+            assert!(payout <= vault);
+            assert_eq!(market.header.vault.get(), vault - payout);
+            assert_eq!(market.header.c_tot.get(), c_tot - capital);
+            assert_eq!(market.header.insurance.get(), insurance);
+            assert_eq!(account.header.capital.get(), 0);
+            kani::cover!(payout > 0 && payout < vault, "positive payout with vault slack left");
+            kani::cover!(payout > 0 && payout == vault, "payout drains the vault exactly");
+            kani::cover!(insurance > 0, "insurance present and untouched");
+        }
+        _ => {
+            kani::cover!(true, "other outcome (refusal / not closed)");
+        }
+    }
+}
