@@ -25,7 +25,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 #[cfg(kani)]
 mod e6 {
     use super::*;
-    static mut LAST: SourceCreditStateV16 = SourceCreditStateV16::EMPTY;
+    use core::sync::atomic::{AtomicU64, Ordering};
+    // the engine forbids `unsafe`: remember the two fields the claim is about in atomics (hi/lo halves)
+    static BOUND_HI: AtomicU64 = AtomicU64::new(0);
+    static BOUND_LO: AtomicU64 = AtomicU64::new(0);
+    static RECV_HI: AtomicU64 = AtomicU64::new(0);
+    static RECV_LO: AtomicU64 = AtomicU64::new(0);
+    fn put(hi: &AtomicU64, lo: &AtomicU64, v: u128) {
+        hi.store((v >> 64) as u64, Ordering::Relaxed);
+        lo.store(v as u64, Ordering::Relaxed);
+    }
+    fn get(hi: &AtomicU64, lo: &AtomicU64) -> u128 {
+        ((hi.load(Ordering::Relaxed) as u128) << 64) | lo.load(Ordering::Relaxed) as u128
+    }
 
     fn source_credit_any<'a, T>(_s: &MarketGroupV16ViewMut<'a, T>, _domain: usize) -> V16Result<SourceCreditStateV16>
     where
@@ -45,7 +57,8 @@ mod e6 {
             credit_rate_num: kani::any(),
             credit_epoch: kani::any(),
         };
-        unsafe { LAST = st };
+        put(&BOUND_HI, &BOUND_LO, st.positive_claim_bound_num);
+        put(&RECV_HI, &RECV_LO, st.provider_receivable_num);
         Ok(st)
     }
 
@@ -63,16 +76,16 @@ mod e6 {
         let domain: usize = kani::any();
         match v.forfeit_loss_backing_capacity_atoms(domain) {
             Ok(cap) => {
-                let st = unsafe { LAST };
-                let owned = st.positive_claim_bound_num.checked_add(st.provider_receivable_num);
+                let (bound, recv) = (get(&BOUND_HI, &BOUND_LO), get(&RECV_HI, &RECV_LO));
+                let owned = bound.checked_add(recv);
                 assert!(owned.is_some());
                 assert!(cap <= owned.unwrap() / BOUND_SCALE);
-                if st.positive_claim_bound_num == 0 && st.provider_receivable_num == 0 {
+                if bound == 0 && recv == 0 {
                     assert!(cap == 0);
                 }
                 kani::cover!(cap > 0, "positive forfeit capacity");
-                kani::cover!(cap == 0 && st.positive_claim_bound_num > 0, "claims fully backed: zero capacity");
-                kani::cover!(st.provider_receivable_num >= BOUND_SCALE && cap > 0, "receivable contributes");
+                kani::cover!(cap == 0 && bound > 0, "claims fully backed: zero capacity");
+                kani::cover!(recv >= BOUND_SCALE && cap > 0, "receivable contributes");
             }
             Err(_) => {
                 kani::cover!(true, "refused: shape / overflow of the state");
