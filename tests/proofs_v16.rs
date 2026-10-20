@@ -152,8 +152,10 @@ fn two_account_view_fixture() -> (
 #[path = "fixtures/eng1020_activated.rs"]
 mod eng1020_snap;
 fn snap_one_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
-    let h: MarketGroupV16HeaderAccount = bytemuck::pod_read_unaligned(&eng1020_snap::ACT_HEADER);
-    let e: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&eng1020_snap::ACT_SLOT);
+    let mut h: MarketGroupV16HeaderAccount = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut h).copy_from_slice(&eng1020_snap::ACT_HEADER);
+    let mut e: EngineAssetSlotV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut e).copy_from_slice(&eng1020_snap::ACT_SLOT);
     (h, [Market::new(0u64, e)])
 }
 fn snap_one_market_view_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1], PortfolioAccountV16Account) {

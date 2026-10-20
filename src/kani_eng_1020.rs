@@ -673,10 +673,15 @@ mod opened_snap {
 fn k126_opened_snap(
     a_capital: Option<u128>,
 ) -> (PortfolioAccountV16Account, PortfolioAccountV16Account, MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
-    let mut h: MarketGroupV16HeaderAccount = bytemuck::pod_read_unaligned(&opened_snap::OPEN_HEADER);
-    let e: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_SLOT);
-    let mut a: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_A);
-    let b: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_B);
+    // byte copy into zeroed Pod values (bytemuck::pod_read_unaligned's error branch was reported reachable by Kani)
+    let mut h: MarketGroupV16HeaderAccount = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut h).copy_from_slice(&opened_snap::OPEN_HEADER);
+    let mut e: EngineAssetSlotV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut e).copy_from_slice(&opened_snap::OPEN_SLOT);
+    let mut a: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut a).copy_from_slice(&opened_snap::OPEN_A);
+    let mut b: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut b).copy_from_slice(&opened_snap::OPEN_B);
     if let Some(c) = a_capital {
         let d = a.capital.get() - c;
         a.capital = V16PodU128::new(c);
@@ -748,4 +753,18 @@ fn kani_eng1020_126_flip_below_im_refused_reduce_not_snap() {
     kani::cover!(k == 6 && r.is_ok(), "flip within IM admitted");
     kani::cover!(k == 7 && r.is_err(), "smaller flip beyond IM refused (#126)");
     kani::cover!(k == 8 && r.is_err(), "equal flip beyond IM refused");
+}
+
+// Snapshot sizes must equal the type sizes in the Kani build (compile-time check).
+const _: () = {
+    assert!(core::mem::size_of::<MarketGroupV16HeaderAccount>() == opened_snap::OPEN_HEADER.len());
+    assert!(core::mem::size_of::<EngineAssetSlotV16Account>() == opened_snap::OPEN_SLOT.len());
+    assert!(core::mem::size_of::<PortfolioAccountV16Account>() == opened_snap::OPEN_A.len());
+};
+
+/// Probe: the snapshot loader alone (diagnoses the IM2 bytemuck failure).
+#[kani::proof]
+fn kani_eng1020_probe_snapshot_load() {
+    let (a, b, h, m) = k126_opened_snap(None);
+    kani::cover!(a.capital.get() > 0 && b.capital.get() > 0 && h.vault.get() > 0 && m[0].engine.asset.market_id.get() != 0, "snapshot loaded");
 }
