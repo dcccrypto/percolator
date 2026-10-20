@@ -673,10 +673,15 @@ mod opened_snap {
 fn k126_opened_snap(
     a_capital: Option<u128>,
 ) -> (PortfolioAccountV16Account, PortfolioAccountV16Account, MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
-    let mut h: MarketGroupV16HeaderAccount = bytemuck::pod_read_unaligned(&opened_snap::OPEN_HEADER);
-    let e: EngineAssetSlotV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_SLOT);
-    let mut a: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_A);
-    let b: PortfolioAccountV16Account = bytemuck::pod_read_unaligned(&opened_snap::OPEN_B);
+    // byte copy into zeroed Pod values (bytemuck::pod_read_unaligned's error branch was reported reachable by Kani)
+    let mut h: MarketGroupV16HeaderAccount = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut h).copy_from_slice(&opened_snap::OPEN_HEADER);
+    let mut e: EngineAssetSlotV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut e).copy_from_slice(&opened_snap::OPEN_SLOT);
+    let mut a: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut a).copy_from_slice(&opened_snap::OPEN_A);
+    let mut b: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut b).copy_from_slice(&opened_snap::OPEN_B);
     if let Some(c) = a_capital {
         let d = a.capital.get() - c;
         a.capital = V16PodU128::new(c);
