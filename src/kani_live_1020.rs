@@ -552,3 +552,30 @@ fn kani_live_e7_liquidate_progresses_below_maintenance() {
         kani::cover!(c0.certified_equity >= 0 && (c0.certified_equity as u128) > c0.certified_maintenance_req, "above maintenance: refused");
     }
 }
+
+// =============================================================================================
+// LV-E8 (split step for the NO-VERDICT E2/E3): the only symbolic x symbolic multiply in the
+// projection's notional terms. The production `liquidation_risk_notional_ceil` is total on the
+// protocol caps and its result never exceeds MAX_ACCOUNT_NOTIONAL (so the fee function's
+// `fee_notional > MAX_ACCOUNT_NOTIONAL` refusal is unreachable for any position at any price).
+// =============================================================================================
+
+#[kani::proof]
+#[kani::unwind(4)]
+fn kani_live_e8_risk_notional_is_total_and_within_the_account_cap() {
+    let abs_q: u128 = kani::any();
+    let price: u64 = kani::any();
+    kani::assume(abs_q <= MAX_POSITION_ABS_Q && price <= MAX_ORACLE_PRICE);
+    let r = liquidation_risk_notional_ceil(abs_q, price);
+    assert!(r.is_ok(), "risk notional errs inside the caps");
+    let n = match r {
+        Ok(n) => n,
+        Err(_) => 0,
+    };
+    assert!(n <= MAX_ACCOUNT_NOTIONAL, "notional above the account cap: the fee function would refuse");
+    if abs_q > 0 && price > 0 {
+        assert!(n >= 1);
+    }
+    kani::cover!(abs_q == MAX_POSITION_ABS_Q && price == MAX_ORACLE_PRICE && n == MAX_ACCOUNT_NOTIONAL, "the cap is met exactly at the extremes");
+    kani::cover!(n > 0 && n < 1000, "small notional");
+}
