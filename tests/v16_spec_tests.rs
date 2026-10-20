@@ -15405,6 +15405,17 @@ impl S16acWorld {
             self.header = h;
             self.markets = m;
             self.acc = a;
+        } else {
+            // R-E L-2: in every committed state, a side with no stored position has no stale
+            // account and no pending obligation, which is why `domain_creditor_claims_final`'s
+            // stale/pending terms never decide it (see the doc at that predicate).
+            let asset = self.markets[0].engine.asset.try_to_runtime().unwrap();
+            for (stored, stale, pending) in [
+                (asset.stored_pos_count_long, asset.stale_account_count_long, asset.pending_obligation_count_long),
+                (asset.stored_pos_count_short, asset.stale_account_count_short, asset.pending_obligation_count_short),
+            ] {
+                assert!(stale <= stored && pending <= stored, "stored {stored} stale {stale} pending {pending}");
+            }
         }
         r
     }

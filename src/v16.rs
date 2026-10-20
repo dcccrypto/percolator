@@ -15513,6 +15513,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Whether the creditor (opposite) side of loss `domain` can no longer create or grow a
     /// claim on it: no stored position, stale account or pending obligation remains.
+    ///
+    /// The stale and pending terms are implied by `stored_pos_count == 0` in every state the
+    /// engine reaches, so the predicate is decided by the stored count alone. Neither term can
+    /// be made to matter through public entries (removing either leaves every test green):
+    /// - stale <= stored: `kernel_mark_kf_stale_cohorts` sets stale = stored, each leg
+    ///   discharges its cohort at most once (`kernel_settle_kf_stale_cohort`), and the bound is
+    ///   a shape invariant in `validate_asset_shape_for_view` (the `stale_account_count_* >
+    ///   stored_pos_count_*` arm). That check is compiled only for test/kani/`audit-scan`, NOT
+    ///   on chain, but audit-scan builds run it on every public exit and the whole engine suite
+    ///   passes there. A forged stale > stored state is also rejected by other checks (the
+    ///   resolved payout blocker aggregation and the K/F drift weights), so it cannot be built
+    ///   consistently to exercise the term.
+    /// - pending <= stored is structural: `kernel_retain_leg_as_pending_obligation` only zeroes
+    ///   the basis of a leg that stays stored (it does not touch `stored_pos_count_*`), and the
+    ///   only decrement of `pending_obligation_count_*` is in `kernel_clear_leg`, in the same
+    ///   arm that decrements `stored_pos_count_*`. tests/resolved_close_obligation_gate.rs
+    ///   observes it (stored 2 with pending 1, then both 0 together).
+    /// Both bounds are asserted after every committed transaction of the s16ac randomized
+    /// walks (tests/v16_spec_tests.rs, `S16acWorld::tx`).
+    /// The two terms stay as defence in depth. They can only make the predicate false, and
+    /// false is exactly the pre-fix behaviour (all of the loss booked as source backing), so a
+    /// counter drift could never make the (a) diversion fire early. They also mirror
+    /// upstream 9615f05c's loss-side triple. (Review R-E L-2, 2026-10-20.)
     fn domain_creditor_claims_final(&self, domain: usize) -> V16Result<bool> {
         let (asset_index, loss_side) = self.domain_asset_side(domain)?;
         let asset = self.asset_state(asset_index)?;
