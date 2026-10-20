@@ -278,7 +278,9 @@ fn proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed() 
     let now = delta_units_raw as i128 * ADL_ONE as i128 + unaligned_extra_raw as i128;
     let got = kani_scaled_adl_delta_fast(abs_basis_q, a_basis, then, now);
 
-    let expected = if abs_units_raw == 0 {
+    // v2.2 (874fe33a): no index move is answered exactly for every a_basis (Some(0); the
+    // equivalence with the wide path is proven by proof_v22_rem_fast_equals_wide's early arm).
+    let expected = if abs_units_raw == 0 || (delta_units_raw == 0 && unaligned_extra_raw == 0) {
         Some(0)
     } else if !a_basis_is_adl_one || unaligned_extra_raw != 0 {
         None
