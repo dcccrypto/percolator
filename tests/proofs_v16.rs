@@ -7902,13 +7902,9 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 
     // Inline market (no account fixture -> no 16-leg loop), valid activated domain 0.
     let (market_id, _, _) = ids();
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
+    let _ = market_id;
+    // v22kani ENG: identical activated state from the native-checked byte snapshot
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     // Single undercapitalized loser holding `loss` of realized loss as negative pnl.
     header.vault = V16PodU128::new(capital);
     header.c_tot = V16PodU128::new(capital);
@@ -7988,13 +7984,9 @@ fn proof_v16_resolved_impaired_capital_backed_loss_routes_to_residual() {
     let claim_num = claim * BOUND_SCALE;
 
     let (market_id, _, _) = ids();
-    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
-    {
-        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
-    }
+    let _ = market_id;
+    // v22kani ENG: identical activated state from the native-checked byte snapshot
+    let (mut header, mut markets) = snap_one_market_only_fixture();
     let engine_market_id = markets[0].engine.asset.market_id.get();
     let impaired_num = BOUND_SCALE;
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
