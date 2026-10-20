@@ -29083,3 +29083,7 @@ const _: () = {
 #[cfg(kani)]
 #[path = "kani_audit_1017_shims.rs"]
 mod kani_audit_1017_shims;
+
+#[cfg(kani)]
+#[path = "kani_eng_1020.rs"]
+pub mod kani_eng_1020;
