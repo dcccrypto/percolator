@@ -10206,6 +10206,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.backing_bucket_for_domain(domain)
     }
 
+    /// Raw `(status, expiry_slot)` of a domain's backing bucket without a full decode; for
+    /// hot-path gating only (any transition re-reads the decoded bucket). (upstream 1a700253)
+    fn backing_bucket_raw_status_expiry_for_domain(&self, domain: usize) -> V16Result<(u8, u64)> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let bucket = match side {
+            SideV16::Long => &slot.backing_long,
+            SideV16::Short => &slot.backing_short,
+        };
+        Ok((bucket.status, bucket.expiry_slot.get()))
+    }
+
     fn set_backing_bucket_for_domain(
         &mut self,
         domain: usize,
@@ -12391,6 +12403,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get(),
         );
         let mut remaining = target;
+        // A lien on lapsed/impaired backing is impaired by bucket status; reconcile it before
+        // burning so the burn never returns forfeited backing to the bucket's valid lane.
+        // (upstream 6d73f1bb, #230)
+        self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(account, slot)?;
 
         let burn = Self::source_claim_unliened_num(&account.as_view(), domain)?.min(remaining);
         if burn != 0 {
@@ -15469,6 +15485,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // two accounts permanently LockActive in tests/v22_r1_i457.rs (a zero-rate
             // source domain whose claimants wait on each other). Tracked in
             // F-S1-6-engine-resolved-payout.md.
+            // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed to Live): a Live loss landing
+            // on a lapsed bucket still marked Fresh is normalized first, exactly as the expiry
+            // crank would; if the bucket is (or thereby becomes) Impaired it cannot take new
+            // backing, so the loss stays as junior support (the capital debit and its value-flow
+            // proof are already done; the value remains in the vault outside the senior stack)
+            // instead of reverting the refresh / liquidation / crank of every losing account on
+            // that side with LockActive. Resolved keeps its pre-existing behaviour (its Impaired
+            // case is the terminal-residual branch above).
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+                let (raw_status, raw_expiry) =
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+                let now = self.header.current_slot.get();
+                let impaired_raw = encode_backing_bucket_status(BackingBucketStatusV16::Impaired);
+                let impaired = if raw_status
+                    == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+                    && raw_expiry <= now
+                {
+                    self.expire_source_backing_bucket_not_atomic(domain, now)?;
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?.0 == impaired_raw
+                } else {
+                    raw_status == impaired_raw
+                };
+                if impaired {
+                    return Ok(());
+                }
+            }
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
             self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         }
@@ -15932,6 +15974,92 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(charged)
     }
 
+    /// Reconcile an open account's counterparty liens against the bucket state they reference
+    /// (spec: "Individual liens referencing an impaired bucket become impaired by bucket status
+    /// and settle later through bounded cranks"). Bounded by `PORTFOLIO_SOURCE_DOMAIN_CAP`; a
+    /// slot without a counterparty lien, or whose bucket is still current, costs only a few
+    /// field reads. See `reconcile_account_impaired_counterparty_lien_at_slot_not_atomic`.
+    /// (upstream 6d73f1bb + fee5f863, aeyakovenko/percolator#230 / PR #242)
+    fn reconcile_account_impaired_counterparty_liens_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        if self.header.mode != MarketModeV16::Live as u8 {
+            return Ok(());
+        }
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = &account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.source_lien_counterparty_backing_num.get() != 0 {
+                self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(
+                    account, slot,
+                )?;
+            }
+            slot += 1;
+        }
+        Ok(())
+    }
+
+    /// Live-mode, one source slot: if the account holds a counterparty lien on a bucket that is
+    /// Impaired (or a lapsed Fresh bucket, which first goes through the canonical expiry
+    /// transition), move the account-local lien into the impaired-claim lane and retire its share
+    /// of the bucket's impaired encumbrance, exactly as the flat-account release
+    /// (`release_account_source_credit_liens_if_unneeded_core_not_atomic`) and the resolved-close
+    /// preparation already do on this line. Expiry already forfeited the liened principal to the
+    /// junior pool at the bucket/domain level, so no quote value moves here except the accrued
+    /// utilization fee, collected first as on those paths. The claim face itself is kept (as an
+    /// impaired, unbacked claim), so later losses still burn it before touching capital.
+    /// Once the last holder has reconciled, the bucket returns to Expired and new losses back
+    /// the domain normally again. (upstream 6d73f1bb + 1a700253, #230)
+    fn reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+    ) -> V16Result<()> {
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::InvalidLeg);
+        }
+        let source = &account.header.source_domains[slot];
+        let counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        if counterparty_backing == 0
+            || !source.is_occupied()
+            || self.header.mode != MarketModeV16::Live as u8
+        {
+            return Ok(());
+        }
+        let domain = source.domain.get() as usize;
+        let now_slot = self.header.current_slot.get();
+        let (raw_status, raw_expiry) = self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+        let lapsed_fresh = raw_status
+            == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && raw_expiry <= now_slot;
+        if !lapsed_fresh
+            && raw_status != encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+        {
+            return Ok(());
+        }
+        if lapsed_fresh {
+            self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Impaired {
+            return Ok(());
+        }
+        if bucket.impaired_liened_backing_num < counterparty_backing {
+            return Err(V16Error::CounterUnderflow);
+        }
+        self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
+        self.retire_source_credit_lien_from_counterparty_impaired_not_atomic(
+            domain,
+            counterparty_backing,
+        )?;
+        Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
+        Ok(())
+    }
+
     fn settle_account_kf_effects_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15946,6 +16074,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if active_leg_count == 0 {
             return Ok(());
         }
+        // F-LIVE-2 / upstream #230: reconcile liens on impaired backing before any K/F burn.
+        self.reconcile_account_impaired_counterparty_liens_not_atomic(account)?;
         if active_leg_count == 1 {
             let mut slot = 0usize;
             while slot < V16_MAX_PORTFOLIO_ASSETS_N && !active_bitmap_get(active_bitmap, slot) {
