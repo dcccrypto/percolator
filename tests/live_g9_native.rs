@@ -374,6 +374,10 @@ struct World2 {
 /// on asset 0 (`begin_terminal_trade_residual_if_needed`, same sequence as f04_regression's
 /// `drive_to_the_barrier`). Asset 1 then falls so T is below maintenance.
 fn r1_world() -> World2 {
+    r1_world_with(5)
+}
+
+fn r1_world_with(asset1_drops: usize) -> World2 {
     let c = Cfg { n: 2, fee_bps: 0, min_liq_abs: 0, lifetime: 1_000 };
     let (mut h, mut m) = market(c).expect("config");
     let mut t = account(10);
@@ -403,7 +407,7 @@ fn r1_world() -> World2 {
     assert_eq!(m[0].engine.pending_domain_loss_barrier_short.get(), 0);
     // asset 1 falls 5 x 4.9% (T loses ~4_300 on 2 units of 10_000 notional -> below maintenance)
     let mut p1 = P0;
-    for _ in 0..5 {
+    for _ in 0..asset1_drops {
         p1 = down(p1);
         tick(&mut h, &mut m, &[p0, p1]).unwrap();
     }
@@ -800,4 +804,32 @@ fn bytes_of<T: Copy>(v: &T) -> Vec<u8> {
     let p = v as *const T as *const u8;
     // SAFETY: plain-old-data engine account structs; only read for equality in a test.
     unsafe { std::slice::from_raw_parts(p, std::mem::size_of::<T>()) }.to_vec()
+}
+
+/// R4 (security review LIVEFIX, finding 1): a BANKRUPT two-leg account (capital 0, pnl < 0)
+/// whose slot-0 leg is behind a barrier. On 1c96c22f the crank returned LockActive (no progress
+/// until the barrier cleared). With the fix it selects the unblocked asset-1 leg. The engine's
+/// multi-asset-deficit path (row #18, `liquidation_lock`) applies: the leg is reduced without
+/// consuming insurance or booking residual against the surviving asset; no Recovery is declared,
+/// the barrier leg and the barrier are untouched.
+#[test]
+fn g9_livefix_r4_bankrupt_account_with_barrier_leg_is_reduced_on_its_unblocked_leg() {
+    let mut w = r1_world_with(12);
+    let c0 = cert(&w.t);
+    eprintln!("R4 cert: equity={} mm={} deficit={} capital={} pnl={} lock={}", c0.certified_equity, c0.certified_maintenance_req, c0.certified_liq_deficit, w.t.capital.get(), w.t.pnl.get(), w.t.liquidation_lock);
+    assert!(c0.valid && c0.certified_equity < 0, "T must be bankrupt");
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "barrier still pending");
+    let basis0 = leg_basis_for_asset(&w.t, 0);
+    let basis1 = leg_basis_for_asset(&w.t, 1);
+    let insurance_before = w.h.insurance.get();
+    let r = auto_crank(&mut w.h, &mut w.m, &mut w.t);
+    eprintln!("R4 auto-crank: {r:?} lock={}", w.t.liquidation_lock);
+    let r = r.expect("the crank makes progress");
+    assert_eq!(r.selected, AutoCrankPlanV16::Liquidate { asset_index: 1 });
+    assert!(matches!(r.outcome, AutoCrankOutcomeV16::Progressed(_)));
+    assert_eq!(mode(&w.h), 0, "no Recovery declared");
+    assert!(leg_basis_for_asset(&w.t, 1).unsigned_abs() < basis1.unsigned_abs(), "asset-1 leg reduced");
+    assert_eq!(leg_basis_for_asset(&w.t, 0), basis0, "the barrier leg is not touched");
+    assert_eq!(w.m[0].engine.pending_domain_loss_barrier_long.get(), 1, "the barrier stays up");
+    assert_eq!(w.h.insurance.get(), insurance_before, "no insurance consumed on the lock path");
 }
