@@ -569,3 +569,25 @@ fn g9_e7_native_twin_of_the_kani_fixture() {
         assert!(seen.contains(b), "fixture never reaches {b}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// RED replays (assert the LIVENESS property; FAIL on the head 1c96c22f). `#[ignore]` keeps the
+// suite green; run with `cargo test --release --test live_g9_native -- --ignored`.
+// ---------------------------------------------------------------------------------------------
+
+/// F-LIVE-1: a below-maintenance account with a liquidatable leg must be liquidated by the public
+/// crank. On the head the crank picks the FIRST flagged leg (asset 0, behind a domain-loss barrier)
+/// and returns LockActive although the asset-1 leg is liquidatable.
+#[test]
+#[ignore = "RED on head: F-LIVE-1 replay (crank head-of-line on a barrier leg)"]
+fn g9_f_live_1_red_crank_liquidates_a_below_maintenance_account_with_a_liquidatable_leg() {
+    let mut w = r1_world();
+    assert!(cert(&w.t).certified_liq_deficit != 0, "precondition: below maintenance");
+    let before = abs_basis_total(&w.t);
+    let r = auto_crank(&mut w.h, &mut w.m, &mut w.t);
+    assert!(
+        matches!(r, Ok(ref x) if matches!(x.selected, AutoCrankPlanV16::Liquidate { .. })),
+        "public crank did not liquidate a below-maintenance account: {r:?}"
+    );
+    assert!(abs_basis_total(&w.t) < before);
+}

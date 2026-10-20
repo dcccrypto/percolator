@@ -517,3 +517,16 @@ fn g9_230_fork_lien_holder() {
     let l = w.liquidate(0, 0);
     eprintln!("230@fork p=100 W refresh={r:?} liquidate={l:?}");
 }
+
+/// F-LIVE-2 RED replay: a below-maintenance (later bankrupt) account on the losing side must be
+/// liquidatable. On the head every liquidation of it returns LockActive while the lien holder W
+/// keeps a position (Impaired backing bucket, upstream #230).
+#[test]
+#[ignore = "RED on head: F-LIVE-2 replay (upstream #230, Impaired bucket blocks liquidation)"]
+fn g9_f_live_2_red_bankrupt_losing_side_account_is_liquidatable() {
+    let mut w = expired_bucket_with_open_lien_holder();
+    w.move_price(0, 210);
+    assert!(10 * (210 - 110) > w.accounts[1].capital.get(), "precondition: L's loss exceeds its capital");
+    let r = w.liquidate(1, 0);
+    assert!(r.is_ok(), "bankrupt losing-side account not liquidatable: {r:?}");
+}
