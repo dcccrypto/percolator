@@ -29083,3 +29083,7 @@ const _: () = {
 #[cfg(kani)]
 #[path = "kani_audit_1017_shims.rs"]
 mod kani_audit_1017_shims;
+// v22kani LIVE 2026-10-20 (G9 liquidation liveness): proof-only child module, never in a program build.
+#[cfg(kani)]
+#[path = "kani_live_1020.rs"]
+mod kani_live_1020;
