@@ -622,9 +622,11 @@ fn g9_livefix_l2_mirrored_losing_long_is_liquidated_by_the_public_crank() {
 }
 
 /// L3: a source bucket lapses with NO lien and nobody runs the expiry. The losing side's next
-/// loss lands on the lapsed Fresh bucket; refresh and the public crank must still progress.
+/// loss lands on the lapsed Fresh bucket. On this line (narrowed port, see the F-LIVE-2 comment in
+/// `book_realized_loss_backing_for_domain_not_atomic`) that is still refused (LockActive) until
+/// the permissionless expiry runs (wrapper tag 89); after it, the public crank liquidates.
 #[test]
-fn g9_livefix_l3_lapsed_unexpired_bucket_without_lien_does_not_block_the_losing_side() {
+fn g9_livefix_l3_lapsed_bucket_without_lien_needs_the_permissionless_expiry() {
     let mut w = World::new(1, 100, 3, |_| {});
     w.deposit(0, 1_000);
     w.deposit(1, 1_000);
@@ -637,13 +639,14 @@ fn g9_livefix_l3_lapsed_unexpired_bucket_without_lien_does_not_block_the_losing_
     assert_eq!(w.bucket(1).status, BackingBucketStatusV16::Fresh);
     w.move_price(0, 121);
     let now = w.slot();
-    let r = w.refresh(1);
-    eprintln!("L3 refresh of the losing short on a lapsed bucket: {:?}", r.as_ref().map(|c| c.certified_liq_deficit));
+    assert_eq!(w.crank(1, now, 0, 121).map(|_| ()), Err(V16Error::LockActive), "lapsed: refused until expired");
+    w.expire_lapsed(); // keeper: wrapper tag 89 ExpireBackingBucket
+    assert_eq!(w.bucket(1).status, BackingBucketStatusV16::Expired, "no lien: Expired, not Impaired");
     let mut progressed = false;
     for step in 0..6 {
         let r = w.crank(1, now, 0, 121);
         eprintln!("L3 step {step}: {:?}", r.as_ref().map(|x| (x.selected, x.outcome)));
-        let r = r.unwrap_or_else(|e| panic!("public crank refused the losing short: {e:?}"));
+        let r = r.unwrap_or_else(|e| panic!("public crank refused the losing short after expiry: {e:?}"));
         if matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }) {
             progressed = true;
             break;
