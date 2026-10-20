@@ -15461,18 +15461,74 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // (upstream 0b861efb)
             self.credit_post_snapshot_residual_not_atomic(amount)?;
         } else {
-            // NOT PORTED on v22: upstream 94979ede (a) credits the part of a late Resolved
-            // loss beyond the domain's support gap to the post-snapshot residual instead of
-            // source backing. On this line it (1) moves the pinned Resolved close payouts
-            // of tests/v22_r1_settle_order.rs (one order pays the loser 10,999 atoms more
-            // loss and strands 11,000 in the vault) and (2) together with hunk (c) leaves
-            // two accounts permanently LockActive in tests/v22_r1_i457.rs (a zero-rate
-            // source domain whose claimants wait on each other). Tracked in
-            // F-S1-6-engine-resolved-payout.md.
-            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-            self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+            // upstream 94979ede (a), narrowed for v22 (AUD-S1-6, 2026-10-20): in Resolved, a late
+            // loss larger than the domain's support gap (positive claim bound minus available
+            // backing) would leave source backing that no claim can ever consume. That excess
+            // funds the post-snapshot junior residual instead. Upstream applies the split as
+            // soon as the market is Resolved; on this line a creditor leg can still settle K/F
+            // after the loser and grow its claim (the R1 settle order), so the gap understates
+            // the final claims and the unnarrowed hunk underpays a later-settling winner (and
+            // strands the difference) in 224-330 of 18,756 randomized close orders. The split
+            // therefore applies only once the creditor side has no stored position, stale
+            // account or pending obligation, i.e. the claim bound is final. The source part is
+            // rounded UP to a whole atom so source backing stays atom-aligned and the residual
+            // part is a whole number of atoms (the sum is exactly `amount`).
+            let (source_backing_num, residual_backing) =
+                if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+                    && self.domain_creditor_claims_final(domain)?
+                {
+                    let source = self.source_credit_for_domain(domain)?;
+                    let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+                        V16Core::available_backing_num_for_source_credit_state(source)?,
+                    );
+                    let gap_atoms = support_gap_num
+                        .checked_add(BOUND_SCALE - 1)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        / BOUND_SCALE;
+                    let source_atoms = amount.min(gap_atoms);
+                    let residual_atoms = amount
+                        .checked_sub(source_atoms)
+                        .ok_or(V16Error::CounterUnderflow)?;
+                    (
+                        source_atoms
+                            .checked_mul(BOUND_SCALE)
+                            .ok_or(V16Error::ArithmeticOverflow)?,
+                        residual_atoms,
+                    )
+                } else {
+                    (backing_num, 0)
+                };
+            if source_backing_num != 0 {
+                let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+                self.add_fresh_counterparty_backing_unchecked(
+                    domain,
+                    source_backing_num,
+                    expiry_slot,
+                )?;
+            }
+            self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
         }
         Ok(())
+    }
+
+    /// Whether the creditor (opposite) side of loss `domain` can no longer create or grow a
+    /// claim on it: no stored position, stale account or pending obligation remains.
+    fn domain_creditor_claims_final(&self, domain: usize) -> V16Result<bool> {
+        let (asset_index, loss_side) = self.domain_asset_side(domain)?;
+        let asset = self.asset_state(asset_index)?;
+        let counts = match opposite_side(loss_side) {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        Ok(counts == (0, 0, 0))
     }
 
     #[cfg(kani)]
@@ -24454,11 +24510,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if converted == 0 {
-            // NOT PORTED on v22: upstream 94979ede (c) refuses this demotion (LockActive)
-            // until the source domain is terminal for the face. On this line it leaves
-            // accounts permanently un-closable in Resolved (a randomized close-order walk
-            // finds 131 of 5,478 scenarios where claimants wait on each other).
-            // Tracked in F-S1-6-engine-resolved-payout.md.
+            // upstream 94979ede (c) + 9615f05c (#220/#222): demoting now would burn the
+            // claim's senior attribution while backing can still arrive for it (the loss side
+            // has not settled yet), so the winner that closes first would lose that backing
+            // to junior dilution. Wait (LockActive) until the domain is terminal for the face.
+            // 9615f05c makes an Empty bucket with no loss-side leg/obligation terminal, so
+            // co-claimants on such a domain no longer wait on each other forever.
+            if !self.source_domain_terminal_for_haircut_demote(source_domain, source)? {
+                return Err(V16Error::LockActive);
+            }
             // Zero-rate, sub-atom, or impaired source face remains a junior claim;
             // only its source-specific backing attribution is terminally removed.
             self.burn_account_source_claim_bound_num_domain_first(
@@ -24501,6 +24561,68 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.compact_source_domains();
         Ok(true)
+    }
+
+    fn source_domain_terminal_for_haircut_demote(
+        &self,
+        domain: usize,
+        retiring_source: PortfolioSourceDomainV16Account,
+    ) -> V16Result<bool> {
+        let (asset_index, loss_side) = self.domain_asset_side(domain)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if matches!(
+            bucket.status,
+            BackingBucketStatusV16::Expired | BackingBucketStatusV16::Impaired
+        ) {
+            return Ok(true);
+        }
+        if retiring_source.source_claim_impaired_num.get() != 0 {
+            return Ok(true);
+        }
+        let asset = self.asset_state(asset_index)?;
+        let loss_side_counts = match loss_side {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        // upstream 9615f05c (#220): in Resolved the only path that can fund this domain is
+        // a loss-side leg crystallizing its K/F loss into backing. An Empty bucket never
+        // expires, so once no loss-side leg, stale account or obligation remains, the domain
+        // can receive no further backing: every zero-conversion claim is final and may retire
+        // independently. Requiring the other claimants' remainder to be zero here would
+        // deadlock co-claimants.
+        if bucket.status == BackingBucketStatusV16::Empty
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && loss_side_counts == (0, 0, 0)
+        {
+            return Ok(true);
+        }
+        let source = self.source_credit_for_domain(domain)?;
+        let remaining_claim_num = source
+            .positive_claim_bound_num
+            .checked_sub(retiring_source.source_claim_bound_num.get())
+            .ok_or(V16Error::CounterUnderflow)?;
+        if remaining_claim_num != 0 {
+            return Ok(false);
+        }
+        let creditor_counts = match opposite_side(loss_side) {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        Ok(creditor_counts == (0, 0))
     }
 
     #[cfg(kani)]

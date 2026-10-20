@@ -15375,3 +15375,399 @@ fn s16_resolved_close_walk_pins_late_debt_payouts_and_liveness() {
     assert!(built > 5000, "vacuity: {built} scenarios built");
     assert_eq!(unclosed, vec![648, 1649, 2061, 2556, 5124, 5620, 5942]);
 }
+
+// ---- AUD-S1-6 hunks (a)+(c), 2026-10-20: rollback-faithful Resolved close-order walk ----
+//
+// Same scenario generator as `s16_resolved_walk` (same LCG and draw order), but every engine
+// call is a transaction: an `Err` restores the market and all four accounts, as the SVM does.
+// (`s16_resolved_walk` keeps state from failed calls, which the engine never sees on chain;
+// it leaves 970,369 atoms in the vault over its 5,554 scenarios against 22,537 here.)
+// After the random phase a deterministic drain moves the clock far forward, expires both
+// buckets and lets every open account try to close in a rotating order, so "not closed"
+// means stuck, not "ran out of steps".
+struct S16acWorld {
+    header: MarketGroupV16HeaderAccount,
+    markets: Vec<Market<u64>>,
+    acc: [PortfolioAccountV16Account; 4],
+}
+
+impl S16acWorld {
+    fn tx<R>(
+        &mut self,
+        f: impl FnOnce(&mut MarketGroupV16ViewMut<'_, u64>, &mut [PortfolioAccountV16Account; 4]) -> Result<R, V16Error>,
+    ) -> Result<R, V16Error> {
+        let (h, m, a) = (self.header, self.markets.clone(), self.acc);
+        let r = {
+            let mut mk = MarketGroupV16ViewMut::new(&mut self.header, &mut self.markets);
+            f(&mut mk, &mut self.acc)
+        };
+        if r.is_err() {
+            self.header = h;
+            self.markets = m;
+            self.acc = a;
+        }
+        r
+    }
+    fn close(&mut self, who: usize, paid: &mut [u128; 4], closed: &mut [bool; 4], auto: bool) -> Result<bool, V16Error> {
+        let r = if auto {
+            self.tx(|m, acc| {
+                let observations = [AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: m.markets[0].engine.asset.effective_price.get(),
+                    funding_rate_e9: 0,
+                }];
+                let work = AutoCrankWorkV16 {
+                    now_slot: m.header.current_slot.get(),
+                    observations: &observations,
+                    resolved_close_fee_rate_per_slot: 0,
+                };
+                match m.permissionless_auto_crank_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]), work)?.outcome {
+                    AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout }) => Ok(Some(payout)),
+                    _ => Ok(None),
+                }
+            })
+        } else {
+            self.tx(|m, acc| {
+                match m.close_resolved_account_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]), 0)? {
+                    ResolvedCloseOutcomeV16::Closed { payout } => Ok(Some(payout)),
+                    _ => Ok(None),
+                }
+            })
+        };
+        match r {
+            Ok(Some(p)) => {
+                paid[who] += p;
+                closed[who] = true;
+                Ok(true)
+            }
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    fn topup(&mut self, who: usize, paid: &mut [u128; 4]) {
+        if !self.acc[who].resolved_payout_receipt.try_to_runtime().unwrap().present {
+            return;
+        }
+        if let Ok(t) = self.tx(|m, acc| m.claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[who]))) {
+            paid[who] += t;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct S16acOut {
+    paid: [u128; 4],
+    closed: [bool; 4],
+    vault: u128,
+    insurance: u128,
+    deposits: u128,
+    last_err: [Option<V16Error>; 4],
+}
+
+/// Random trades, random price path with random partial refreshes, Resolved, then `steps`
+/// random close / auto-crank close / top-up / expiry / clock actions, then a deterministic
+/// drain (clock far forward, expire both buckets, every open account tries to close in a
+/// rotating order). None when the scenario could not be built.
+fn s16ac_walk(seed: u64, steps: usize) -> Option<S16acOut> {
+    let mut r = S16Lcg(seed * 7919 + 1);
+    let (header, markets) = market_fixture(1, 100);
+    let mut w = S16acWorld {
+        header,
+        markets,
+        acc: [account_fixture(1, 221), account_fixture(1, 222), account_fixture(1, 223), account_fixture(1, 224)],
+    };
+    let mut deposits = 0u128;
+    for k in 0..4 {
+        let c = [200u128, 400, 800, 1000][r.n(4) as usize];
+        w.tx(|m, acc| m.deposit_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[k]), c)).unwrap();
+        deposits += c;
+    }
+    let mut trades = 0;
+    for _ in 0..(1 + r.n(3)) {
+        let x = r.n(4) as usize;
+        let mut y = r.n(4) as usize;
+        if y == x {
+            y = (y + 1) % 4;
+        }
+        let sz = (1 + r.n(3)) as u128;
+        let ok = w
+            .tx(|m, acc| {
+                let (lo, hi) = (x.min(y), x.max(y));
+                let (a, b) = acc.split_at_mut(hi);
+                let (first, second) = (&mut a[lo], &mut b[0]);
+                let (l, s) = if x < y { (first, second) } else { (second, first) };
+                m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut PortfolioV16ViewMut::new(l),
+                    &mut PortfolioV16ViewMut::new(s),
+                    TradeRequestV16 { asset_index: 0, size_q: signed_q(sz * POS_SCALE), exec_price: 100, fee_bps: 0 },
+                    true,
+                )
+            })
+            .is_ok();
+        if ok {
+            trades += 1;
+        }
+    }
+    if trades == 0 {
+        return None;
+    }
+    let mut slot = w.header.current_slot.get();
+    let mut p = 100u64;
+    for _ in 0..(1 + r.n(4)) {
+        let tgt = [60u64, 80, 120, 160, 220, 300][r.n(6) as usize];
+        while p != tgt {
+            slot += 1;
+            p = if tgt > p { (p + 10).min(tgt) } else { p.saturating_sub(10).max(tgt) };
+            if w
+                .tx(|m, _| {
+                    m.set_asset_raw_oracle_target_not_atomic(0, p)?;
+                    m.accrue_asset_to_not_atomic(0, slot, p, 0, true)
+                })
+                .is_err()
+            {
+                return None;
+            }
+            for k in 0..4 {
+                if r.n(3) == 0 {
+                    let _ = w.tx(|m, acc| m.full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut acc[k])));
+                }
+            }
+        }
+    }
+    if w.tx(|m, _| m.resolve_market_not_atomic(slot)).is_err() {
+        return None;
+    }
+    let mut paid = [0u128; 4];
+    let mut closed = [false; 4];
+    let mut last_err: [Option<V16Error>; 4] = [None; 4];
+    for _ in 0..steps {
+        let who = r.n(4) as usize;
+        match r.n(8) {
+            6 if !closed[who] => {
+                let _ = w.close(who, &mut paid, &mut closed, true);
+            }
+            0..=2 if !closed[who] => {
+                let _ = w.close(who, &mut paid, &mut closed, false);
+            }
+            3 if !closed[who] => w.topup(who, &mut paid),
+            4 => {
+                for d in 0..2 {
+                    let _ = w.tx(|m, _| { let s = m.header.current_slot.get(); m.expire_source_backing_bucket_not_atomic(d, s) });
+                }
+            }
+            5 => {
+                let dt = 1 + r.n(3_000_000);
+                let _ = w.tx(|m, _| { let now = m.header.current_slot.get() + dt; m.advance_resolved_slot_not_atomic(now) });
+            }
+            _ => {}
+        }
+    }
+    for round in 0..40usize {
+        let _ = w.tx(|m, _| { let now = m.header.current_slot.get() + 5_000_000; m.advance_resolved_slot_not_atomic(now) });
+        for d in 0..2 {
+            let _ = w.tx(|m, _| { let s = m.header.current_slot.get(); m.expire_source_backing_bucket_not_atomic(d, s) });
+        }
+        for j in 0..4usize {
+            let who = (j + round) % 4;
+            if closed[who] {
+                continue;
+            }
+            if matches!(w.close(who, &mut paid, &mut closed, true), Ok(true)) {
+                continue;
+            }
+            for _ in 0..6 {
+                match w.close(who, &mut paid, &mut closed, false) {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(e) => {
+                        last_err[who] = Some(e);
+                        break;
+                    }
+                }
+            }
+            if !closed[who] {
+                w.topup(who, &mut paid);
+            }
+        }
+        if closed.iter().all(|c| *c) {
+            break;
+        }
+    }
+    let mk = MarketGroupV16ViewMut::new(&mut w.header, &mut w.markets);
+    mk.validate_shape().unwrap();
+    Some(S16acOut { paid, closed, vault: w.header.vault.get(), insurance: w.header.insurance.get(), deposits, last_err })
+}
+
+fn s16ac_walk_stats(steps: usize) -> (usize, Vec<u64>, Vec<u64>, u128) {
+    let (mut built, mut stuck, mut leaky, mut left) = (0usize, vec![], vec![], 0u128);
+    for seed in 0..6000u64 {
+        let Some(o) = s16ac_walk(seed, steps) else { continue };
+        built += 1;
+        if o.paid.iter().sum::<u128>() + o.vault != o.deposits + o.insurance {
+            leaky.push(seed);
+        }
+        if o.closed.iter().all(|c| *c) {
+            left += o.vault - o.insurance;
+        } else {
+            stuck.push(seed);
+        }
+    }
+    (built, stuck, leaky, left)
+}
+
+/// Hunk (c) + upstream 9615f05c. A winner whose close runs before the loser's loss has arrived
+/// as backing must wait, not demote its claim: on 1c96c22f seed 2381 pays account 0 only 86
+/// of its 240 and leaves 154 atoms in the vault after every account has closed.
+#[test]
+fn s16ac_early_winner_keeps_backing_that_arrives_after_its_close() {
+    let o = s16ac_walk(2381, 80).expect("scenario builds");
+    assert!(o.closed.iter().all(|c| *c));
+    assert_eq!(o.paid.iter().sum::<u128>() + o.vault, o.deposits + o.insurance);
+    assert_eq!((o.paid, o.vault - o.insurance), ([240, 960, 840, 360], 0));
+}
+
+/// Hunk (a), narrowed: once the creditor side can no longer grow its claims, a late loss beyond
+/// the support gap funds the junior residual instead of ownerless source backing. On 1c96c22f
+/// these seeds strand the excess (vault left 21 / 30 / 20).
+#[test]
+fn s16ac_excess_late_loss_funds_junior_residual_once_creditors_are_final() {
+    let pinned: [(u64, [u128; 4], u128); 3] = [
+        (2041, [400, 360, 1000, 1020], 20),
+        (3226, [800, 1000, 340, 845], 15),
+        (3262, [760, 230, 400, 200], 10),
+    ];
+    for (seed, paid, left) in pinned {
+        let o = s16ac_walk(seed, 80).expect("scenario builds");
+        assert!(o.closed.iter().all(|c| *c), "seed {seed}");
+        assert_eq!(o.paid.iter().sum::<u128>() + o.vault, o.deposits + o.insurance);
+        assert_eq!((o.paid, o.vault - o.insurance), (paid, left), "seed {seed}");
+    }
+}
+
+/// Liveness + conservation over every randomized close order: no account is ever stuck
+/// (upstream 94979ede (c) without 9615f05c leaves 124 scenarios stuck here), value is
+/// conserved exactly, and the atoms left after every account closed are pinned
+/// (1c96c22f: 22,537 at 80 steps and 23,851 with no random steps; the remainder is the
+/// pre-existing stale-mark round-trip class, not these hunks).
+#[test]
+fn s16ac_resolved_close_walk_is_live_conserving_and_pinned() {
+    for (steps, want_left) in [(80usize, 22_357u128), (0, 23_724)] {
+        let (built, stuck, leaky, left) = s16ac_walk_stats(steps);
+        eprintln!("S16AC steps {steps}: built {built} stuck {stuck:?} leaky {leaky:?} left {left}");
+        assert!(built > 5000, "vacuity: {built} scenarios built");
+        assert_eq!(stuck, Vec::<u64>::new(), "steps {steps}: stuck accounts");
+        assert_eq!(leaky, Vec::<u64>::new(), "steps {steps}: conservation");
+        assert_eq!(left, want_left, "steps {steps}");
+    }
+}
+
+#[test]
+fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
+    // Ported from upstream 9615f05c (AUD-S1-6, 2026-10-20). Issue #220: the loser settles before either winner has attributed its
+    // claim, so its loss funds junior residual and the winners' source domain
+    // keeps an Empty bucket. Two zero-conversion claimants must not block each
+    // other's resolved close forever.
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut winner_a_header = account_fixture(1, 60);
+    let mut winner_b_header = account_fixture(1, 61);
+    let mut loser_header = account_fixture(1, 62);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner_a = PortfolioV16ViewMut::new(&mut winner_a_header);
+    let mut winner_b = PortfolioV16ViewMut::new(&mut winner_b_header);
+    let mut loser = PortfolioV16ViewMut::new(&mut loser_header);
+    market.deposit_not_atomic(&mut winner_a, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut winner_b, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut loser, 2_000_000).unwrap();
+    for winner in [&mut winner_a, &mut winner_b] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                winner,
+                &mut loser,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+                true,
+            )
+            .unwrap();
+    }
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.resolve_market_not_atomic(4).unwrap();
+
+    let mut loser_payout = None;
+    for _ in 0..16 {
+        match market.close_resolved_account_not_atomic(&mut loser, 0) {
+            Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
+            Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
+                loser_payout = Some(payout);
+                break;
+            }
+            Err(e) => panic!("loser close failed: {e:?}"),
+        }
+    }
+    let loser_payout = loser_payout.expect("loser must close first");
+    assert!(loser_payout < 2_000_000);
+    // v22 deviation: the R1 settle order attributes the winners' claims at Live accrual, so
+    // here the loser's loss lands as Fresh source backing (upstream reaches an Empty bucket).
+    // The Empty-bucket co-claimant deadlock itself is covered on this line by
+    // `s16ac_resolved_close_walk_is_live_conserving_and_pinned` (without 9615f05c, 124 of its
+    // scenarios stay stuck). The outcome below is upstream's exact pin.
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh
+    );
+
+    // Both winners now attribute zero-conversion claims to the Empty domain.
+    let mut payouts = [None, None];
+    for _ in 0..32 {
+        for (i, winner) in [&mut winner_a, &mut winner_b].into_iter().enumerate() {
+            if payouts[i].is_some() {
+                continue;
+            }
+            match market.close_resolved_account_not_atomic(winner, 0) {
+                Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    payouts[i] = Some(payout)
+                }
+                Err(e) => panic!("winner {i} resolved close must progress, got {e:?}"),
+            }
+        }
+        if payouts.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    let [Some(a), Some(b)] = payouts else {
+        panic!("both zero-conversion co-claimants must close: {payouts:?}");
+    };
+    // The loser's 10_000 loss reaches the winners exactly once through the
+    // junior pool: each is paid its full face, nothing is minted or stranded.
+    assert_eq!((a, b, loser_payout), (1_005_000, 1_005_000, 1_990_000));
+    assert_eq!(market.header.vault.get(), 0);
+    market.validate_shape().unwrap();
+    winner_a.validate_with_market(&market.as_view()).unwrap();
+    winner_b.validate_with_market(&market.as_view()).unwrap();
+    loser.validate_with_market(&market.as_view()).unwrap();
+}
+
