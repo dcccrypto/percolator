@@ -460,10 +460,9 @@ fn kani_live_e7_liquidate_progresses_below_maintenance() {
     kani::assume(insurance <= 600);
 
     let mut g = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    while g.markets[0].engine.asset.slot_last.get() < 2 {
-        let next = g.markets[0].engine.asset.slot_last.get() + 1;
-        let _ = g.accrue_asset_to_not_atomic(0, next, E7_P0, 0, true);
-    }
+    // asset activated at slot 1: one accrual brings it to slot 2 (bounded; a refusal is assumed away)
+    let synced = g.accrue_asset_to_not_atomic(0, 2, E7_P0, 0, true).is_ok();
+    kani::assume(synced && g.markets[0].engine.asset.slot_last.get() == 2);
     let setup_ok = {
         let mut tv = PortfolioV16ViewMut::new(&mut t);
         let mut cv = PortfolioV16ViewMut::new(&mut cp);
