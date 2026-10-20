@@ -4385,7 +4385,7 @@ pub fn kani_funding_div_rem(p: u128) -> (u128, u128) {
     funding_div_rem(p)
 }
 
-#[cfg(kani)]
+#[cfg(any())] // kani v22-final: duplicate of the cfg(any(kani, fuzz)) copy at :26420; disabled, line count kept
 pub fn kani_funding_index_deltas(funding_num: i128, a_long: u128, a_short: u128) -> V16Result<(i128, i128)> {
     V16Core::kernel_funding_index_deltas(funding_num, a_long, a_short)
 }
@@ -26062,7 +26062,7 @@ pub const PORTFOLIO_LEG_V16_EMPTY_ACCOUNT: PortfolioLegV16Account = PortfolioLeg
 impl PortfolioLegV16Account {
     /// Whether this slot holds exactly the empty-leg encoding (one byte compare).
     #[inline(always)]
-    pub fn is_empty_encoding(&self) -> bool {
+    pub fn is_empty_encoding(&self) -> bool { #[cfg(kani)] if !kani_v22_leg_byte_compare_on() { return kani_v22_is_empty_encoding_fieldwise(self); }
         self.active == 0
             && bytemuck::bytes_of(self) == bytemuck::bytes_of(&PORTFOLIO_LEG_V16_EMPTY_ACCOUNT)
     }
@@ -29153,3 +29153,59 @@ pub fn repay_pnl_postconditions_hold(
         && c_tot_after <= c_tot_before
         && capital_before - capital_after == c_tot_before - c_tot_after
 }
+
+#[cfg(kani)]
+#[path = "kani_v22_shims.rs"]
+mod kani_v22_shims;
+#[cfg(kani)]
+#[path = "kani_v22_band_shims.rs"]
+mod kani_v22_band_shims;
+
+// Kani v2.2 r2 (memcmp unwind, ledger/kani-v22-run-diag-unwind-memcmp-2026-10-10.md, option B). PROOF-ONLY.
+// Under cfg(kani), `PortfolioLegV16Account::is_empty_encoding` takes the field-wise branch below unless the
+// switch is on, so leg decodes lower to <= 16-byte compares instead of one 217-byte memcmp (which a harness
+// unwind < 218 cuts). The production byte compare (the unchanged lines of `is_empty_encoding`) runs under
+// cfg(kani) only with the switch on: `proof_v22_empty_leg_bytes_eq_fieldwise` proves the two equal.
+// Non-kani builds compile none of this and the production lines are unchanged (G-ART).
+#[cfg(kani)]
+static KANI_V22_LEG_BYTE_COMPARE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(kani)]
+#[inline(always)]
+fn kani_v22_leg_byte_compare_on() -> bool {
+    KANI_V22_LEG_BYTE_COMPARE.load(core::sync::atomic::Ordering::Relaxed)
+}
+/// Proof-only: route `is_empty_encoding` through the PRODUCTION byte compare (`true`) or the field-wise
+/// shim (`false`, the default).
+#[cfg(kani)]
+pub fn kani_v22_set_leg_byte_compare(on: bool) {
+    KANI_V22_LEG_BYTE_COMPARE.store(on, core::sync::atomic::Ordering::Relaxed)
+}
+/// Proof-only field-wise empty-leg test: derived `PartialEq` over a `#[repr(C)]` struct whose every field is
+/// `u8` or a Pod newtype over `[u8; N]` (N <= 16, align 1), so `==` compares exactly the 217 bytes.
+#[cfg(kani)]
+#[inline(always)]
+pub fn kani_v22_is_empty_encoding_fieldwise(leg: &PortfolioLegV16Account) -> bool {
+    leg.active == 0 && *leg == PORTFOLIO_LEG_V16_EMPTY_ACCOUNT
+}
+// No padding: 217 bytes = the field sum, align 1 (so bytewise == field-wise).
+#[cfg(kani)]
+const _: () = {
+    assert!(core::mem::size_of::<PortfolioLegV16Account>() == 217);
+    assert!(core::mem::align_of::<PortfolioLegV16Account>() == 1);
+    assert!(core::mem::size_of::<V16PodU32>() == 4 && core::mem::align_of::<V16PodU32>() == 1);
+    assert!(core::mem::size_of::<V16PodU64>() == 8 && core::mem::align_of::<V16PodU64>() == 1);
+    assert!(core::mem::size_of::<V16PodU128>() == 16 && core::mem::align_of::<V16PodU128>() == 1);
+    assert!(core::mem::size_of::<V16PodI128>() == 16 && core::mem::align_of::<V16PodI128>() == 1);
+    assert!(
+        1 + 4 + 8 + 1 + 16 * 4 + 16 * 2 + 8 + 8 + 16 * 3 + 8 + 1 + 1 + 8 + 1 + 16 + 8
+            == core::mem::size_of::<PortfolioLegV16Account>()
+    );
+};
+
+#[cfg(kani)]
+#[path = "kani_audit_1017_shims.rs"]
+mod kani_audit_1017_shims;
+
+#[cfg(kani)]
+#[path = "kani_eng_1020.rs"]
+pub mod kani_eng_1020;

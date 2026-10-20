@@ -12,7 +12,6 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_commit_declared_liquidation_recovery, kani_decode_account_kf_settlement_plan_key,
-    kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_insert_account_kf_settlement_plan_entry, kani_kernel_accumulate_batch_trade,
@@ -939,18 +938,14 @@ fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
     let mut expected_header = header_before;
     expected_header.oracle_epoch =
         V16PodU64::new(header_before.oracle_epoch.get() + u64::from(changed));
-    assert!(kani_eq_market_group_v16_header_account(
-        &expected_header,
-        market.header
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(expected_header == *market.header);
     let mut expected_slot = slot_before;
     let mut expected_asset = expected_slot.asset.try_to_runtime().unwrap();
     expected_asset.raw_oracle_target_price = target;
     expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &expected_slot,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(expected_slot == market.markets[0].engine);
 }
 
 #[kani::proof]
@@ -2798,7 +2793,7 @@ fn proof_v16_dynamic_market_account_len_fails_closed_on_arithmetic_overflow() {
 }
 
 #[kani::proof]
-#[kani::unwind(16)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
     let extension_index_raw: u8 = kani::any();
@@ -3311,6 +3306,8 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(i > 0 && needs_obs(&AutoCrankPlanV16::RefreshAccount { asset_index: None }), "symbolic index; the one observation-requiring plan");
 }
 
 // A flat account whose independently funded source-credit lien is no longer
@@ -3354,6 +3351,8 @@ fn proof_v16_auto_crank_source_lien_release_is_total_and_prioritized() {
         PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
     );
     assert_eq!(liquidation, AutoCrankPlanV16::Liquidate { asset_index: 7 });
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(release == AutoCrankPlanV16::ReleaseSourceLiens && liquidation == AutoCrankPlanV16::Liquidate { asset_index: 7 }, "concrete harness: both selections reached");
 }
 
 // Pending close is a production-dispatchable class, not merely a proof-summary
@@ -3428,6 +3427,8 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
             reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
         }
     );
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(lower == AutoCrankPlanV16::AdvanceClose && terminal == proactive_recovery, "concrete harness: all three selections reached");
 }
 
 #[kani::proof]
@@ -6946,6 +6947,10 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         b_epoch_snap: 0,
         b_stale: false,
         stale: false,
+        band_epoch_snap: 0,
+        band_liq_pending: false,
+        rent_snap: 0,
+        rent_carry: 0,
     };
     account_header.legs[0] = percolator::v16::PortfolioLegV16Account::from_runtime(&leg);
     let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
@@ -7632,6 +7637,8 @@ fn proof_v16_source_support_rounds_per_domain_before_aggregation() {
     assert_eq!(first, 0);
     assert_eq!(second, 0);
     assert_eq!(first.checked_add(second), Some(0));
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(first == 0 && second == 0, "concrete harness: half-rate support floors to 0 per domain");
 }
 
 // Cross-account solvency: two independent winners holding positive-PnL claims
@@ -10015,7 +10022,12 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         account.header.pnl.get(),
         -(loss as i128) + expected_used as i128
     );
-    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    // P2b L1 (e6aaf94e): an attributable bankruptcy marks the bankrupt side's domain
+    // (asset 0, Long = domain 0) in the wire byte: 1 | (1 << 1) = 3.
+    assert_eq!(
+        market.header.bankruptcy_hlock_active,
+        percolator::bankruptcy_hlock_mark_domain(0, 0)
+    );
     assert_eq!(
         market.header.negative_pnl_account_count.get(),
         if expected_used == loss { 0 } else { 1 }
@@ -13423,7 +13435,7 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     header.insurance = V16PodU128::new(insurance);
     header.negative_pnl_account_count = V16PodU64::new(1); // the one negative account
 
-    let mut acct_header = PortfolioAccountV16Account::default();
+    let mut acct_header = empty_account_fixture(market_id, 2);
     acct_header.capital = V16PodU128::new(capital);
     acct_header.pnl = V16PodI128::new(pnl);
 
@@ -15288,6 +15300,9 @@ fn proof_account_kf_settlement_key_roundtrip_and_priority() {
             kani_account_kf_settlement_plan_key(phase, source_domain, other_slot).unwrap();
         assert!(earlier_slot < later_slot);
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(phase == 1 && source_domain < other_domain && leg_slot > 0, "gain-phase key, domain order branch");
+    kani::cover!(leg_slot < other_slot && source_domain > 0, "slot order branch");
 }
 
 // The whole-account K/F settlement plan is built one entry at a time by this
@@ -15365,6 +15380,9 @@ fn proof_account_kf_settlement_plan_insert_preserves_order_and_multiset() {
         index += 1;
     }
     assert!(proof_holds);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(prefix_len >= 2 && expected_insert_at > 0 && expected_insert_at < prefix_len, "insert in the middle of a sorted plan");
+    kani::cover!(prefix_len >= 1 && expected_insert_at == prefix_len, "append at the end");
 }
 
 // Shared liquidation/rebalance theorem for partially ADL-reduced positions.
@@ -16077,6 +16095,9 @@ fn proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation() {
     } else {
         assert_eq!(selected, None);
     }
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(!has_refresh && has_reset && selected == Some(reset_index), "reset obligation selected");
+    kani::cover!(has_refresh && has_reset && refresh_index != reset_index, "refresh wins over reset");
 }
 
 #[kani::proof]
@@ -16130,6 +16151,8 @@ fn proof_v16_detached_refresh_leg_skips_post_refresh_accrual() {
         kani_refresh_detached_selected_leg(selected_leg_before, selected_leg_after),
         selected_leg_before && !selected_leg_after
     );
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(selected_leg_before && !selected_leg_after, "detach detected");
 }
 
 // Permissionless mixed-lifecycle liveness theorem. Symbolic masks cover every
@@ -18349,6 +18372,8 @@ fn proof_v16_backing_expiry_kernel_rejects_every_ineligible_bucket() {
 #[kani::solver(cadical)]
 fn proof_v16_fully_backed_expiry_yields_zero_realizable_support() {
     assert_expired_backing_yields_zero_realizable_support(3);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the helper ran to completion");
 }
 
 #[kani::proof]
@@ -18434,6 +18459,8 @@ fn proof_v16_public_backing_expiry_replay_is_inert() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(result == Err(V16Error::Stale), "concrete harness: stale replay refused");
 }
 
 // These two bounded bindings execute the production zero-copy route for both
@@ -18445,6 +18472,8 @@ fn proof_v16_public_backing_expiry_replay_is_inert() {
 #[kani::solver(cadical)]
 fn proof_v16_public_post_snapshot_expiry_improves_haircut_and_frames_receipts() {
     assert_post_snapshot_expiry_route(1, 1, 4, BOUND_SCALE);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the route helper ran to completion");
 }
 
 #[kani::proof]
@@ -18452,6 +18481,8 @@ fn proof_v16_public_post_snapshot_expiry_improves_haircut_and_frames_receipts() 
 #[kani::solver(cadical)]
 fn proof_v16_public_post_snapshot_expiry_restores_full_rate() {
     assert_post_snapshot_expiry_route(3, 1, 3, 0);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(true, "concrete harness: the route helper ran to completion");
 }
 
 // upstream 63891280 "Prove the no-free-OI fee lower bound": a risk-increasing fill
@@ -18577,6 +18608,8 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    // r2 (amendment 2026-10-12 04:50): non-vacuity cover(s); no assume, assert, bound or fixture changed.
+    kani::cover!(charged == 0 && capital > 1 && earnings_before > 0, "payer with capital and prior earnings; fee floors to zero");
 }
 
 // upstream 9b737fdc "Prove unattributed loss lock lifecycle" (with 6d8e0a48 "Fix
@@ -18739,14 +18772,10 @@ fn assert_terminal_insurance_retirement_rejected_without_mutation(
     let result = market.retire_terminal_unbudgeted_insurance_not_atomic(0);
 
     assert_eq!(result, Err(V16Error::LockActive));
-    assert!(kani_eq_market_group_v16_header_account(
-        &header_before,
-        market.header
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &slot_before,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(header_before == *market.header);
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(slot_before == market.markets[0].engine);
 }
 
 // Production-route theorem: when insurance is the only remaining vault stock,
@@ -18777,14 +18806,10 @@ fn proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed() {
         "terminal retirement covers a nonzero full-width insurance balance"
     );
     assert_eq!(result, Ok(insurance));
-    assert!(kani_eq_market_group_v16_header_account(
-        &expected_header,
-        market.header
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &slot_before,
-        &market.markets[0].engine
-    ));
+    // P-4 (kani v22-final): derived PartialEq on the Pod header compares EVERY byte
+    assert!(expected_header == *market.header);
+    // P-4 (kani v22-final): the kani_eq shim missed 13 band/rent/mirror fields; `==` compares all
+    assert!(slot_before == market.markets[0].engine);
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
