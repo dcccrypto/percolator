@@ -2616,16 +2616,23 @@ impl V16Core {
     /// PRODUCTION KERNEL (F-LIVE-1, v22live): the auto-crank's liquidation leg. The FIRST
     /// liquidatable leg that is not behind a pending domain-loss barrier on its own side, else
     /// the FIRST liquidatable leg (whose liquidation the kernel then refuses with `LockActive`,
-    /// exactly as before). `unblocked` must be a subset of `liquidatable`, so the result is
-    /// `Some` iff some leg is liquidatable: the summary's `has_open_risk` and the plan priority
-    /// are unchanged, and an account with no barrier leg gets the same slot as before.
-    /// Deterministic, O(legs).
+    /// exactly as before). `unblocked` is masked by `liquidatable` here, so the kernel is total
+    /// and the result is `Some` iff some leg is liquidatable: the summary's `has_open_risk` and
+    /// the plan priority are unchanged, and an account with no barrier leg gets the same slot as
+    /// before. Deterministic, O(legs). Proof: tests/proofs_v22_livefix.rs.
     pub(crate) fn kernel_auto_crank_liquidation_slot(
         unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
         liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
     ) -> Option<usize> {
-        Self::first_actionable_slot(unblocked).or(Self::first_actionable_slot(liquidatable))
+        let mut preferred = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            preferred[slot] = unblocked[slot] && liquidatable[slot];
+            slot += 1;
+        }
+        Self::first_actionable_slot(preferred).or(Self::first_actionable_slot(liquidatable))
     }
+
 
     /// PRODUCTION KERNEL: ordinary refresh accrual and liquidation can target
     /// only a live or draining asset. Recovery uses a separate committed-state
@@ -4173,6 +4180,14 @@ pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> b
 #[cfg(kani)]
 pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
     V16Core::first_actionable_slot(flags)
+}
+
+#[cfg(kani)]
+pub fn kani_auto_crank_liquidation_slot(
+    unblocked: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+    liquidatable: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
+) -> Option<usize> {
+    V16Core::kernel_auto_crank_liquidation_slot(unblocked, liquidatable)
 }
 
 #[cfg(kani)]
