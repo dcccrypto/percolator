@@ -670,6 +670,20 @@ mod opened_snap {
     include!("../tests/fixtures/eng1020_opened.rs");
 }
 
+fn k126_splice_account(snap: &[u8]) -> PortfolioAccountV16Account {
+    let off = core::mem::offset_of!(PortfolioAccountV16Account, source_domains);
+    let kani_len = core::mem::size_of::<PortfolioAccountV16Account>();
+    let dom = core::mem::size_of::<PortfolioSourceDomainV16Account>();
+    let suffix = kani_len - off - PORTFOLIO_SOURCE_DOMAIN_CAP * dom;
+    assert_eq!(snap.len() - off - 2 * V16_MAX_PORTFOLIO_ASSETS_N * dom, suffix);
+    let mut a: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut a)[..off].copy_from_slice(&snap[..off]);
+    let t = PortfolioAccountV16Account::try_empty(a.provenance_header).unwrap();
+    a.source_domains = t.source_domains;
+    bytemuck::bytes_of_mut(&mut a)[kani_len - suffix..].copy_from_slice(&snap[snap.len() - suffix..]);
+    a
+}
+
 fn k126_opened_snap(
     a_capital: Option<u128>,
 ) -> (PortfolioAccountV16Account, PortfolioAccountV16Account, MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
@@ -678,10 +692,12 @@ fn k126_opened_snap(
     bytemuck::bytes_of_mut(&mut h).copy_from_slice(&opened_snap::OPEN_HEADER);
     let mut e: EngineAssetSlotV16Account = bytemuck::Zeroable::zeroed();
     bytemuck::bytes_of_mut(&mut e).copy_from_slice(&opened_snap::OPEN_SLOT);
-    let mut a: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
-    bytemuck::bytes_of_mut(&mut a).copy_from_slice(&opened_snap::OPEN_A);
-    let mut b: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
-    bytemuck::bytes_of_mut(&mut b).copy_from_slice(&opened_snap::OPEN_B);
+    // Accounts: under cfg(kani) PORTFOLIO_SOURCE_DOMAIN_CAP is 4 (32 natively), so the account layout differs.
+    // The native test `eng1020_opened_snapshot_is_current` checks the snapshot's source-domain region is exactly
+    // the empty-account encoding; the loader takes prefix and suffix bytes from the snapshot and the (Kani-sized)
+    // source domains from `try_empty` of the same provenance header.
+    let mut a = k126_splice_account(&opened_snap::OPEN_A);
+    let b = k126_splice_account(&opened_snap::OPEN_B);
     if let Some(c) = a_capital {
         let d = a.capital.get() - c;
         a.capital = V16PodU128::new(c);
@@ -759,7 +775,6 @@ fn kani_eng1020_126_flip_below_im_refused_reduce_not_snap() {
 const _: () = {
     assert!(core::mem::size_of::<MarketGroupV16HeaderAccount>() == opened_snap::OPEN_HEADER.len());
     assert!(core::mem::size_of::<EngineAssetSlotV16Account>() == opened_snap::OPEN_SLOT.len());
-    assert!(core::mem::size_of::<PortfolioAccountV16Account>() == opened_snap::OPEN_A.len());
 };
 
 /// Probe: the snapshot loader alone (diagnoses the IM2 bytemuck failure).
