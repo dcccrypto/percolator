@@ -156,4 +156,12 @@ fn eng1020_opened_snapshot_is_current() {
     assert_eq!(&opened_snap::OPEN_SLOT[..], &parts[1].1[..]);
     assert_eq!(&opened_snap::OPEN_A[..], &parts[2].1[..]);
     assert_eq!(&opened_snap::OPEN_B[..], &parts[3].1[..]);
+    // the Kani loader replaces the source-domain region with try_empty's: it must already be exactly that
+    for acc in [&a, &b] {
+        let mut t = PortfolioAccountV16Account::default();
+        t.init_empty_in_place(acc.provenance_header).unwrap();
+        assert_eq!(acc.source_domains, t.source_domains);
+        // every entry is the same empty encoding, so the Kani build's 4-entry array is the same encoding
+        assert!(acc.source_domains.iter().all(|d| *d == acc.source_domains[0]));
+    }
 }
