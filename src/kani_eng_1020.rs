@@ -549,3 +549,106 @@ fn kani_eng1020_g10_s_setter_reader_round_trip() {
         kani::cover!(true, "setter refuses (aggregate total overflow)");
     }
 }
+
+// ------------------------------------------------------------------------------------------------------------
+// ENG-126-W: wiring of the final trade checks. Real fn `finish_trade_checks_not_atomic`; the lien creator and the
+// two IM gates are replaced by recorders (the lien creator returns Ok; each gate returns a FREE Ok/Err), so the
+// claim is about WHICH checks run for WHICH account, for every flag combination. With ENG-126-P (a flip yields
+// risk_increasing = true and *_requires_initial_margin = true, the open-from-flat flags), this gives: a flip creates
+// the source lien (when the account has source claims and the market is not h-locked) and passes the IM gate,
+// exactly like an open; a strict reduction (requires_initial_margin = false) creates no lien and skips the gate.
+// ------------------------------------------------------------------------------------------------------------
+static W_LIEN_L: AtomicBool = AtomicBool::new(false);
+static W_LIEN_S: AtomicBool = AtomicBool::new(false);
+static W_IM_L: AtomicBool = AtomicBool::new(false);
+static W_IM_S: AtomicBool = AtomicBool::new(false);
+static W_NPC_L: AtomicBool = AtomicBool::new(false);
+static W_NPC_S: AtomicBool = AtomicBool::new(false);
+static W_FAILED: AtomicBool = AtomicBool::new(false);
+
+fn w_is_long(id0: u8) -> bool {
+    id0 == 2
+}
+fn w_lien_rec<'a, T>(_s: &mut MarketGroupV16ViewMut<'a, T>, account: &mut PortfolioV16ViewMut<'_>) -> V16Result<()>
+where
+    T: 'a,
+{
+    if w_is_long(account.header.provenance_header.portfolio_account_id[0]) {
+        W_LIEN_L.store(true, Ordering::Relaxed);
+    } else {
+        W_LIEN_S.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+fn w_gate(account: &PortfolioV16View<'_>, l: &AtomicBool, s: &AtomicBool) -> V16Result<()> {
+    if w_is_long(account.header.provenance_header.portfolio_account_id[0]) {
+        l.store(true, Ordering::Relaxed);
+    } else {
+        s.store(true, Ordering::Relaxed);
+    }
+    let ok: bool = kani::any();
+    if ok {
+        Ok(())
+    } else {
+        W_FAILED.store(true, Ordering::Relaxed);
+        Err(V16Error::InsufficientInitialMargin)
+    }
+}
+fn w_im_rec<'a, T>(account: &PortfolioV16View<'_>) -> V16Result<()>
+where
+    T: 'a,
+{
+    w_gate(account, &W_IM_L, &W_IM_S)
+}
+fn w_npc_rec<'a, T>(account: &PortfolioV16View<'_>) -> V16Result<()>
+where
+    T: 'a,
+{
+    w_gate(account, &W_NPC_L, &W_NPC_S)
+}
+
+#[kani::proof]
+#[kani::unwind(70)]
+#[kani::stub(super::MarketGroupV16ViewMut::create_initial_margin_source_lien_if_needed, w_lien_rec)]
+#[kani::stub(super::MarketGroupV16ViewMut::ensure_initial_margin, w_im_rec)]
+#[kani::stub(super::MarketGroupV16ViewMut::ensure_no_positive_credit_initial_margin, w_npc_rec)]
+fn kani_eng1020_126_finish_checks_lien_and_im_wiring() {
+    let (mut header, mut markets) = k126_market_fixture();
+    let mut long_acct = k126_account(2);
+    let mut short_acct = k126_account(3);
+    let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let (locked, ri, lreq, sreq, lhsc, shsc): (bool, bool, bool, bool, bool, bool) =
+        (kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any());
+    let r = v.finish_trade_checks_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut long_acct),
+        &mut PortfolioV16ViewMut::new(&mut short_acct),
+        locked,
+        ri,
+        lreq,
+        sreq,
+        lhsc,
+        shsc,
+    );
+    let ld = |a: &AtomicBool| a.load(Ordering::Relaxed);
+    if !ld(&W_FAILED) {
+        // every gate passed: the call completes (the PF-free audit-scan helpers are Ok without the feature)
+        assert!(r.is_ok());
+        assert_eq!(ld(&W_LIEN_L), ri && !locked && lreq && lhsc);
+        assert_eq!(ld(&W_LIEN_S), ri && !locked && sreq && shsc);
+        assert_eq!(ld(&W_IM_L), lreq);
+        assert_eq!(ld(&W_IM_S), sreq);
+        assert_eq!(ld(&W_NPC_L), locked && lreq);
+        assert_eq!(ld(&W_NPC_S), locked && sreq);
+        kani::cover!(ri && !locked && lreq && lhsc && ld(&W_IM_L), "flip/open with claims: lien created and IM checked");
+        kani::cover!(!lreq && !ld(&W_IM_L) && !ld(&W_LIEN_L) && lhsc && ri, "strict reduce: no lien, no IM gate");
+        kani::cover!(locked && lreq && ld(&W_NPC_L), "locked market: no-positive-credit IM gate");
+    } else {
+        // a failed gate refuses the trade
+        assert!(r.is_err());
+        kani::cover!(ld(&W_IM_L) && lreq, "IM failure refuses");
+    }
+    // a required IM gate is never skipped: if lreq, the long gate ran (or an earlier gate already refused)
+    if lreq && r.is_ok() {
+        assert!(ld(&W_IM_L));
+    }
+}
