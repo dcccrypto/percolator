@@ -15485,31 +15485,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // two accounts permanently LockActive in tests/v22_r1_i457.rs (a zero-rate
             // source domain whose claimants wait on each other). Tracked in
             // F-S1-6-engine-resolved-payout.md.
-            // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed to Live): a Live loss landing
-            // on a lapsed bucket still marked Fresh is normalized first, exactly as the expiry
-            // crank would; if the bucket is (or thereby becomes) Impaired it cannot take new
-            // backing, so the loss stays as junior support (the capital debit and its value-flow
-            // proof are already done; the value remains in the vault outside the senior stack)
-            // instead of reverting the refresh / liquidation / crank of every losing account on
-            // that side with LockActive. Resolved keeps its pre-existing behaviour (its Impaired
-            // case is the terminal-residual branch above).
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
-                let (raw_status, raw_expiry) =
-                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
-                let now = self.header.current_slot.get();
-                let impaired_raw = encode_backing_bucket_status(BackingBucketStatusV16::Impaired);
-                let impaired = if raw_status
-                    == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
-                    && raw_expiry <= now
-                {
-                    self.expire_source_backing_bucket_not_atomic(domain, now)?;
-                    self.backing_bucket_raw_status_expiry_for_domain(domain)?.0 == impaired_raw
-                } else {
-                    raw_status == impaired_raw
-                };
-                if impaired {
-                    return Ok(());
-                }
+            // F-LIVE-2 (v22live; upstream 13ebf86b / #216, narrowed): in Live, an Impaired bucket
+            // (a lapsed one that still carries liens) cannot take new backing. The loss then stays
+            // as junior support (the capital debit and its value-flow proof are already done; the
+            // value remains in the vault outside the senior stack) instead of reverting the
+            // refresh / liquidation / crank of every losing account on that side with LockActive.
+            // The bucket returns to Expired, and losses back the domain again, as soon as its last
+            // lien holder settles (`reconcile_account_impaired_counterparty_liens_not_atomic`).
+            // NOT taken from 13ebf86b: expiring a lapsed-but-still-Fresh bucket here. On this line
+            // that moves value: it forfeits the lapsed bucket's backing to the junior pool at the
+            // first loss instead of when a keeper expires it (tests/livefix_rollback_walk.rs:
+            // vault atoms left after every close 22,537 -> 211,820 over 5,633 scenarios); the
+            // lapsed case keeps its permissionless escape (wrapper tag 89 ExpireBackingBucket, or
+            // any claim holder's crank), after which this Impaired arm or a normal add applies. Resolved keeps its pre-existing
+            // behaviour (its Impaired case is the terminal-residual branch above).
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Live
+                && self.backing_bucket_raw_status_expiry_for_domain(domain)?.0
+                    == encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+            {
+                return Ok(());
             }
             let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
             self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
